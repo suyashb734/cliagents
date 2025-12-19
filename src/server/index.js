@@ -457,6 +457,12 @@ class AgentServer {
           return sendError(res, 'MISSING_PARAMETER', { message: 'Message is required', param: 'message' });
         }
 
+        // Validate message
+        const messageValidation = validateMessage(message);
+        if (!messageValidation.valid) {
+          return sendError(res, 'INVALID_PARAMETER', { param: 'message', message: messageValidation.error });
+        }
+
         // Create session with JSON schema support
         const session = await this.sessionManager.createSession({
           adapter,

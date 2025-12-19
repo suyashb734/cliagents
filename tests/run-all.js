@@ -326,10 +326,14 @@ async function testNewAdapters() {
       if (status === 200) {
         assert(data.result, 'Should have result');
         assert(data.result.includes('6'), `Expected 6, got: ${data.result}`);
-      } else if (status === 500 && data.error && data.error.includes('not authenticated')) {
-        console.log('    (skipped - CLI not authenticated)');
       } else {
-        assert(status === 200, `Expected 200, got ${status}: ${JSON.stringify(data)}`);
+        // Handle both old string error format and new standardized format
+        const errorMsg = data.error?.message || data.error || '';
+        if (status === 500 && errorMsg.includes('not authenticated')) {
+          console.log('    (skipped - CLI not authenticated)');
+        } else {
+          assert(status === 200, `Expected 200, got ${status}: ${JSON.stringify(data)}`);
+        }
       }
     });
   } else {
@@ -351,12 +355,16 @@ async function testNewAdapters() {
       if (status === 200) {
         assert(data.result, 'Should have result');
         assert(data.result.includes('8'), `Expected 8, got: ${data.result}`);
-      } else if (data.error && (data.error.includes('exit') ||
-                                data.error.includes('not configured') ||
-                                data.error.includes('timed out'))) {
-        console.log('    (skipped - CLI not configured, run: vibe --setup)');
       } else {
-        assert(status === 200, `Expected 200, got ${status}: ${JSON.stringify(data)}`);
+        // Handle both old string error format and new standardized format
+        const errorMsg = data.error?.message || data.error || '';
+        if (errorMsg.includes('exit') ||
+            errorMsg.includes('not configured') ||
+            errorMsg.includes('timed out')) {
+          console.log('    (skipped - CLI not configured, run: vibe --setup)');
+        } else {
+          assert(status === 200, `Expected 200, got ${status}: ${JSON.stringify(data)}`);
+        }
       }
     });
   } else {
@@ -365,6 +373,136 @@ async function testNewAdapters() {
       console.log('    (skipped - CLI not installed)');
     });
   }
+}
+
+async function testValidation() {
+  console.log('\n📋 Input Validation Tests');
+
+  // workDir validation
+  await test('Rejects path traversal in workDir', async () => {
+    const { status, data } = await request('POST', '/sessions', {
+      adapter: 'claude-code',
+      workDir: '/tmp/../etc/passwd'
+    });
+    assert(status === 400, `Expected 400, got ${status}`);
+    assert(data.error?.code === 'invalid_parameter', 'Should be invalid_parameter error');
+  });
+
+  await test('Rejects dangerous system paths', async () => {
+    const { status, data } = await request('POST', '/sessions', {
+      adapter: 'claude-code',
+      workDir: '/etc/secrets'
+    });
+    assert(status === 400, `Expected 400, got ${status}`);
+    assert(data.error?.message?.includes('system directory'), 'Should mention system directory');
+  });
+
+  // Message validation
+  await test('Rejects empty message in session', async () => {
+    const { data: session } = await request('POST', '/sessions', { adapter: 'claude-code' });
+    const { status, data } = await request('POST', `/sessions/${session.sessionId}/messages`, {
+      message: ''
+    });
+    assert(status === 400, `Expected 400, got ${status}`);
+    assert(data.error?.code === 'invalid_parameter', 'Should be invalid_parameter error');
+    await request('DELETE', `/sessions/${session.sessionId}`);
+  });
+
+  await test('Rejects missing message in /ask', async () => {
+    const { status, data } = await request('POST', '/ask', { adapter: 'claude-code' });
+    assert(status === 400, `Expected 400, got ${status}`);
+    assert(data.error?.code === 'missing_parameter', 'Should be missing_parameter');
+    assert(data.error?.param === 'message', 'Should specify message param');
+  });
+
+  await test('Rejects non-string message', async () => {
+    const { status, data } = await request('POST', '/ask', {
+      adapter: 'claude-code',
+      message: 12345
+    });
+    assert(status === 400, `Expected 400, got ${status}`);
+    assert(data.error?.code === 'invalid_parameter', 'Should be invalid_parameter');
+  });
+}
+
+async function testFileOperations() {
+  console.log('\n📋 File Operation Tests');
+
+  let sessionId;
+
+  await test('Upload file to session', async () => {
+    const { data: session } = await request('POST', '/sessions', { adapter: 'claude-code' });
+    sessionId = session.sessionId;
+
+    const { status, data } = await request('POST', `/sessions/${sessionId}/files`, {
+      files: [{ name: 'test.txt', content: 'Hello World', encoding: 'utf8' }]
+    });
+    assert(status === 200, `Expected 200, got ${status}`);
+    assert(data.files?.[0]?.status === 'uploaded', 'File should be uploaded');
+  });
+
+  await test('Upload base64 encoded file', async () => {
+    const { status, data } = await request('POST', `/sessions/${sessionId}/files`, {
+      files: [{ name: 'binary.bin', content: Buffer.from('binary data').toString('base64'), encoding: 'base64' }]
+    });
+    assert(status === 200, `Expected 200, got ${status}`);
+    assert(data.files?.[0]?.status === 'uploaded', 'Base64 file should be uploaded');
+  });
+
+  await test('List files in session', async () => {
+    const { status, data } = await request('GET', `/sessions/${sessionId}/files`);
+    assert(status === 200, `Expected 200, got ${status}`);
+    assert(Array.isArray(data.files), 'Should return files array');
+    assert(data.files.some(f => f.name === 'test.txt'), 'Should list uploaded file');
+  });
+
+  await test('Reject path traversal in filename', async () => {
+    const { status, data } = await request('POST', `/sessions/${sessionId}/files`, {
+      files: [{ name: '../../../etc/passwd', content: 'malicious', encoding: 'utf8' }]
+    });
+    assert(status === 200, 'Request succeeds but file fails');
+    assert(data.files?.[0]?.status === 'failed', 'File with traversal should fail');
+  });
+
+  await test('Reject missing files array', async () => {
+    const { status, data } = await request('POST', `/sessions/${sessionId}/files`, {});
+    assert(status === 400, `Expected 400, got ${status}`);
+    assert(data.error?.code === 'missing_parameter', 'Should be missing_parameter');
+  });
+
+  await test('Files 404 for non-existent session', async () => {
+    const { status } = await request('GET', '/sessions/nonexistent123/files');
+    assert(status === 404, `Expected 404, got ${status}`);
+  });
+
+  // Cleanup
+  await request('DELETE', `/sessions/${sessionId}`);
+}
+
+async function testErrorFormat() {
+  console.log('\n📋 Standardized Error Format Tests');
+
+  await test('404 returns standardized error object', async () => {
+    const { status, data } = await request('GET', '/sessions/nonexistent123');
+    assert(status === 404, `Expected 404, got ${status}`);
+    assert(typeof data.error === 'object', 'Error should be object not string');
+    assert(data.error.code === 'session_not_found', `Expected session_not_found, got ${data.error.code}`);
+    assert(data.error.message, 'Should have message field');
+    assert(data.error.type === 'session_not_found', 'Should have type field');
+  });
+
+  await test('400 missing param returns error with param field', async () => {
+    const { status, data } = await request('POST', '/ask', {});
+    assert(status === 400, `Expected 400, got ${status}`);
+    assert(data.error?.code === 'missing_parameter', 'Should be missing_parameter');
+    assert(data.error?.param === 'message', 'Should specify which param is missing');
+  });
+
+  await test('Invalid adapter returns adapter_not_found', async () => {
+    const { status, data } = await request('POST', '/sessions', { adapter: 'nonexistent-adapter' });
+    assert(status === 404, `Expected 404, got ${status}`);
+    assert(data.error?.code === 'adapter_not_found', 'Should be adapter_not_found');
+  });
 }
 
 async function testSessionResume() {
@@ -441,6 +579,9 @@ async function main() {
   await testHealth();
   await testAdapters();
   await testSessions();
+  await testValidation();        // Input validation tests
+  await testFileOperations();    // File upload/list tests
+  await testErrorFormat();       // Standardized error format tests
   await testOneShot();
   await testContextPreservation();
   await testErrorHandling();
