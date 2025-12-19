@@ -461,14 +461,24 @@ const server = new AgentServer({
 
 ## Roadmap
 
-- [x] Claude Code adapter
-- [ ] Gemini CLI adapter
-- [ ] OpenAI Codex adapter
-- [ ] MCP server implementation (for AI-to-AI orchestration)
+### Completed
+- [x] 12 CLI adapters (Claude, Gemini, Codex, Aider, Goose, Amazon Q, Plandex, Continue, Mistral Vibe, Shell-GPT, AIChat, GitHub Copilot)
+- [x] REST API with SSE streaming
+- [x] WebSocket support
+- [x] Session status tracking
+- [x] Interrupt capability
+- [x] OpenAPI 3.0 specification
+- [x] File upload to sessions
+- [x] Model selection per session
+- [x] JSON Schema for structured output
+- [x] Tool restrictions
+
+### Planned
+- [ ] Grok CLI adapter (when official CLI releases)
 - [ ] TypeScript definitions
-- [ ] Connection pooling
+- [ ] Docker support
 - [ ] Rate limiting
-- [ ] Authentication
+- [ ] Authentication middleware
 
 ## License
 
