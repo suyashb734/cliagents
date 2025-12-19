@@ -1,0 +1,953 @@
+{
+  "openapi": "3.0.3",
+  "info": {
+    "title": "cliagents API",
+    "description": "REST API for AI agent orchestration. Supports multiple AI CLI tools (Claude Code, Gemini CLI, Codex CLI, etc.) via a unified HTTP interface.",
+    "version": "1.0.0",
+    "contact": {
+      "name": "cliagents"
+    },
+    "license": {
+      "name": "MIT"
+    }
+  },
+  "servers": [
+    {
+      "url": "http://localhost:3001",
+      "description": "Local development server"
+    }
+  ],
+  "paths": {
+    "/health": {
+      "get": {
+        "summary": "Health check",
+        "description": "Check if the server is running and healthy",
+        "operationId": "healthCheck",
+        "tags": ["System"],
+        "responses": {
+          "200": {
+            "description": "Server is healthy",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "properties": {
+                    "status": {
+                      "type": "string",
+                      "example": "ok"
+                    },
+                    "timestamp": {
+                      "type": "integer",
+                      "description": "Unix timestamp in milliseconds"
+                    }
+                  }
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/adapters": {
+      "get": {
+        "summary": "List available adapters",
+        "description": "Get a list of all registered AI agent adapters and their availability status",
+        "operationId": "listAdapters",
+        "tags": ["Adapters"],
+        "responses": {
+          "200": {
+            "description": "List of adapters",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "properties": {
+                    "adapters": {
+                      "type": "array",
+                      "items": {
+                        "$ref": "#/components/schemas/Adapter"
+                      }
+                    }
+                  }
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/sessions": {
+      "post": {
+        "summary": "Create a new session",
+        "description": "Create a new agent session with the specified adapter",
+        "operationId": "createSession",
+        "tags": ["Sessions"],
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/CreateSessionRequest"
+              }
+            }
+          }
+        },
+        "responses": {
+          "200": {
+            "description": "Session created successfully",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Session"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "Adapter not found",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "503": {
+            "description": "Adapter CLI not available",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          }
+        }
+      },
+      "get": {
+        "summary": "List all sessions",
+        "description": "Get a list of all active sessions",
+        "operationId": "listSessions",
+        "tags": ["Sessions"],
+        "responses": {
+          "200": {
+            "description": "List of sessions",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "properties": {
+                    "sessions": {
+                      "type": "array",
+                      "items": {
+                        "$ref": "#/components/schemas/SessionInfo"
+                      }
+                    }
+                  }
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/sessions/{sessionId}": {
+      "get": {
+        "summary": "Get session info",
+        "description": "Get detailed information about a specific session",
+        "operationId": "getSession",
+        "tags": ["Sessions"],
+        "parameters": [
+          {
+            "name": "sessionId",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Session information",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/SessionInfo"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "Session not found",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          }
+        }
+      },
+      "delete": {
+        "summary": "Terminate session",
+        "description": "Terminate and clean up a session",
+        "operationId": "terminateSession",
+        "tags": ["Sessions"],
+        "parameters": [
+          {
+            "name": "sessionId",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Session terminated",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "properties": {
+                    "status": {
+                      "type": "string",
+                      "example": "terminated"
+                    }
+                  }
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "Session not found",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/sessions/{sessionId}/status": {
+      "get": {
+        "summary": "Get session status",
+        "description": "Get the current status of a session (running, stable, or error)",
+        "operationId": "getSessionStatus",
+        "tags": ["Sessions"],
+        "parameters": [
+          {
+            "name": "sessionId",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Session status",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/SessionStatus"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "Session not found",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/sessions/{sessionId}/interrupt": {
+      "post": {
+        "summary": "Interrupt session",
+        "description": "Interrupt (kill) the active process for a session",
+        "operationId": "interruptSession",
+        "tags": ["Sessions"],
+        "parameters": [
+          {
+            "name": "sessionId",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Interrupt result",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/InterruptResult"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "Session not found",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/sessions/{sessionId}/messages": {
+      "post": {
+        "summary": "Send message to session",
+        "description": "Send a message to an agent session and get a response. Supports both synchronous and streaming (SSE) modes.",
+        "operationId": "sendMessage",
+        "tags": ["Messages"],
+        "parameters": [
+          {
+            "name": "sessionId",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/SendMessageRequest"
+              }
+            }
+          }
+        },
+        "responses": {
+          "200": {
+            "description": "Message response (or SSE stream if stream=true)",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/MessageResponse"
+                }
+              },
+              "text/event-stream": {
+                "schema": {
+                  "type": "string",
+                  "description": "Server-Sent Events stream with chunk, result, error, and done events"
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "Missing required parameter",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "Session not found",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "504": {
+            "description": "Request timed out",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/sessions/{sessionId}/files": {
+      "post": {
+        "summary": "Upload files to session",
+        "description": "Upload files to the session's working directory",
+        "operationId": "uploadFiles",
+        "tags": ["Files"],
+        "parameters": [
+          {
+            "name": "sessionId",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/UploadFilesRequest"
+              }
+            }
+          }
+        },
+        "responses": {
+          "200": {
+            "description": "Files uploaded",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/UploadFilesResponse"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "Session not found",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          }
+        }
+      },
+      "get": {
+        "summary": "List files in session",
+        "description": "List files in the session's working directory",
+        "operationId": "listFiles",
+        "tags": ["Files"],
+        "parameters": [
+          {
+            "name": "sessionId",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "List of files",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ListFilesResponse"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "Session not found",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/ask": {
+      "post": {
+        "summary": "One-shot ask",
+        "description": "Send a single message to an agent and get a response. Automatically creates and terminates a session.",
+        "operationId": "ask",
+        "tags": ["Messages"],
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/AskRequest"
+              }
+            }
+          }
+        },
+        "responses": {
+          "200": {
+            "description": "Agent response",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/MessageResponse"
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "Missing required parameter",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          }
+        }
+      }
+    }
+  },
+  "components": {
+    "schemas": {
+      "Adapter": {
+        "type": "object",
+        "properties": {
+          "name": {
+            "type": "string",
+            "description": "Adapter identifier",
+            "example": "claude-code"
+          },
+          "version": {
+            "type": "string",
+            "example": "1.0.0"
+          },
+          "available": {
+            "type": "boolean",
+            "description": "Whether the CLI tool is installed and available"
+          },
+          "models": {
+            "type": "array",
+            "description": "Available models for this adapter",
+            "items": {
+              "type": "object",
+              "properties": {
+                "id": {
+                  "type": "string"
+                },
+                "name": {
+                  "type": "string"
+                },
+                "description": {
+                  "type": "string"
+                }
+              }
+            }
+          }
+        }
+      },
+      "CreateSessionRequest": {
+        "type": "object",
+        "properties": {
+          "adapter": {
+            "type": "string",
+            "description": "Adapter to use",
+            "example": "claude-code",
+            "enum": ["claude-code", "gemini-cli", "codex-cli", "aider", "goose", "amazon-q", "plandex", "continue-cli", "mistral-vibe", "shell-gpt", "aichat", "github-copilot"]
+          },
+          "model": {
+            "type": "string",
+            "description": "Specific model to use (adapter-specific)"
+          },
+          "systemPrompt": {
+            "type": "string",
+            "description": "System prompt to initialize the session"
+          },
+          "workDir": {
+            "type": "string",
+            "description": "Working directory for the session"
+          },
+          "allowedTools": {
+            "type": "array",
+            "items": {
+              "type": "string"
+            },
+            "description": "List of allowed tools (restricts agent capabilities)"
+          },
+          "jsonSchema": {
+            "type": "object",
+            "description": "JSON Schema for structured output (Claude only)"
+          },
+          "temperature": {
+            "type": "number",
+            "description": "Sampling temperature 0.0-2.0 (Gemini only)"
+          },
+          "top_p": {
+            "type": "number",
+            "description": "Nucleus sampling threshold 0.0-1.0 (Gemini only)"
+          },
+          "top_k": {
+            "type": "integer",
+            "description": "Top-k sampling (Gemini only)"
+          },
+          "max_output_tokens": {
+            "type": "integer",
+            "description": "Maximum output tokens"
+          }
+        }
+      },
+      "Session": {
+        "type": "object",
+        "properties": {
+          "sessionId": {
+            "type": "string"
+          },
+          "adapter": {
+            "type": "string"
+          },
+          "status": {
+            "type": "string",
+            "enum": ["ready", "running", "stable", "error"]
+          },
+          "model": {
+            "type": "string"
+          }
+        }
+      },
+      "SessionInfo": {
+        "type": "object",
+        "properties": {
+          "sessionId": {
+            "type": "string"
+          },
+          "adapterName": {
+            "type": "string"
+          },
+          "createdAt": {
+            "type": "integer",
+            "description": "Unix timestamp in milliseconds"
+          },
+          "lastActivity": {
+            "type": "integer",
+            "description": "Unix timestamp in milliseconds"
+          },
+          "status": {
+            "type": "string",
+            "enum": ["stable", "running", "error"]
+          },
+          "messageCount": {
+            "type": "integer"
+          }
+        }
+      },
+      "SessionStatus": {
+        "type": "object",
+        "properties": {
+          "sessionId": {
+            "type": "string"
+          },
+          "status": {
+            "type": "string",
+            "enum": ["stable", "running", "error"],
+            "description": "Current session status"
+          },
+          "lastActivity": {
+            "type": "integer",
+            "description": "Unix timestamp of last activity"
+          },
+          "messageCount": {
+            "type": "integer",
+            "description": "Number of messages sent in this session"
+          },
+          "adapterName": {
+            "type": "string"
+          },
+          "hasActiveProcess": {
+            "type": "boolean",
+            "description": "Whether there's an active CLI process"
+          },
+          "idleMs": {
+            "type": "integer",
+            "description": "Milliseconds since last activity"
+          }
+        }
+      },
+      "InterruptResult": {
+        "type": "object",
+        "properties": {
+          "interrupted": {
+            "type": "boolean",
+            "description": "Whether a process was interrupted"
+          },
+          "previousStatus": {
+            "type": "string",
+            "enum": ["stable", "running", "error"]
+          },
+          "reason": {
+            "type": "string",
+            "description": "Reason if not interrupted",
+            "enum": ["session_not_found", "adapter_not_found", "no_active_process"]
+          }
+        }
+      },
+      "SendMessageRequest": {
+        "type": "object",
+        "required": ["message"],
+        "properties": {
+          "message": {
+            "type": "string",
+            "description": "The message to send to the agent"
+          },
+          "stream": {
+            "type": "boolean",
+            "description": "Enable SSE streaming mode"
+          },
+          "timeout": {
+            "type": "integer",
+            "description": "Custom timeout in milliseconds"
+          },
+          "jsonSchema": {
+            "type": "object",
+            "description": "Per-message JSON schema override (Claude only)"
+          },
+          "allowedTools": {
+            "type": "array",
+            "items": {
+              "type": "string"
+            },
+            "description": "Per-message allowed tools override"
+          }
+        }
+      },
+      "MessageResponse": {
+        "type": "object",
+        "properties": {
+          "result": {
+            "type": "string",
+            "description": "The agent's response"
+          },
+          "text": {
+            "type": "string",
+            "description": "Raw response text"
+          },
+          "metadata": {
+            "type": "object",
+            "properties": {
+              "costUsd": {
+                "type": "number",
+                "description": "Cost in USD"
+              },
+              "durationMs": {
+                "type": "integer",
+                "description": "Duration in milliseconds"
+              },
+              "inputTokens": {
+                "type": "integer"
+              },
+              "outputTokens": {
+                "type": "integer"
+              },
+              "timedOut": {
+                "type": "boolean"
+              }
+            }
+          },
+          "structuredOutput": {
+            "type": "object",
+            "description": "Structured JSON output (if jsonSchema was provided)"
+          }
+        }
+      },
+      "AskRequest": {
+        "type": "object",
+        "required": ["message"],
+        "properties": {
+          "message": {
+            "type": "string"
+          },
+          "adapter": {
+            "type": "string",
+            "example": "claude-code"
+          },
+          "model": {
+            "type": "string"
+          },
+          "systemPrompt": {
+            "type": "string"
+          },
+          "timeout": {
+            "type": "integer"
+          },
+          "jsonSchema": {
+            "type": "object"
+          },
+          "allowedTools": {
+            "type": "array",
+            "items": {
+              "type": "string"
+            }
+          }
+        }
+      },
+      "UploadFilesRequest": {
+        "type": "object",
+        "required": ["files"],
+        "properties": {
+          "files": {
+            "type": "array",
+            "items": {
+              "type": "object",
+              "required": ["name", "content"],
+              "properties": {
+                "name": {
+                  "type": "string",
+                  "description": "Filename"
+                },
+                "content": {
+                  "type": "string",
+                  "description": "File content (base64 or utf8)"
+                },
+                "encoding": {
+                  "type": "string",
+                  "enum": ["utf8", "base64"],
+                  "default": "utf8"
+                }
+              }
+            }
+          }
+        }
+      },
+      "UploadFilesResponse": {
+        "type": "object",
+        "properties": {
+          "sessionId": {
+            "type": "string"
+          },
+          "workDir": {
+            "type": "string"
+          },
+          "files": {
+            "type": "array",
+            "items": {
+              "type": "object",
+              "properties": {
+                "name": {
+                  "type": "string"
+                },
+                "path": {
+                  "type": "string"
+                },
+                "size": {
+                  "type": "integer"
+                },
+                "status": {
+                  "type": "string",
+                  "enum": ["uploaded", "failed"]
+                },
+                "error": {
+                  "type": "string"
+                }
+              }
+            }
+          }
+        }
+      },
+      "ListFilesResponse": {
+        "type": "object",
+        "properties": {
+          "sessionId": {
+            "type": "string"
+          },
+          "workDir": {
+            "type": "string"
+          },
+          "files": {
+            "type": "array",
+            "items": {
+              "type": "object",
+              "properties": {
+                "name": {
+                  "type": "string"
+                },
+                "path": {
+                  "type": "string"
+                },
+                "size": {
+                  "type": "integer"
+                },
+                "isDirectory": {
+                  "type": "boolean"
+                },
+                "modified": {
+                  "type": "string",
+                  "format": "date-time"
+                }
+              }
+            }
+          }
+        }
+      },
+      "Error": {
+        "type": "object",
+        "properties": {
+          "error": {
+            "type": "object",
+            "properties": {
+              "code": {
+                "type": "string",
+                "description": "Error code",
+                "enum": ["invalid_request_error", "missing_parameter", "session_not_found", "adapter_not_found", "adapter_unavailable", "timeout_error", "cli_error", "internal_error"]
+              },
+              "message": {
+                "type": "string",
+                "description": "Human-readable error message"
+              },
+              "type": {
+                "type": "string"
+              },
+              "param": {
+                "type": "string",
+                "description": "Parameter that caused the error (if applicable)"
+              }
+            }
+          }
+        }
+      }
+    }
+  },
+  "tags": [
+    {
+      "name": "System",
+      "description": "System health and status"
+    },
+    {
+      "name": "Adapters",
+      "description": "AI agent adapter management"
+    },
+    {
+      "name": "Sessions",
+      "description": "Session lifecycle management"
+    },
+    {
+      "name": "Messages",
+      "description": "Send messages to agents"
+    },
+    {
+      "name": "Files",
+      "description": "File management for sessions"
+    }
+  ]
+}

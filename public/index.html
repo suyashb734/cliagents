@@ -1,0 +1,862 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>Universal Agent Chat</title>
+  <style>
+    * {
+      margin: 0;
+      padding: 0;
+      box-sizing: border-box;
+    }
+
+    body {
+      font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, Oxygen, Ubuntu, Cantarell, sans-serif;
+      background: #0f0f0f;
+      color: #e0e0e0;
+      height: 100vh;
+      display: flex;
+      flex-direction: column;
+    }
+
+    .header {
+      background: #1a1a1a;
+      padding: 15px 20px;
+      border-bottom: 1px solid #333;
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      gap: 20px;
+    }
+
+    .header h1 {
+      font-size: 18px;
+      font-weight: 600;
+      color: #fff;
+    }
+
+    .controls {
+      display: flex;
+      align-items: center;
+      gap: 15px;
+    }
+
+    .adapter-select {
+      display: flex;
+      align-items: center;
+      gap: 8px;
+    }
+
+    .adapter-select label {
+      font-size: 13px;
+      color: #999;
+    }
+
+    .adapter-select select {
+      background: #252525;
+      border: 1px solid #444;
+      color: #fff;
+      padding: 8px 12px;
+      border-radius: 6px;
+      font-size: 14px;
+      cursor: pointer;
+    }
+
+    .adapter-select select:focus {
+      outline: none;
+      border-color: #4a90e2;
+    }
+
+    .session-info {
+      font-size: 12px;
+      color: #666;
+    }
+
+    .session-info.active {
+      color: #4caf50;
+    }
+
+    .btn {
+      background: #4a90e2;
+      color: white;
+      border: none;
+      padding: 8px 16px;
+      border-radius: 6px;
+      font-size: 13px;
+      cursor: pointer;
+      transition: background 0.2s;
+    }
+
+    .btn:hover {
+      background: #357abd;
+    }
+
+    .btn.danger {
+      background: #dc3545;
+    }
+
+    .btn.danger:hover {
+      background: #c82333;
+    }
+
+    .btn:disabled {
+      background: #444;
+      cursor: not-allowed;
+    }
+
+    .chat-container {
+      flex: 1;
+      display: flex;
+      flex-direction: column;
+      max-width: 900px;
+      width: 100%;
+      margin: 0 auto;
+      padding: 20px;
+      overflow: hidden;
+    }
+
+    .messages {
+      flex: 1;
+      overflow-y: auto;
+      display: flex;
+      flex-direction: column;
+      gap: 15px;
+      padding-bottom: 20px;
+    }
+
+    .message {
+      max-width: 85%;
+      animation: fadeIn 0.2s ease;
+    }
+
+    @keyframes fadeIn {
+      from { opacity: 0; transform: translateY(10px); }
+      to { opacity: 1; transform: translateY(0); }
+    }
+
+    .message.user {
+      align-self: flex-end;
+    }
+
+    .message.assistant {
+      align-self: flex-start;
+    }
+
+    .message.system {
+      align-self: center;
+      max-width: 100%;
+    }
+
+    .message-content {
+      padding: 12px 16px;
+      border-radius: 12px;
+      line-height: 1.5;
+      font-size: 14px;
+      white-space: pre-wrap;
+      word-wrap: break-word;
+    }
+
+    .message.user .message-content {
+      background: #4a90e2;
+      color: white;
+      border-bottom-right-radius: 4px;
+    }
+
+    .message.assistant .message-content {
+      background: #252525;
+      color: #e0e0e0;
+      border: 1px solid #333;
+      border-bottom-left-radius: 4px;
+    }
+
+    .message.system .message-content {
+      background: #1a2a1a;
+      color: #90ee90;
+      border: 1px solid #2a4a2a;
+      font-size: 13px;
+      text-align: center;
+    }
+
+    .message-meta {
+      font-size: 11px;
+      color: #666;
+      margin-top: 4px;
+      padding: 0 4px;
+    }
+
+    .message.user .message-meta {
+      text-align: right;
+    }
+
+    .message-attachments {
+      display: flex;
+      flex-wrap: wrap;
+      gap: 8px;
+      margin-bottom: 8px;
+    }
+
+    .attachment-preview {
+      position: relative;
+      border-radius: 8px;
+      overflow: hidden;
+      border: 1px solid #444;
+    }
+
+    .attachment-preview img {
+      max-width: 200px;
+      max-height: 150px;
+      display: block;
+    }
+
+    .attachment-preview .file-info {
+      background: #333;
+      padding: 8px 12px;
+      font-size: 12px;
+      display: flex;
+      align-items: center;
+      gap: 6px;
+    }
+
+    .input-container {
+      padding: 15px;
+      background: #1a1a1a;
+      border-radius: 12px;
+      border: 1px solid #333;
+    }
+
+    .attachments-preview {
+      display: flex;
+      flex-wrap: wrap;
+      gap: 8px;
+      margin-bottom: 10px;
+    }
+
+    .attachments-preview:empty {
+      display: none;
+    }
+
+    .attachment-item {
+      position: relative;
+      background: #252525;
+      border-radius: 8px;
+      padding: 8px;
+      display: flex;
+      align-items: center;
+      gap: 8px;
+      border: 1px solid #444;
+    }
+
+    .attachment-item img {
+      width: 40px;
+      height: 40px;
+      object-fit: cover;
+      border-radius: 4px;
+    }
+
+    .attachment-item .name {
+      font-size: 12px;
+      max-width: 120px;
+      overflow: hidden;
+      text-overflow: ellipsis;
+      white-space: nowrap;
+    }
+
+    .attachment-item .remove {
+      position: absolute;
+      top: -6px;
+      right: -6px;
+      background: #dc3545;
+      color: white;
+      border: none;
+      width: 18px;
+      height: 18px;
+      border-radius: 50%;
+      font-size: 12px;
+      cursor: pointer;
+      display: flex;
+      align-items: center;
+      justify-content: center;
+    }
+
+    .input-row {
+      display: flex;
+      gap: 10px;
+      align-items: flex-end;
+    }
+
+    .input-actions {
+      display: flex;
+      gap: 8px;
+    }
+
+    .input-actions button {
+      background: #252525;
+      border: 1px solid #444;
+      color: #999;
+      width: 40px;
+      height: 40px;
+      border-radius: 8px;
+      cursor: pointer;
+      display: flex;
+      align-items: center;
+      justify-content: center;
+      transition: all 0.2s;
+    }
+
+    .input-actions button:hover {
+      background: #333;
+      color: #fff;
+      border-color: #555;
+    }
+
+    .input-field {
+      flex: 1;
+      display: flex;
+      flex-direction: column;
+    }
+
+    .input-field textarea {
+      background: #252525;
+      border: 1px solid #444;
+      color: #e0e0e0;
+      padding: 12px 16px;
+      border-radius: 8px;
+      font-size: 14px;
+      resize: none;
+      min-height: 44px;
+      max-height: 150px;
+      font-family: inherit;
+    }
+
+    .input-field textarea:focus {
+      outline: none;
+      border-color: #4a90e2;
+    }
+
+    .send-btn {
+      background: #4a90e2;
+      color: white;
+      border: none;
+      padding: 12px 24px;
+      border-radius: 8px;
+      font-size: 14px;
+      font-weight: 600;
+      cursor: pointer;
+      transition: background 0.2s;
+      height: 44px;
+    }
+
+    .send-btn:hover {
+      background: #357abd;
+    }
+
+    .send-btn:disabled {
+      background: #444;
+      cursor: not-allowed;
+    }
+
+    .typing-indicator {
+      display: flex;
+      gap: 4px;
+      padding: 12px 16px;
+      background: #252525;
+      border-radius: 12px;
+      width: fit-content;
+    }
+
+    .typing-indicator span {
+      width: 8px;
+      height: 8px;
+      background: #666;
+      border-radius: 50%;
+      animation: bounce 1.4s infinite ease-in-out both;
+    }
+
+    .typing-indicator span:nth-child(1) { animation-delay: -0.32s; }
+    .typing-indicator span:nth-child(2) { animation-delay: -0.16s; }
+
+    @keyframes bounce {
+      0%, 80%, 100% { transform: scale(0); }
+      40% { transform: scale(1); }
+    }
+
+    ::-webkit-scrollbar {
+      width: 8px;
+    }
+
+    ::-webkit-scrollbar-track {
+      background: #1a1a1a;
+    }
+
+    ::-webkit-scrollbar-thumb {
+      background: #444;
+      border-radius: 4px;
+    }
+
+    ::-webkit-scrollbar-thumb:hover {
+      background: #555;
+    }
+
+    #fileInput {
+      display: none;
+    }
+  </style>
+</head>
+<body>
+  <div class="header">
+    <h1>Universal Agent Chat</h1>
+    <div class="controls">
+      <div class="adapter-select">
+        <label>Agent:</label>
+        <select id="adapterSelect">
+          <option value="claude-code">Claude Code</option>
+          <option value="gemini-cli">Gemini CLI</option>
+        </select>
+      </div>
+      <div class="adapter-select" id="modelSelectContainer" style="display: none;">
+        <label>Model:</label>
+        <select id="modelSelect">
+        </select>
+      </div>
+      <span class="session-info" id="sessionInfo">No session</span>
+      <button class="btn" id="newSessionBtn">New Session</button>
+      <button class="btn danger" id="endSessionBtn" disabled>End Session</button>
+    </div>
+  </div>
+
+  <div class="chat-container">
+    <div class="messages" id="messages"></div>
+
+    <div class="input-container">
+      <div class="attachments-preview" id="attachmentsPreview"></div>
+      <div class="input-row">
+        <div class="input-actions">
+          <button id="attachBtn" title="Attach file">
+            <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+              <path d="M21.44 11.05l-9.19 9.19a6 6 0 01-8.49-8.49l9.19-9.19a4 4 0 015.66 5.66l-9.2 9.19a2 2 0 01-2.83-2.83l8.49-8.48"/>
+            </svg>
+          </button>
+          <button id="imageBtn" title="Attach image">
+            <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+              <rect x="3" y="3" width="18" height="18" rx="2" ry="2"/>
+              <circle cx="8.5" cy="8.5" r="1.5"/>
+              <polyline points="21 15 16 10 5 21"/>
+            </svg>
+          </button>
+        </div>
+        <div class="input-field">
+          <textarea id="messageInput" placeholder="Type your message..." rows="1"></textarea>
+        </div>
+        <button class="send-btn" id="sendBtn" disabled>Send</button>
+      </div>
+    </div>
+  </div>
+
+  <input type="file" id="fileInput" multiple>
+
+  <script>
+    const API_BASE = window.location.origin;
+    const WS_BASE = `ws://${window.location.host}/ws`;
+
+    let ws = null;
+    let sessionId = null;
+    let attachments = [];
+    let isWaiting = false;
+    let adaptersData = {}; // Store adapter info including models
+
+    const adapterSelect = document.getElementById('adapterSelect');
+    const modelSelect = document.getElementById('modelSelect');
+    const modelSelectContainer = document.getElementById('modelSelectContainer');
+    const sessionInfo = document.getElementById('sessionInfo');
+    const newSessionBtn = document.getElementById('newSessionBtn');
+    const endSessionBtn = document.getElementById('endSessionBtn');
+    const messagesContainer = document.getElementById('messages');
+    const messageInput = document.getElementById('messageInput');
+    const sendBtn = document.getElementById('sendBtn');
+    const attachBtn = document.getElementById('attachBtn');
+    const imageBtn = document.getElementById('imageBtn');
+    const fileInput = document.getElementById('fileInput');
+    const attachmentsPreview = document.getElementById('attachmentsPreview');
+
+    // Auto-resize textarea
+    messageInput.addEventListener('input', () => {
+      messageInput.style.height = 'auto';
+      messageInput.style.height = Math.min(messageInput.scrollHeight, 150) + 'px';
+      updateSendButton();
+    });
+
+    // Handle adapter change - show/hide model selector
+    adapterSelect.addEventListener('change', () => {
+      updateModelSelector();
+    });
+
+    function updateModelSelector() {
+      const selectedAdapter = adapterSelect.value;
+      const adapter = adaptersData[selectedAdapter];
+
+      if (adapter && adapter.models && adapter.models.length > 0) {
+        modelSelect.innerHTML = adapter.models.map(m =>
+          `<option value="${m.id}" title="${m.description}">${m.name}</option>`
+        ).join('');
+        modelSelectContainer.style.display = 'flex';
+      } else {
+        modelSelectContainer.style.display = 'none';
+      }
+    }
+
+    function updateSendButton() {
+      sendBtn.disabled = !sessionId || isWaiting || (!messageInput.value.trim() && attachments.length === 0);
+    }
+
+    // Connect to WebSocket
+    function connectWS() {
+      ws = new WebSocket(WS_BASE);
+
+      ws.onopen = () => {
+        console.log('WebSocket connected');
+        addSystemMessage('Connected to server');
+      };
+
+      ws.onclose = () => {
+        console.log('WebSocket disconnected');
+        setTimeout(connectWS, 2000);
+      };
+
+      ws.onerror = (err) => {
+        console.error('WebSocket error:', err);
+      };
+
+      ws.onmessage = (event) => {
+        const data = JSON.parse(event.data);
+        handleWSMessage(data);
+      };
+    }
+
+    function handleWSMessage(data) {
+      switch (data.type) {
+        case 'connected':
+          console.log('Server:', data.message);
+          break;
+
+        case 'session_created':
+          sessionId = data.session.sessionId;
+          sessionInfo.textContent = `Session: ${sessionId.substring(0, 8)}...`;
+          sessionInfo.classList.add('active');
+          endSessionBtn.disabled = false;
+          adapterSelect.disabled = true;
+          modelSelect.disabled = true;
+          updateSendButton();
+          const modelInfo = data.session.model ? ` (${data.session.model})` : '';
+          addSystemMessage(`Session created with ${data.session.adapter}${modelInfo}`);
+          break;
+
+        case 'session_joined':
+          addSystemMessage('Joined session');
+          break;
+
+        case 'thinking':
+          showTypingIndicator();
+          break;
+
+        case 'chunk':
+          hideTypingIndicator();
+          appendToLastAssistantMessage(data.chunk.content);
+          break;
+
+        case 'complete':
+          hideTypingIndicator();
+          isWaiting = false;
+          updateSendButton();
+          break;
+
+        case 'session_terminated':
+          sessionId = null;
+          sessionInfo.textContent = 'No session';
+          sessionInfo.classList.remove('active');
+          endSessionBtn.disabled = true;
+          adapterSelect.disabled = false;
+          modelSelect.disabled = false;
+          updateSendButton();
+          addSystemMessage('Session ended');
+          break;
+
+        case 'error':
+          hideTypingIndicator();
+          isWaiting = false;
+          updateSendButton();
+          addSystemMessage(`Error: ${data.error}`);
+          break;
+      }
+    }
+
+    // Create new session
+    newSessionBtn.addEventListener('click', async () => {
+      if (sessionId) {
+        await endSession();
+      }
+
+      const adapter = adapterSelect.value;
+      const selectedAdapter = adaptersData[adapter];
+      const model = (selectedAdapter && selectedAdapter.models) ? modelSelect.value : undefined;
+
+      if (ws && ws.readyState === WebSocket.OPEN) {
+        ws.send(JSON.stringify({
+          type: 'create_session',
+          adapter,
+          model
+        }));
+      }
+    });
+
+    // End session
+    endSessionBtn.addEventListener('click', endSession);
+
+    async function endSession() {
+      if (ws && ws.readyState === WebSocket.OPEN && sessionId) {
+        ws.send(JSON.stringify({
+          type: 'terminate_session'
+        }));
+      }
+    }
+
+    // Send message
+    sendBtn.addEventListener('click', sendMessage);
+    messageInput.addEventListener('keypress', (e) => {
+      if (e.key === 'Enter' && !e.shiftKey) {
+        e.preventDefault();
+        sendMessage();
+      }
+    });
+
+    async function sendMessage() {
+      const message = messageInput.value.trim();
+      if ((!message && attachments.length === 0) || !sessionId || isWaiting) return;
+
+      // Build message with attachments
+      let fullMessage = message;
+      if (attachments.length > 0) {
+        const attachmentInfo = attachments.map(a => {
+          if (a.type.startsWith('image/')) {
+            return `[Image: ${a.name}]\n${a.dataUrl}`;
+          } else {
+            return `[File: ${a.name}]\n${a.content}`;
+          }
+        }).join('\n\n');
+        fullMessage = attachmentInfo + (message ? '\n\n' + message : '');
+      }
+
+      // Add user message to UI
+      addUserMessage(message, attachments);
+
+      // Clear input
+      messageInput.value = '';
+      messageInput.style.height = 'auto';
+      attachments = [];
+      renderAttachments();
+      updateSendButton();
+
+      // Send via WebSocket
+      isWaiting = true;
+      updateSendButton();
+
+      if (ws && ws.readyState === WebSocket.OPEN) {
+        ws.send(JSON.stringify({
+          type: 'send_message',
+          message: fullMessage
+        }));
+      }
+    }
+
+    // File attachments
+    attachBtn.addEventListener('click', () => {
+      fileInput.accept = '*/*';
+      fileInput.click();
+    });
+
+    imageBtn.addEventListener('click', () => {
+      fileInput.accept = 'image/*';
+      fileInput.click();
+    });
+
+    fileInput.addEventListener('change', async (e) => {
+      const files = Array.from(e.target.files);
+
+      for (const file of files) {
+        if (file.type.startsWith('image/')) {
+          const dataUrl = await readFileAsDataURL(file);
+          attachments.push({
+            name: file.name,
+            type: file.type,
+            dataUrl
+          });
+        } else {
+          const content = await readFileAsText(file);
+          attachments.push({
+            name: file.name,
+            type: file.type,
+            content
+          });
+        }
+      }
+
+      renderAttachments();
+      updateSendButton();
+      fileInput.value = '';
+    });
+
+    function readFileAsDataURL(file) {
+      return new Promise((resolve) => {
+        const reader = new FileReader();
+        reader.onload = () => resolve(reader.result);
+        reader.readAsDataURL(file);
+      });
+    }
+
+    function readFileAsText(file) {
+      return new Promise((resolve) => {
+        const reader = new FileReader();
+        reader.onload = () => resolve(reader.result);
+        reader.readAsText(file);
+      });
+    }
+
+    function renderAttachments() {
+      attachmentsPreview.innerHTML = attachments.map((a, i) => `
+        <div class="attachment-item">
+          ${a.dataUrl ? `<img src="${a.dataUrl}" alt="${a.name}">` : ''}
+          <span class="name">${a.name}</span>
+          <button class="remove" onclick="removeAttachment(${i})">x</button>
+        </div>
+      `).join('');
+    }
+
+    window.removeAttachment = (index) => {
+      attachments.splice(index, 1);
+      renderAttachments();
+      updateSendButton();
+    };
+
+    // Message rendering
+    function addUserMessage(text, attachments = []) {
+      const messageDiv = document.createElement('div');
+      messageDiv.className = 'message user';
+
+      let html = '';
+      if (attachments.length > 0) {
+        html += '<div class="message-attachments">';
+        for (const a of attachments) {
+          if (a.dataUrl) {
+            html += `<div class="attachment-preview"><img src="${a.dataUrl}" alt="${a.name}"></div>`;
+          } else {
+            html += `<div class="attachment-preview"><div class="file-info">${a.name}</div></div>`;
+          }
+        }
+        html += '</div>';
+      }
+      html += `<div class="message-content">${escapeHtml(text)}</div>`;
+      html += `<div class="message-meta">${new Date().toLocaleTimeString()}</div>`;
+
+      messageDiv.innerHTML = html;
+      messagesContainer.appendChild(messageDiv);
+      scrollToBottom();
+    }
+
+    function addAssistantMessage(text) {
+      const messageDiv = document.createElement('div');
+      messageDiv.className = 'message assistant';
+      messageDiv.id = 'assistant-msg-' + Date.now();
+      messageDiv.innerHTML = `
+        <div class="message-content">${escapeHtml(text)}</div>
+        <div class="message-meta">${adapterSelect.value} - ${new Date().toLocaleTimeString()}</div>
+      `;
+      messagesContainer.appendChild(messageDiv);
+      scrollToBottom();
+      return messageDiv;
+    }
+
+    function appendToLastAssistantMessage(text) {
+      const lastMsg = messagesContainer.querySelector('.message.assistant:last-of-type');
+      if (lastMsg) {
+        const content = lastMsg.querySelector('.message-content');
+        content.textContent += text;
+      } else {
+        addAssistantMessage(text);
+      }
+      scrollToBottom();
+    }
+
+    function addSystemMessage(text) {
+      const messageDiv = document.createElement('div');
+      messageDiv.className = 'message system';
+      messageDiv.innerHTML = `<div class="message-content">${escapeHtml(text)}</div>`;
+      messagesContainer.appendChild(messageDiv);
+      scrollToBottom();
+    }
+
+    let typingIndicator = null;
+    function showTypingIndicator() {
+      if (typingIndicator) return;
+
+      const messageDiv = document.createElement('div');
+      messageDiv.className = 'message assistant';
+      messageDiv.innerHTML = `
+        <div class="typing-indicator">
+          <span></span>
+          <span></span>
+          <span></span>
+        </div>
+      `;
+      typingIndicator = messageDiv;
+      messagesContainer.appendChild(messageDiv);
+      scrollToBottom();
+    }
+
+    function hideTypingIndicator() {
+      if (typingIndicator) {
+        typingIndicator.remove();
+        typingIndicator = null;
+      }
+    }
+
+    function scrollToBottom() {
+      messagesContainer.scrollTop = messagesContainer.scrollHeight;
+    }
+
+    function escapeHtml(text) {
+      const div = document.createElement('div');
+      div.textContent = text;
+      return div.innerHTML;
+    }
+
+    // Load available adapters
+    async function loadAdapters() {
+      try {
+        const response = await fetch(`${API_BASE}/adapters`);
+        const data = await response.json();
+
+        // Store adapter data for model lookup
+        adaptersData = {};
+        data.adapters.forEach(a => {
+          adaptersData[a.name] = a;
+        });
+
+        adapterSelect.innerHTML = data.adapters.map(a => `
+          <option value="${a.name}" ${!a.available ? 'disabled' : ''}>
+            ${a.name}${!a.available ? ' (unavailable)' : ''}
+          </option>
+        `).join('');
+
+        // Initialize model selector for default adapter
+        updateModelSelector();
+      } catch (err) {
+        console.error('Failed to load adapters:', err);
+      }
+    }
+
+    // Initialize
+    loadAdapters();
+    connectWS();
+  </script>
+</body>
+</html>

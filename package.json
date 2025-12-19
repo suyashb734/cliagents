@@ -1,0 +1,53 @@
+{
+  "name": "cliagents",
+  "version": "1.0.0",
+  "description": "HTTP server for CLI-based AI agents. Unified API for Claude Code, Gemini CLI, Codex, Aider, Goose, and more.",
+  "main": "src/index.js",
+  "scripts": {
+    "start": "node src/index.js",
+    "dev": "node --watch src/index.js",
+    "setup": "node src/scripts/setup-auth.js",
+    "test": "node tests/run-all.js"
+  },
+  "keywords": [
+    "ai",
+    "agent",
+    "cli",
+    "claude",
+    "gemini",
+    "codex",
+    "aider",
+    "goose",
+    "api",
+    "rest",
+    "websocket",
+    "streaming",
+    "llm"
+  ],
+  "author": "suyashb734",
+  "license": "MIT",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/suyashb734/cliagents.git"
+  },
+  "bugs": {
+    "url": "https://github.com/suyashb734/cliagents/issues"
+  },
+  "homepage": "https://github.com/suyashb734/cliagents#readme",
+  "engines": {
+    "node": ">=18.0.0"
+  },
+  "files": [
+    "src",
+    "openapi.json",
+    "README.md",
+    "LICENSE"
+  ],
+  "dependencies": {
+    "@anthropic-ai/sdk": "^0.39.0",
+    "cors": "^2.8.5",
+    "express": "^4.18.2",
+    "ws": "^8.14.2",
+    "openai": "^4.0.0"
+  }
+}

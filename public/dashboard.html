@@ -1,0 +1,971 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>Universal Agent Server - Dashboard</title>
+  <style>
+    :root {
+      --bg-primary: #0d1117;
+      --bg-secondary: #161b22;
+      --bg-tertiary: #21262d;
+      --border-color: #30363d;
+      --text-primary: #e6edf3;
+      --text-secondary: #8b949e;
+      --accent-blue: #58a6ff;
+      --accent-green: #3fb950;
+      --accent-yellow: #d29922;
+      --accent-red: #f85149;
+      --accent-purple: #a371f7;
+    }
+
+    * {
+      box-sizing: border-box;
+      margin: 0;
+      padding: 0;
+    }
+
+    body {
+      font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, Oxygen, Ubuntu, sans-serif;
+      background: var(--bg-primary);
+      color: var(--text-primary);
+      min-height: 100vh;
+      padding: 20px;
+    }
+
+    .container {
+      max-width: 1400px;
+      margin: 0 auto;
+    }
+
+    header {
+      display: flex;
+      justify-content: space-between;
+      align-items: center;
+      margin-bottom: 30px;
+      padding-bottom: 20px;
+      border-bottom: 1px solid var(--border-color);
+    }
+
+    h1 {
+      font-size: 1.8rem;
+      font-weight: 600;
+      display: flex;
+      align-items: center;
+      gap: 12px;
+    }
+
+    h1 .icon {
+      font-size: 1.5rem;
+    }
+
+    .header-actions {
+      display: flex;
+      gap: 12px;
+    }
+
+    .btn {
+      padding: 8px 16px;
+      border-radius: 6px;
+      border: 1px solid var(--border-color);
+      background: var(--bg-secondary);
+      color: var(--text-primary);
+      font-size: 14px;
+      cursor: pointer;
+      display: flex;
+      align-items: center;
+      gap: 6px;
+      transition: all 0.2s;
+    }
+
+    .btn:hover {
+      background: var(--bg-tertiary);
+      border-color: var(--text-secondary);
+    }
+
+    .btn-primary {
+      background: var(--accent-blue);
+      border-color: var(--accent-blue);
+      color: white;
+    }
+
+    .btn-primary:hover {
+      background: #4c9aed;
+    }
+
+    .btn:disabled {
+      opacity: 0.5;
+      cursor: not-allowed;
+    }
+
+    .stats-bar {
+      display: grid;
+      grid-template-columns: repeat(auto-fit, minmax(200px, 1fr));
+      gap: 16px;
+      margin-bottom: 30px;
+    }
+
+    .stat-card {
+      background: var(--bg-secondary);
+      border: 1px solid var(--border-color);
+      border-radius: 8px;
+      padding: 16px 20px;
+    }
+
+    .stat-label {
+      font-size: 12px;
+      color: var(--text-secondary);
+      text-transform: uppercase;
+      letter-spacing: 0.5px;
+      margin-bottom: 6px;
+    }
+
+    .stat-value {
+      font-size: 28px;
+      font-weight: 600;
+    }
+
+    .stat-value.green { color: var(--accent-green); }
+    .stat-value.yellow { color: var(--accent-yellow); }
+    .stat-value.red { color: var(--accent-red); }
+
+    .adapters-grid {
+      display: grid;
+      grid-template-columns: repeat(auto-fill, minmax(380px, 1fr));
+      gap: 16px;
+    }
+
+    .adapter-card {
+      background: var(--bg-secondary);
+      border: 1px solid var(--border-color);
+      border-radius: 12px;
+      overflow: hidden;
+      transition: border-color 0.2s;
+    }
+
+    .adapter-card:hover {
+      border-color: var(--text-secondary);
+    }
+
+    .adapter-header {
+      padding: 16px 20px;
+      display: flex;
+      justify-content: space-between;
+      align-items: center;
+      border-bottom: 1px solid var(--border-color);
+    }
+
+    .adapter-name {
+      font-size: 16px;
+      font-weight: 600;
+      display: flex;
+      align-items: center;
+      gap: 8px;
+    }
+
+    .adapter-cli {
+      font-size: 12px;
+      color: var(--text-secondary);
+      font-family: monospace;
+      background: var(--bg-tertiary);
+      padding: 2px 8px;
+      border-radius: 4px;
+    }
+
+    .status-badges {
+      display: flex;
+      gap: 8px;
+    }
+
+    .badge {
+      font-size: 11px;
+      padding: 4px 10px;
+      border-radius: 20px;
+      font-weight: 500;
+      display: flex;
+      align-items: center;
+      gap: 4px;
+    }
+
+    .badge-installed {
+      background: rgba(63, 185, 80, 0.15);
+      color: var(--accent-green);
+    }
+
+    .badge-not-installed {
+      background: rgba(248, 81, 73, 0.15);
+      color: var(--accent-red);
+    }
+
+    .badge-authenticated {
+      background: rgba(63, 185, 80, 0.15);
+      color: var(--accent-green);
+    }
+
+    .badge-likely {
+      background: rgba(210, 153, 34, 0.15);
+      color: var(--accent-yellow);
+    }
+
+    .badge-unknown {
+      background: rgba(139, 148, 158, 0.15);
+      color: var(--text-secondary);
+    }
+
+    .badge-failed {
+      background: rgba(248, 81, 73, 0.15);
+      color: var(--accent-red);
+    }
+
+    .adapter-body {
+      padding: 16px 20px;
+    }
+
+    .adapter-info {
+      margin-bottom: 16px;
+    }
+
+    .info-row {
+      display: flex;
+      justify-content: space-between;
+      padding: 8px 0;
+      border-bottom: 1px solid var(--border-color);
+      font-size: 13px;
+    }
+
+    .info-row:last-child {
+      border-bottom: none;
+    }
+
+    .info-label {
+      color: var(--text-secondary);
+    }
+
+    .info-value {
+      color: var(--text-primary);
+      font-family: monospace;
+    }
+
+    .info-value.success { color: var(--accent-green); }
+    .info-value.warning { color: var(--accent-yellow); }
+    .info-value.error { color: var(--accent-red); }
+
+    .env-vars {
+      display: flex;
+      flex-wrap: wrap;
+      gap: 6px;
+    }
+
+    .env-var {
+      font-size: 11px;
+      padding: 2px 8px;
+      border-radius: 4px;
+      font-family: monospace;
+    }
+
+    .env-var.set {
+      background: rgba(63, 185, 80, 0.15);
+      color: var(--accent-green);
+    }
+
+    .env-var.unset {
+      background: rgba(139, 148, 158, 0.1);
+      color: var(--text-secondary);
+    }
+
+    .adapter-actions {
+      display: flex;
+      gap: 8px;
+      flex-wrap: wrap;
+    }
+
+    .adapter-actions .btn {
+      flex: 1;
+      min-width: 100px;
+      justify-content: center;
+    }
+
+    .modal-overlay {
+      position: fixed;
+      top: 0;
+      left: 0;
+      right: 0;
+      bottom: 0;
+      background: rgba(0, 0, 0, 0.7);
+      display: flex;
+      align-items: center;
+      justify-content: center;
+      z-index: 1000;
+      opacity: 0;
+      visibility: hidden;
+      transition: all 0.2s;
+    }
+
+    .modal-overlay.active {
+      opacity: 1;
+      visibility: visible;
+    }
+
+    .modal {
+      background: var(--bg-secondary);
+      border: 1px solid var(--border-color);
+      border-radius: 12px;
+      width: 90%;
+      max-width: 500px;
+      max-height: 80vh;
+      overflow: auto;
+    }
+
+    .modal-header {
+      padding: 16px 20px;
+      border-bottom: 1px solid var(--border-color);
+      display: flex;
+      justify-content: space-between;
+      align-items: center;
+    }
+
+    .modal-title {
+      font-size: 18px;
+      font-weight: 600;
+    }
+
+    .modal-close {
+      background: none;
+      border: none;
+      color: var(--text-secondary);
+      font-size: 24px;
+      cursor: pointer;
+      padding: 0;
+      line-height: 1;
+    }
+
+    .modal-close:hover {
+      color: var(--text-primary);
+    }
+
+    .modal-body {
+      padding: 20px;
+    }
+
+    .modal-section {
+      margin-bottom: 20px;
+    }
+
+    .modal-section:last-child {
+      margin-bottom: 0;
+    }
+
+    .modal-section-title {
+      font-size: 14px;
+      font-weight: 600;
+      margin-bottom: 10px;
+      color: var(--text-secondary);
+    }
+
+    .form-group {
+      margin-bottom: 16px;
+    }
+
+    .form-group label {
+      display: block;
+      font-size: 13px;
+      margin-bottom: 6px;
+      color: var(--text-secondary);
+    }
+
+    .form-group input {
+      width: 100%;
+      padding: 10px 12px;
+      background: var(--bg-tertiary);
+      border: 1px solid var(--border-color);
+      border-radius: 6px;
+      color: var(--text-primary);
+      font-size: 14px;
+      font-family: monospace;
+    }
+
+    .form-group input:focus {
+      outline: none;
+      border-color: var(--accent-blue);
+    }
+
+    .command-box {
+      background: var(--bg-tertiary);
+      border: 1px solid var(--border-color);
+      border-radius: 6px;
+      padding: 12px 16px;
+      font-family: monospace;
+      font-size: 14px;
+      display: flex;
+      justify-content: space-between;
+      align-items: center;
+    }
+
+    .command-box .copy-btn {
+      background: none;
+      border: none;
+      color: var(--text-secondary);
+      cursor: pointer;
+      padding: 4px;
+    }
+
+    .command-box .copy-btn:hover {
+      color: var(--accent-blue);
+    }
+
+    .instructions {
+      font-size: 14px;
+      line-height: 1.6;
+      color: var(--text-secondary);
+    }
+
+    .instructions a {
+      color: var(--accent-blue);
+      text-decoration: none;
+    }
+
+    .instructions a:hover {
+      text-decoration: underline;
+    }
+
+    .test-result {
+      padding: 12px 16px;
+      border-radius: 6px;
+      font-size: 14px;
+      margin-top: 16px;
+    }
+
+    .test-result.success {
+      background: rgba(63, 185, 80, 0.15);
+      border: 1px solid var(--accent-green);
+      color: var(--accent-green);
+    }
+
+    .test-result.error {
+      background: rgba(248, 81, 73, 0.15);
+      border: 1px solid var(--accent-red);
+      color: var(--accent-red);
+    }
+
+    .test-result.testing {
+      background: rgba(88, 166, 255, 0.15);
+      border: 1px solid var(--accent-blue);
+      color: var(--accent-blue);
+    }
+
+    .spinner {
+      display: inline-block;
+      width: 14px;
+      height: 14px;
+      border: 2px solid transparent;
+      border-top-color: currentColor;
+      border-radius: 50%;
+      animation: spin 1s linear infinite;
+    }
+
+    @keyframes spin {
+      to { transform: rotate(360deg); }
+    }
+
+    .toast {
+      position: fixed;
+      bottom: 20px;
+      right: 20px;
+      padding: 12px 20px;
+      background: var(--bg-secondary);
+      border: 1px solid var(--border-color);
+      border-radius: 8px;
+      font-size: 14px;
+      display: flex;
+      align-items: center;
+      gap: 10px;
+      z-index: 1001;
+      transform: translateY(100px);
+      opacity: 0;
+      transition: all 0.3s;
+    }
+
+    .toast.show {
+      transform: translateY(0);
+      opacity: 1;
+    }
+
+    .toast.success {
+      border-color: var(--accent-green);
+    }
+
+    .toast.error {
+      border-color: var(--accent-red);
+    }
+
+    @media (max-width: 600px) {
+      .adapters-grid {
+        grid-template-columns: 1fr;
+      }
+
+      .header-actions {
+        flex-direction: column;
+      }
+    }
+  </style>
+</head>
+<body>
+  <div class="container">
+    <header>
+      <h1>
+        <span class="icon">&#x1F916;</span>
+        Universal Agent Server
+      </h1>
+      <div class="header-actions">
+        <a href="/" class="btn">
+          <span>&#x1F4AC;</span> Chat UI
+        </a>
+        <button class="btn btn-primary" onclick="refreshAll()">
+          <span>&#x21BB;</span> Refresh All
+        </button>
+      </div>
+    </header>
+
+    <div class="stats-bar">
+      <div class="stat-card">
+        <div class="stat-label">Total Adapters</div>
+        <div class="stat-value" id="stat-total">-</div>
+      </div>
+      <div class="stat-card">
+        <div class="stat-label">Installed</div>
+        <div class="stat-value green" id="stat-installed">-</div>
+      </div>
+      <div class="stat-card">
+        <div class="stat-label">Authenticated</div>
+        <div class="stat-value green" id="stat-authenticated">-</div>
+      </div>
+      <div class="stat-card">
+        <div class="stat-label">Need Attention</div>
+        <div class="stat-value yellow" id="stat-attention">-</div>
+      </div>
+    </div>
+
+    <div class="adapters-grid" id="adapters-grid">
+      <div style="text-align: center; padding: 40px; color: var(--text-secondary);">
+        <div class="spinner" style="width: 32px; height: 32px; margin: 0 auto 16px;"></div>
+        Loading adapters...
+      </div>
+    </div>
+  </div>
+
+  <!-- Login Modal -->
+  <div class="modal-overlay" id="login-modal">
+    <div class="modal">
+      <div class="modal-header">
+        <span class="modal-title" id="modal-title">Configure Adapter</span>
+        <button class="modal-close" onclick="closeModal()">&times;</button>
+      </div>
+      <div class="modal-body" id="modal-body">
+        <!-- Dynamic content -->
+      </div>
+    </div>
+  </div>
+
+  <!-- Toast -->
+  <div class="toast" id="toast"></div>
+
+  <script>
+    const API_BASE = window.location.origin;
+    let adaptersData = [];
+
+    // Fetch all adapter statuses
+    async function fetchAdapterStatuses() {
+      try {
+        const response = await fetch(`${API_BASE}/dashboard/adapters/status`);
+        if (!response.ok) throw new Error('Failed to fetch');
+        const data = await response.json();
+        adaptersData = data.adapters;
+        renderAdapters(adaptersData);
+        updateStats(adaptersData);
+      } catch (error) {
+        console.error('Error fetching adapter statuses:', error);
+        document.getElementById('adapters-grid').innerHTML = `
+          <div style="text-align: center; padding: 40px; color: var(--accent-red);">
+            Error loading adapters. Is the server running?
+          </div>
+        `;
+      }
+    }
+
+    // Update stats bar
+    function updateStats(adapters) {
+      const total = adapters.length;
+      const installed = adapters.filter(a => a.installed).length;
+      const authenticated = adapters.filter(a => a.authStatus === 'authenticated').length;
+      const needsAttention = adapters.filter(a =>
+        a.installed && (a.authStatus === 'unknown' || a.authStatus === 'failed')
+      ).length;
+
+      document.getElementById('stat-total').textContent = total;
+      document.getElementById('stat-installed').textContent = installed;
+      document.getElementById('stat-authenticated').textContent = authenticated;
+      document.getElementById('stat-attention').textContent = needsAttention;
+    }
+
+    // Render adapter cards
+    function renderAdapters(adapters) {
+      const grid = document.getElementById('adapters-grid');
+
+      if (adapters.length === 0) {
+        grid.innerHTML = '<div style="text-align: center; padding: 40px; color: var(--text-secondary);">No adapters found</div>';
+        return;
+      }
+
+      grid.innerHTML = adapters.map(adapter => `
+        <div class="adapter-card" data-adapter="${adapter.name}">
+          <div class="adapter-header">
+            <div>
+              <div class="adapter-name">
+                ${adapter.displayName}
+                <span class="adapter-cli">${adapter.name}</span>
+              </div>
+            </div>
+            <div class="status-badges">
+              ${adapter.installed
+                ? '<span class="badge badge-installed">&#x2713; Installed</span>'
+                : '<span class="badge badge-not-installed">&#x2717; Not Installed</span>'
+              }
+              ${getAuthBadge(adapter)}
+            </div>
+          </div>
+          <div class="adapter-body">
+            <div class="adapter-info">
+              <div class="info-row">
+                <span class="info-label">Auth Type</span>
+                <span class="info-value">${adapter.authType}</span>
+              </div>
+              <div class="info-row">
+                <span class="info-label">Environment Variables</span>
+                <div class="env-vars">
+                  ${Object.entries(adapter.envVarsSet || {}).map(([key, set]) => `
+                    <span class="env-var ${set ? 'set' : 'unset'}">${key}</span>
+                  `).join('')}
+                </div>
+              </div>
+              ${adapter.configFilePath ? `
+                <div class="info-row">
+                  <span class="info-label">Config File</span>
+                  <span class="info-value ${adapter.configFileExists ? 'success' : 'warning'}">
+                    ${adapter.configFileExists ? '&#x2713;' : '&#x2717;'} ${adapter.configFilePath.replace(/^\/Users\/[^/]+/, '~')}
+                  </span>
+                </div>
+              ` : ''}
+            </div>
+            <div class="adapter-actions">
+              <button class="btn" onclick="testAdapter('${adapter.name}')" ${!adapter.installed ? 'disabled' : ''}>
+                <span>&#x26A1;</span> Test
+              </button>
+              <button class="btn" onclick="openLoginModal('${adapter.name}')" ${!adapter.installed ? 'disabled' : ''}>
+                <span>&#x1F511;</span> Configure
+              </button>
+              <a href="${adapter.docsUrl}" target="_blank" class="btn">
+                <span>&#x1F4D6;</span> Docs
+              </a>
+            </div>
+            <div class="test-result-container" id="test-result-${adapter.name}"></div>
+          </div>
+        </div>
+      `).join('');
+    }
+
+    function getAuthBadge(adapter) {
+      if (!adapter.installed) return '';
+
+      switch (adapter.authStatus) {
+        case 'authenticated':
+          return '<span class="badge badge-authenticated">&#x2713; Authenticated</span>';
+        case 'likely':
+          return '<span class="badge badge-likely">&#x2713; Likely OK</span>';
+        case 'failed':
+          return '<span class="badge badge-failed">&#x2717; Auth Failed</span>';
+        default:
+          return '<span class="badge badge-unknown">? Unknown</span>';
+      }
+    }
+
+    // Test an adapter
+    async function testAdapter(adapterName) {
+      const container = document.getElementById(`test-result-${adapterName}`);
+      container.innerHTML = `
+        <div class="test-result testing">
+          <span class="spinner"></span> Testing authentication...
+        </div>
+      `;
+
+      try {
+        const response = await fetch(`${API_BASE}/dashboard/adapters/${adapterName}/test`, {
+          method: 'POST'
+        });
+        const result = await response.json();
+
+        if (result.success) {
+          container.innerHTML = `
+            <div class="test-result success">
+              &#x2713; Success! Response in ${result.duration}ms
+              ${result.response ? `<br><small>"${result.response}"</small>` : ''}
+            </div>
+          `;
+          // Update the adapter's auth status
+          const adapter = adaptersData.find(a => a.name === adapterName);
+          if (adapter) {
+            adapter.authStatus = 'authenticated';
+            renderAdapters(adaptersData);
+            updateStats(adaptersData);
+          }
+        } else {
+          container.innerHTML = `
+            <div class="test-result error">
+              &#x2717; Failed: ${result.error}
+            </div>
+          `;
+        }
+      } catch (error) {
+        container.innerHTML = `
+          <div class="test-result error">
+            &#x2717; Error: ${error.message}
+          </div>
+        `;
+      }
+    }
+
+    // Open login modal
+    function openLoginModal(adapterName) {
+      const adapter = adaptersData.find(a => a.name === adapterName);
+      if (!adapter) return;
+
+      document.getElementById('modal-title').textContent = `Configure ${adapter.displayName}`;
+
+      let modalContent = '';
+
+      // Different content based on auth type
+      if (adapter.authType === 'cli-interactive') {
+        // CLI-interactive: requires terminal command
+        modalContent += `
+          <div class="modal-section">
+            <div class="modal-section-title" style="display: flex; align-items: center; gap: 8px;">
+              <span style="font-size: 18px;">&#x1F4BB;</span> Terminal Login Required
+            </div>
+            <p class="instructions">
+              This CLI uses its own authentication flow (OAuth/browser login).
+              <strong>You must run the command in your terminal</strong> - it cannot be done from this dashboard.
+            </p>
+          </div>
+        `;
+
+        if (adapter.loginCommand) {
+          modalContent += `
+            <div class="modal-section">
+              <div class="modal-section-title">Command to Run</div>
+              <div class="command-box">
+                <code>${adapter.loginCommand}</code>
+                <button class="copy-btn" onclick="copyToClipboard('${adapter.loginCommand}')" title="Copy to clipboard">&#x1F4CB;</button>
+              </div>
+              <p class="instructions" style="margin-top: 12px; font-size: 13px;">
+                1. Open your terminal<br>
+                2. Paste and run this command<br>
+                3. Follow the prompts (browser will open for OAuth)<br>
+                4. Come back here and click "Test" to verify
+              </p>
+            </div>
+          `;
+        }
+
+        modalContent += `
+          <div class="modal-section">
+            <div class="modal-section-title">Instructions</div>
+            <p class="instructions">${adapter.loginInstructions}</p>
+          </div>
+        `;
+
+      } else if (adapter.authType === 'api-key') {
+        // API-key: can set from dashboard
+        modalContent += `
+          <div class="modal-section">
+            <div class="modal-section-title" style="display: flex; align-items: center; gap: 8px;">
+              <span style="font-size: 18px;">&#x1F511;</span> API Key Required
+            </div>
+            <p class="instructions">${adapter.loginInstructions}</p>
+          </div>
+        `;
+
+        // Environment variables input
+        const envVars = Object.entries(adapter.envVarsSet || {});
+        if (envVars.length > 0) {
+          modalContent += `
+            <div class="modal-section">
+              <div class="modal-section-title">Set API Key</div>
+              ${envVars.map(([key, isSet]) => `
+                <div class="form-group">
+                  <label>
+                    ${key} ${isSet ? '<span style="color: var(--accent-green);">&#x2713; Set</span>' : '<span style="color: var(--text-secondary);">Not set</span>'}
+                  </label>
+                  <input type="password" id="env-${key}" placeholder="Enter ${key}" value="${isSet ? '********' : ''}">
+                </div>
+              `).join('')}
+              <button class="btn btn-primary" onclick="saveEnvVars('${adapterName}')">
+                Save API Key
+              </button>
+              <p class="instructions" style="margin-top: 10px; font-size: 12px;">
+                <strong>Note:</strong> Keys set here only persist for the current server session.
+                For permanent config, add to your shell profile (~/.bashrc, ~/.zshrc):
+                <br><code style="display: block; margin-top: 6px; padding: 8px; background: var(--bg-tertiary); border-radius: 4px;">export ${envVars[0]?.[0] || 'API_KEY'}="your-key-here"</code>
+              </p>
+            </div>
+          `;
+        }
+
+      } else if (adapter.authType === 'config-file') {
+        // Config file: show file path and instructions
+        modalContent += `
+          <div class="modal-section">
+            <div class="modal-section-title" style="display: flex; align-items: center; gap: 8px;">
+              <span style="font-size: 18px;">&#x1F4C4;</span> Config File Required
+            </div>
+            <p class="instructions">${adapter.loginInstructions}</p>
+          </div>
+        `;
+
+        if (adapter.configFilePath) {
+          modalContent += `
+            <div class="modal-section">
+              <div class="modal-section-title">Config File Location</div>
+              <div class="command-box">
+                <code>${adapter.configFilePath}</code>
+                <button class="copy-btn" onclick="copyToClipboard('${adapter.configFilePath}')" title="Copy path">&#x1F4CB;</button>
+              </div>
+              <p class="instructions" style="margin-top: 10px; font-size: 12px;">
+                ${adapter.configFileExists
+                  ? '<span style="color: var(--accent-green);">&#x2713; Config file exists</span>'
+                  : '<span style="color: var(--accent-yellow);">&#x26A0; Config file not found - create it with your API keys</span>'}
+              </p>
+            </div>
+          `;
+        }
+
+        // Also show env var option if available
+        const envVars = Object.entries(adapter.envVarsSet || {});
+        if (envVars.length > 0) {
+          modalContent += `
+            <div class="modal-section">
+              <div class="modal-section-title">Alternative: Environment Variables</div>
+              ${envVars.map(([key, isSet]) => `
+                <div class="form-group">
+                  <label>
+                    ${key} ${isSet ? '<span style="color: var(--accent-green);">&#x2713; Set</span>' : '<span style="color: var(--text-secondary);">Not set</span>'}
+                  </label>
+                  <input type="password" id="env-${key}" placeholder="Enter ${key}" value="${isSet ? '********' : ''}">
+                </div>
+              `).join('')}
+              <button class="btn btn-primary" onclick="saveEnvVars('${adapterName}')">
+                Save Environment Variables
+              </button>
+            </div>
+          `;
+        }
+      }
+
+      // Docs link (always show)
+      modalContent += `
+        <div class="modal-section">
+          <div class="modal-section-title">Documentation</div>
+          <a href="${adapter.docsUrl}" target="_blank" class="btn" style="display: inline-flex;">
+            <span>&#x1F4D6;</span> Open Documentation
+          </a>
+        </div>
+      `;
+
+      document.getElementById('modal-body').innerHTML = modalContent;
+      document.getElementById('login-modal').classList.add('active');
+    }
+
+    // Close modal
+    function closeModal() {
+      document.getElementById('login-modal').classList.remove('active');
+    }
+
+    // Copy to clipboard
+    function copyToClipboard(text) {
+      navigator.clipboard.writeText(text).then(() => {
+        showToast('Copied to clipboard!', 'success');
+      });
+    }
+
+    // Save environment variables
+    async function saveEnvVars(adapterName) {
+      const adapter = adaptersData.find(a => a.name === adapterName);
+      if (!adapter) return;
+
+      const envVars = {};
+      for (const key of Object.keys(adapter.envVarsSet || {})) {
+        const input = document.getElementById(`env-${key}`);
+        if (input && input.value && input.value !== '********') {
+          envVars[key] = input.value;
+        }
+      }
+
+      if (Object.keys(envVars).length === 0) {
+        showToast('No changes to save', 'error');
+        return;
+      }
+
+      try {
+        const response = await fetch(`${API_BASE}/dashboard/adapters/${adapterName}/env`, {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ envVars })
+        });
+
+        const result = await response.json();
+        if (result.success) {
+          showToast('Environment variables saved!', 'success');
+          closeModal();
+          fetchAdapterStatuses(); // Refresh
+        } else {
+          showToast(`Error: ${result.error}`, 'error');
+        }
+      } catch (error) {
+        showToast(`Error: ${error.message}`, 'error');
+      }
+    }
+
+    // Show toast notification
+    function showToast(message, type = 'success') {
+      const toast = document.getElementById('toast');
+      toast.textContent = message;
+      toast.className = `toast ${type} show`;
+
+      setTimeout(() => {
+        toast.classList.remove('show');
+      }, 3000);
+    }
+
+    // Refresh all
+    function refreshAll() {
+      fetchAdapterStatuses();
+      showToast('Refreshing...', 'success');
+    }
+
+    // Close modal on overlay click
+    document.getElementById('login-modal').addEventListener('click', (e) => {
+      if (e.target.id === 'login-modal') {
+        closeModal();
+      }
+    });
+
+    // Close modal on Escape
+    document.addEventListener('keydown', (e) => {
+      if (e.key === 'Escape') {
+        closeModal();
+      }
+    });
+
+    // Initial load
+    fetchAdapterStatuses();
+  </script>
+</body>
+</html>
