@@ -211,9 +211,16 @@ const server = new AgentServer({
 
 ## Testing
 
-See `tests/` directory for automated tests:
-- `test-health.js` - Server health check
-- `test-adapters.js` - Adapter availability
-- `test-sessions.js` - Session lifecycle
-- `test-context.js` - Context preservation
-- `test-actions.js` - Browser action parsing
+```bash
+# Start server first
+npm start
+
+# Run tests (in another terminal)
+npm test
+```
+
+Test files:
+- `tests/run-all.js` - Main automated test suite (health, adapters, sessions, streaming, context)
+- `tests/test-file-context.js` - File context preservation tests
+- `tests/test-screenshot-context.js` - Screenshot/image context tests
+- `examples/test-basic.js` - Basic usage example

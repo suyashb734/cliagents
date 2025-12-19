@@ -30,6 +30,7 @@ const GitHubCopilotAdapter = require('../adapters/github-copilot');
 
 // Utilities
 const { sendError, errorHandler, ErrorCodes } = require('../utils/errors');
+const { validateWorkDir, validateMessage, validateJsonSchema, validateFileName } = require('../utils/validation');
 const {
   getAdapterStatus,
   getAllAdapterStatuses,
@@ -95,7 +96,7 @@ class AgentServer {
         res.setHeader('Content-Type', 'application/json');
         res.sendFile(specPath);
       } else {
-        res.status(404).json({ error: 'OpenAPI specification not found' });
+        sendError(res, 'INTERNAL_ERROR', { message: 'OpenAPI specification not found' });
       }
     });
 
@@ -131,11 +132,24 @@ class AgentServer {
           // Generation parameters (Gemini only)
           temperature, top_p, top_k, max_output_tokens
         } = req.body;
+
+        // Validate workDir to prevent path traversal
+        const workDirValidation = validateWorkDir(workDir);
+        if (!workDirValidation.valid) {
+          return sendError(res, 'INVALID_PARAMETER', { message: workDirValidation.error, param: 'workDir' });
+        }
+
+        // Validate jsonSchema if provided
+        const schemaValidation = validateJsonSchema(jsonSchema);
+        if (!schemaValidation.valid) {
+          return sendError(res, 'INVALID_PARAMETER', { message: schemaValidation.error, param: 'jsonSchema' });
+        }
+
         const session = await this.sessionManager.createSession({
           adapter,
           systemPrompt,
           allowedTools,
-          workDir,
+          workDir: workDirValidation.sanitized,
           model,
           jsonSchema,  // JSON Schema for structured output (Claude only)
           // Generation parameters (Gemini only - writes to ~/.gemini/config.yaml)
@@ -209,8 +223,19 @@ class AgentServer {
     app.post('/sessions/:sessionId/messages', async (req, res) => {
       try {
         const { message, timeout, stream, jsonSchema, allowedTools } = req.body;
-        if (!message) {
-          return sendError(res, 'MISSING_PARAMETER', { param: 'message', message: 'Message is required' });
+
+        // Validate message
+        const messageValidation = validateMessage(message);
+        if (!messageValidation.valid) {
+          return sendError(res, 'INVALID_PARAMETER', { param: 'message', message: messageValidation.error });
+        }
+
+        // Validate jsonSchema if provided
+        if (jsonSchema) {
+          const schemaValidation = validateJsonSchema(jsonSchema);
+          if (!schemaValidation.valid) {
+            return sendError(res, 'INVALID_PARAMETER', { message: schemaValidation.error, param: 'jsonSchema' });
+          }
         }
 
         const options = {
@@ -277,16 +302,16 @@ class AgentServer {
       try {
         const { text } = req.body;
         if (!text) {
-          return res.status(400).json({ error: 'Text is required' });
+          return sendError(res, 'MISSING_PARAMETER', { message: 'Text is required', param: 'text' });
         }
 
         const parsed = this.sessionManager.parseResponse(req.params.sessionId, text);
         res.json(parsed);
       } catch (error) {
         if (error.message.includes('not found')) {
-          return res.status(404).json({ error: error.message });
+          return sendError(res, 'SESSION_NOT_FOUND', { message: error.message });
         }
-        res.status(500).json({ error: error.message });
+        sendError(res, 'INTERNAL_ERROR', { message: error.message });
       }
     });
 
@@ -295,11 +320,11 @@ class AgentServer {
       try {
         const terminated = await this.sessionManager.terminateSession(req.params.sessionId);
         if (!terminated) {
-          return res.status(404).json({ error: 'Session not found' });
+          return sendError(res, 'SESSION_NOT_FOUND');
         }
         res.json({ status: 'terminated' });
       } catch (error) {
-        res.status(500).json({ error: error.message });
+        sendError(res, 'INTERNAL_ERROR', { message: error.message });
       }
     });
 
@@ -309,12 +334,12 @@ class AgentServer {
       try {
         const session = this.sessionManager.getSession(req.params.sessionId);
         if (!session) {
-          return res.status(404).json({ error: 'Session not found' });
+          return sendError(res, 'SESSION_NOT_FOUND');
         }
 
         const { files } = req.body;
         if (!files || !Array.isArray(files) || files.length === 0) {
-          return res.status(400).json({ error: 'Files array is required' });
+          return sendError(res, 'MISSING_PARAMETER', { message: 'Files array is required', param: 'files' });
         }
 
         // Get session's working directory from adapter
@@ -329,13 +354,14 @@ class AgentServer {
 
         const results = [];
         for (const file of files) {
-          if (!file.name) {
-            results.push({ error: 'File name is required' });
+          // Validate file name
+          const fileNameValidation = validateFileName(file.name);
+          if (!fileNameValidation.valid) {
+            results.push({ name: file.name, error: fileNameValidation.error, status: 'failed' });
             continue;
           }
 
-          // Sanitize filename to prevent path traversal
-          const safeName = path.basename(file.name);
+          const safeName = fileNameValidation.sanitized;
           const filePath = path.join(workDir, safeName);
 
           try {
@@ -345,6 +371,17 @@ class AgentServer {
               content = Buffer.from(file.content, 'base64');
             } else {
               content = file.content || '';
+            }
+
+            // Limit file size (10MB max per file)
+            const MAX_FILE_SIZE = 10 * 1024 * 1024;
+            if (content.length > MAX_FILE_SIZE) {
+              results.push({
+                name: safeName,
+                error: `File size exceeds maximum allowed (${MAX_FILE_SIZE / 1024 / 1024}MB)`,
+                status: 'failed'
+              });
+              continue;
             }
 
             fs.writeFileSync(filePath, content);
@@ -378,7 +415,7 @@ class AgentServer {
       try {
         const session = this.sessionManager.getSession(req.params.sessionId);
         if (!session) {
-          return res.status(404).json({ error: 'Session not found' });
+          return sendError(res, 'SESSION_NOT_FOUND');
         }
 
         // Get session's working directory from adapter
@@ -417,7 +454,7 @@ class AgentServer {
       try {
         const { message, adapter, systemPrompt, timeout, jsonSchema, allowedTools, model } = req.body;
         if (!message) {
-          return res.status(400).json({ error: 'Message is required' });
+          return sendError(res, 'MISSING_PARAMETER', { message: 'Message is required', param: 'message' });
         }
 
         // Create session with JSON schema support
@@ -446,7 +483,7 @@ class AgentServer {
           throw error;
         }
       } catch (error) {
-        res.status(500).json({ error: error.message });
+        sendError(res, 'INTERNAL_ERROR', { message: error.message });
       }
     });
 
@@ -548,11 +585,11 @@ class AgentServer {
       try {
         const config = getAuthConfig(req.params.name);
         if (!config) {
-          return res.status(404).json({ error: 'Adapter not found' });
+          return sendError(res, 'ADAPTER_NOT_FOUND');
         }
         res.json(config);
       } catch (error) {
-        res.status(500).json({ error: error.message });
+        sendError(res, 'INTERNAL_ERROR', { message: error.message });
       }
     });
   }
@@ -716,6 +753,9 @@ class AgentServer {
     // Clean up orphaned CLI processes from previous runs
     this._cleanupOrphanProcesses();
 
+    // Setup graceful shutdown handlers
+    this._setupShutdownHandlers();
+
     return new Promise((resolve) => {
       this.server = this.app.listen(this.port, this.host, () => {
         console.log(`cliagents running at http://${this.host}:${this.port}`);
@@ -734,6 +774,56 @@ class AgentServer {
 
         resolve(this.server);
       });
+    });
+  }
+
+  /**
+   * Setup graceful shutdown signal handlers
+   */
+  _setupShutdownHandlers() {
+    let isShuttingDown = false;
+
+    const shutdown = async (signal) => {
+      if (isShuttingDown) {
+        console.log(`[Shutdown] Already shutting down, ignoring ${signal}`);
+        return;
+      }
+      isShuttingDown = true;
+
+      console.log(`\n[Shutdown] Received ${signal}, shutting down gracefully...`);
+
+      // Set a timeout to force exit if graceful shutdown takes too long
+      const forceExitTimeout = setTimeout(() => {
+        console.error('[Shutdown] Forced exit after timeout');
+        process.exit(1);
+      }, 10000); // 10 second timeout
+
+      try {
+        await this.stop();
+        clearTimeout(forceExitTimeout);
+        console.log('[Shutdown] Graceful shutdown complete');
+        process.exit(0);
+      } catch (error) {
+        console.error('[Shutdown] Error during shutdown:', error);
+        clearTimeout(forceExitTimeout);
+        process.exit(1);
+      }
+    };
+
+    // Handle termination signals
+    process.on('SIGINT', () => shutdown('SIGINT'));
+    process.on('SIGTERM', () => shutdown('SIGTERM'));
+
+    // Handle uncaught exceptions
+    process.on('uncaughtException', (error) => {
+      console.error('[Fatal] Uncaught exception:', error);
+      shutdown('uncaughtException');
+    });
+
+    // Handle unhandled promise rejections
+    process.on('unhandledRejection', (reason, promise) => {
+      console.error('[Fatal] Unhandled rejection at:', promise, 'reason:', reason);
+      // Don't shutdown for unhandled rejections, just log them
     });
   }
 

@@ -5,7 +5,7 @@
  * Uses spawn-per-message with session resume for persistent sessions.
  */
 
-const { spawn, execFileSync } = require('child_process');
+const { spawn, execFileSync, execSync } = require('child_process');
 const fs = require('fs');
 const path = require('path');
 const BaseLLMAdapter = require('../core/base-llm-adapter');
@@ -22,6 +22,7 @@ class ClaudeCodeAdapter extends BaseLLMAdapter {
       model: null,  // null = use default, or specify model
       max_output_tokens: null, // null = use default, set via CLAUDE_CODE_MAX_OUTPUT_TOKENS env var
       lazyInit: true,  // Don't make API call on session creation
+      claudePath: null,  // Allow explicit path override
       ...config
     });
 
@@ -29,6 +30,7 @@ class ClaudeCodeAdapter extends BaseLLMAdapter {
     this.version = '1.0.0';
     this.sessions = new Map(); // sessionId -> { claudeSessionId, ready, messageCount, model, jsonSchema, allowedTools, maxOutputTokens }
     this.activeProcesses = new Map(); // Track running CLI processes: sessionId -> process
+    this._claudePathCache = null;  // Cache resolved claude path
 
     // Available models for Claude Code CLI
     this.availableModels = [
@@ -38,6 +40,52 @@ class ClaudeCodeAdapter extends BaseLLMAdapter {
       { id: 'claude-3-5-sonnet-20241022', name: 'Claude 3.5 Sonnet', description: 'Balanced performance and speed' },
       { id: 'claude-3-5-haiku-20241022', name: 'Claude 3.5 Haiku', description: 'Fast and cost-effective' }
     ];
+  }
+
+  /**
+   * Get the path to the claude CLI binary
+   * Checks: config override > cache > which command > common paths
+   */
+  _getClaudePath() {
+    // Use config override if provided
+    if (this.config.claudePath) {
+      return this.config.claudePath;
+    }
+
+    // Return cached path if available
+    if (this._claudePathCache) {
+      return this._claudePathCache;
+    }
+
+    // Try to find claude using 'which'
+    try {
+      const result = execSync('which claude', { encoding: 'utf8', timeout: 5000 }).trim();
+      if (result) {
+        this._claudePathCache = result;
+        return result;
+      }
+    } catch (e) {
+      // which failed, try common paths
+    }
+
+    // Check common installation paths
+    const commonPaths = [
+      '/opt/homebrew/bin/claude',      // macOS ARM (Homebrew)
+      '/usr/local/bin/claude',         // macOS Intel / Linux
+      '/usr/bin/claude',               // Linux system
+      path.join(process.env.HOME || '', '.npm-global/bin/claude'),  // npm global
+      path.join(process.env.HOME || '', 'node_modules/.bin/claude') // local node_modules
+    ];
+
+    for (const p of commonPaths) {
+      if (fs.existsSync(p)) {
+        this._claudePathCache = p;
+        return p;
+      }
+    }
+
+    // Default fallback (will fail if not found, but gives clear error)
+    return 'claude';
   }
 
   /**
@@ -113,7 +161,7 @@ class ClaudeCodeAdapter extends BaseLLMAdapter {
    */
   async _runClaudeCommand(args, options = {}) {
     const timeout = options.timeout || this.config.timeout;
-    const claudePath = '/opt/homebrew/bin/claude';
+    const claudePath = this._getClaudePath();
 
     // Ensure work directory exists
     const workDir = options.workDir || process.cwd();
@@ -122,10 +170,11 @@ class ClaudeCodeAdapter extends BaseLLMAdapter {
     }
 
     // Build environment with optional max_output_tokens
+    // Include common binary paths for cross-platform support
     const env = {
       ...process.env,
       NO_COLOR: '1',
-      PATH: `/opt/homebrew/bin:/usr/local/bin:${process.env.PATH}`
+      PATH: `/opt/homebrew/bin:/usr/local/bin:/usr/bin:${process.env.PATH}`
     };
 
     // Set CLAUDE_CODE_MAX_OUTPUT_TOKENS if specified
@@ -221,7 +270,7 @@ class ClaudeCodeAdapter extends BaseLLMAdapter {
    */
   async *_runClaudeCommandStreaming(args, options = {}) {
     const timeout = options.timeout || this.config.timeout;
-    const claudePath = '/opt/homebrew/bin/claude';
+    const claudePath = this._getClaudePath();
 
     const workDir = options.workDir || process.cwd();
     if (!fs.existsSync(workDir)) {
@@ -229,10 +278,11 @@ class ClaudeCodeAdapter extends BaseLLMAdapter {
     }
 
     // Build environment with optional max_output_tokens
+    // Include common binary paths for cross-platform support
     const env = {
       ...process.env,
       NO_COLOR: '1',
-      PATH: `/opt/homebrew/bin:/usr/local/bin:${process.env.PATH}`
+      PATH: `/opt/homebrew/bin:/usr/local/bin:/usr/bin:${process.env.PATH}`
     };
 
     // Set CLAUDE_CODE_MAX_OUTPUT_TOKENS if specified

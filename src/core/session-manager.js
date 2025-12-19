@@ -16,9 +16,15 @@ class SessionManager extends EventEmitter {
     this.defaultAdapter = options.defaultAdapter || 'claude-code';
     this.sessionTimeout = options.sessionTimeout || 30 * 60 * 1000; // 30 minutes
     this.maxSessions = options.maxSessions || 10;
+    this._isShuttingDown = false;
 
-    // Start cleanup interval
-    this.cleanupInterval = setInterval(() => this._cleanupStaleSessions(), 60000);
+    // Start cleanup interval with proper error handling
+    this.cleanupInterval = setInterval(() => {
+      this._cleanupStaleSessions().catch(err => {
+        console.error('[SessionManager] Cleanup error:', err.message);
+        this.emit('error', { type: 'cleanup_error', error: err });
+      });
+    }, 60000);
   }
 
   /**
@@ -370,17 +376,29 @@ class SessionManager extends EventEmitter {
    * Shutdown manager and all sessions
    */
   async shutdown() {
+    if (this._isShuttingDown) return;
+    this._isShuttingDown = true;
+
+    console.log('[SessionManager] Shutting down...');
     clearInterval(this.cleanupInterval);
 
     // Terminate all sessions
     const sessions = Array.from(this.sessions.keys());
-    await Promise.all(sessions.map(id => this.terminateSession(id)));
+    console.log(`[SessionManager] Terminating ${sessions.length} active sessions...`);
+    await Promise.all(sessions.map(id => this.terminateSession(id).catch(err => {
+      console.error(`[SessionManager] Error terminating session ${id}:`, err.message);
+    })));
 
     // Cleanup all adapters
     for (const adapter of this.adapters.values()) {
-      await adapter.cleanup();
+      try {
+        await adapter.cleanup();
+      } catch (err) {
+        console.error(`[SessionManager] Error cleaning up adapter:`, err.message);
+      }
     }
 
+    console.log('[SessionManager] Shutdown complete');
     this.emit('shutdown');
   }
 }
