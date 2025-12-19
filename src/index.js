@@ -136,17 +136,6 @@ if (require.main === module) {
     console.log('\nReady to accept connections!\n');
   });
 
-  // Graceful shutdown
-  process.on('SIGINT', async () => {
-    console.log('\nShutting down...');
-    await server.stop();
-    process.exit(0);
-  });
-
-  process.on('SIGTERM', async () => {
-    console.log('\nShutting down...');
-    await server.stop();
-    process.exit(0);
-  });
+  // Note: Graceful shutdown handlers are registered by AgentServer._setupShutdownHandlers()
 }
 

@@ -5,7 +5,7 @@
  * Uses spawn-per-message with session resume (-r) for persistent sessions.
  */
 
-const { spawn, execFileSync } = require('child_process');
+const { spawn, execFileSync, execSync } = require('child_process');
 const fs = require('fs');
 const BaseLLMAdapter = require('../core/base-llm-adapter');
 const { logConversation, logSessionStart } = require('../utils/conversation-logger');
@@ -47,6 +47,51 @@ class GeminiCliAdapter extends BaseLLMAdapter {
       top_k: this.config.top_k,
       max_output_tokens: this.config.max_output_tokens
     });
+  }
+
+  /**
+   * Get the path to the gemini CLI binary
+   * Supports config override, PATH lookup, and common installation locations
+   */
+  _getGeminiPath() {
+    // Use config override if provided
+    if (this.config.geminiPath) {
+      return this.config.geminiPath;
+    }
+
+    // Return cached path if available
+    if (this._geminiPathCache) {
+      return this._geminiPathCache;
+    }
+
+    // Try to find gemini using 'which'
+    try {
+      const result = execSync('which gemini', { encoding: 'utf8', timeout: 5000 }).trim();
+      if (result) {
+        this._geminiPathCache = result;
+        return result;
+      }
+    } catch (e) {
+      // which failed, try common paths
+    }
+
+    // Check common installation paths
+    const commonPaths = [
+      '/opt/homebrew/bin/gemini',      // macOS ARM (Homebrew)
+      '/usr/local/bin/gemini',         // macOS Intel / Linux
+      '/usr/bin/gemini',               // Linux system
+      `${process.env.HOME}/.local/bin/gemini`, // pip install --user
+    ];
+
+    for (const p of commonPaths) {
+      if (fs.existsSync(p)) {
+        this._geminiPathCache = p;
+        return p;
+      }
+    }
+
+    // Fall back to bare command (relies on PATH)
+    return 'gemini';
   }
 
   /**
@@ -106,7 +151,8 @@ class GeminiCliAdapter extends BaseLLMAdapter {
    */
   _listGeminiSessions() {
     try {
-      const output = execFileSync('/usr/local/bin/gemini', ['--list-sessions'], {
+      const geminiPath = this._getGeminiPath();
+      const output = execFileSync(geminiPath, ['--list-sessions'], {
         encoding: 'utf-8',
         timeout: 5000
       });
@@ -198,7 +244,7 @@ class GeminiCliAdapter extends BaseLLMAdapter {
    */
   async _runGeminiCommand(args, options = {}) {
     const timeout = options.timeout || this.config.timeout;
-    const geminiPath = '/usr/local/bin/gemini';
+    const geminiPath = this._getGeminiPath();
 
     // Ensure work directory exists
     const workDir = options.workDir || process.cwd();
@@ -311,7 +357,7 @@ class GeminiCliAdapter extends BaseLLMAdapter {
    */
   async *_runGeminiCommandStreaming(args, options = {}) {
     const timeout = options.timeout || this.config.timeout;
-    const geminiPath = '/usr/local/bin/gemini';
+    const geminiPath = this._getGeminiPath();
 
     const workDir = options.workDir || process.cwd();
     if (!fs.existsSync(workDir)) {
