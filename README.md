@@ -150,6 +150,7 @@ ws.send(JSON.stringify({ type: 'send_message', message: 'Hello!' }));
 | `mistral-vibe` | `vibe` | GitHub releases | Wrapper |
 | `shell-gpt` | `sgpt` | pip install shell-gpt | Wrapper |
 | `aichat` | `aichat` | cargo install aichat | Native |
+| `github-copilot` | `gh copilot` | gh extension install github/gh-copilot | Native |
 
 ---
 
@@ -371,6 +372,25 @@ const session = await manager.createSession({
 ```
 
 **Models**: `openai:gpt-4o`, `anthropic:claude-3.5-sonnet`, `google:gemini-2.0-flash`, `mistral:mistral-large`, `groq:llama-3.3-70b`
+
+---
+
+### GitHub Copilot CLI
+GitHub's AI assistant in your terminal. Requires Copilot subscription.
+
+```bash
+# Install (requires GitHub CLI)
+gh extension install github/gh-copilot
+```
+
+```javascript
+const session = await manager.createSession({
+  adapter: 'github-copilot',
+  workDir: '/path/to/project'
+});
+```
+
+**Note**: Requires GitHub Copilot subscription ($10/mo, free for students/OSS maintainers).
 
 ---
 
