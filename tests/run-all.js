@@ -33,7 +33,7 @@ function assert(condition, message) {
 }
 
 // Test results tracking
-const results = { passed: 0, failed: 0, tests: [] };
+const results = { passed: 0, failed: 0, skipped: 0, tests: [] };
 
 async function test(name, fn) {
   try {
@@ -42,9 +42,17 @@ async function test(name, fn) {
     results.tests.push({ name, status: 'passed' });
     console.log(`  ✅ ${name}`);
   } catch (error) {
-    results.failed++;
-    results.tests.push({ name, status: 'failed', error: error.message });
-    console.log(`  ❌ ${name}: ${error.message}`);
+    // Handle explicit skips
+    if (error.message.startsWith('SKIP:')) {
+      results.skipped++;
+      const reason = error.message.replace('SKIP:', '').trim();
+      results.tests.push({ name, status: 'skipped', reason });
+      console.log(`  ⏭️  ${name} (skipped - ${reason})`);
+    } else {
+      results.failed++;
+      results.tests.push({ name, status: 'failed', error: error.message });
+      console.log(`  ❌ ${name}: ${error.message}`);
+    }
   }
 }
 
@@ -76,11 +84,15 @@ async function testHealth() {
 async function testAdapters() {
   console.log('\n📋 Adapter Tests');
 
-  await test('Lists available adapters', async () => {
+  await test('Lists all 6 first-party adapters', async () => {
     const { status, data } = await request('GET', '/adapters');
     assert(status === 200, `Expected 200, got ${status}`);
     assert(Array.isArray(data.adapters), 'Should return adapters array');
-    assert(data.adapters.length >= 2, 'Should have at least 2 adapters');
+    assert(data.adapters.length === 6, `Should have exactly 6 adapters, got ${data.adapters.length}`);
+
+    const names = data.adapters.map(a => a.name).sort();
+    const expected = ['amazon-q', 'claude-code', 'codex-cli', 'gemini-cli', 'github-copilot', 'mistral-vibe'].sort();
+    assert(JSON.stringify(names) === JSON.stringify(expected), `Expected ${expected}, got ${names}`);
   });
 
   await test('Claude Code adapter is available', async () => {
@@ -309,72 +321,72 @@ async function testStreamingProgress() {
   });
 }
 
-async function testNewAdapters() {
-  console.log('\n📋 New Adapter Tests');
+async function testFirstPartyAdapters() {
+  console.log('\n📋 First-Party Adapter Tests');
 
   // Get available adapters first
   const { data } = await request('GET', '/adapters');
   const adapters = data.adapters;
 
-  // Test Codex CLI if available
-  const codex = adapters.find(a => a.name === 'codex-cli');
-  if (codex && codex.available) {
-    await test('Codex CLI one-shot ask', async () => {
+  // Helper for testing adapters with proper skip tracking
+  async function testAdapter(name, displayName, expectedAnswer, skipPatterns = []) {
+    const adapter = adapters.find(a => a.name === name);
+
+    if (!adapter) {
+      results.skipped = (results.skipped || 0) + 1;
+      results.tests.push({ name: `${displayName} one-shot ask`, status: 'skipped', reason: 'not registered' });
+      console.log(`  ⏭️  ${displayName} one-shot ask (skipped - not registered)`);
+      return;
+    }
+
+    if (!adapter.available) {
+      results.skipped = (results.skipped || 0) + 1;
+      results.tests.push({ name: `${displayName} one-shot ask`, status: 'skipped', reason: 'CLI not installed' });
+      console.log(`  ⏭️  ${displayName} one-shot ask (skipped - CLI not installed)`);
+      return;
+    }
+
+    await test(`${displayName} one-shot ask`, async () => {
+      const num1 = Math.floor(Math.random() * 5) + 1;
+      const num2 = Math.floor(Math.random() * 5) + 1;
+      const expected = num1 + num2;
+
       const { status, data } = await request('POST', '/ask', {
-        adapter: 'codex-cli',
-        message: 'What is 3 + 3? Reply with just the number.'
+        adapter: name,
+        message: `What is ${num1} + ${num2}? Reply with just the number.`
       });
-      // Accept either success or CLI auth error (not a server crash)
+
+      // Check both error message and result for skip patterns
+      const errorMsg = data.error?.message || data.error || '';
+      const resultMsg = data.result || '';
+      const combinedMsg = errorMsg + ' ' + resultMsg;
+      const isSkippable = skipPatterns.some(p => combinedMsg.toLowerCase().includes(p.toLowerCase()));
+
+      if (isSkippable) {
+        const reason = errorMsg || resultMsg.substring(0, 100);
+        throw new Error(`SKIP: ${reason}`);
+      }
+
       if (status === 200) {
         assert(data.result, 'Should have result');
-        assert(data.result.includes('6'), `Expected 6, got: ${data.result}`);
+        assert(data.result.includes(String(expected)), `Expected ${expected}, got: ${data.result}`);
       } else {
-        // Handle both old string error format and new standardized format
-        const errorMsg = data.error?.message || data.error || '';
-        if (status === 500 && errorMsg.includes('not authenticated')) {
-          console.log('    (skipped - CLI not authenticated)');
-        } else {
-          assert(status === 200, `Expected 200, got ${status}: ${JSON.stringify(data)}`);
-        }
+        assert(status === 200, `Expected 200, got ${status}: ${JSON.stringify(data)}`);
       }
-    });
-  } else {
-    await test('Codex CLI adapter registered', async () => {
-      assert(codex, 'Codex adapter should be registered');
-      console.log('    (skipped - CLI not installed)');
     });
   }
 
-  // Test Mistral Vibe if available
-  const vibe = adapters.find(a => a.name === 'mistral-vibe');
-  if (vibe && vibe.available) {
-    await test('Mistral Vibe one-shot ask', async () => {
-      const { status, data } = await request('POST', '/ask', {
-        adapter: 'mistral-vibe',
-        message: 'What is 4 + 4? Reply with just the number.'
-      });
-      // Accept either success or CLI not configured (exit code, timeout, or specific error)
-      if (status === 200) {
-        assert(data.result, 'Should have result');
-        assert(data.result.includes('8'), `Expected 8, got: ${data.result}`);
-      } else {
-        // Handle both old string error format and new standardized format
-        const errorMsg = data.error?.message || data.error || '';
-        if (errorMsg.includes('exit') ||
-            errorMsg.includes('not configured') ||
-            errorMsg.includes('timed out')) {
-          console.log('    (skipped - CLI not configured, run: vibe --setup)');
-        } else {
-          assert(status === 200, `Expected 200, got ${status}: ${JSON.stringify(data)}`);
-        }
-      }
-    });
-  } else {
-    await test('Mistral Vibe adapter registered', async () => {
-      assert(vibe, 'Mistral Vibe adapter should be registered');
-      console.log('    (skipped - CLI not installed)');
-    });
-  }
+  // Test Codex CLI (OpenAI)
+  await testAdapter('codex-cli', 'Codex CLI', null, ['not authenticated', 'api key']);
+
+  // Test Amazon Q (Amazon)
+  await testAdapter('amazon-q', 'Amazon Q', null, ['not authenticated', 'credentials', 'sso', 'no such file', 'not found']);
+
+  // Test GitHub Copilot (Microsoft/OpenAI)
+  await testAdapter('github-copilot', 'GitHub Copilot', null, ['not authenticated', 'not logged in', 'sign in', 'deprecated', 'no commands']);
+
+  // Test Mistral Vibe (Mistral)
+  await testAdapter('mistral-vibe', 'Mistral Vibe', null, ['not configured', 'exit', 'timed out', 'setup']);
 }
 
 async function testValidation() {
@@ -687,12 +699,20 @@ async function main() {
   await testContextPreservation();
   await testErrorHandling();
   await testStreamingProgress();
-  await testNewAdapters();
+  await testFirstPartyAdapters();
   await testSessionResume();
 
   // Summary
   console.log('\n' + '━'.repeat(50));
-  console.log(`\n📊 Results: ${results.passed} passed, ${results.failed} failed`);
+  const skippedMsg = results.skipped > 0 ? `, ${results.skipped} skipped` : '';
+  console.log(`\n📊 Results: ${results.passed} passed, ${results.failed} failed${skippedMsg}`);
+
+  if (results.skipped > 0) {
+    console.log('\n⏭️  Skipped tests:');
+    results.tests
+      .filter(t => t.status === 'skipped')
+      .forEach(t => console.log(`   - ${t.name}: ${t.reason}`));
+  }
 
   if (results.failed > 0) {
     console.log('\n❌ Failed tests:');

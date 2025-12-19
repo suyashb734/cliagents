@@ -8,20 +8,12 @@
 const AgentAdapter = require('./core/adapter');
 const SessionManager = require('./core/session-manager');
 
-// Adapters - Existing
+// Adapters - First-party CLI tools (from AI companies with their own LLMs)
 const ClaudeCodeAdapter = require('./adapters/claude-code');
 const GeminiCliAdapter = require('./adapters/gemini-cli');
-
-// Adapters - New CLI Models
 const CodexCliAdapter = require('./adapters/codex-cli');
-const AiderAdapter = require('./adapters/aider');
-const GooseAdapter = require('./adapters/goose');
 const AmazonQAdapter = require('./adapters/amazon-q');
-const PlandexAdapter = require('./adapters/plandex');
-const ContinueCliAdapter = require('./adapters/continue-cli');
 const MistralVibeAdapter = require('./adapters/mistral-vibe');
-const ShellGptAdapter = require('./adapters/shell-gpt');
-const AichatAdapter = require('./adapters/aichat');
 const GitHubCopilotAdapter = require('./adapters/github-copilot');
 
 // Utilities
@@ -40,20 +32,12 @@ module.exports = {
   SessionManager,
   SessionWrapper,
 
-  // Adapters - Existing
+  // Adapters - First-party CLI tools
   ClaudeCodeAdapter,
   GeminiCliAdapter,
-
-  // Adapters - New CLI Models
   CodexCliAdapter,
-  AiderAdapter,
-  GooseAdapter,
   AmazonQAdapter,
-  PlandexAdapter,
-  ContinueCliAdapter,
   MistralVibeAdapter,
-  ShellGptAdapter,
-  AichatAdapter,
   GitHubCopilotAdapter,
 
   // Server
@@ -66,24 +50,16 @@ module.exports = {
   createServer: (options = {}) => new AgentServer(options),
 
   // Create standalone session manager (without HTTP server)
-  // Registers all available adapters
+  // Registers all available first-party adapters
   createSessionManager: (options = {}) => {
     const manager = new SessionManager(options);
 
-    // Existing adapters
+    // First-party CLI adapters
     manager.registerAdapter('claude-code', new ClaudeCodeAdapter(options.claudeCode || {}));
     manager.registerAdapter('gemini-cli', new GeminiCliAdapter(options.geminiCli || {}));
-
-    // New CLI adapters
     manager.registerAdapter('codex-cli', new CodexCliAdapter(options.codexCli || {}));
-    manager.registerAdapter('aider', new AiderAdapter(options.aider || {}));
-    manager.registerAdapter('goose', new GooseAdapter(options.goose || {}));
     manager.registerAdapter('amazon-q', new AmazonQAdapter(options.amazonQ || {}));
-    manager.registerAdapter('plandex', new PlandexAdapter(options.plandex || {}));
-    manager.registerAdapter('continue-cli', new ContinueCliAdapter(options.continueCli || {}));
     manager.registerAdapter('mistral-vibe', new MistralVibeAdapter(options.mistralVibe || {}));
-    manager.registerAdapter('shell-gpt', new ShellGptAdapter(options.shellGpt || {}));
-    manager.registerAdapter('aichat', new AichatAdapter(options.aichat || {}));
     manager.registerAdapter('github-copilot', new GitHubCopilotAdapter(options.githubCopilot || {}));
 
     return manager;

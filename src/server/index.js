@@ -12,20 +12,12 @@ const fs = require('fs');
 const { execSync } = require('child_process');
 const SessionManager = require('../core/session-manager');
 
-// Adapters - Existing
+// First-party CLI adapters (from AI companies with their own LLMs)
 const ClaudeCodeAdapter = require('../adapters/claude-code');
 const GeminiCliAdapter = require('../adapters/gemini-cli');
-
-// Adapters - New CLI Models
 const CodexCliAdapter = require('../adapters/codex-cli');
-const AiderAdapter = require('../adapters/aider');
-const GooseAdapter = require('../adapters/goose');
 const AmazonQAdapter = require('../adapters/amazon-q');
-const PlandexAdapter = require('../adapters/plandex');
-const ContinueCliAdapter = require('../adapters/continue-cli');
 const MistralVibeAdapter = require('../adapters/mistral-vibe');
-const ShellGptAdapter = require('../adapters/shell-gpt');
-const AichatAdapter = require('../adapters/aichat');
 const GitHubCopilotAdapter = require('../adapters/github-copilot');
 
 // Utilities
@@ -51,18 +43,12 @@ class AgentServer {
       maxSessions: options.maxSessions || 10
     });
 
-    // Register all adapters
+    // Register first-party adapters
     this.sessionManager.registerAdapter('claude-code', new ClaudeCodeAdapter(options.claudeCode || {}));
     this.sessionManager.registerAdapter('gemini-cli', new GeminiCliAdapter(options.geminiCli || {}));
     this.sessionManager.registerAdapter('codex-cli', new CodexCliAdapter(options.codexCli || {}));
-    this.sessionManager.registerAdapter('aider', new AiderAdapter(options.aider || {}));
-    this.sessionManager.registerAdapter('goose', new GooseAdapter(options.goose || {}));
     this.sessionManager.registerAdapter('amazon-q', new AmazonQAdapter(options.amazonQ || {}));
-    this.sessionManager.registerAdapter('plandex', new PlandexAdapter(options.plandex || {}));
-    this.sessionManager.registerAdapter('continue-cli', new ContinueCliAdapter(options.continueCli || {}));
     this.sessionManager.registerAdapter('mistral-vibe', new MistralVibeAdapter(options.mistralVibe || {}));
-    this.sessionManager.registerAdapter('shell-gpt', new ShellGptAdapter(options.shellGpt || {}));
-    this.sessionManager.registerAdapter('aichat', new AichatAdapter(options.aichat || {}));
     this.sessionManager.registerAdapter('github-copilot', new GitHubCopilotAdapter(options.githubCopilot || {}));
 
     // Express app
