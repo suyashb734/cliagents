@@ -4,16 +4,34 @@ A Node.js server that wraps CLI-based AI agents (Claude Code, Gemini CLI, Codex,
 
 ## Why?
 
+### Stop Paying for API Keys During Development
+
+Most developers use API keys to integrate AI into their apps, paying per token. But if you already have a **Claude Pro**, **ChatGPT Plus**, or **Google account**, you're paying twice:
+
+| Approach | Cost | What You Get |
+|----------|------|--------------|
+| **Claude API** | ~$150/mo for heavy use | Pay-per-token billing |
+| **Claude Code CLI** (Pro) | $20/mo flat | ~7.5x more value, included with Pro |
+| **Gemini API** | Free tier is Flash-only | Severe rate limits |
+| **Gemini CLI** | FREE | Blended Pro/Flash with better limits |
+| **OpenAI API** | Pay-per-token | No subscription benefits |
+| **Codex CLI** (Plus) | $20/mo flat | Included with ChatGPT Plus |
+
+**This server lets you use CLI tools programmatically**, so you can build and test with the generous CLI limits instead of burning through API credits.
+
+### The Problem with CLI Tools
+
 CLI agents like Claude Code are powerful but:
 - They're designed for terminal use, not programmatic access
 - Each invocation spawns a new process (slow, no session persistence)
 - No easy way to integrate into web apps or other services
 
-This server solves these problems by:
-- Maintaining **persistent sessions** with CLI agents
-- Providing **HTTP and WebSocket APIs** for easy integration
-- Supporting **multiple adapters** for different AI CLIs
-- Handling **session management**, timeouts, and cleanup
+### What This Server Does
+
+- Maintains **persistent sessions** with CLI agents
+- Provides **HTTP and WebSocket APIs** for easy integration
+- Supports **multiple adapters** for different AI CLIs
+- Handles **session management**, timeouts, and cleanup
 
 ## Installation
 
@@ -133,24 +151,40 @@ ws.send(JSON.stringify({ type: 'send_message', message: 'Hello!' }));
 // { type: 'complete' }
 ```
 
-## Supported Adapters (11 Total)
+## Supported Adapters
 
-### Quick Reference
+### ✅ Tested & Production-Ready
 
-| Adapter | CLI Command | Install | Session Support |
-|---------|-------------|---------|-----------------|
-| `claude-code` | `claude` | npm i -g @anthropic-ai/claude-code | Native |
-| `gemini-cli` | `gemini` | pip install gemini-cli | Native |
-| `codex-cli` | `codex` | npm i -g @openai/codex | Native |
-| `aider` | `aider` | pip install aider-chat | Git-based |
-| `goose` | `goose` | brew install goose | Native |
-| `amazon-q` | `q` / `kiro` | AWS CLI plugin | Native |
-| `plandex` | `plandex` | curl -sL plandex.ai/install.sh \| bash | Native |
-| `continue-cli` | `cn` | npm i -g @continuedev/cli | Native |
-| `mistral-vibe` | `vibe` | GitHub releases | Wrapper |
-| `shell-gpt` | `sgpt` | pip install shell-gpt | Wrapper |
-| `aichat` | `aichat` | cargo install aichat | Native |
-| `github-copilot` | `gh copilot` | gh extension install github/gh-copilot | Native |
+These adapters are fully tested with the test suite:
+
+| Adapter | CLI | Cost | Install |
+|---------|-----|------|---------|
+| `claude-code` | `claude` | FREE with Claude Pro ($20/mo) | `npm i -g @anthropic-ai/claude-code` |
+| `gemini-cli` | `gemini` | FREE (Google account) | `npm i -g @google/gemini-cli` |
+
+### 🧪 Implemented (Not Yet Tested)
+
+These adapters are implemented but need real-world testing:
+
+| Adapter | CLI | Cost | Install |
+|---------|-----|------|---------|
+| `codex-cli` | `codex` | FREE with ChatGPT Plus ($20/mo) | `npm i -g @openai/codex` |
+| `mistral-vibe` | `vibe` | FREE until Dec 2025 | [GitHub releases](https://github.com/mistralai/mistral-vibe) |
+| `amazon-q` | `kiro` | FREE tier available | AWS CLI plugin |
+| `plandex` | `plandex` | FREE cloud tier | `curl -sL plandex.ai/install.sh \| bash` |
+| `github-copilot` | `gh copilot` | $10/mo (free for students) | `gh extension install github/gh-copilot` |
+
+### 🔌 API Key Routers (Require Your Own Keys)
+
+These wrap CLIs that need your own API keys - no free tier benefit:
+
+| Adapter | CLI | What It Does | Install |
+|---------|-----|--------------|---------|
+| `aider` | `aider` | AI pair programming with Git | `pip install aider-chat` |
+| `goose` | `goose` | Block's open-source agent | `brew install goose` |
+| `shell-gpt` | `sgpt` | Shell command generation | `pip install shell-gpt` |
+| `aichat` | `aichat` | Multi-provider CLI | `cargo install aichat` |
+| `continue-cli` | `cn` | IDE-style coding agent | `npm i -g @continuedev/cli` |
 
 ---
 
@@ -176,11 +210,11 @@ const session = await manager.createSession({
 ---
 
 ### Gemini CLI
-Google's Gemini models via CLI.
+Google's Gemini models via CLI. FREE with any Google account.
 
 ```bash
-# Install
-pip install gemini-cli
+# Install (requires Node.js 20+)
+npm install -g @google/gemini-cli
 ```
 
 ```javascript
@@ -482,16 +516,17 @@ const server = new AgentServer({
 ## Roadmap
 
 ### Completed
-- [x] 12 CLI adapters (Claude, Gemini, Codex, Aider, Goose, Amazon Q, Plandex, Continue, Mistral Vibe, Shell-GPT, AIChat, GitHub Copilot)
-- [x] REST API with SSE streaming
+- [x] Core server with REST API and SSE streaming
 - [x] WebSocket support
-- [x] Session status tracking
-- [x] Interrupt capability
+- [x] Session status tracking and interrupt capability
 - [x] OpenAPI 3.0 specification
 - [x] File upload to sessions
 - [x] Model selection per session
-- [x] JSON Schema for structured output
-- [x] Tool restrictions
+- [x] 2 fully tested adapters (Claude Code, Gemini CLI)
+
+### In Progress
+- [ ] Test remaining 5 free-tier adapters (Codex, Mistral Vibe, Amazon Q, Plandex, GitHub Copilot)
+- [ ] Validate API key router adapters (Aider, Goose, Shell-GPT, AIChat, Continue)
 
 ### Planned
 - [ ] Grok CLI adapter (when official CLI releases)
