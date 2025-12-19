@@ -445,7 +445,7 @@ class GeminiCliAdapter extends BaseLLMAdapter {
               // Assistant is speaking/thinking
               const content = msg.content;
               if (content) {
-                lastAssistantContent = content;
+                lastAssistantContent += content;  // Concatenate all chunks
                 yield {
                   type: 'progress',
                   progressType: 'assistant',
@@ -505,7 +505,7 @@ class GeminiCliAdapter extends BaseLLMAdapter {
           }
           // Also capture last assistant content from buffer
           if (msg.type === 'message' && msg.role === 'assistant' && msg.content) {
-            lastAssistantContent = msg.content;
+            lastAssistantContent += msg.content;  // Concatenate
           }
         } catch (e) {
           // Ignore incomplete JSON

@@ -2,14 +2,14 @@
  * GitHub Copilot CLI Adapter
  *
  * Implements the AgentAdapter interface for GitHub Copilot CLI.
- * Copilot CLI is a GitHub CLI extension that provides AI assistance.
+ * The new Copilot CLI (2025) is a standalone coding agent.
  *
- * Install: gh extension install github/gh-copilot
- * Auth: gh auth login (GitHub OAuth)
- * Docs: https://github.com/features/copilot/cli
+ * Install: npm install -g @github/copilot
+ * Auth: copilot (then /login on first run)
+ * Docs: https://github.com/github/copilot-cli
  */
 
-const { spawn } = require('child_process');
+const { spawn, execSync } = require('child_process');
 const fs = require('fs');
 const BaseLLMAdapter = require('../core/base-llm-adapter');
 const { logConversation, logSessionStart } = require('../utils/conversation-logger');
@@ -19,19 +19,61 @@ class GitHubCopilotAdapter extends BaseLLMAdapter {
     super({
       timeout: 120000,  // 2 minutes
       workDir: '/tmp/agent',
+      allowAllTools: true,  // Auto-approve actions
       maxResponseSize: 10 * 1024 * 1024,
+      model: null,  // Use default model
       ...config
     });
 
     this.name = 'github-copilot';
-    this.version = '1.0.0';
+    this.version = '2.0.0';
     this.sessions = new Map();
     this.activeProcesses = new Map();
 
-    // GitHub Copilot CLI uses one model
+    // Available models for Copilot CLI
     this.availableModels = [
-      { id: 'default', name: 'Copilot', description: 'GitHub Copilot model' }
+      { id: 'default', name: 'Default', description: 'Default Copilot model (Claude Sonnet 4.5)' },
+      { id: 'claude-sonnet-4', name: 'Claude Sonnet 4', description: 'Anthropic Claude Sonnet 4' },
+      { id: 'gpt-5', name: 'GPT-5', description: 'OpenAI GPT-5' }
     ];
+  }
+
+  /**
+   * Get the path to the copilot CLI binary
+   */
+  _getCopilotPath() {
+    if (this.config.copilotPath) {
+      return this.config.copilotPath;
+    }
+
+    if (this._copilotPathCache) {
+      return this._copilotPathCache;
+    }
+
+    try {
+      const result = execSync('which copilot', { encoding: 'utf8', timeout: 5000 }).trim();
+      if (result) {
+        this._copilotPathCache = result;
+        return result;
+      }
+    } catch (e) {
+      // which failed, try common paths
+    }
+
+    const commonPaths = [
+      '/usr/local/bin/copilot',
+      '/opt/homebrew/bin/copilot',
+      `${process.env.HOME}/.npm-global/bin/copilot`,
+    ];
+
+    for (const p of commonPaths) {
+      if (fs.existsSync(p)) {
+        this._copilotPathCache = p;
+        return p;
+      }
+    }
+
+    return 'copilot';
   }
 
   getAvailableModels() {
@@ -40,8 +82,8 @@ class GitHubCopilotAdapter extends BaseLLMAdapter {
 
   async isAvailable() {
     return new Promise((resolve) => {
-      // Check if gh CLI is installed and copilot extension is available
-      const check = spawn('gh', ['copilot', '--version']);
+      const copilotPath = this._getCopilotPath();
+      const check = spawn(copilotPath, ['--version']);
       check.on('close', (code) => resolve(code === 0));
       check.on('error', () => resolve(false));
     });
@@ -61,13 +103,14 @@ class GitHubCopilotAdapter extends BaseLLMAdapter {
     const session = {
       ready: true,
       messageCount: 0,
-      workDir
+      workDir,
+      model: options.model || this.config.model
     };
 
     this.sessions.set(sessionId, session);
     this.emit('ready', { sessionId });
 
-    logSessionStart(sessionId, this.name, { workDir });
+    logSessionStart(sessionId, this.name, { workDir, model: session.model });
 
     return {
       sessionId,
@@ -76,11 +119,21 @@ class GitHubCopilotAdapter extends BaseLLMAdapter {
     };
   }
 
-  async *_runCopilotCommandStreaming(subcommand, args, options = {}) {
+  async *_runCopilotCommandStreaming(prompt, options = {}) {
     const timeout = options.timeout || this.config.timeout;
+    const copilotPath = this._getCopilotPath();
 
-    // gh copilot has subcommands: suggest, explain
-    const fullArgs = ['copilot', subcommand, ...args];
+    // Build args for non-interactive mode
+    const args = [
+      '-p', prompt,              // Non-interactive prompt mode
+      '--allow-all-tools',       // Auto-approve all actions
+      '--allow-all-paths',       // Allow access to any path
+    ];
+
+    // Only add model if explicitly specified and not 'default'
+    if (options.model && options.model !== 'default') {
+      args.push('--model', options.model);
+    }
 
     const workDir = options.workDir || process.cwd();
     if (!fs.existsSync(workDir)) {
@@ -90,12 +143,11 @@ class GitHubCopilotAdapter extends BaseLLMAdapter {
     const env = {
       ...process.env,
       NO_COLOR: '1',
-      GH_PROMPT: 'disable'  // Disable interactive prompts
     };
 
-    console.log('[GitHubCopilotAdapter] Streaming: gh', fullArgs.join(' '));
+    console.log('[GitHubCopilotAdapter] Streaming:', copilotPath, args.join(' '));
 
-    const proc = spawn('gh', fullArgs, {
+    const proc = spawn(copilotPath, args, {
       cwd: workDir,
       env,
       stdio: ['pipe', 'pipe', 'pipe']
@@ -118,77 +170,51 @@ class GitHubCopilotAdapter extends BaseLLMAdapter {
       timedOut = true;
       proc.kill('SIGTERM');
       setTimeout(() => {
-        if (!proc.killed) {
-          proc.kill('SIGKILL');
-        }
-      }, 2000);
+        if (!proc.killed) proc.kill('SIGKILL');
+      }, 5000);
     }, timeout);
 
-    const processComplete = new Promise((resolve) => {
-      proc.on('close', (code) => {
-        clearTimeout(timeoutId);
-        exitCode = code;
-        if (sessionId) {
-          this.activeProcesses.delete(sessionId);
-        }
-        resolve();
-      });
-      proc.on('error', (err) => {
-        clearTimeout(timeoutId);
-        processError = err;
-        if (sessionId) {
-          this.activeProcesses.delete(sessionId);
-        }
-        resolve();
-      });
+    proc.on('error', (err) => {
+      processError = err;
     });
 
-    proc.stderr.on('data', (data) => {
-      stderrOutput += data.toString();
-    });
-
-    try {
-      for await (const chunk of proc.stdout) {
-        const text = chunk.toString();
-        fullOutput += text;
-
-        this.emit('chunk', {
-          sessionId: options.sessionId,
-          chunk: text,
-          partial: true
-        });
-
-        yield { type: 'chunk', content: text };
-      }
-
-      await processComplete;
-
-      if (timedOut) {
-        yield { type: 'error', content: 'Request timed out', timedOut: true };
-        return;
-      }
-      if (processError) {
-        yield { type: 'error', content: processError.message };
-        return;
-      }
-      if (exitCode !== 0 && !fullOutput) {
-        yield { type: 'error', content: `gh copilot exited with code ${exitCode}: ${stderrOutput}` };
-        return;
-      }
-
-      yield {
-        type: 'result',
-        content: fullOutput.trim(),
-        stats: {}
-      };
-
-    } catch (error) {
+    proc.on('close', (code) => {
+      exitCode = code;
       clearTimeout(timeoutId);
-      yield {
-        type: 'error',
-        content: error.message,
-        timedOut: false
-      };
+      if (sessionId) {
+        this.activeProcesses.delete(sessionId);
+      }
+    });
+
+    // Handle stdout chunks
+    for await (const chunk of proc.stdout) {
+      const text = chunk.toString();
+      fullOutput += text;
+      yield { type: 'text', content: text };
+    }
+
+    // Collect stderr
+    for await (const chunk of proc.stderr) {
+      stderrOutput += chunk.toString();
+    }
+
+    // Wait for process to close
+    await new Promise((resolve) => {
+      if (exitCode !== null) resolve();
+      else proc.on('close', resolve);
+    });
+
+    if (timedOut) {
+      throw new Error('Request timed out');
+    }
+
+    if (processError) {
+      throw processError;
+    }
+
+    if (exitCode !== 0 && exitCode !== null) {
+      const errorMsg = stderrOutput || fullOutput || `Exit code ${exitCode}`;
+      throw new Error(`Copilot exited with code ${exitCode}: ${errorMsg}`);
     }
   }
 
@@ -197,117 +223,77 @@ class GitHubCopilotAdapter extends BaseLLMAdapter {
     if (!session) {
       throw new Error(`Session ${sessionId} not found`);
     }
-    if (!session.ready) {
-      throw new Error(`Session ${sessionId} not ready`);
-    }
-
-    // Determine which subcommand to use based on message
-    // gh copilot suggest - for command suggestions
-    // gh copilot explain - for explanations
-    let subcommand = 'suggest';
-    let args = [];
-
-    const lowerMessage = message.toLowerCase();
-    if (lowerMessage.startsWith('explain ') || lowerMessage.includes('what does') || lowerMessage.includes('how does')) {
-      subcommand = 'explain';
-      args = [message.replace(/^explain\s+/i, '')];
-    } else {
-      subcommand = 'suggest';
-      args = ['-t', 'shell', message];  // Default to shell suggestions
-    }
 
     session.messageCount++;
+    let fullResult = '';
 
-    let finalContent = '';
-
-    try {
-      for await (const chunk of this._runCopilotCommandStreaming(subcommand, args, {
-        timeout: options.timeout || this.config.timeout,
-        sessionId,
-        workDir: session.workDir
-      })) {
-        if (chunk.type === 'chunk') {
-          yield chunk;
-        } else if (chunk.type === 'result') {
-          finalContent = chunk.content;
-
-          logConversation(sessionId, this.name, {
-            prompt: message,
-            response: finalContent
-          });
-
-          yield {
-            type: 'result',
-            content: finalContent,
-            metadata: {
-              subcommand,
-              timedOut: false
-            }
-          };
-        } else if (chunk.type === 'error') {
-          logConversation(sessionId, this.name, {
-            prompt: message,
-            error: chunk.content
-          });
-
-          yield {
-            type: 'error',
-            content: chunk.content,
-            timedOut: chunk.timedOut
-          };
-        }
+    for await (const chunk of this._runCopilotCommandStreaming(message, {
+      ...options,
+      sessionId,
+      workDir: session.workDir,
+      model: options.model || session.model
+    })) {
+      if (chunk.type === 'text') {
+        fullResult += chunk.content;
       }
-    } catch (error) {
-      logConversation(sessionId, this.name, {
-        prompt: message,
-        error: error.message
-      });
-
-      yield {
-        type: 'error',
-        content: error.message
-      };
+      yield chunk;
     }
+
+    logConversation(sessionId, this.name, {
+      role: 'user',
+      content: message
+    });
+    logConversation(sessionId, this.name, {
+      role: 'assistant',
+      content: fullResult
+    });
+
+    yield {
+      type: 'result',
+      result: fullResult.trim(),
+      sessionId,
+      messageCount: session.messageCount
+    };
   }
 
   async terminate(sessionId) {
     const session = this.sessions.get(sessionId);
-    if (!session) return;
+    if (!session) {
+      return { sessionId, status: 'not_found' };
+    }
 
     const proc = this.activeProcesses.get(sessionId);
-    if (proc && !proc.killed) {
+    if (proc) {
       proc.kill('SIGTERM');
-      setTimeout(() => {
-        if (!proc.killed) {
-          proc.kill('SIGKILL');
-        }
-      }, 2000);
+      this.activeProcesses.delete(sessionId);
     }
-    this.activeProcesses.delete(sessionId);
 
     this.sessions.delete(sessionId);
-    this.emit('terminated', { sessionId });
+    return { sessionId, status: 'terminated' };
   }
 
-  killAllProcesses() {
-    for (const [, proc] of this.activeProcesses.entries()) {
-      if (proc && !proc.killed) {
-        proc.kill('SIGKILL');
-      }
+  async interrupt(sessionId) {
+    const proc = this.activeProcesses.get(sessionId);
+    if (proc) {
+      proc.kill('SIGINT');
+      return { sessionId, status: 'interrupted' };
     }
-    this.activeProcesses.clear();
+    return { sessionId, status: 'no_active_process' };
   }
 
-  isSessionActive(sessionId) {
-    return this.sessions.has(sessionId);
-  }
+  getStatus(sessionId) {
+    const session = this.sessions.get(sessionId);
+    if (!session) {
+      return { status: 'not_found' };
+    }
 
-  getActiveSessions() {
-    return Array.from(this.sessions.keys());
-  }
-
-  parseResponse(text) {
-    return { text };
+    const isRunning = this.activeProcesses.has(sessionId);
+    return {
+      status: isRunning ? 'running' : 'stable',
+      messageCount: session.messageCount,
+      workDir: session.workDir,
+      model: session.model
+    };
   }
 }
 

@@ -252,19 +252,19 @@ class AmazonQAdapter extends BaseLLMAdapter {
       throw new Error(`Session ${sessionId} not ready`);
     }
 
-    // Build args for Amazon Q
-    // q chat --message "..." or q dev --message "..."
-    const args = [
-      'chat',  // Use chat subcommand
-      '--message', message
-    ];
-
-    // Add system prompt context if first message
+    // Build args for Amazon Q (Kiro CLI)
+    // New syntax: q chat [OPTIONS] [INPUT]
     let fullMessage = message;
     if (session.messageCount === 0 && session.systemPrompt) {
       fullMessage = `Context: ${session.systemPrompt}\n\nQuestion: ${message}`;
-      args[2] = fullMessage;
     }
+
+    const args = [
+      'chat',
+      '--trust-all-tools',  // Auto-approve actions
+      '--no-interactive',   // Non-interactive mode
+      fullMessage           // Message as positional argument
+    ];
 
     session.messageCount++;
     session.conversationHistory.push({ role: 'user', content: message });

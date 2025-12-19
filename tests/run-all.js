@@ -383,7 +383,7 @@ async function testFirstPartyAdapters() {
   await testAdapter('amazon-q', 'Amazon Q', null, ['not authenticated', 'credentials', 'sso', 'no such file', 'not found']);
 
   // Test GitHub Copilot (Microsoft/OpenAI)
-  await testAdapter('github-copilot', 'GitHub Copilot', null, ['not authenticated', 'not logged in', 'sign in', 'deprecated', 'no commands']);
+  await testAdapter('github-copilot', 'GitHub Copilot', null, ['not authenticated', 'not logged in', 'sign in', 'deprecated', 'no commands', 'model_not_supported', 'not supported']);
 
   // Test Mistral Vibe (Mistral)
   await testAdapter('mistral-vibe', 'Mistral Vibe', null, ['not configured', 'exit', 'timed out', 'setup']);
