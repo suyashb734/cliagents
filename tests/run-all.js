@@ -7,6 +7,8 @@
  * Then run tests: npm test
  */
 
+const WebSocket = require('ws');
+
 const BASE_URL = process.env.TEST_URL || 'http://localhost:3001';
 
 // Test utilities
@@ -505,6 +507,104 @@ async function testErrorFormat() {
   });
 }
 
+async function testWebSocket() {
+  console.log('\n📋 WebSocket Tests');
+
+  // Helper to create WebSocket connection
+  const WS_URL = BASE_URL.replace('http', 'ws') + '/ws';
+
+  function createWsClient() {
+    return new Promise((resolve, reject) => {
+      const ws = new WebSocket(WS_URL);
+      ws.on('open', () => resolve(ws));
+      ws.on('error', reject);
+    });
+  }
+
+  function sendAndWait(ws, message, expectedType, timeout = 5000) {
+    return new Promise((resolve, reject) => {
+      const timer = setTimeout(() => reject(new Error(`Timeout waiting for ${expectedType}`)), timeout);
+      const handler = (data) => {
+        const msg = JSON.parse(data.toString());
+        if (msg.type === expectedType || msg.type === 'error') {
+          clearTimeout(timer);
+          ws.off('message', handler);
+          resolve(msg);
+        }
+      };
+      ws.on('message', handler);
+      ws.send(JSON.stringify(message));
+    });
+  }
+
+  await test('WebSocket connects successfully', async () => {
+    const ws = await createWsClient();
+    assert(ws.readyState === WebSocket.OPEN, 'WebSocket should be open');
+    ws.close();
+  });
+
+  await test('WebSocket ping/pong works', async () => {
+    const ws = await createWsClient();
+    const response = await sendAndWait(ws, { type: 'ping' }, 'pong');
+    assert(response.type === 'pong', 'Should receive pong');
+    assert(typeof response.timestamp === 'number', 'Should have timestamp');
+    ws.close();
+  });
+
+  await test('WebSocket create_session works', async () => {
+    const ws = await createWsClient();
+    const response = await sendAndWait(ws, {
+      type: 'create_session',
+      adapter: 'claude-code'
+    }, 'session_created');
+    assert(response.type === 'session_created', 'Should create session');
+    assert(response.session?.sessionId, 'Should have sessionId');
+
+    // Cleanup
+    await sendAndWait(ws, { type: 'terminate_session' }, 'session_terminated');
+    ws.close();
+  });
+
+  await test('WebSocket join_session works', async () => {
+    // Create session via HTTP first
+    const { data: session } = await request('POST', '/sessions', { adapter: 'claude-code' });
+    const sessionId = session.sessionId;
+
+    const ws = await createWsClient();
+    const response = await sendAndWait(ws, {
+      type: 'join_session',
+      sessionId
+    }, 'session_joined');
+    assert(response.type === 'session_joined', 'Should join session');
+    assert(response.sessionId === sessionId, 'Should have correct sessionId');
+
+    ws.close();
+    await request('DELETE', `/sessions/${sessionId}`);
+  });
+
+  await test('WebSocket returns error for invalid session', async () => {
+    const ws = await createWsClient();
+    const response = await sendAndWait(ws, {
+      type: 'join_session',
+      sessionId: 'nonexistent123'
+    }, 'error');
+    assert(response.type === 'error', 'Should return error');
+    assert(response.error.includes('not found'), 'Should mention not found');
+    ws.close();
+  });
+
+  await test('WebSocket send_message requires session', async () => {
+    const ws = await createWsClient();
+    const response = await sendAndWait(ws, {
+      type: 'send_message',
+      message: 'Hello'
+    }, 'error');
+    assert(response.type === 'error', 'Should return error');
+    assert(response.error.includes('No session'), 'Should mention no session');
+    ws.close();
+  });
+}
+
 async function testSessionResume() {
   console.log('\n📋 Session Resume Tests');
 
@@ -582,6 +682,7 @@ async function main() {
   await testValidation();        // Input validation tests
   await testFileOperations();    // File upload/list tests
   await testErrorFormat();       // Standardized error format tests
+  await testWebSocket();         // WebSocket API tests
   await testOneShot();
   await testContextPreservation();
   await testErrorHandling();
