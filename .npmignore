@@ -1,0 +1,26 @@
+# Development files
+tests/
+examples/
+public/
+.env
+.env.example
+logs/
+
+# Build/IDE
+.git/
+.github/
+.vscode/
+.idea/
+*.log
+
+# Documentation (keep README and LICENSE via package.json "files")
+CLAUDE.md
+CONTRIBUTING.md
+CHANGELOG.md
+docs/
+
+# Config files
+.eslintrc*
+.prettierrc*
+tsconfig.json
+jest.config.*

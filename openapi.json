@@ -480,6 +480,135 @@
         }
       }
     },
+    "/v1/models": {
+      "get": {
+        "summary": "List available models",
+        "description": "Returns a list of available models based on which CLI adapters are installed. OpenAI-compatible endpoint.",
+        "operationId": "listModels",
+        "tags": ["OpenAI Compatible"],
+        "responses": {
+          "200": {
+            "description": "List of available models",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "properties": {
+                    "object": {
+                      "type": "string",
+                      "example": "list"
+                    },
+                    "data": {
+                      "type": "array",
+                      "items": {
+                        "$ref": "#/components/schemas/OpenAIModel"
+                      }
+                    }
+                  }
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/v1/models/{model}": {
+      "get": {
+        "summary": "Get model details",
+        "description": "Returns details about a specific model. OpenAI-compatible endpoint.",
+        "operationId": "getModel",
+        "tags": ["OpenAI Compatible"],
+        "parameters": [
+          {
+            "name": "model",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string"
+            },
+            "description": "Model ID (e.g., claude-sonnet-4-20250514, gpt-4o, gemini-2.5-flash)"
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Model details",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/OpenAIModel"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "Model not found",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/OpenAIError"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/v1/chat/completions": {
+      "post": {
+        "summary": "Create chat completion",
+        "description": "Creates a chat completion using an OpenAI-compatible request format. Routes to the appropriate CLI adapter based on the model name. Supports both streaming and non-streaming modes.",
+        "operationId": "createChatCompletion",
+        "tags": ["OpenAI Compatible"],
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/ChatCompletionRequest"
+              }
+            }
+          }
+        },
+        "responses": {
+          "200": {
+            "description": "Chat completion response (or SSE stream if stream=true)",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ChatCompletionResponse"
+                }
+              },
+              "text/event-stream": {
+                "schema": {
+                  "type": "string",
+                  "description": "Server-Sent Events stream in OpenAI format"
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "Invalid request",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/OpenAIError"
+                }
+              }
+            }
+          },
+          "503": {
+            "description": "Model/CLI not available",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/OpenAIError"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
     "/ask": {
       "post": {
         "summary": "One-shot ask",
@@ -925,6 +1054,215 @@
             }
           }
         }
+      },
+      "OpenAIModel": {
+        "type": "object",
+        "description": "OpenAI-compatible model object",
+        "properties": {
+          "id": {
+            "type": "string",
+            "description": "Model identifier",
+            "example": "claude-sonnet-4-20250514"
+          },
+          "object": {
+            "type": "string",
+            "example": "model"
+          },
+          "created": {
+            "type": "integer",
+            "description": "Unix timestamp of model creation"
+          },
+          "owned_by": {
+            "type": "string",
+            "description": "The adapter that provides this model",
+            "example": "claude-code"
+          },
+          "available": {
+            "type": "boolean",
+            "description": "Whether the model's CLI is available"
+          }
+        }
+      },
+      "ChatCompletionRequest": {
+        "type": "object",
+        "description": "OpenAI-compatible chat completion request",
+        "required": ["model", "messages"],
+        "properties": {
+          "model": {
+            "type": "string",
+            "description": "Model ID to use. Maps to CLI adapters: gpt-* → codex-cli, claude-* → claude-code, gemini-* → gemini-cli",
+            "example": "claude-sonnet-4-20250514"
+          },
+          "messages": {
+            "type": "array",
+            "description": "List of messages in the conversation",
+            "items": {
+              "type": "object",
+              "required": ["role", "content"],
+              "properties": {
+                "role": {
+                  "type": "string",
+                  "enum": ["system", "user", "assistant"],
+                  "description": "Role of the message author"
+                },
+                "content": {
+                  "oneOf": [
+                    {
+                      "type": "string",
+                      "description": "Message content as text"
+                    },
+                    {
+                      "type": "array",
+                      "description": "Message content as array (for vision)",
+                      "items": {
+                        "type": "object",
+                        "properties": {
+                          "type": {
+                            "type": "string",
+                            "enum": ["text", "image_url"]
+                          },
+                          "text": {
+                            "type": "string"
+                          },
+                          "image_url": {
+                            "type": "object",
+                            "properties": {
+                              "url": {
+                                "type": "string"
+                              }
+                            }
+                          }
+                        }
+                      }
+                    }
+                  ]
+                }
+              }
+            }
+          },
+          "stream": {
+            "type": "boolean",
+            "default": false,
+            "description": "If true, returns SSE stream"
+          },
+          "temperature": {
+            "type": "number",
+            "minimum": 0,
+            "maximum": 2,
+            "description": "Sampling temperature (Gemini only)"
+          },
+          "max_tokens": {
+            "type": "integer",
+            "description": "Maximum tokens to generate"
+          },
+          "top_p": {
+            "type": "number",
+            "minimum": 0,
+            "maximum": 1,
+            "description": "Nucleus sampling (Gemini only)"
+          },
+          "stop": {
+            "oneOf": [
+              {"type": "string"},
+              {"type": "array", "items": {"type": "string"}}
+            ],
+            "description": "Stop sequences"
+          }
+        }
+      },
+      "ChatCompletionResponse": {
+        "type": "object",
+        "description": "OpenAI-compatible chat completion response",
+        "properties": {
+          "id": {
+            "type": "string",
+            "description": "Unique completion ID",
+            "example": "chatcmpl-abc123"
+          },
+          "object": {
+            "type": "string",
+            "example": "chat.completion"
+          },
+          "created": {
+            "type": "integer",
+            "description": "Unix timestamp"
+          },
+          "model": {
+            "type": "string",
+            "description": "Model used"
+          },
+          "choices": {
+            "type": "array",
+            "items": {
+              "type": "object",
+              "properties": {
+                "index": {
+                  "type": "integer"
+                },
+                "message": {
+                  "type": "object",
+                  "properties": {
+                    "role": {
+                      "type": "string",
+                      "example": "assistant"
+                    },
+                    "content": {
+                      "type": "string"
+                    }
+                  }
+                },
+                "logprobs": {
+                  "type": "object",
+                  "nullable": true
+                },
+                "finish_reason": {
+                  "type": "string",
+                  "enum": ["stop", "length", "content_filter", "tool_calls"]
+                }
+              }
+            }
+          },
+          "usage": {
+            "type": "object",
+            "properties": {
+              "prompt_tokens": {
+                "type": "integer"
+              },
+              "completion_tokens": {
+                "type": "integer"
+              },
+              "total_tokens": {
+                "type": "integer"
+              }
+            }
+          }
+        }
+      },
+      "OpenAIError": {
+        "type": "object",
+        "description": "OpenAI-compatible error response",
+        "properties": {
+          "error": {
+            "type": "object",
+            "properties": {
+              "message": {
+                "type": "string"
+              },
+              "type": {
+                "type": "string",
+                "enum": ["invalid_request_error", "server_error", "internal_error"]
+              },
+              "param": {
+                "type": "string",
+                "nullable": true
+              },
+              "code": {
+                "type": "string",
+                "nullable": true
+              }
+            }
+          }
+        }
       }
     }
   },
@@ -948,6 +1286,10 @@
     {
       "name": "Files",
       "description": "File management for sessions"
+    },
+    {
+      "name": "OpenAI Compatible",
+      "description": "OpenAI-compatible endpoints for drop-in SDK compatibility. Use these endpoints with the OpenAI SDK by setting baseURL to this server."
     }
   ]
 }

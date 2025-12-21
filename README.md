@@ -2,6 +2,8 @@
 
 A Node.js server that wraps CLI-based AI agents (Claude Code, Gemini CLI, Codex, etc.) and exposes them via HTTP REST API and WebSocket for real-time streaming.
 
+> **Security Notice**: This server has no built-in authentication and is intended for **local development only**. Do not expose to the public internet without adding authentication via a reverse proxy.
+
 ## Why?
 
 ### Stop Paying for API Keys During Development
@@ -32,6 +34,114 @@ CLI agents like Claude Code are powerful but:
 - Provides **HTTP and WebSocket APIs** for easy integration
 - Supports **multiple adapters** for different AI CLIs
 - Handles **session management**, timeouts, and cleanup
+- **OpenAI-compatible API** (`/v1/chat/completions`) for easy SDK integration
+
+## OpenAI-Compatible API
+
+cliagents exposes an OpenAI-compatible endpoint, so you can use existing SDKs:
+
+```javascript
+import OpenAI from 'openai';
+
+const client = new OpenAI({
+  baseURL: 'http://localhost:3001/v1',
+  apiKey: 'unused'  // Not needed for CLI agents
+});
+
+// Works with Claude, Gemini, or OpenAI models
+const response = await client.chat.completions.create({
+  model: 'claude-sonnet-4-20250514',  // or 'gemini-2.5-flash', 'gpt-4o'
+  messages: [{ role: 'user', content: 'Hello!' }],
+  stream: true
+});
+
+for await (const chunk of response) {
+  process.stdout.write(chunk.choices[0]?.delta?.content || '');
+}
+```
+
+### Available Endpoints
+
+| Endpoint | Description |
+|----------|-------------|
+| `POST /v1/chat/completions` | OpenAI-compatible chat (streaming & non-streaming) |
+| `GET /v1/models` | List available models (based on installed CLIs) |
+| `GET /v1/models/:id` | Get specific model info |
+
+### Model Routing
+
+The model name determines which CLI adapter handles the request:
+
+| Model Name | Routes To |
+|------------|-----------|
+| `gpt-4o`, `gpt-4o-mini`, `o3-mini` | Codex CLI |
+| `claude-sonnet-4-20250514`, `claude-opus-4-5-20250514` | Claude Code |
+| `gemini-2.5-flash`, `gemini-2.5-pro` | Gemini CLI |
+
+## Switching to Production
+
+cliagents is a **development tool**. When you're ready for production, switch to real APIs with minimal code changes:
+
+### Option 1: Direct API (Single Provider)
+
+```javascript
+// DEVELOPMENT
+const client = new OpenAI({
+  baseURL: 'http://localhost:3001/v1',
+  apiKey: 'unused'
+});
+
+// PRODUCTION - Change 2 lines
+const client = new OpenAI({
+  baseURL: 'https://api.openai.com/v1',  // ← Change
+  apiKey: process.env.OPENAI_API_KEY      // ← Change
+});
+
+// Same code works!
+const response = await client.chat.completions.create({
+  model: 'gpt-4o',
+  messages: [{ role: 'user', content: 'Hello' }]
+});
+```
+
+### Option 2: LiteLLM (Multi-Provider) - Recommended
+
+For production with multiple providers (Claude, GPT, Gemini), use [LiteLLM](https://docs.litellm.ai/):
+
+```javascript
+// DEVELOPMENT - cliagents
+const client = new OpenAI({
+  baseURL: 'http://localhost:3001/v1',
+  apiKey: 'unused'
+});
+
+// PRODUCTION - LiteLLM proxy (same OpenAI SDK!)
+const client = new OpenAI({
+  baseURL: 'http://your-litellm-proxy:4000/v1',
+  apiKey: process.env.LITELLM_API_KEY
+});
+
+// Add provider prefix for routing
+const response = await client.chat.completions.create({
+  model: 'anthropic/claude-sonnet-4-20250514',  // ← Add prefix
+  messages: [{ role: 'user', content: 'Hello' }]
+});
+```
+
+### Option 3: Environment-Based Switch
+
+```javascript
+import OpenAI from 'openai';
+
+const isDev = process.env.NODE_ENV === 'development';
+
+const client = new OpenAI({
+  baseURL: isDev ? 'http://localhost:3001/v1' : 'https://api.openai.com/v1',
+  apiKey: isDev ? 'unused' : process.env.OPENAI_API_KEY
+});
+
+// Zero code changes between dev and prod
+```
 
 ## Installation
 

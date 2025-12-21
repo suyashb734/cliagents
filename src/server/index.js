@@ -30,6 +30,7 @@ const {
   setEnvVar,
   getAuthConfig
 } = require('../utils/adapter-auth');
+const { createOpenAIRouter } = require('./openai-compat');
 
 class AgentServer {
   constructor(options = {}) {
@@ -62,6 +63,10 @@ class AgentServer {
 
     // Setup routes
     this._setupRoutes();
+
+    // Mount OpenAI-compatible routes at /v1
+    const openaiRouter = createOpenAIRouter(this.sessionManager);
+    this.app.use('/v1', openaiRouter);
 
     // WebSocket clients
     this.wsClients = new Map(); // sessionId -> Set<ws>
@@ -754,6 +759,7 @@ class AgentServer {
         console.log(`WebSocket available at ws://${this.host}:${this.port}/ws`);
         console.log(`Chat UI available at http://${this.host}:${this.port}/`);
         console.log(`Dashboard available at http://${this.host}:${this.port}/dashboard`);
+        console.log(`OpenAI-compatible API at http://${this.host}:${this.port}/v1/chat/completions`);
 
         this._setupWebSocket(this.server);
 
