@@ -21,6 +21,10 @@ Thumbs.db
 *.swp
 *.swo
 
+# AI coding assistants (personal config)
+.claude/
+.serena/
+
 # Test coverage
 coverage/
 .nyc_output/
