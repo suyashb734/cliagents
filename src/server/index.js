@@ -32,6 +32,13 @@ const {
 } = require('../utils/adapter-auth');
 const { createOpenAIRouter } = require('./openai-compat');
 
+// Orchestration components
+const { PersistentSessionManager } = require('../tmux/session-manager');
+const { createAllDetectors } = require('../status-detectors/factory');
+const { getDB } = require('../database/db');
+const InboxService = require('../services/inbox-service');
+const { createOrchestrationRouter } = require('./orchestration-router');
+
 class AgentServer {
   constructor(options = {}) {
     this.port = options.port || 3001;
@@ -68,8 +75,148 @@ class AgentServer {
     const openaiRouter = createOpenAIRouter(this.sessionManager);
     this.app.use('/v1', openaiRouter);
 
+    // Initialize orchestration components (optional feature)
+    this._initOrchestration(options);
+
     // WebSocket clients
     this.wsClients = new Map(); // sessionId -> Set<ws>
+  }
+
+  /**
+   * Initialize orchestration components for multi-agent coordination
+   */
+  _initOrchestration(options = {}) {
+    // Check if orchestration is enabled (default: true if tmux available)
+    const orchestrationEnabled = options.orchestration?.enabled ?? true;
+
+    if (!orchestrationEnabled) {
+      console.log('[AgentServer] Orchestration disabled');
+      this.orchestration = null;
+      return;
+    }
+
+    try {
+      // Check for tmux
+      const { execSync } = require('child_process');
+      try {
+        execSync('which tmux', { stdio: 'pipe' });
+      } catch (e) {
+        console.warn('[AgentServer] tmux not found - orchestration disabled');
+        console.warn('[AgentServer] Install with: brew install tmux');
+        this.orchestration = null;
+        return;
+      }
+
+      // Initialize database
+      const db = getDB({
+        dataDir: options.orchestration?.dataDir || path.join(process.cwd(), 'data')
+      });
+
+      // Initialize persistent session manager
+      const persistentSessionManager = new PersistentSessionManager({
+        db,
+        logDir: options.orchestration?.logDir || path.join(process.cwd(), 'logs'),
+        workDir: options.orchestration?.workDir || process.cwd()
+      });
+
+      // Register status detectors
+      const detectors = createAllDetectors();
+      for (const [adapter, detector] of detectors) {
+        persistentSessionManager.registerStatusDetector(adapter, detector);
+      }
+
+      // Initialize inbox service
+      const inboxService = new InboxService({
+        db,
+        sessionManager: persistentSessionManager,
+        pollInterval: options.orchestration?.inboxPollInterval || 500
+      });
+
+      // Start inbox delivery loop
+      inboxService.start();
+
+      // Store orchestration context
+      this.orchestration = {
+        db,
+        sessionManager: persistentSessionManager,
+        inboxService,
+        enabled: true
+      };
+
+      // Mount orchestration routes
+      const orchestrationRouter = createOrchestrationRouter({
+        sessionManager: persistentSessionManager,
+        db,
+        inboxService
+      });
+      this.app.use('/orchestration', orchestrationRouter);
+
+      // Forward orchestration events to WebSocket clients
+      this._setupOrchestrationEvents();
+
+      console.log('[AgentServer] Orchestration enabled');
+      console.log('[AgentServer]   - Database: data/cliagents.db');
+      console.log('[AgentServer]   - Logs: logs/');
+      console.log('[AgentServer]   - Endpoints: /orchestration/*');
+
+    } catch (error) {
+      console.error('[AgentServer] Failed to initialize orchestration:', error.message);
+      this.orchestration = null;
+    }
+  }
+
+  /**
+   * Set up WebSocket events for orchestration
+   */
+  _setupOrchestrationEvents() {
+    if (!this.orchestration) return;
+
+    const { sessionManager, inboxService } = this.orchestration;
+
+    // Terminal events
+    sessionManager.on('terminal-created', (data) => {
+      this._broadcastOrchestrationEvent('terminal-created', data);
+    });
+
+    sessionManager.on('terminal-destroyed', (data) => {
+      this._broadcastOrchestrationEvent('terminal-destroyed', data);
+    });
+
+    sessionManager.on('status-change', (data) => {
+      this._broadcastOrchestrationEvent('status-change', data);
+    });
+
+    // Inbox events
+    inboxService.on('message-queued', (data) => {
+      this._broadcastOrchestrationEvent('message-queued', data);
+    });
+
+    inboxService.on('message-delivered', (data) => {
+      this._broadcastOrchestrationEvent('message-delivered', data);
+    });
+
+    inboxService.on('message-failed', (data) => {
+      this._broadcastOrchestrationEvent('message-failed', data);
+    });
+  }
+
+  /**
+   * Broadcast orchestration event to all connected WebSocket clients
+   */
+  _broadcastOrchestrationEvent(type, data) {
+    if (!this.wss) return;
+
+    const message = JSON.stringify({
+      type: `orchestration:${type}`,
+      ...data,
+      timestamp: Date.now()
+    });
+
+    this.wss.clients.forEach((client) => {
+      if (client.readyState === 1) { // OPEN
+        client.send(message);
+      }
+    });
   }
 
   _setupRoutes() {
