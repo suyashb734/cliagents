@@ -21,8 +21,10 @@ Thumbs.db
 *.swp
 *.swo
 
-# AI coding assistants (personal config)
-.claude/
+# AI coding assistants (personal config, but share agents)
+.claude/settings.json
+.claude/settings.local.json
+.claude/statsig/
 .serena/
 
 # Test coverage
