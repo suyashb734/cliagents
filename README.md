@@ -22,7 +22,7 @@ A Node.js server that wraps CLI-based AI agents (Claude Code, Gemini CLI, Codex)
 
 ## Why cliagents?
 
-### Stop Paying Twice for AI
+### 1. Stop Paying Twice for AI
 
 Most developers use API keys, paying per token. But if you already have **Claude Pro**, **ChatGPT Plus**, or a **Google account**, you're paying twice:
 
@@ -37,12 +37,46 @@ Most developers use API keys, paying per token. But if you already have **Claude
 
 **cliagents lets you use CLI tools programmatically** - build and test with generous CLI limits instead of burning API credits.
 
-### Multi-Agent Cost Optimization
+### 2. Better Output Through Multi-Agent Collaboration
+
+Even if token cost isn't your concern, **three agents thinking about the same problem find more issues than one agent spending 3x the time**. Different models have different strengths and blind spots:
+
+| Agent | Strengths | Typical Catches |
+|-------|-----------|-----------------|
+| **Claude** | Architecture, logic, planning | Design flaws, race conditions |
+| **Gemini** | Security analysis, breadth | Injection vectors, auth gaps |
+| **Codex** | Code correctness, edge cases | Crash bugs, resource leaks |
+
+In our own testing, we ran all three agents reviewing the same PR:
+- Gemini found shell injection bypasses that Claude missed
+- Codex found crash bugs in timeout handling that Gemini missed
+- Claude caught logic errors in Gemini's own code fixes
+
+**The value is in diversity of analysis, not just parallelism.**
+
+### 3. Multi-Agent Cost Optimization
 
 By orchestrating multiple CLI agents, you can:
 - **Distribute workload** across agents to stay within individual rate limits
 - **Use the right tool** for each task (Gemini for research, Claude for coding, Codex for review)
 - **Avoid premium tiers** by parallelizing work across standard subscriptions
+
+### What cliagents Is Good For
+
+- **Multi-agent code reviews** - 3 agents reviewing from different angles catch more bugs
+- **Plan-implement-review workflows** - One agent plans, another implements, a third reviews
+- **Parallel task execution** - Independent tasks run on different agents simultaneously
+- **Code generation and editing** - Subagents write focused, file-level changes
+- **Research and analysis** - Agents explore codebases, read docs, summarize findings
+- **Collaborative problem solving** - Agents debate approaches via shared artifacts/findings
+
+### What cliagents Is NOT Good For
+
+- **Running tests or build commands** - Subagents run inside tmux; shell operations like `npm test` should be run by the orchestrator, not delegated
+- **Git operations** - Commits, pushes, and PR creation affect shared state and need orchestrator control
+- **Server management** - Starting/stopping services requires host-level access
+- **Real-time interactive tasks** - tmux-based communication has inherent latency
+- **Tasks requiring GUI interaction** - CLI agents are text-only
 
 ## Key Features
 

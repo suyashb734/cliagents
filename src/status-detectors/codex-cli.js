@@ -32,14 +32,14 @@ const CODEX_PATTERNS = {
    * NOTE: Don't match • (bullet) alone - it's used for both status AND response output
    * The bullet is only matched when followed by action words (not response content)
    */
-  PROCESSING: /[⠋⠙⠹⠸⠼⠴⠦⠧⠇⠏●○]|• (?:Working|Explored|Reading|Searching|Thinking|Analyzing|Identifying|I'm preparing|preparing|implementing|processing|Whirring)/i,
+  PROCESSING: /[⠋⠙⠹⠸⠼⠴⠦⠧⠇⠏]|• (?:Working|Explored|Reading|Searching|Thinking|Analyzing|Identifying|I'm preparing|preparing|implementing|processing|Whirring)/i,
 
   /**
    * COMPLETED: Response has been delivered
    * Patterns indicating task completion
    * Includes "Worked for Xs" timing line that appears after response
    */
-  COMPLETED: /Complete|Done|Finished|Result:|─ Worked for \d+/i,
+  COMPLETED: /─ Worked for \d+/i,
 
   /**
    * WAITING_PERMISSION: Needs user approval

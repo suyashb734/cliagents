@@ -172,8 +172,10 @@ class PermissionManager extends EventEmitter {
     // Check if path is within allowed paths
     const isAllowed = this.allowedPaths.some(allowed => {
       const resolvedAllowed = path.resolve(allowed);
+      // Ensure it ends with separator for startWith check, but handle root correctly
+      const prefix = resolvedAllowed === path.sep ? resolvedAllowed : resolvedAllowed + path.sep;
       // STRICT CHECK: match exact directory or subdirectory
-      return resolvedPath === resolvedAllowed || resolvedPath.startsWith(resolvedAllowed + path.sep);
+      return resolvedPath === resolvedAllowed || resolvedPath.startsWith(prefix);
     });
 
     if (!isAllowed) {
@@ -189,6 +191,11 @@ class PermissionManager extends EventEmitter {
    */
   _checkBashCommand(command, toolName) {
     if (!command || typeof command !== 'string') return { allowed: true };
+
+    // Block command substitution
+    if (/\$\(|`/.test(command)) {
+      return this._deny('Shell command substitution not allowed in restricted mode', toolName);
+    }
 
     // 1. Split on command separators (;, &&, ||)
     const statements = command.split(/;|&&|\|\|/);
@@ -206,7 +213,9 @@ class PermissionManager extends EventEmitter {
         const redirectionRegex = /(?:>>|2>|&>|>|<)\s*([^\s]+)/g;
         let match;
         while ((match = redirectionRegex.exec(cleanPart)) !== null) {
-          const target = match[1];
+          let target = match[1];
+          // Strip surrounding quotes
+          target = target.replace(/^["']|["']$/g, '');
           const res = this._checkPathPermission(toolName, { path: target });
           if (!res.allowed) return res;
         }
@@ -222,6 +231,9 @@ class PermissionManager extends EventEmitter {
           if (candidate.startsWith('--') && candidate.includes('=')) {
             candidate = candidate.split('=', 2)[1];
           }
+
+          // Strip surrounding quotes
+          candidate = candidate.replace(/^["']|["']$/g, '');
 
           // Check if it looks like a path
           // Criteria: starts with /, ./, ../, ~ or contains /

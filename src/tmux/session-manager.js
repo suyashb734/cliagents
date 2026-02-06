@@ -469,45 +469,32 @@ class PersistentSessionManager extends EventEmitter {
     let recoveredCount = 0;
 
     for (const session of sessions) {
-      // Session name format: cliagents-{first6}
-      // Window name format: agent-{remaining26}
       const sessionName = session.name;
       const windows = this.tmux.listWindows(sessionName);
       if (windows.length === 0) continue;
       
       // We assume one window per session for this agent
       const windowName = windows[0].name;
-      
-      // Parse ID parts
-      // sessionName: cliagents-XXXXXX
-      const idPart1 = sessionName.replace('cliagents-', '');
 
-      // windowName: agent-YYYYYYYYYYYYYYYYYYYYYYYYYY (26 chars)
-      const idPart2 = windowName.replace(/^agent-/, '');
+      const envOutput = this.tmux._exec(
+        ['show-environment', '-t', sessionName, 'CLIAGENTS_TERMINAL_ID'],
+        { ignoreErrors: true, silent: true }
+      );
+      const envMatch = envOutput ? envOutput.match(/CLIAGENTS_TERMINAL_ID=([^\n]+)/) : null;
+      const terminalId = envMatch ? envMatch[1].trim() : null;
 
-      // Verify lengths to be sure (32 hex chars total)
-      if (idPart1.length !== 6 || idPart2.length !== 26) {
-        console.warn(`Skipping session ${sessionName}: Cannot reconstruct ID from names`);
+      if (!terminalId || terminalId.length !== 32) {
+        console.warn(`Skipping session ${sessionName}: Missing CLIAGENTS_TERMINAL_ID`);
         continue;
       }
-      
-      const terminalId = idPart1 + idPart2;
-      
-      // Parse adapter/profile from window name
-      // windowName format: agent-{idPart2}
-      const prefix = 'agent';
-      
-      // We can't easily distinguish between agentProfile and adapter if they overlap,
-      // but for recovery we can default to 'unknown' or try to guess.
-      // Ideally we would have stored this in tmux env vars.
-      // Let's check if we set env vars in createTerminal.
-      // Yes: CLIAGENTS_TERMINAL_ID is set.
-      // We can inspect the pane environment to get the full ID and potentially other vars!
-      
-      // Let's try to get the ID from environment to be safe.
-      // We can use `tmux show-environment -t session`
-      
-      // For now, let's reconstruct the object.
+
+      const suffix = terminalId.slice(6);
+      let prefix = windowName;
+      if (windowName.endsWith(`-${suffix}`)) {
+        prefix = windowName.slice(0, -(suffix.length + 1));
+      } else if (windowName.includes('-')) {
+        prefix = windowName.split('-')[0];
+      }
       
       const workDir = this.tmux.getPaneDirectory(sessionName, windowName) || this.workDir;
       const logPath = path.join(this.logDir, `${terminalId}.log`);

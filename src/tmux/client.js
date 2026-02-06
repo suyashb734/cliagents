@@ -8,6 +8,7 @@
 const { execSync, spawnSync } = require('child_process');
 const path = require('path');
 const fs = require('fs');
+const crypto = require('crypto');
 
 // Regex for validating session/window names (alphanumeric, dash, underscore only)
 const SAFE_NAME_PATTERN = /^[a-zA-Z0-9_-]+$/;
@@ -117,6 +118,23 @@ class TmuxClient {
   }
 
   /**
+   * Escape keys for use in double-quoted shell string for send-keys
+   * @param {string} str - String to escape
+   * @returns {string} - Escaped string
+   */
+  _escapeKeys(str) {
+    if (typeof str !== 'string') {
+      return '';
+    }
+    return str
+      .replace(/\\/g, '\\\\')
+      .replace(/"/g, '\\"')
+      .replace(/\$/g, '\\$')
+      .replace(/`/g, '\\`')
+      .replace(/!/g, '\\!');
+  }
+
+  /**
    * Create a new tmux session with a window
    * @param {string} sessionName - Unique session name
    * @param {string} windowName - Window name within session
@@ -194,11 +212,12 @@ class TmuxClient {
     // Short messages use send-keys -l directly for simplicity.
     if (keys.length > 200) {
       // Write to a temp file, load into tmux buffer, paste into pane
-      const tmpFile = path.join(this.logDir, `.tmux-input-${Date.now()}`);
+      const tmpFile = path.join(this.logDir, `.tmux-input-${Date.now()}-${crypto.randomBytes(4).toString('hex')}`);
+      const bufferName = `cli-${Date.now()}-${crypto.randomBytes(4).toString('hex')}`;
       try {
         fs.writeFileSync(tmpFile, keys);
-        this._exec(['load-buffer', tmpFile]);
-        this._exec(['paste-buffer', '-t', target, '-d', '-p']);
+        this._exec(['load-buffer', '-b', bufferName, tmpFile]);
+        this._exec(['paste-buffer', '-t', target, '-b', bufferName, '-d', '-p']);
       } finally {
         try { fs.unlinkSync(tmpFile); } catch (e) { /* ignore cleanup errors */ }
       }

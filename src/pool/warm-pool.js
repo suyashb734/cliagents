@@ -172,6 +172,12 @@ class WarmPool extends EventEmitter {
       console.log(`[WarmPool] Unknown adapter ${adapter}, creating on demand`);
       const terminal = await this._createTerminal(adapter, options);
       this.stats.poolMisses++;
+      this.acquired.set(terminal.terminalId, {
+        adapter,
+        acquiredAt: Date.now()
+      });
+      this.stats.acquired++;
+      this.emit('acquired', { terminalId: terminal.terminalId, fromPool: false });
       return { terminalId: terminal.terminalId, fromPool: false };
     }
 
@@ -297,11 +303,16 @@ class WarmPool extends EventEmitter {
     });
 
     // Wait for IDLE state
-    await this.sessionManager.waitForStatus(
-      terminal.terminalId,
-      TerminalStatus.IDLE,
-      this.config.initTimeout
-    );
+    try {
+      await this.sessionManager.waitForStatus(
+        terminal.terminalId,
+        TerminalStatus.IDLE,
+        this.config.initTimeout
+      );
+    } catch (error) {
+      await this._destroyTerminal(terminal.terminalId).catch(() => {});
+      throw error;
+    }
 
     return terminal;
   }
@@ -407,18 +418,24 @@ class WarmPool extends EventEmitter {
       for (let i = pool.length - 1; i >= 0; i--) {
         const entry = pool[i];
 
-        // Check age
-        if (now - entry.createdAt > this.config.maxTerminalAge) {
-          console.log(`[WarmPool] Terminal ${entry.terminalId} too old, refreshing`);
-          pool.splice(i, 1);
-          this._destroyTerminal(entry.terminalId).catch(() => {});
-          continue;
-        }
+        try {
+          // Check age
+          if (now - entry.createdAt > this.config.maxTerminalAge) {
+            console.log(`[WarmPool] Terminal ${entry.terminalId} too old, refreshing`);
+            pool.splice(i, 1);
+            this._destroyTerminal(entry.terminalId).catch(() => {});
+            continue;
+          }
 
-        // Check status
-        const status = this.sessionManager.getStatus(entry.terminalId);
-        if (status !== TerminalStatus.IDLE) {
-          console.log(`[WarmPool] Terminal ${entry.terminalId} unhealthy (${status}), removing`);
+          // Check status
+          const status = this.sessionManager.getStatus(entry.terminalId);
+          if (status !== TerminalStatus.IDLE) {
+            console.log(`[WarmPool] Terminal ${entry.terminalId} unhealthy (${status}), removing`);
+            pool.splice(i, 1);
+            this._destroyTerminal(entry.terminalId).catch(() => {});
+          }
+        } catch (error) {
+          console.warn(`[WarmPool] Health check failed for ${entry.terminalId}:`, error.message);
           pool.splice(i, 1);
           this._destroyTerminal(entry.terminalId).catch(() => {});
         }
