@@ -283,7 +283,7 @@ class TmuxClient {
     // SECURITY: Validate log path doesn't contain path traversal
     const normalizedPath = path.normalize(absolutePath);
     const normalizedLogDir = path.normalize(this.logDir);
-    if (!normalizedPath.startsWith(normalizedLogDir) && !path.isAbsolute(logPath)) {
+    if (!normalizedPath.startsWith(normalizedLogDir)) {
       throw new Error('Invalid log path: path traversal detected');
     }
 

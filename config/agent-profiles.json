@@ -48,7 +48,9 @@
       "defaultAdapter": "claude-code",
       "timeout": 900,
       "claudeOptions": {
-        "allowedTools": ["Read", "Write", "Edit", "Glob", "Grep", "Bash"]
+        "permissionMode": "interceptor",
+        "allowedTools": ["Read", "Write", "Edit", "Glob", "Grep", "Bash"],
+        "allowedPaths": ["${workDir}"]
       }
     },
 
@@ -82,7 +84,9 @@
       "defaultAdapter": "claude-code",
       "timeout": 600,
       "claudeOptions": {
-        "allowedTools": ["Read", "Write", "Edit", "Glob", "Grep", "Bash"]
+        "permissionMode": "interceptor",
+        "allowedTools": ["Read", "Write", "Edit", "Glob", "Grep", "Bash"],
+        "allowedPaths": ["${workDir}"]
       }
     },
 
@@ -92,7 +96,9 @@
       "defaultAdapter": "claude-code",
       "timeout": 600,
       "claudeOptions": {
-        "allowedTools": ["Read", "Write", "Edit", "Glob", "Grep", "Bash"]
+        "permissionMode": "interceptor",
+        "allowedTools": ["Read", "Write", "Edit", "Glob", "Grep", "Bash"],
+        "allowedPaths": ["${workDir}"]
       }
     },
 

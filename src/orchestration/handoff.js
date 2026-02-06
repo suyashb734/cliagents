@@ -351,8 +351,16 @@ async function executeHandoffAttempt(agentProfile, message, profile, options) {
     // Map the actual terminal ID to our pre-generated one for file output
     fileOutputTerminalId = useFileOutput ? terminalIdForFileOutput : worker.terminalId;
 
-    // 1.5. Start permission interceptor if using interceptor mode
-    if (profile.permissionMode === 'interceptor') {
+    // 1.5. Start permission interceptor if using interceptor mode or restricted tools
+    const hasRestrictedAllowedTools = Array.isArray(profile.allowedTools) &&
+      profile.allowedTools.length > 0 &&
+      (!profile.allowedTools.includes('Write') ||
+        !profile.allowedTools.includes('Edit') ||
+        !profile.allowedTools.includes('Bash') ||
+        !profile.allowedTools.includes('Task'));
+    const shouldStartInterceptor = profile.permissionMode === 'interceptor' || hasRestrictedAllowedTools;
+
+    if (shouldStartInterceptor) {
       // Create permission manager from profile settings
       const permissionManager = PermissionManager.fromProfile ?
         PermissionManager.fromProfile(profile, options.workDir || process.cwd()) :

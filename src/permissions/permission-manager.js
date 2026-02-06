@@ -116,6 +116,14 @@ class PermissionManager extends EventEmitter {
       }
     }
 
+    // SECURITY: Check path restrictions for Bash commands
+    if (toolName === 'Bash' && args.command) {
+      const bashResult = this._checkBashCommand(args.command, toolName);
+      if (!bashResult.allowed) {
+        return bashResult;
+      }
+    }
+
     // 4. Run custom policies
     for (const policy of this.policies) {
       if (typeof policy.check === 'function') {
@@ -170,6 +178,44 @@ class PermissionManager extends EventEmitter {
       return this._deny(`Path not allowed: ${targetPath}`, toolName);
     }
 
+    return { allowed: true };
+  }
+
+  /**
+   * Check Bash command arguments for path violations
+   * @private
+   */
+  _checkBashCommand(command, toolName) {
+    if (!command || typeof command !== 'string') return { allowed: true };
+    
+    // Check redirections (e.g. echo "text" > file)
+    if (command.includes('>')) {
+      const parts = command.split('>');
+      if (parts[1]) {
+        // Get the first token after >
+        const target = parts[1].trim().split(/\s+/)[0];
+        if (target) {
+          const res = this._checkPathPermission(toolName, { path: target });
+          if (!res.allowed) return res;
+        }
+      }
+    }
+    
+    const parts = command.trim().split(/\s+/);
+    const cmd = parts[0];
+    const restricted = ['cat', 'rm', 'cp', 'mv', 'cd'];
+    
+    if (restricted.includes(cmd)) {
+      for (let i = 1; i < parts.length; i++) {
+        const arg = parts[i];
+        // Skip flags and operators
+        if (!arg.startsWith('-') && !['>', '>>', '|', '&', ';'].includes(arg)) {
+          const res = this._checkPathPermission(toolName, { path: arg });
+          if (!res.allowed) return res;
+        }
+      }
+    }
+    
     return { allowed: true };
   }
 
@@ -291,8 +337,16 @@ class PermissionManager extends EventEmitter {
    * @returns {PermissionManager}
    */
   static fromProfile(profile, workDir) {
+    const resolvedWorkDir = workDir || process.cwd();
+    const resolvePathTemplates = (paths) => {
+      return paths
+        .filter(p => typeof p === 'string' && p.length > 0)
+        .map(p => p.replace(/\$\{workDir\}/g, resolvedWorkDir))
+        .map(p => path.resolve(p));
+    };
+
     const options = {
-      allowedPaths: workDir ? [workDir] : [process.cwd()],
+      allowedPaths: [resolvedWorkDir],
       logDenials: true
     };
 
@@ -304,9 +358,13 @@ class PermissionManager extends EventEmitter {
       options.deniedTools = profile.deniedTools;
     }
 
+    if (Array.isArray(profile.allowedPaths) && profile.allowedPaths.length > 0) {
+      options.allowedPaths = resolvePathTemplates(profile.allowedPaths);
+    }
+
     // Use denied paths from profile if specified
-    if (profile.deniedPaths) {
-      options.deniedPaths = profile.deniedPaths;
+    if (Array.isArray(profile.deniedPaths) && profile.deniedPaths.length > 0) {
+      options.deniedPaths = resolvePathTemplates(profile.deniedPaths);
     }
 
     return new PermissionManager(options);

@@ -51,10 +51,10 @@ function isPathSafe(pathStr) {
 }
 
 /**
- * Generate an 8-character terminal ID
+ * Generate a 32-character terminal ID (128-bit entropy)
  */
 function generateTerminalId() {
-  return crypto.randomBytes(4).toString('hex');
+  return crypto.randomBytes(16).toString('hex');
 }
 
 /**
@@ -336,6 +336,15 @@ class PersistentSessionManager extends EventEmitter {
     // SECURITY: Validate working directory path
     if (!isPathSafe(workDir)) {
       throw new Error('Invalid working directory: contains dangerous characters');
+    }
+
+    // SECURITY: Reject system paths for workDir
+    const resolvedWorkDir = path.resolve(workDir);
+    const systemPaths = ['/etc', '/System', '/usr', '/var', '/root', '/bin', '/sbin'];
+    for (const sysPath of systemPaths) {
+      if (resolvedWorkDir === sysPath || resolvedWorkDir.startsWith(sysPath + path.sep)) {
+        throw new Error(`Invalid working directory: System path ${sysPath} is not allowed`);
+      }
     }
 
     // Ensure working directory exists

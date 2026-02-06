@@ -113,6 +113,7 @@ class AgentProfilesService {
       adapter: adapterName,
       timeout: role.timeout || 300,
       allowedTools: role.claudeOptions?.allowedTools || adapter.defaultAllowedTools || null,
+      allowedPaths: role.claudeOptions?.allowedPaths || null,
       permissionMode: role.claudeOptions?.permissionMode || null,
       capabilities: adapter.capabilities || []
     };
@@ -258,6 +259,10 @@ class AgentProfilesService {
 
     if (profile.allowedTools && !Array.isArray(profile.allowedTools)) {
       errors.push('allowedTools must be an array');
+    }
+
+    if (profile.allowedPaths && !Array.isArray(profile.allowedPaths)) {
+      errors.push('allowedPaths must be an array');
     }
 
     return {
