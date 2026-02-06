@@ -40,5 +40,19 @@ tmp/
 temp/
 *.tmp
 
+# Database
+data/
+*.db
+*.db-wal
+*.db-shm
+
+# Audio/media files
+*.m4a
+*.mp3
+*.wav
+
 # Session/working directories
 /tmp/agent/
+
+# Temporary scripts
+transcribe_temp.js

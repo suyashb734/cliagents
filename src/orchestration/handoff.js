@@ -193,6 +193,75 @@ function extractOutput(output, adapter) {
 }
 
 /**
+ * Handle blocking interactive prompts during CLI initialization.
+ *
+ * Different CLIs may show prompts during startup that block the IDLE state:
+ * - Claude Code: Settings Error dialog (invalid .claude/settings.json)
+ * - Codex CLI: Update available prompt
+ * - Gemini CLI: "Do you trust this folder?" prompt
+ *
+ * This function detects these prompts and auto-dismisses them.
+ */
+async function handleInitPrompts(sessionManager, terminalId, adapter, traceId) {
+  // Wait for CLI to start and potentially show blocking prompts
+  await new Promise(resolve => setTimeout(resolve, 5000));
+
+  const currentStatus = sessionManager.getStatus(terminalId);
+  if (currentStatus !== TerminalStatus.WAITING_USER_ANSWER) {
+    return; // No blocking prompt detected
+  }
+
+  const output = sessionManager.getOutput(terminalId, 1000);
+
+  // Claude Code: Settings Error dialog
+  // Shows when .claude/settings.json has invalid keys
+  // Options: 1. Exit and fix manually  2. Continue without these settings
+  // Option 1 is pre-selected; we need to navigate Down then press Enter
+  if (adapter === 'claude-code') {
+    if (output.includes('Settings Error') || output.includes('Continue without these settings')) {
+      console.log(`[handoff] Claude settings error detected, auto-continuing...`);
+      // Navigate down to "Continue without these settings" (option 2) and confirm
+      sessionManager.sendSpecialKey(terminalId, 'Down');
+      await new Promise(resolve => setTimeout(resolve, 300));
+      sessionManager.sendSpecialKey(terminalId, 'Enter');
+      await new Promise(resolve => setTimeout(resolve, 3000));
+      return;
+    }
+  }
+
+  // Codex CLI: Update available prompt
+  if (adapter === 'codex-cli') {
+    if (output.includes('Update available') || output.includes('Skip until next version')) {
+      console.log(`[handoff] Codex update prompt detected, auto-skipping...`);
+      // Navigate down to "Skip" option and confirm
+      sessionManager.sendSpecialKey(terminalId, 'Down');
+      await new Promise(resolve => setTimeout(resolve, 300));
+      sessionManager.sendSpecialKey(terminalId, 'Enter');
+      await new Promise(resolve => setTimeout(resolve, 3000));
+      return;
+    }
+  }
+
+  // Gemini CLI: Trust folder prompt
+  // Shows "Do you trust this folder?" with options:
+  // ● 1. Trust folder (pre-selected)  2. Trust parent  3. Don't trust
+  // Just press Enter since option 1 is already selected
+  if (adapter === 'gemini-cli') {
+    if (output.includes('Do you trust this folder') || output.includes('Trust folder')) {
+      console.log(`[handoff] Gemini trust prompt detected, auto-trusting...`);
+      // Option 1 "Trust folder" is pre-selected, just press Enter
+      sessionManager.sendSpecialKey(terminalId, 'Enter');
+      await new Promise(resolve => setTimeout(resolve, 3000));
+      return;
+    }
+  }
+
+  console.log(`[handoff] Unknown WAITING_USER_ANSWER prompt for ${adapter}, attempting Enter...`);
+  sessionManager.sendSpecialKey(terminalId, 'Enter');
+  await new Promise(resolve => setTimeout(resolve, 2000));
+}
+
+/**
  * Execute a single handoff attempt (internal)
  */
 async function executeHandoffAttempt(agentProfile, message, profile, options) {
@@ -313,50 +382,27 @@ async function executeHandoffAttempt(agentProfile, message, profile, options) {
     // Different CLIs have different initialization times
     const initTimeouts = {
       'codex-cli': 90000,    // Codex is slowest to initialize
-      'gemini-cli': 45000,   // Gemini is moderate
-      'claude-code': 30000,  // Claude is fast
+      'gemini-cli': 60000,   // Gemini needs time for auth + trust prompt
+      'claude-code': 60000,  // Claude may show settings error dialog
       'amazon-q': 45000      // Amazon Q is moderate
     };
     const initTimeout = initTimeouts[profile.adapter] || 45000;
 
-    // Codex-specific: Check for update prompt before waiting
-    // The update prompt appears quickly but blocks indefinitely
-    if (profile.adapter === 'codex-cli') {
-      // Wait a few seconds for CLI to start and potentially show update prompt
-      await new Promise(resolve => setTimeout(resolve, 5000));
-      const currentStatus = sessionManager.getStatus(worker.terminalId);
-      if (currentStatus === TerminalStatus.WAITING_USER_ANSWER) {
-        const output = sessionManager.getOutput(worker.terminalId, 500);
-        if (output.includes('Update available') || output.includes('Skip until next version')) {
-          console.log(`[handoff] Codex update prompt detected, auto-skipping...`);
-          // Send "2" to select "Skip" option
-          await sessionManager.sendInput(worker.terminalId, '2', { traceId });
-          await new Promise(resolve => setTimeout(resolve, 3000));
-        }
-      }
-    }
-
-    // Gemini-specific: Check for trust folder prompt before waiting
-    // Gemini CLI asks "Do you trust this folder?" which blocks until answered
-    if (profile.adapter === 'gemini-cli') {
-      // Wait a few seconds for CLI to start and potentially show trust prompt
-      await new Promise(resolve => setTimeout(resolve, 5000));
-      let currentStatus = sessionManager.getStatus(worker.terminalId);
-      if (currentStatus === TerminalStatus.WAITING_USER_ANSWER) {
-        const output = sessionManager.getOutput(worker.terminalId, 1000);
-        if (output.includes('Do you trust this folder') || output.includes('Trust folder')) {
-          console.log(`[handoff] Gemini trust prompt detected, auto-trusting...`);
-          // Send "1" to select "Trust folder" option
-          await sessionManager.sendInput(worker.terminalId, '1', { traceId });
-          await new Promise(resolve => setTimeout(resolve, 3000));
-        }
-      }
-    }
+    // Auto-handle blocking interactive prompts that prevent IDLE
+    // Each adapter may show prompts during initialization that need to be dismissed.
+    // We poll the status and check output to detect and handle these prompts.
+    await handleInitPrompts(sessionManager, worker.terminalId, profile.adapter, traceId);
 
     try {
       await sessionManager.waitForStatus(worker.terminalId, TerminalStatus.IDLE, initTimeout);
     } catch (error) {
-      throw new Error(`Worker failed to initialize: ${error.message}`);
+      // Before giving up, try handling prompts one more time (they may appear late)
+      await handleInitPrompts(sessionManager, worker.terminalId, profile.adapter, traceId);
+      try {
+        await sessionManager.waitForStatus(worker.terminalId, TerminalStatus.IDLE, 15000);
+      } catch (retryError) {
+        throw new Error(`Worker failed to initialize: ${retryError.message}`);
+      }
     }
 
     // 3. Capture initial output length before sending message
