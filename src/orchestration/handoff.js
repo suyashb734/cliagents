@@ -206,59 +206,65 @@ async function handleInitPrompts(sessionManager, terminalId, adapter, traceId) {
   // Wait for CLI to start and potentially show blocking prompts
   await new Promise(resolve => setTimeout(resolve, 5000));
 
-  const currentStatus = sessionManager.getStatus(terminalId);
-  if (currentStatus !== TerminalStatus.WAITING_USER_ANSWER) {
-    return; // No blocking prompt detected
-  }
-
-  const output = sessionManager.getOutput(terminalId, 1000);
-
-  // Claude Code: Settings Error dialog
-  // Shows when .claude/settings.json has invalid keys
-  // Options: 1. Exit and fix manually  2. Continue without these settings
-  // Option 1 is pre-selected; we need to navigate Down then press Enter
-  if (adapter === 'claude-code') {
-    if (output.includes('Settings Error') || output.includes('Continue without these settings')) {
-      console.log(`[handoff] Claude settings error detected, auto-continuing...`);
-      // Navigate down to "Continue without these settings" (option 2) and confirm
-      sessionManager.sendSpecialKey(terminalId, 'Down');
-      await new Promise(resolve => setTimeout(resolve, 300));
-      sessionManager.sendSpecialKey(terminalId, 'Enter');
-      await new Promise(resolve => setTimeout(resolve, 3000));
-      return;
+  // Loop to handle multi-step prompts (e.g., Codex: select Skip → Press Enter to continue)
+  const maxRounds = 3;
+  for (let round = 0; round < maxRounds; round++) {
+    const currentStatus = sessionManager.getStatus(terminalId);
+    if (currentStatus !== TerminalStatus.WAITING_USER_ANSWER) {
+      return; // No blocking prompt, we're good
     }
-  }
 
-  // Codex CLI: Update available prompt
-  if (adapter === 'codex-cli') {
-    if (output.includes('Update available') || output.includes('Skip until next version')) {
-      console.log(`[handoff] Codex update prompt detected, auto-skipping...`);
-      // Navigate down to "Skip" option and confirm
-      sessionManager.sendSpecialKey(terminalId, 'Down');
-      await new Promise(resolve => setTimeout(resolve, 300));
-      sessionManager.sendSpecialKey(terminalId, 'Enter');
-      await new Promise(resolve => setTimeout(resolve, 3000));
-      return;
+    const output = sessionManager.getOutput(terminalId, 1000);
+    let handled = false;
+
+    // Claude Code: Settings Error dialog
+    // Options: 1. Exit and fix manually  2. Continue without these settings
+    // Option 1 is pre-selected; navigate Down then Enter to select option 2
+    if (adapter === 'claude-code') {
+      if (output.includes('Settings Error') || output.includes('Continue without these settings')) {
+        console.log(`[handoff] Claude settings error detected (round ${round + 1}), auto-continuing...`);
+        sessionManager.sendSpecialKey(terminalId, 'Down');
+        await new Promise(resolve => setTimeout(resolve, 300));
+        sessionManager.sendSpecialKey(terminalId, 'Enter');
+        handled = true;
+      }
     }
-  }
 
-  // Gemini CLI: Trust folder prompt
-  // Shows "Do you trust this folder?" with options:
-  // ● 1. Trust folder (pre-selected)  2. Trust parent  3. Don't trust
-  // Just press Enter since option 1 is already selected
-  if (adapter === 'gemini-cli') {
-    if (output.includes('Do you trust this folder') || output.includes('Trust folder')) {
-      console.log(`[handoff] Gemini trust prompt detected, auto-trusting...`);
-      // Option 1 "Trust folder" is pre-selected, just press Enter
-      sessionManager.sendSpecialKey(terminalId, 'Enter');
-      await new Promise(resolve => setTimeout(resolve, 3000));
-      return;
+    // Codex CLI: Update available prompt (two-step)
+    // Step 1: Arrow menu "Update now / Skip / Skip until next version" → Down+Enter for Skip
+    // Step 2: Info box "Press enter to continue" → Enter
+    if (adapter === 'codex-cli') {
+      if (output.includes('Update now') || output.includes('Skip until next version')) {
+        console.log(`[handoff] Codex update menu detected (round ${round + 1}), selecting Skip...`);
+        sessionManager.sendSpecialKey(terminalId, 'Down');
+        await new Promise(resolve => setTimeout(resolve, 300));
+        sessionManager.sendSpecialKey(terminalId, 'Enter');
+        handled = true;
+      } else if (output.includes('Press enter to continue') || output.includes('Update available')) {
+        console.log(`[handoff] Codex update info detected (round ${round + 1}), pressing Enter...`);
+        sessionManager.sendSpecialKey(terminalId, 'Enter');
+        handled = true;
+      }
     }
-  }
 
-  console.log(`[handoff] Unknown WAITING_USER_ANSWER prompt for ${adapter}, attempting Enter...`);
-  sessionManager.sendSpecialKey(terminalId, 'Enter');
-  await new Promise(resolve => setTimeout(resolve, 2000));
+    // Gemini CLI: Trust folder prompt
+    // ● 1. Trust folder (pre-selected) → just press Enter
+    if (adapter === 'gemini-cli') {
+      if (output.includes('Do you trust this folder') || output.includes('Trust folder')) {
+        console.log(`[handoff] Gemini trust prompt detected (round ${round + 1}), auto-trusting...`);
+        sessionManager.sendSpecialKey(terminalId, 'Enter');
+        handled = true;
+      }
+    }
+
+    if (!handled) {
+      console.log(`[handoff] Unknown WAITING_USER_ANSWER prompt for ${adapter} (round ${round + 1}), pressing Enter...`);
+      sessionManager.sendSpecialKey(terminalId, 'Enter');
+    }
+
+    // Wait for the CLI to process the input and potentially show next prompt
+    await new Promise(resolve => setTimeout(resolve, 3000));
+  }
 }
 
 /**

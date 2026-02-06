@@ -57,7 +57,7 @@ const CODEX_PATTERNS = {
    * Only match actual CLI selection prompts
    * Includes rate limit model switch prompts and update prompts
    */
-  WAITING_USER_ANSWER: /^(?:Select|Choose).*:\s*$|Which.*\?\s*$|Press enter to confirm|Switch to.*model|Skip until next version/mi,
+  WAITING_USER_ANSWER: /^(?:Select|Choose).*:\s*$|Which.*\?\s*$|Press enter to (?:confirm|continue)|Switch to.*model|Skip until next version|Update available/mi,
 
   /**
    * ERROR: Something went wrong

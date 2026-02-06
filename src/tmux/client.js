@@ -186,17 +186,32 @@ class TmuxClient {
   sendKeys(sessionName, windowName, keys, pressEnter = true) {
     this._validateName(sessionName, 'session');
     this._validateName(windowName, 'window');
-    
+
     const target = `${sessionName}:${windowName}`;
 
-    // Send text using -l (literal) flag which handles special characters safely
-    // spawnSync passes this as a raw argument, avoiding shell interpolation
-    this._exec(['send-keys', '-t', target, '-l', keys]);
+    // For long messages (>200 chars), use load-buffer + paste-buffer
+    // to avoid tmux send-keys truncation issues with large inputs.
+    // Short messages use send-keys -l directly for simplicity.
+    if (keys.length > 200) {
+      // Write to a temp file, load into tmux buffer, paste into pane
+      const tmpFile = path.join(this.logDir, `.tmux-input-${Date.now()}`);
+      try {
+        fs.writeFileSync(tmpFile, keys);
+        this._exec(['load-buffer', tmpFile]);
+        this._exec(['paste-buffer', '-t', target, '-d', '-p']);
+      } finally {
+        try { fs.unlinkSync(tmpFile); } catch (e) { /* ignore cleanup errors */ }
+      }
+    } else {
+      // Send text using -l (literal) flag which handles special characters safely
+      this._exec(['send-keys', '-t', target, '-l', keys]);
+    }
 
     if (pressEnter) {
-      // Add 100ms delay to ensure text is fully processed before pressing Enter
-      // We use a small sleep here
-      spawnSync('sleep', ['0.1']);
+      // Add delay to ensure text is fully processed before pressing Enter
+      // Longer delay for longer messages to allow terminal processing
+      const delay = keys.length > 200 ? 0.5 : 0.1;
+      spawnSync('sleep', [String(delay)]);
       this._exec(['send-keys', '-t', target, 'Enter']);
     }
   }
