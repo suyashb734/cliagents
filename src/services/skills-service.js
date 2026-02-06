@@ -87,7 +87,7 @@ class SkillsService {
       this.projectDir = path.resolve(this.projectRoot, rawProjectDir);
       
       // Prevent path traversal outside project root if it was a relative path
-      if (!this.projectDir.startsWith(this.projectRoot) && rawProjectDir.includes('..')) {
+      if (!this.projectDir.startsWith(this.projectRoot) || rawProjectDir.includes('..')) {
         console.warn(`[SkillsService] Security warning: projectDir '${rawProjectDir}' resolves outside projectRoot. Resetting to default.`);
         this.projectDir = path.resolve(this.projectRoot, '.cliagents/skills');
       }
@@ -95,10 +95,15 @@ class SkillsService {
     
     this.maxDepth = options.maxDepth || 3;
 
-    // Cache
+    // Separate caches for sync and async paths to avoid race conditions
     this.skillsCache = null;
     this.lastScanTime = 0;
+    this.asyncSkillsCache = null;
+    this.asyncLastScanTime = 0;
     this.cacheTTL = 5000; // 5 seconds
+
+    // Simple async lock to prevent concurrent async scans
+    this._asyncScanPromise = null;
   }
 
   /**
@@ -280,25 +285,38 @@ class SkillsService {
   async getAllSkillsAsync(forceRefresh = false) {
     const now = Date.now();
 
-    if (!forceRefresh && this.skillsCache && (now - this.lastScanTime) < this.cacheTTL) {
-      return this.skillsCache;
+    if (!forceRefresh && this.asyncSkillsCache && (now - this.asyncLastScanTime) < this.cacheTTL) {
+      return this.asyncSkillsCache;
     }
 
-    const allSkills = [];
+    // If an async scan is already in progress, wait for it instead of starting another
+    if (this._asyncScanPromise) {
+      return this._asyncScanPromise;
+    }
 
-    // Scan all sources in parallel
-    const [projectSkills, personalSkills, coreSkills] = await Promise.all([
-      this.findSkillsInDirAsync(this.projectDir, 'project'),
-      this.findSkillsInDirAsync(this.personalDir, 'personal'),
-      this.findSkillsInDirAsync(this.coreDir, 'core')
-    ]);
+    this._asyncScanPromise = (async () => {
+      try {
+        const allSkills = [];
 
-    allSkills.push(...projectSkills, ...personalSkills, ...coreSkills);
+        // Scan all sources in parallel
+        const [projectSkills, personalSkills, coreSkills] = await Promise.all([
+          this.findSkillsInDirAsync(this.projectDir, 'project'),
+          this.findSkillsInDirAsync(this.personalDir, 'personal'),
+          this.findSkillsInDirAsync(this.coreDir, 'core')
+        ]);
 
-    this.skillsCache = allSkills;
-    this.lastScanTime = now;
+        allSkills.push(...projectSkills, ...personalSkills, ...coreSkills);
 
-    return allSkills;
+        this.asyncSkillsCache = allSkills;
+        this.asyncLastScanTime = Date.now();
+
+        return allSkills;
+      } finally {
+        this._asyncScanPromise = null;
+      }
+    })();
+
+    return this._asyncScanPromise;
   }
 
   /**
@@ -791,6 +809,8 @@ class SkillsService {
   clearCache() {
     this.skillsCache = null;
     this.lastScanTime = 0;
+    this.asyncSkillsCache = null;
+    this.asyncLastScanTime = 0;
   }
 }
 
@@ -806,6 +826,27 @@ let instance = null;
 function getSkillsService(options = {}) {
   if (!instance) {
     instance = new SkillsService(options);
+  } else if (Object.keys(options).length > 0) {
+    // Warn if caller passes options that differ from the existing instance
+    const differences = [];
+    if (options.coreDir && options.coreDir !== instance.coreDir) {
+      differences.push(`coreDir: '${instance.coreDir}' vs '${options.coreDir}'`);
+    }
+    if (options.personalDir && options.personalDir !== instance.personalDir) {
+      differences.push(`personalDir: '${instance.personalDir}' vs '${options.personalDir}'`);
+    }
+    if (options.projectDir && options.projectDir !== instance.projectDir) {
+      differences.push(`projectDir: '${instance.projectDir}' vs '${options.projectDir}'`);
+    }
+    if (options.projectRoot && options.projectRoot !== instance.projectRoot) {
+      differences.push(`projectRoot: '${instance.projectRoot}' vs '${options.projectRoot}'`);
+    }
+    if (differences.length > 0) {
+      console.warn(
+        `[SkillsService] getSkillsService() called with different options than the existing singleton. ` +
+        `Returning existing instance. Differences: ${differences.join('; ')}`
+      );
+    }
   }
   return instance;
 }
