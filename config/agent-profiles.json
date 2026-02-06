@@ -1,47 +1,141 @@
 {
-  "developer": {
-    "adapter": "claude-code",
-    "systemPrompt": "You are a senior software developer. Review code for bugs, best practices, and maintainability issues. Be thorough but concise in your findings.",
-    "timeout": 300,
-    "allowedTools": ["Read", "Glob", "Grep"]
+  "_meta": {
+    "description": "Agent roles and adapter configurations for multi-agent workflows",
+    "version": "3.0",
+    "changes": "Separated roles from adapters - roles define WHAT to do, adapters define WHO does it"
   },
-  "security-reviewer": {
-    "adapter": "gemini-cli",
-    "systemPrompt": "You are a security expert. Review code for security vulnerabilities, OWASP top 10, injection attacks, authentication issues, and data exposure risks. Prioritize critical issues.",
-    "timeout": 300
+
+  "adapters": {
+    "claude-code": {
+      "capabilities": ["plan-mode", "file-edit", "structured-output", "tool-restriction", "mcp"],
+      "defaultAllowedTools": ["Read", "Write", "Edit", "Glob", "Grep", "Bash", "Task"],
+      "readOnlyTools": ["Read", "Glob", "Grep"],
+      "description": "Claude Code CLI - full coding agent with MCP support"
+    },
+    "gemini-cli": {
+      "capabilities": ["web-search", "large-context", "fast-response"],
+      "description": "Gemini CLI - fast responses, web search, large context window"
+    },
+    "codex-cli": {
+      "capabilities": ["code-review", "sandbox-execution", "auto-apply"],
+      "description": "OpenAI Codex CLI - code review and sandbox execution"
+    },
+    "amazon-q": {
+      "capabilities": ["aws-integration", "code-suggestions"],
+      "description": "Amazon Q - AWS-integrated coding assistant"
+    },
+    "github-copilot": {
+      "capabilities": ["code-completion", "explain-code"],
+      "description": "GitHub Copilot CLI - code suggestions and explanations"
+    }
   },
-  "performance-analyst": {
-    "adapter": "codex-cli",
-    "systemPrompt": "You are a performance optimization expert. Review code for performance bottlenecks, memory leaks, inefficient algorithms, and optimization opportunities.",
-    "timeout": 300
+
+  "roles": {
+    "plan": {
+      "description": "Creates implementation plans without executing code",
+      "systemPrompt": "You are a technical planner. Analyze requirements, break down tasks into clear steps, identify dependencies, and create actionable implementation plans. Do NOT write code - only plan. Output your plan in a structured format with numbered steps.",
+      "defaultAdapter": "claude-code",
+      "timeout": 300,
+      "claudeOptions": {
+        "permissionMode": "plan",
+        "allowedTools": ["Read", "Glob", "Grep"]
+      }
+    },
+
+    "implement": {
+      "description": "Implements code changes based on plans or requirements",
+      "systemPrompt": "You are an implementation specialist. Follow the provided plan exactly and implement each step. Write clean, tested code. Report any blockers or deviations from the plan.",
+      "defaultAdapter": "claude-code",
+      "timeout": 900,
+      "claudeOptions": {
+        "allowedTools": ["Read", "Write", "Edit", "Glob", "Grep", "Bash"]
+      }
+    },
+
+    "review": {
+      "description": "Reviews code for bugs, issues, and improvements",
+      "systemPrompt": "You are a code reviewer. Review the code thoroughly for bugs, logic errors, edge cases, error handling, security issues, and performance problems. List findings with file:line references and severity (critical/high/medium/low).",
+      "defaultAdapter": "claude-code",
+      "timeout": 300,
+      "claudeOptions": {
+        "allowedTools": ["Read", "Glob", "Grep"]
+      }
+    },
+
+    "review-security": {
+      "description": "Security-focused code review",
+      "systemPrompt": "You are a security expert. Review code for OWASP top 10, injection attacks, authentication issues, data exposure, and supply chain risks. Prioritize findings by severity (critical/high/medium/low). Provide specific remediation steps.",
+      "defaultAdapter": "gemini-cli",
+      "timeout": 300
+    },
+
+    "review-performance": {
+      "description": "Performance-focused code review",
+      "systemPrompt": "You are a performance expert. Find bottlenecks, memory leaks, N+1 queries, inefficient algorithms, and optimization opportunities. Quantify impact where possible and suggest specific fixes.",
+      "defaultAdapter": "codex-cli",
+      "timeout": 300
+    },
+
+    "test": {
+      "description": "Writes and runs tests for code changes",
+      "systemPrompt": "You are a testing specialist. Write unit tests, integration tests, and edge case tests. Run tests and report results. Aim for high coverage of changed code. Use the project's existing test framework.",
+      "defaultAdapter": "claude-code",
+      "timeout": 600,
+      "claudeOptions": {
+        "allowedTools": ["Read", "Write", "Edit", "Glob", "Grep", "Bash"]
+      }
+    },
+
+    "fix": {
+      "description": "Fixes issues identified by reviewers or tests",
+      "systemPrompt": "You are a code fixer. Apply fixes for the issues provided. Make minimal, focused changes. Verify fixes don't break existing functionality. Explain what you changed and why.",
+      "defaultAdapter": "claude-code",
+      "timeout": 600,
+      "claudeOptions": {
+        "allowedTools": ["Read", "Write", "Edit", "Glob", "Grep", "Bash"]
+      }
+    },
+
+    "research": {
+      "description": "Researches APIs, libraries, and best practices",
+      "systemPrompt": "You are a research assistant. Find documentation, examples, and best practices. Summarize findings concisely with links to sources. Focus on practical, actionable information.",
+      "defaultAdapter": "gemini-cli",
+      "timeout": 300
+    },
+
+    "architect": {
+      "description": "Analyzes architecture and suggests improvements",
+      "systemPrompt": "You are a software architect. Analyze code structure, identify patterns and anti-patterns, and recommend improvements. Consider scalability, maintainability, testability, and security. Provide concrete refactoring suggestions.",
+      "defaultAdapter": "claude-code",
+      "timeout": 600,
+      "claudeOptions": {
+        "permissionMode": "plan",
+        "allowedTools": ["Read", "Glob", "Grep"]
+      }
+    },
+
+    "document": {
+      "description": "Writes documentation for code",
+      "systemPrompt": "You are a technical writer. Write clear README updates, API docs, and inline comments. Focus on 'why' not 'what'. Keep it concise and useful for developers.",
+      "defaultAdapter": "claude-code",
+      "timeout": 300,
+      "claudeOptions": {
+        "allowedTools": ["Read", "Write", "Edit", "Glob"]
+      }
+    }
   },
-  "test-writer": {
-    "adapter": "claude-code",
-    "systemPrompt": "You are a testing specialist. Write comprehensive unit tests, integration tests, and identify edge cases that need testing.",
-    "timeout": 600,
-    "allowedTools": ["Read", "Write", "Glob", "Grep"]
-  },
-  "documentation-writer": {
-    "adapter": "claude-code",
-    "systemPrompt": "You are a technical writer. Write clear, concise documentation including API docs, README updates, and inline comments.",
-    "timeout": 300,
-    "allowedTools": ["Read", "Write", "Glob"]
-  },
-  "architect": {
-    "adapter": "claude-code",
-    "systemPrompt": "You are a software architect. Analyze code structure, suggest architectural improvements, identify patterns and anti-patterns, and recommend refactoring strategies.",
-    "timeout": 600,
-    "allowedTools": ["Read", "Glob", "Grep", "Task"]
-  },
-  "researcher": {
-    "adapter": "gemini-cli",
-    "systemPrompt": "You are a research assistant. Search for information, analyze documentation, and summarize findings concisely.",
-    "timeout": 300
-  },
-  "code-fixer": {
-    "adapter": "claude-code",
-    "systemPrompt": "You are a code maintenance specialist. Fix bugs, apply patches, and resolve issues identified by other reviewers. Ensure changes are minimal and focused.",
-    "timeout": 600,
-    "allowedTools": ["Read", "Write", "Edit", "Glob", "Grep", "Bash"]
+
+  "legacyProfiles": {
+    "_comment": "Backward compatibility mapping from old profile names to new role+adapter",
+    "planner": { "role": "plan", "adapter": "claude-code" },
+    "implementer": { "role": "implement", "adapter": "claude-code" },
+    "reviewer-bugs": { "role": "review", "adapter": "claude-code" },
+    "reviewer-security": { "role": "review-security", "adapter": "gemini-cli" },
+    "reviewer-performance": { "role": "review-performance", "adapter": "codex-cli" },
+    "tester": { "role": "test", "adapter": "claude-code" },
+    "fixer": { "role": "fix", "adapter": "claude-code" },
+    "researcher": { "role": "research", "adapter": "gemini-cli" },
+    "architect": { "role": "architect", "adapter": "claude-code" },
+    "documenter": { "role": "document", "adapter": "claude-code" }
   }
 }

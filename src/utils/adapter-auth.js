@@ -378,6 +378,101 @@ function spawnInteractiveLogin(adapterName) {
   };
 }
 
+/**
+ * Quick check if an adapter is likely authenticated
+ * Returns { authenticated: boolean, reason: string }
+ *
+ * This is a fast, synchronous check that doesn't spawn processes.
+ * For definitive verification, use testAdapterAuth() instead.
+ */
+function isAdapterAuthenticated(adapterName) {
+  const config = ADAPTER_AUTH_CONFIG[adapterName];
+  if (!config) {
+    return { authenticated: false, reason: 'Unknown adapter' };
+  }
+
+  switch (adapterName) {
+    case 'gemini-cli': {
+      // Gemini uses OAuth credentials stored in ~/.gemini/oauth_creds.json
+      const credsPath = expandPath('~/.gemini/oauth_creds.json');
+      if (credsPath && fs.existsSync(credsPath)) {
+        try {
+          const creds = JSON.parse(fs.readFileSync(credsPath, 'utf8'));
+          // Check if we have a refresh token (indicates valid OAuth flow completed)
+          if (creds.refresh_token) {
+            return { authenticated: true, reason: 'OAuth credentials found' };
+          }
+        } catch (e) {
+          // Invalid JSON or read error
+        }
+      }
+      return {
+        authenticated: false,
+        reason: 'Gemini CLI not authenticated. Run "gemini auth login" first.'
+      };
+    }
+
+    case 'claude-code': {
+      // Claude Code handles auth internally via browser OAuth
+      // Check for existing session data in ~/.claude or similar
+      const claudeDir = expandPath('~/.claude');
+      if (claudeDir && fs.existsSync(claudeDir)) {
+        // Claude stores auth tokens internally - presence of dir suggests prior auth
+        return { authenticated: true, reason: 'Claude directory exists' };
+      }
+      // Claude will prompt for auth on first run if needed
+      return { authenticated: true, reason: 'Claude handles auth interactively' };
+    }
+
+    case 'codex-cli': {
+      // Codex supports two auth methods:
+      // 1. OPENAI_API_KEY environment variable
+      // 2. ChatGPT OAuth login (stored in ~/.codex/auth.json)
+      if (checkEnvVar('OPENAI_API_KEY')) {
+        return { authenticated: true, reason: 'OPENAI_API_KEY is set' };
+      }
+      // Check for ChatGPT OAuth credentials
+      const codexAuthPath = expandPath('~/.codex/auth.json');
+      if (codexAuthPath && fs.existsSync(codexAuthPath)) {
+        try {
+          const auth = JSON.parse(fs.readFileSync(codexAuthPath, 'utf8'));
+          // Tokens are nested under auth.tokens object
+          const tokens = auth.tokens || auth;
+          if (tokens.access_token || tokens.refresh_token) {
+            return { authenticated: true, reason: 'ChatGPT OAuth credentials found' };
+          }
+        } catch (e) {
+          // Invalid JSON or read error
+        }
+      }
+      return {
+        authenticated: false,
+        reason: 'Codex CLI not authenticated. Run "codex login" or set OPENAI_API_KEY'
+      };
+    }
+
+    default: {
+      // For other adapters, check env vars and config files
+      const hasEnvVar = config.envVars.some(v => checkEnvVar(v));
+      const hasConfig = config.configFile && checkConfigFile(config.configFile);
+
+      if (hasEnvVar || hasConfig) {
+        return { authenticated: true, reason: 'Credentials found' };
+      }
+
+      // For cli-interactive auth types, assume OK (will prompt if needed)
+      if (config.authType === 'cli-interactive') {
+        return { authenticated: true, reason: 'Interactive auth (may prompt)' };
+      }
+
+      return {
+        authenticated: false,
+        reason: config.loginInstructions || 'Authentication required'
+      };
+    }
+  }
+}
+
 module.exports = {
   ADAPTER_AUTH_CONFIG,
   getAdapterStatus,
@@ -388,5 +483,6 @@ module.exports = {
   spawnInteractiveLogin,
   checkEnvVar,
   checkConfigFile,
-  expandPath
+  expandPath,
+  isAdapterAuthenticated
 };

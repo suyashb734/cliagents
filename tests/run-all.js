@@ -9,7 +9,7 @@
 
 const WebSocket = require('ws');
 
-const BASE_URL = process.env.TEST_URL || 'http://localhost:3001';
+const BASE_URL = process.env.TEST_URL || 'http://localhost:4001';
 
 // Test utilities
 async function request(method, path, body = null) {
@@ -922,6 +922,60 @@ async function testOpenAICompat() {
   });
 }
 
+async function testMessagesEndpoint() {
+  console.log('\n📋 Messages Endpoint Smoke Tests');
+
+  let sessionId;
+
+  await test('GET /orchestration/terminals/:id/messages returns 200', async () => {
+    // Create a terminal first
+    const createRes = await request('POST', '/orchestration/terminals', {
+      adapter: 'claude-code',
+      agentProfile: 'planner'
+    });
+    assert(createRes.status === 200, `Terminal create failed: ${createRes.status}`);
+    const terminalId = createRes.data.terminalId;
+
+    // Get messages
+    const { status, data } = await request('GET', `/orchestration/terminals/${terminalId}/messages`);
+    assert(status === 200, `Expected 200, got ${status}`);
+    assert(data.messages !== undefined, 'Should have messages field');
+    assert(data.pagination !== undefined, 'Should have pagination field');
+
+    // Save for cleanup
+    sessionId = terminalId;
+  });
+
+  await test('Messages endpoint returns empty array for new terminal', async () => {
+    // Create a fresh terminal
+    const createRes = await request('POST', '/orchestration/terminals', {
+      adapter: 'claude-code',
+      agentProfile: 'planner'
+    });
+    const terminalId = createRes.data.terminalId;
+
+    const { status, data } = await request('GET', `/orchestration/terminals/${terminalId}/messages`);
+    assert(status === 200, `Expected 200, got ${status}`);
+    assert(Array.isArray(data.messages), 'messages should be an array');
+    assert(data.messages.length === 0, `Expected 0 messages, got ${data.messages.length}`);
+
+    // Cleanup
+    await request('DELETE', `/orchestration/terminals/${terminalId}`);
+  });
+
+  await test('Messages endpoint returns 404 for invalid terminal', async () => {
+    const { status, data } = await request('GET', '/orchestration/terminals/invalid-id-12345/messages');
+    assert(status === 404, `Expected 404, got ${status}`);
+    assert(data.error, 'Should have error object');
+    assert(data.error.code === 'terminal_not_found', `Expected terminal_not_found, got ${data.error.code}`);
+  });
+
+  // Cleanup from first test
+  if (sessionId) {
+    await request('DELETE', `/orchestration/terminals/${sessionId}`);
+  }
+}
+
 // ============================================
 // MAIN
 // ============================================
@@ -947,6 +1001,7 @@ async function main() {
   await testFileOperations();    // File upload/list tests
   await testErrorFormat();       // Standardized error format tests
   await testWebSocket();         // WebSocket API tests
+  await testMessagesEndpoint();  // Messages endpoint smoke tests
   await testOneShot();
   await testContextPreservation();
   await testErrorHandling();

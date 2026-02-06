@@ -1,54 +1,147 @@
 # cliagents
 
-A Node.js server that wraps CLI-based AI agents (Claude Code, Gemini CLI, Codex, etc.) and exposes them via HTTP REST API and WebSocket for real-time streaming.
+A Node.js server that wraps CLI-based AI agents (Claude Code, Gemini CLI, Codex) and exposes them via HTTP REST API, WebSocket, and MCP for multi-agent orchestration.
 
-> **Security Notice**: This server has no built-in authentication and is intended for **local development only**. Do not expose to the public internet without adding authentication via a reverse proxy.
+[![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](https://opensource.org/licenses/MIT)
 
-## Why?
+## Table of Contents
 
-### Stop Paying for API Keys During Development
+- [Why cliagents?](#why-cliagents)
+- [Key Features](#key-features)
+- [Quick Start](#quick-start)
+- [Use Cases](#use-cases)
+- [Core Adapters](#core-adapters)
+- [OpenAI-Compatible API](#openai-compatible-api)
+- [Multi-Agent Orchestration](#multi-agent-orchestration)
+- [Authentication](#authentication)
+- [API Reference](#api-reference)
+- [Architecture](#architecture)
+- [Configuration](#configuration)
+- [Development](#development)
+- [License](#license)
 
-Most developers use API keys to integrate AI into their apps, paying per token. But if you already have a **Claude Pro**, **ChatGPT Plus**, or **Google account**, you're paying twice:
+## Why cliagents?
+
+### Stop Paying Twice for AI
+
+Most developers use API keys, paying per token. But if you already have **Claude Pro**, **ChatGPT Plus**, or a **Google account**, you're paying twice:
 
 | Approach | Cost | What You Get |
 |----------|------|--------------|
-| **Claude API** | ~$150/mo for heavy use | Pay-per-token billing |
-| **Claude Code CLI** (Pro) | $20/mo flat | ~7.5x more value, included with Pro |
-| **Gemini API** | Free tier is Flash-only | Severe rate limits |
-| **Gemini CLI** | FREE | Blended Pro/Flash with better limits |
+| **Claude API** | ~$150/mo heavy use | Pay-per-token |
+| **Claude Code CLI** (Pro) | $20/mo flat | Included with Pro subscription |
+| **Gemini API** | Free tier limited | Flash-only, rate limits |
+| **Gemini CLI** | FREE | Full access with Google account |
 | **OpenAI API** | Pay-per-token | No subscription benefits |
 | **Codex CLI** (Plus) | $20/mo flat | Included with ChatGPT Plus |
 
-**This server lets you use CLI tools programmatically**, so you can build and test with the generous CLI limits instead of burning through API credits.
+**cliagents lets you use CLI tools programmatically** - build and test with generous CLI limits instead of burning API credits.
 
-### The Problem with CLI Tools
+### Multi-Agent Cost Optimization
 
-CLI agents like Claude Code are powerful but:
-- They're designed for terminal use, not programmatic access
-- Each invocation spawns a new process (slow, no session persistence)
-- No easy way to integrate into web apps or other services
+By orchestrating multiple CLI agents, you can:
+- **Distribute workload** across agents to stay within individual rate limits
+- **Use the right tool** for each task (Gemini for research, Claude for coding, Codex for review)
+- **Avoid premium tiers** by parallelizing work across standard subscriptions
 
-### What This Server Does
+## Key Features
 
-- Maintains **persistent sessions** with CLI agents
-- Provides **HTTP and WebSocket APIs** for easy integration
-- Supports **multiple adapters** for different AI CLIs
-- Handles **session management**, timeouts, and cleanup
-- **OpenAI-compatible API** (`/v1/chat/completions`) for easy SDK integration
+- **OpenAI-Compatible API** - Drop-in replacement using existing SDKs
+- **Multi-Agent Orchestration** - Coordinate tasks across Claude, Gemini, and Codex
+- **Persistent Sessions** - Maintain context across multiple interactions
+- **Skills System** - Reusable workflows for TDD, debugging, code review
+- **MCP Integration** - Use from Claude Code or other MCP-enabled tools
+
+## Quick Start
+
+### Prerequisites
+
+- **Node.js** 18+
+- **npm** for package management
+- **At least one CLI agent installed**:
+  - Claude Code: `npm i -g @anthropic-ai/claude-code`
+  - Gemini CLI: `npm i -g @google/gemini-cli`
+  - Codex CLI: `npm i -g @openai/codex`
+
+### Installation
+
+```bash
+git clone https://github.com/suyashb734/cliagents.git
+cd cliagents
+npm install
+npm start
+```
+
+Server runs at `http://localhost:4001`
+
+### First Request
+
+```bash
+# One-shot ask
+curl -X POST http://localhost:4001/ask \
+  -H "Content-Type: application/json" \
+  -d '{"message": "What is 2+2?", "adapter": "gemini-cli"}'
+
+# OpenAI-compatible endpoint
+curl -X POST http://localhost:4001/v1/chat/completions \
+  -H "Content-Type: application/json" \
+  -d '{
+    "model": "gemini-2.5-flash",
+    "messages": [{"role": "user", "content": "Hello!"}]
+  }'
+```
+
+## Use Cases
+
+### 1. Planning & Review Workflows
+Use Claude as a supervisor to create plans, then have Gemini and Codex review and refine before implementation.
+
+### 2. Orchestrated Implementation
+Claude breaks down a feature into tasks, delegates implementation to Gemini, and monitors progress. Codex reviews each piece for security.
+
+### 3. Code Review Ensemble
+Run code through multiple agents in parallel - each catches different issues:
+- Claude: Logic bugs, architecture concerns
+- Gemini: Documentation, API design
+- Codex: Security vulnerabilities, performance
+
+### 4. AI-Driven TDD
+One agent writes failing tests, another implements code to pass them, a third refactors. Full Red-Green-Refactor cycle.
+
+### 5. Automated Documentation
+Agents monitor code changes and automatically update READMEs, API docs, and inline comments.
+
+## Core Adapters
+
+### Primary (Fully Tested)
+
+| Adapter | CLI Command | Cost | Install |
+|---------|-------------|------|---------|
+| `claude-code` | `claude` | $20/mo (Pro) | `npm i -g @anthropic-ai/claude-code` |
+| `gemini-cli` | `gemini` | FREE | `npm i -g @google/gemini-cli` |
+| `codex-cli` | `codex` | $20/mo (Plus) | `npm i -g @openai/codex` |
+
+### Experimental
+
+| Adapter | CLI Command | Status |
+|---------|-------------|--------|
+| `amazon-q` | `q` | Implemented, needs testing |
+| `github-copilot` | `gh copilot` | Implemented, needs testing |
+
+See [docs/adapters.md](docs/adapters.md) for all adapters including Aider, Goose, and others.
 
 ## OpenAI-Compatible API
 
-cliagents exposes an OpenAI-compatible endpoint, so you can use existing SDKs:
+Use existing OpenAI SDKs with cliagents:
 
 ```javascript
 import OpenAI from 'openai';
 
 const client = new OpenAI({
-  baseURL: 'http://localhost:3001/v1',
-  apiKey: 'unused'  // Not needed for CLI agents
+  baseURL: 'http://localhost:4001/v1',
+  apiKey: 'unused'  // Not needed in dev mode
 });
 
-// Works with Claude, Gemini, or OpenAI models
 const response = await client.chat.completions.create({
   model: 'claude-sonnet-4-20250514',  // or 'gemini-2.5-flash', 'gpt-4o'
   messages: [{ role: 'user', content: 'Hello!' }],
@@ -60,124 +153,102 @@ for await (const chunk of response) {
 }
 ```
 
-### Available Endpoints
-
-| Endpoint | Description |
-|----------|-------------|
-| `POST /v1/chat/completions` | OpenAI-compatible chat (streaming & non-streaming) |
-| `GET /v1/models` | List available models (based on installed CLIs) |
-| `GET /v1/models/:id` | Get specific model info |
-
 ### Model Routing
-
-The model name determines which CLI adapter handles the request:
 
 | Model Name | Routes To |
 |------------|-----------|
-| `gpt-4o`, `gpt-4o-mini`, `o3-mini` | Codex CLI |
-| `claude-sonnet-4-20250514`, `claude-opus-4-5-20250514` | Claude Code |
-| `gemini-2.5-flash`, `gemini-2.5-pro` | Gemini CLI |
+| `claude-*` models | Claude Code |
+| `gemini-*` models | Gemini CLI |
+| `gpt-*`, `o3-*`, `o4-*` | Codex CLI |
 
-## Switching to Production
+### Switching to Production
 
-cliagents is a **development tool**. When you're ready for production, switch to real APIs with minimal code changes:
-
-### Option 1: Direct API (Single Provider)
+When ready for production, change two lines:
 
 ```javascript
-// DEVELOPMENT
+// Development
 const client = new OpenAI({
-  baseURL: 'http://localhost:3001/v1',
+  baseURL: 'http://localhost:4001/v1',
   apiKey: 'unused'
 });
 
-// PRODUCTION - Change 2 lines
+// Production - just change baseURL and apiKey
 const client = new OpenAI({
-  baseURL: 'https://api.openai.com/v1',  // ← Change
-  apiKey: process.env.OPENAI_API_KEY      // ← Change
-});
-
-// Same code works!
-const response = await client.chat.completions.create({
-  model: 'gpt-4o',
-  messages: [{ role: 'user', content: 'Hello' }]
+  baseURL: 'https://api.openai.com/v1',
+  apiKey: process.env.OPENAI_API_KEY
 });
 ```
 
-### Option 2: LiteLLM (Multi-Provider) - Recommended
+## Multi-Agent Orchestration
 
-For production with multiple providers (Claude, GPT, Gemini), use [LiteLLM](https://docs.litellm.ai/):
+cliagents includes an orchestration layer for coordinating multiple agents.
+
+### MCP Tools
+
+When using cliagents as an MCP server with Claude Code:
 
 ```javascript
-// DEVELOPMENT - cliagents
-const client = new OpenAI({
-  baseURL: 'http://localhost:3001/v1',
-  apiKey: 'unused'
+// Delegate task to another agent
+delegate_task({
+  role: "implement",
+  adapter: "gemini-cli",
+  message: "Implement the login form based on the design spec"
 });
 
-// PRODUCTION - LiteLLM proxy (same OpenAI SDK!)
-const client = new OpenAI({
-  baseURL: 'http://your-litellm-proxy:4000/v1',
-  apiKey: process.env.LITELLM_API_KEY
+// Run a predefined workflow
+run_workflow({
+  workflow: "code-review",  // Parallel: bugs + security + performance
+  message: "Review src/auth/"
 });
 
-// Add provider prefix for routing
-const response = await client.chat.completions.create({
-  model: 'anthropic/claude-sonnet-4-20250514',  // ← Add prefix
-  messages: [{ role: 'user', content: 'Hello' }]
-});
+// List available skills
+list_skills({ tag: "debugging" });
 ```
 
-### Option 3: Environment-Based Switch
+### Available Workflows
 
-```javascript
-import OpenAI from 'openai';
+| Workflow | Description |
+|----------|-------------|
+| `code-review` | Parallel review for bugs, security, performance |
+| `feature` | Plan → Implement → Test |
+| `bugfix` | Analyze → Fix → Test |
+| `research` | Research → Document |
 
-const isDev = process.env.NODE_ENV === 'development';
+### Skills System
 
-const client = new OpenAI({
-  baseURL: isDev ? 'http://localhost:3001/v1' : 'https://api.openai.com/v1',
-  apiKey: isDev ? 'unused' : process.env.OPENAI_API_KEY
-});
-
-// Zero code changes between dev and prod
-```
-
-## Installation
+Skills are reusable workflows loaded from `SKILL.md` files:
 
 ```bash
-git clone https://github.com/suyashb734/cliagents.git
-cd cliagents
-npm install
+# List available skills
+curl http://localhost:4001/orchestration/skills
+
+# Invoke a skill
+curl -X POST http://localhost:4001/orchestration/skills/invoke \
+  -H "Content-Type: application/json" \
+  -d '{"skill": "test-driven-development", "message": "Add user logout"}'
+```
+
+Built-in skills: `test-driven-development`, `debugging`, `code-review`, `multi-agent-workflow`, `agent-handoff`
+
+## Authentication
+
+Authentication is **optional** and disabled by default (dev mode).
+
+To enable:
+
+```bash
+export CLI_AGENTS_API_KEY="your-secret-key"
 npm start
 ```
 
-## Quick Start
-
-### As a Standalone Server
-
+Then include in requests:
 ```bash
-npm start
-# Server running at http://localhost:3001
-# WebSocket at ws://localhost:3001/ws
+curl -H "Authorization: Bearer your-secret-key" ...
+# or
+curl -H "X-API-Key: your-secret-key" ...
 ```
 
-### As a Module
-
-```javascript
-const { createSessionManager, AgentServer } = require('cliagents');
-
-// Option 1: Programmatic usage (no HTTP server)
-const manager = createSessionManager();
-const session = await manager.createSession({ adapter: 'claude-code' });
-const response = await manager.send(session.sessionId, 'What is 2+2?');
-console.log(response.text);
-await manager.terminateSession(session.sessionId);
-
-// Option 2: With HTTP server
-const server = new AgentServer({ port: 3001 });
-await server.start();
-```
+> **Note**: For production deployment, always set `CLI_AGENTS_API_KEY` or use a reverse proxy with authentication.
 
 ## API Reference
 
@@ -187,463 +258,103 @@ await server.start();
 |--------|----------|-------------|
 | GET | `/health` | Health check |
 | GET | `/adapters` | List available adapters |
-| POST | `/sessions` | Create a new session |
-| GET | `/sessions` | List all sessions |
-| GET | `/sessions/:id` | Get session info |
-| POST | `/sessions/:id/messages` | Send message to session |
-| POST | `/sessions/:id/parse` | Parse response text |
+| POST | `/sessions` | Create session |
+| POST | `/sessions/:id/messages` | Send message |
 | DELETE | `/sessions/:id` | Terminate session |
-| POST | `/ask` | One-shot ask (auto-creates and terminates session) |
-
-### Create Session
-
-```bash
-curl -X POST http://localhost:3001/sessions \
-  -H "Content-Type: application/json" \
-  -d '{"adapter": "claude-code"}'
-```
-
-Response:
-```json
-{
-  "sessionId": "abc123...",
-  "adapter": "claude-code",
-  "status": "ready"
-}
-```
-
-### Send Message
-
-```bash
-curl -X POST http://localhost:3001/sessions/abc123/messages \
-  -H "Content-Type: application/json" \
-  -d '{"message": "What is the capital of France?"}'
-```
-
-Response:
-```json
-{
-  "text": "The capital of France is Paris.",
-  "result": "The capital of France is Paris.",
-  "metadata": {
-    "inputTokens": 12,
-    "outputTokens": 8
-  }
-}
-```
-
-### One-Shot Ask
-
-```bash
-curl -X POST http://localhost:3001/ask \
-  -H "Content-Type: application/json" \
-  -d '{"message": "What is 2+2?"}'
-```
-
-### WebSocket
-
-```javascript
-const ws = new WebSocket('ws://localhost:3001/ws');
-
-ws.onmessage = (event) => {
-  const msg = JSON.parse(event.data);
-  console.log(msg.type, msg);
-};
-
-// Create session
-ws.send(JSON.stringify({ type: 'create_session', adapter: 'claude-code' }));
-
-// Send message (after session created)
-ws.send(JSON.stringify({ type: 'send_message', message: 'Hello!' }));
-
-// Receive streaming chunks
-// { type: 'chunk', chunk: { type: 'text', content: '...' } }
-// { type: 'complete' }
-```
-
-## Supported Adapters
-
-### ✅ Tested & Production-Ready
-
-These adapters are fully tested with the test suite:
-
-| Adapter | CLI | Cost | Install |
-|---------|-----|------|---------|
-| `claude-code` | `claude` | FREE with Claude Pro ($20/mo) | `npm i -g @anthropic-ai/claude-code` |
-| `gemini-cli` | `gemini` | FREE (Google account) | `npm i -g @google/gemini-cli` |
-
-### 🧪 Implemented (Not Yet Tested)
-
-These adapters are implemented but need real-world testing:
-
-| Adapter | CLI | Cost | Install |
-|---------|-----|------|---------|
-| `codex-cli` | `codex` | FREE with ChatGPT Plus ($20/mo) | `npm i -g @openai/codex` |
-| `mistral-vibe` | `vibe` | FREE until Dec 2025 | [GitHub releases](https://github.com/mistralai/mistral-vibe) |
-| `amazon-q` | `kiro` | FREE tier available | AWS CLI plugin |
-| `plandex` | `plandex` | FREE cloud tier | `curl -sL plandex.ai/install.sh \| bash` |
-| `github-copilot` | `gh copilot` | $10/mo (free for students) | `gh extension install github/gh-copilot` |
-
-### 🔌 API Key Routers (Require Your Own Keys)
-
-These wrap CLIs that need your own API keys - no free tier benefit:
-
-| Adapter | CLI | What It Does | Install |
-|---------|-----|--------------|---------|
-| `aider` | `aider` | AI pair programming with Git | `pip install aider-chat` |
-| `goose` | `goose` | Block's open-source agent | `brew install goose` |
-| `shell-gpt` | `sgpt` | Shell command generation | `pip install shell-gpt` |
-| `aichat` | `aichat` | Multi-provider CLI | `cargo install aichat` |
-| `continue-cli` | `cn` | IDE-style coding agent | `npm i -g @continuedev/cli` |
-
----
-
-### Claude Code
-Anthropic's official CLI for Claude. Best for coding tasks.
-
-```bash
-# Install
-npm i -g @anthropic-ai/claude-code
-```
-
-```javascript
-const session = await manager.createSession({
-  adapter: 'claude-code',
-  model: 'claude-sonnet-4-5-20250514',  // Optional
-  workDir: '/path/to/project',
-  systemPrompt: 'You are a helpful assistant'
-});
-```
-
-**Models**: `claude-sonnet-4-5-20250514`, `claude-opus-4-5-20250514`, `claude-3-5-sonnet-20241022`, `claude-3-5-haiku-20241022`
-
----
-
-### Gemini CLI
-Google's Gemini models via CLI. FREE with any Google account.
-
-```bash
-# Install (requires Node.js 20+)
-npm install -g @google/gemini-cli
-```
-
-```javascript
-const session = await manager.createSession({
-  adapter: 'gemini-cli',
-  model: 'gemini-2.5-pro',
-  temperature: 0.7,  // Generation params
-  top_p: 0.9
-});
-```
-
-**Models**: `gemini-2.5-flash`, `gemini-2.5-pro`, `gemini-3-pro-preview`
-
----
-
-### OpenAI Codex CLI
-OpenAI's coding agent. 31K+ GitHub stars.
-
-```bash
-# Install
-npm i -g @openai/codex
-```
-
-```javascript
-const session = await manager.createSession({
-  adapter: 'codex-cli',
-  model: 'o3-mini',  // or 'gpt-4o', 'o4-mini'
-  workDir: '/path/to/project'
-});
-```
-
-**Models**: `o3-mini`, `o4-mini`, `gpt-4o`, `gpt-4o-mini`
-
----
-
-### Aider
-AI pair programming with Git integration. Multi-model support.
-
-```bash
-# Install
-pip install aider-chat
-```
-
-```javascript
-const session = await manager.createSession({
-  adapter: 'aider',
-  model: 'sonnet',  // or 'opus', 'gpt-4o', 'deepseek'
-  files: ['src/main.py', 'tests/'],  // Files to include
-  autoCommits: false  // Disable auto-commits
-});
-```
-
-**Models**: `sonnet`, `opus`, `haiku`, `gpt-4o`, `gpt-4o-mini`, `o3-mini`, `deepseek`, `deepseek-r1`
-
----
-
-### Goose
-Block's open-source AI agent with MCP support.
-
-```bash
-# Install (macOS)
-brew install goose
-```
-
-```javascript
-const session = await manager.createSession({
-  adapter: 'goose',
-  model: 'claude-3.5-sonnet',
-  workDir: '/path/to/project'
-});
-```
-
-**Models**: `claude-3.5-sonnet`, `claude-3-opus`, `gpt-4o`, `gpt-4o-mini`, `gemini-2.0-flash`
-
----
-
-### Amazon Q Developer CLI
-AWS's AI-powered coding assistant (Claude 3.7 Sonnet).
-
-```bash
-# Install via AWS CLI or Kiro CLI
-# Requires AWS credentials
-```
-
-```javascript
-const session = await manager.createSession({
-  adapter: 'amazon-q',
-  workDir: '/path/to/project'
-});
-```
-
----
-
-### Plandex
-Designed for large projects (2M+ tokens context).
-
-```bash
-# Install
-curl -sL https://plandex.ai/install.sh | bash
-```
-
-```javascript
-const session = await manager.createSession({
-  adapter: 'plandex',
-  model: 'openai/gpt-4o',  // OpenRouter format
-  workDir: '/path/to/project'
-});
-```
-
-**Models**: `openai/gpt-4o`, `openai/o3-mini`, `anthropic/claude-3.5-sonnet`, `google/gemini-pro`
-
----
-
-### Continue CLI
-Async coding agents in your terminal.
-
-```bash
-# Install
-npm i -g @continuedev/cli
-```
-
-```javascript
-const session = await manager.createSession({
-  adapter: 'continue-cli',
-  model: 'gpt-4o',
-  workDir: '/path/to/project'
-});
-```
-
-**Models**: `gpt-4o`, `claude-3.5-sonnet`, `gemini-2.5-pro`, `ollama/llama3`
-
----
-
-### Mistral Vibe CLI
-Mistral's coding assistant powered by Devstral (72% SWE-bench).
-
-```bash
-# Install from GitHub releases
-# https://github.com/mistralai/mistral-vibe
-```
-
-```javascript
-const session = await manager.createSession({
-  adapter: 'mistral-vibe',
-  model: 'devstral',  // or 'devstral-small'
-  workDir: '/path/to/project'
-});
-```
-
-**Models**: `devstral-small` (fast, local), `devstral` (full), `codestral`
-
----
-
-### Shell-GPT
-Shell command generation and execution. Uses SessionWrapper for context.
-
-```bash
-# Install
-pip install shell-gpt
-```
-
-```javascript
-const session = await manager.createSession({
-  adapter: 'shell-gpt',
-  model: 'gpt-4o',
-  shellMode: true,  // Generate shell commands
-  executeMode: false  // Auto-execute (careful!)
-});
-```
-
-**Models**: `gpt-4o`, `gpt-4o-mini`, `gpt-3.5-turbo`
-
----
-
-### aichat
-All-in-one LLM CLI with multi-provider support.
-
-```bash
-# Install (Rust)
-cargo install aichat
-```
-
-```javascript
-const session = await manager.createSession({
-  adapter: 'aichat',
-  model: 'openai:gpt-4o',  // provider:model format
-  role: 'shell'  // Optional: shell, code, etc.
-});
-```
-
-**Models**: `openai:gpt-4o`, `anthropic:claude-3.5-sonnet`, `google:gemini-2.0-flash`, `mistral:mistral-large`, `groq:llama-3.3-70b`
-
----
-
-### GitHub Copilot CLI
-GitHub's AI assistant in your terminal. Requires Copilot subscription.
-
-```bash
-# Install (requires GitHub CLI)
-gh extension install github/gh-copilot
-```
-
-```javascript
-const session = await manager.createSession({
-  adapter: 'github-copilot',
-  workDir: '/path/to/project'
-});
-```
-
-**Note**: Requires GitHub Copilot subscription ($10/mo, free for students/OSS maintainers).
-
----
-
-### Adding Custom Adapters
-
-```javascript
-const { AgentAdapter, AgentServer } = require('cliagents');
-
-class MyCustomAdapter extends AgentAdapter {
-  constructor(config) {
-    super(config);
-    this.name = 'my-adapter';
-  }
-
-  async isAvailable() {
-    // Check if CLI is installed
-  }
-
-  async spawn(sessionId, options) {
-    // Start the CLI process
-  }
-
-  async *send(sessionId, message, options) {
-    // Send message and yield response chunks
-  }
-
-  async terminate(sessionId) {
-    // Kill the process
-  }
-
-  // ... implement other required methods
-}
-
-const server = new AgentServer();
-server.registerAdapter('my-adapter', new MyCustomAdapter());
-await server.start();
-```
-
-## Configuration
-
-```javascript
-const server = new AgentServer({
-  port: 3001,                    // HTTP port
-  host: '0.0.0.0',               // Bind address
-  defaultAdapter: 'claude-code', // Default adapter
-  sessionTimeout: 30 * 60 * 1000, // 30 min session timeout
-  maxSessions: 10,               // Max concurrent sessions
-  claudeCode: {
-    timeout: 60000,              // Response timeout
-    workDir: '/tmp/agent',       // Working directory
-    skipPermissions: true,       // Skip permission prompts
-    verbose: true                // Verbose output
-  }
-});
-```
+| POST | `/ask` | One-shot ask |
+| GET | `/v1/models` | List models (OpenAI-compatible) |
+| POST | `/v1/chat/completions` | Chat (OpenAI-compatible) |
+
+### Orchestration Endpoints
+
+| Method | Endpoint | Description |
+|--------|----------|-------------|
+| POST | `/orchestration/handoff` | Delegate task to agent |
+| GET | `/orchestration/terminals` | List active terminals |
+| GET | `/orchestration/skills` | List available skills |
+| POST | `/orchestration/skills/invoke` | Invoke a skill |
+
+Full API documentation: [openapi.json](openapi.json)
 
 ## Architecture
 
 ```
-┌─────────────────────────────────────────────────┐
-│              Your Application                    │
-│    (claude-browser, web app, script, etc.)      │
-└─────────────────────────────────────────────────┘
-                      │
-                      ▼
-┌─────────────────────────────────────────────────┐
-│                  cliagents                       │
-│  ┌──────────────┐  ┌──────────────────────────┐ │
-│  │ HTTP Server  │  │    WebSocket Server      │ │
-│  └──────────────┘  └──────────────────────────┘ │
-│                      │                          │
-│  ┌──────────────────────────────────────────┐  │
-│  │           Session Manager                 │  │
-│  └──────────────────────────────────────────┘  │
-│                      │                          │
-│  ┌─────────┐ ┌─────────┐ ┌─────────┐ ┌─────┐  │
-│  │ Claude  │ │ Gemini  │ │ Codex   │ │ ... │  │
-│  │ Adapter │ │ Adapter │ │ Adapter │ │     │  │
-│  └─────────┘ └─────────┘ └─────────┘ └─────┘  │
-└─────────────────────────────────────────────────┘
-                      │
-                      ▼
-┌─────────────────────────────────────────────────┐
-│              CLI Processes                       │
-│  (claude, gemini, codex, etc.)                  │
-└─────────────────────────────────────────────────┘
+┌─────────────────────────────────────────────────────────┐
+│                    Client Applications                   │
+│         (Web apps, scripts, Claude Code via MCP)        │
+└─────────────────────────────────────────────────────────┘
+                           │
+              ┌────────────┼────────────┐
+              ▼            ▼            ▼
+         HTTP/REST    WebSocket    MCP Server
+              │            │            │
+┌─────────────┴────────────┴────────────┴─────────────────┐
+│                     cliagents Server                     │
+│  ┌─────────────────────────────────────────────────────┐│
+│  │              Orchestration Layer                     ││
+│  │    (Task routing, workflows, skills, handoffs)      ││
+│  └─────────────────────────────────────────────────────┘│
+│  ┌─────────────────────────────────────────────────────┐│
+│  │              Session Manager                         ││
+│  │         (Lifecycle, timeouts, cleanup)              ││
+│  └─────────────────────────────────────────────────────┘│
+│  ┌───────────┐  ┌───────────┐  ┌───────────┐           │
+│  │  Claude   │  │  Gemini   │  │  Codex    │  ...      │
+│  │  Adapter  │  │  Adapter  │  │  Adapter  │           │
+│  └───────────┘  └───────────┘  └───────────┘           │
+└─────────────────────────────────────────────────────────┘
+                           │
+┌─────────────────────────────────────────────────────────┐
+│                    CLI Processes                         │
+│              (claude, gemini, codex, ...)               │
+└─────────────────────────────────────────────────────────┘
 ```
 
-## Roadmap
+## Configuration
 
-### Completed
-- [x] Core server with REST API and SSE streaming
-- [x] WebSocket support
-- [x] Session status tracking and interrupt capability
-- [x] OpenAPI 3.0 specification
-- [x] File upload to sessions
-- [x] Model selection per session
-- [x] 2 fully tested adapters (Claude Code, Gemini CLI)
+### Environment Variables
 
-### In Progress
-- [ ] Test remaining 5 free-tier adapters (Codex, Mistral Vibe, Amazon Q, Plandex, GitHub Copilot)
-- [ ] Validate API key router adapters (Aider, Goose, Shell-GPT, AIChat, Continue)
+| Variable | Description | Default |
+|----------|-------------|---------|
+| `CLI_AGENTS_API_KEY` | API key for authentication | None (dev mode) |
+| `PORT` | Server port | 4001 |
 
-### Planned
-- [ ] Grok CLI adapter (when official CLI releases)
-- [ ] TypeScript definitions
-- [ ] Docker support
-- [ ] Rate limiting
-- [ ] Authentication middleware
+### Programmatic Configuration
+
+```javascript
+const { AgentServer } = require('cliagents');
+
+const server = new AgentServer({
+  port: 4001,
+  defaultAdapter: 'claude-code',
+  sessionTimeout: 30 * 60 * 1000,  // 30 minutes
+  maxSessions: 10
+});
+
+await server.start();
+```
+
+## Development
+
+### Running Tests
+
+```bash
+npm test
+```
+
+### Development Mode
+
+```bash
+npm run dev  # Starts with --watch
+```
+
+### Adding Adapters
+
+See [docs/adding-adapters.md](docs/adding-adapters.md) for the adapter development guide.
+
+### Contributing
+
+See [CONTRIBUTING.md](CONTRIBUTING.md) for guidelines.
 
 ## License
 

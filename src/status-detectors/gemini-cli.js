@@ -20,16 +20,19 @@ const { TerminalStatus } = require('../models/terminal-status');
 const GEMINI_PATTERNS = {
   /**
    * IDLE: Prompt waiting for input
-   * Gemini CLI shows `gemini>` or similar prompt when ready
+   * Modern Gemini CLI shows input box with "Type your message" text
+   * Also matches legacy `gemini>` prompt and status bar indicators
    */
-  IDLE: /(gemini|>)\s*$/i,
+  IDLE: /Type your message|gemini>|\*\s+Type your|^\s*>\s*$|\/model\s*$/m,
 
   /**
    * PROCESSING: Agent is working
-   * Gemini CLI shows thinking indicators while processing
-   * May include spinner characters or "Generating..." text
+   * Gemini CLI shows spinner characters while processing with whimsical messages.
+   * Examples: "⠋ I'm Feeling Lucky", "⠧ Finishing the Kessel Run", "⠹ Formulating a Concise Summary"
+   * The key indicator is: spinner + text + "(esc to cancel, Ns)" at line end
+   * Also match common action verbs as backup
    */
-  PROCESSING: /[⠋⠙⠹⠸⠼⠴⠦⠧⠇⠏]|Generating|Thinking|Loading|\.{3}$/,
+  PROCESSING: /[⠋⠙⠹⠸⠼⠴⠦⠧⠇⠏].*\(esc to cancel|[⠋⠙⠹⠸⠼⠴⠦⠧⠇⠏]\s+\S+.*\d+s\)|(?:Considering|Generating|Thinking|Loading|Formulating|Finishing)/,
 
   /**
    * COMPLETED: Response has been delivered
@@ -40,20 +43,30 @@ const GEMINI_PATTERNS = {
   /**
    * WAITING_PERMISSION: Needs user approval (sandbox mode bypasses this)
    * In non-sandbox mode, may ask for file access
+   * IMPORTANT: Must require start-of-line to avoid matching "Allow?" in response text
+   * Real CLI permission prompts appear at the start of lines
    */
-  WAITING_PERMISSION: /Confirm|Approve|Allow|y\/n\s*[\?\:]|proceed\?/i,
+  WAITING_PERMISSION: /^\s*\(y\/n\)|^Allow\s*\?|^Approve\s*\?|^Confirm\s*\?|^proceed\s*\?/mi,
 
   /**
    * WAITING_USER_ANSWER: Presenting choices
-   * Interactive prompts for user selection
+   * Interactive prompts for user selection including:
+   * - Trust folder prompts: "Do you trust this folder?"
+   * - Choice selections: "Select...", "Choose...", "Which...?"
+   * - Numbered choice indicators: "● 1. Trust folder" (bullet + number)
+   * IMPORTANT: Must be specific to avoid matching code content
    */
-  WAITING_USER_ANSWER: /Select.*:|Choose.*:|Which.*\?|\[\d+\]|Enter.*:/i,
+  WAITING_USER_ANSWER: /Do you trust this folder|^(?:Select|Choose).*:\s*$|Which.*\?\s*$|● \d+\.\s+Trust/mi,
 
   /**
    * ERROR: Something went wrong
    * Error messages in Gemini CLI output
+   * IMPORTANT: Only match errors at START of line to avoid false positives from code content
+   * When agents read source files containing "error:" or "failed:", we don't want to detect ERROR
+   * Real CLI errors appear at the start of output lines, not embedded in code
+   * NOTE: APIError and RateLimitError MUST also be start-of-line to avoid matching code content
    */
-  ERROR: /\bError\b:|error:|Error:|failed:|FAILED|Exception:|APIError|RateLimitError/i
+  ERROR: /^(?:Error|ERROR)\s*:|^(?:error)\s*:|^\s*\[?(?:error|ERROR)\]?\s*:|^APIError|^RateLimitError/m
 };
 
 class GeminiCliDetector extends BaseStatusDetector {
@@ -87,16 +100,23 @@ class GeminiCliDetector extends BaseStatusDetector {
 
   /**
    * Check if output indicates API error
+   * IMPORTANT: These patterns must be specific to actual CLI error messages,
+   * not generic words that might appear in code being read by agents.
+   * For example, "authentication" appears in many codebases but doesn't indicate an error.
    */
   isApiError(output) {
-    return /APIError|API error|quota exceeded|authentication/i.test(output);
+    // Only match actual API error patterns, not generic words
+    // These must be at start of line or preceded by error indicators
+    return /^(?:APIError|API error|ERROR:.*quota|authentication\s*(?:failed|error|required))/mi.test(output);
   }
 
   /**
    * Check if rate limited
+   * Must match actual rate limit error messages, not variable names like "rate_limit"
    */
   isRateLimited(output) {
-    return /rate.?limit|too many requests|retry after/i.test(output);
+    // Only match actual rate limit error messages with context
+    return /^(?:rate\s*limit|too many requests|retry after \d)/mi.test(output);
   }
 
   /**

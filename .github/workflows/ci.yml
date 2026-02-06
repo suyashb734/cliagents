@@ -2,13 +2,55 @@ name: CI
 
 on:
   push:
-    branches: [main]
+    branches: [main, develop]
   pull_request:
     branches: [main]
 
 jobs:
-  test:
+  lint-and-syntax:
+    name: Lint & Syntax Check
     runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Setup Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: '20'
+          cache: 'npm'
+
+      - name: Install dependencies
+        run: npm ci
+
+      - name: Check JS syntax (all files)
+        run: |
+          echo "Checking JavaScript syntax..."
+          ERRORS=0
+          for file in $(find src -name "*.js"); do
+            if ! node --check "$file" 2>/dev/null; then
+              echo "Syntax error in: $file"
+              ERRORS=$((ERRORS + 1))
+            fi
+          done
+          if [ $ERRORS -ne 0 ]; then
+            echo "Found $ERRORS syntax error(s)"
+            exit 1
+          fi
+          echo "All syntax checks passed"
+
+      - name: Check for debug statements
+        run: |
+          echo "Checking for debug statements..."
+          if grep -rn "console\.log\|debugger" src/ --include="*.js" | head -20; then
+            echo ""
+            echo "Warning: Debug statements found (see above)"
+            echo "Consider removing before production"
+          fi
+
+  test:
+    name: Run Tests
+    runs-on: ubuntu-latest
+    needs: lint-and-syntax
 
     strategy:
       matrix:
@@ -17,7 +59,7 @@ jobs:
     steps:
       - uses: actions/checkout@v4
 
-      - name: Use Node.js ${{ matrix.node-version }}
+      - name: Setup Node.js ${{ matrix.node-version }}
         uses: actions/setup-node@v4
         with:
           node-version: ${{ matrix.node-version }}
@@ -26,38 +68,80 @@ jobs:
       - name: Install dependencies
         run: npm ci
 
-      - name: Start server
-        run: npm start &
+      - name: Install tmux (required for orchestration)
+        run: sudo apt-get update && sudo apt-get install -y tmux
+
+      - name: Verify tmux installation
+        run: tmux -V
+
+      - name: Start server in background
+        run: |
+          npm start &
+          echo "Waiting for server to start..."
         env:
           PORT: 3001
 
-      - name: Wait for server
+      - name: Wait for server health
         run: |
           for i in {1..30}; do
-            curl -s http://localhost:3001/health && break
-            echo "Waiting for server..."
-            sleep 1
+            if curl -s http://localhost:3001/health > /dev/null 2>&1; then
+              echo "Server is healthy"
+              exit 0
+            fi
+            echo "Waiting for server... ($i/30)"
+            sleep 2
           done
+          echo "Server failed to start"
+          exit 1
 
       - name: Run tests
         run: npm test
         env:
           CI: true
 
-  lint:
-    runs-on: ubuntu-latest
+      - name: Stop server
+        if: always()
+        run: pkill -f "node.*server" || true
 
+  security-check:
+    name: Security Audit
+    runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
 
-      - name: Use Node.js
+      - name: Setup Node.js
         uses: actions/setup-node@v4
         with:
-          node-version: '20.x'
+          node-version: '20'
           cache: 'npm'
 
       - name: Install dependencies
         run: npm ci
 
-      - name: Check for syntax errors
-        run: node --check src/index.js
+      - name: Run npm audit
+        run: npm audit --audit-level=high
+        continue-on-error: true
+
+      - name: Check for hardcoded secrets
+        run: |
+          echo "Checking for potential secrets..."
+          FOUND=0
+          # Check for common secret patterns (excluding env var references)
+          if grep -rEn "(password|secret|api_key|apikey|token)\s*[:=]\s*['\"][^'\"]+['\"]" src/ --include="*.js" | grep -v "process\.env" | grep -v "req\." | grep -v "config\." | head -10; then
+            FOUND=1
+          fi
+          if [ $FOUND -eq 1 ]; then
+            echo ""
+            echo "Warning: Potential hardcoded secrets found (review above)"
+          else
+            echo "No hardcoded secrets detected"
+          fi
+
+      - name: Check for unsafe shell execution patterns
+        run: |
+          echo "Checking for unsafe shell execution..."
+          # Look for execSync/spawn without proper escaping
+          if grep -rn "execSync\|spawn\|exec(" src/ --include="*.js" | head -20; then
+            echo ""
+            echo "Shell execution found - ensure proper input sanitization"
+          fi

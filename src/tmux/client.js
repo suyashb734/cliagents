@@ -5,9 +5,12 @@
  * Inspired by CAO's approach for multi-agent orchestration.
  */
 
-const { execSync, exec } = require('child_process');
+const { execSync, spawnSync } = require('child_process');
 const path = require('path');
 const fs = require('fs');
+
+// Regex for validating session/window names (alphanumeric, dash, underscore only)
+const SAFE_NAME_PATTERN = /^[a-zA-Z0-9_-]+$/;
 
 class TmuxClient {
   constructor(options = {}) {
@@ -36,43 +39,81 @@ class TmuxClient {
   }
 
   /**
-   * Build tmux command with optional socket path
+   * Build tmux command arguments with optional socket path
+   * @param {string[]} args - Tmux arguments
+   * @returns {string[]} - Full command arguments including socket option
    */
-  _tmuxCmd(args) {
-    const socketArg = this.socketPath ? `-S ${this.socketPath}` : '';
-    return `tmux ${socketArg} ${args}`;
+  _tmuxArgs(args) {
+    const fullArgs = [];
+    if (this.socketPath) {
+      fullArgs.push('-S', this.socketPath);
+    }
+    return fullArgs.concat(args);
   }
 
   /**
-   * Execute tmux command synchronously
+   * Execute tmux command synchronously using spawnSync
+   * @param {string[]} args - Command arguments
+   * @param {object} options - Options for spawnSync
    */
   _exec(args, options = {}) {
-    const cmd = this._tmuxCmd(args);
-    try {
-      return execSync(cmd, {
-        encoding: 'utf8',
-        stdio: options.silent ? 'pipe' : undefined,
-        ...options
-      });
-    } catch (error) {
-      if (options.ignoreErrors) {
-        return null;
-      }
-      throw error;
+    const tmuxArgs = this._tmuxArgs(args);
+    
+    // Default options
+    const spawnOptions = {
+      encoding: 'utf8',
+      env: options.env || process.env,
+      stdio: options.silent ? 'pipe' : undefined,
+      cwd: options.cwd || process.cwd()
+    };
+
+    const result = spawnSync('tmux', tmuxArgs, spawnOptions);
+
+    if (result.error) {
+      if (options.ignoreErrors) return null;
+      throw result.error;
+    }
+
+    if (result.status !== 0) {
+      if (options.ignoreErrors) return null;
+      const stderr = result.stderr ? result.stderr.toString() : '';
+      throw new Error(`tmux command failed (exit code ${result.status}): ${stderr}`);
+    }
+
+    return result.stdout ? result.stdout.toString() : '';
+  }
+
+  /**
+   * Validate session/window names to prevent injection
+   * @param {string} name - Name to validate
+   * @param {string} type - Type for error message ('session' or 'window')
+   * @throws {Error} If name contains unsafe characters
+   */
+  _validateName(name, type = 'name') {
+    if (!name || typeof name !== 'string') {
+      throw new Error(`${type} name is required`);
+    }
+    if (!SAFE_NAME_PATTERN.test(name)) {
+      throw new Error(`Invalid ${type} name: "${name}". Only alphanumeric characters, dashes, and underscores are allowed.`);
+    }
+    if (name.length > 50) {
+      throw new Error(`${type} name too long (max 50 characters)`);
     }
   }
 
   /**
-   * Escape special characters for tmux send-keys
+   * Escape string for use in shell single quotes
+   * Single quotes cannot be escaped inside single quotes, so we:
+   * 'text' + \' + 'more text' = 'text'\''more text'
+   * @param {string} str - String to escape
+   * @returns {string} - Escaped string safe for single-quoted shell context
    */
-  _escapeKeys(text) {
-    // Escape characters that have special meaning in tmux
-    return text
-      .replace(/\\/g, '\\\\')
-      .replace(/"/g, '\\"')
-      .replace(/\$/g, '\\$')
-      .replace(/`/g, '\\`')
-      .replace(/!/g, '\\!');
+  _escapeForShell(str) {
+    if (typeof str !== 'string') {
+      return '';
+    }
+    // Replace single quotes with: end quote, escaped quote, start quote
+    return str.replace(/'/g, "'\\''");
   }
 
   /**
@@ -84,6 +125,10 @@ class TmuxClient {
    * @returns {boolean} - Success status
    */
   createSession(sessionName, windowName, terminalId, options = {}) {
+    // SECURITY: Validate names to prevent command injection
+    this._validateName(sessionName, 'session');
+    this._validateName(windowName, 'window');
+
     const { workingDir, env = {} } = options;
 
     // Check if session already exists
@@ -98,14 +143,20 @@ class TmuxClient {
     };
 
     // Create detached session
-    const cdArg = workingDir ? `-c "${workingDir}"` : '';
-    this._exec(`new-session -d -s "${sessionName}" -n "${windowName}" ${cdArg}`, {
+    const args = ['new-session', '-d', '-s', sessionName, '-n', windowName];
+    
+    if (workingDir) {
+      args.push('-c', workingDir);
+    }
+    
+    this._exec(args, {
       env: { ...process.env, ...envVars }
     });
 
     // Set environment variables in the session
     for (const [key, value] of Object.entries(envVars)) {
-      this._exec(`set-environment -t "${sessionName}" ${key} "${value}"`);
+      // Use set-environment which handles escaping safely when passed as args
+      this._exec(['set-environment', '-t', sessionName, key, value]);
     }
 
     return true;
@@ -117,7 +168,8 @@ class TmuxClient {
    * @returns {boolean}
    */
   sessionExists(sessionName) {
-    const result = this._exec(`has-session -t "${sessionName}" 2>/dev/null`, {
+    // has-session returns 0 if exists, 1 if not
+    const result = this._exec(['has-session', '-t', sessionName], {
       ignoreErrors: true,
       silent: true
     });
@@ -132,14 +184,20 @@ class TmuxClient {
    * @param {boolean} pressEnter - Whether to press Enter after
    */
   sendKeys(sessionName, windowName, keys, pressEnter = true) {
-    const escapedKeys = this._escapeKeys(keys);
-    const target = `"${sessionName}:${windowName}"`;
+    this._validateName(sessionName, 'session');
+    this._validateName(windowName, 'window');
+    
+    const target = `${sessionName}:${windowName}`;
 
-    // Use literal mode (-l) for complex text
-    this._exec(`send-keys -t ${target} -l "${escapedKeys}"`);
+    // Send text using -l (literal) flag which handles special characters safely
+    // spawnSync passes this as a raw argument, avoiding shell interpolation
+    this._exec(['send-keys', '-t', target, '-l', keys]);
 
     if (pressEnter) {
-      this._exec(`send-keys -t ${target} Enter`);
+      // Add 100ms delay to ensure text is fully processed before pressing Enter
+      // We use a small sleep here
+      spawnSync('sleep', ['0.1']);
+      this._exec(['send-keys', '-t', target, 'Enter']);
     }
   }
 
@@ -150,8 +208,11 @@ class TmuxClient {
    * @param {string} key - Key name (Enter, Tab, Escape, C-c, etc.)
    */
   sendSpecialKey(sessionName, windowName, key) {
-    const target = `"${sessionName}:${windowName}"`;
-    this._exec(`send-keys -t ${target} ${key}`);
+    this._validateName(sessionName, 'session');
+    this._validateName(windowName, 'window');
+    
+    const target = `${sessionName}:${windowName}`;
+    this._exec(['send-keys', '-t', target, key]);
   }
 
   /**
@@ -162,10 +223,10 @@ class TmuxClient {
    * @returns {string} - Captured output
    */
   getHistory(sessionName, windowName, lines = this.defaultHistoryLimit) {
-    const target = `"${sessionName}:${windowName}"`;
+    const target = `${sessionName}:${windowName}`;
     try {
       // capture-pane with -p prints to stdout, -S -N captures last N lines
-      const output = this._exec(`capture-pane -t ${target} -p -S -${lines}`, {
+      const output = this._exec(['capture-pane', '-t', target, '-p', '-S', `-${lines}`], {
         silent: true
       });
       return output || '';
@@ -182,9 +243,9 @@ class TmuxClient {
    * @returns {string} - Visible content
    */
   getVisibleContent(sessionName, windowName) {
-    const target = `"${sessionName}:${windowName}"`;
+    const target = `${sessionName}:${windowName}`;
     try {
-      return this._exec(`capture-pane -t ${target} -p`, { silent: true }) || '';
+      return this._exec(['capture-pane', '-t', target, '-p'], { silent: true }) || '';
     } catch (error) {
       return '';
     }
@@ -197,8 +258,19 @@ class TmuxClient {
    * @param {string} logPath - Path to log file
    */
   pipePaneToFile(sessionName, windowName, logPath) {
-    const target = `"${sessionName}:${windowName}"`;
+    // SECURITY: Validate session/window names
+    this._validateName(sessionName, 'session');
+    this._validateName(windowName, 'window');
+
+    const target = `${sessionName}:${windowName}`;
     const absolutePath = path.isAbsolute(logPath) ? logPath : path.join(this.logDir, logPath);
+
+    // SECURITY: Validate log path doesn't contain path traversal
+    const normalizedPath = path.normalize(absolutePath);
+    const normalizedLogDir = path.normalize(this.logDir);
+    if (!normalizedPath.startsWith(normalizedLogDir) && !path.isAbsolute(logPath)) {
+      throw new Error('Invalid log path: path traversal detected');
+    }
 
     // Ensure log directory exists
     const logDir = path.dirname(absolutePath);
@@ -206,8 +278,15 @@ class TmuxClient {
       fs.mkdirSync(logDir, { recursive: true });
     }
 
+    // SECURITY: Escape the path for shell single quotes
+    const escapedPath = this._escapeForShell(absolutePath);
+    
+    // pipe-pane takes a SHELL COMMAND string as an argument.
+    // We construct this string carefully: cat >> 'escaped_path'
+    const command = `cat >> '${escapedPath}'`;
+    
     // -o flag opens pipe without closing existing one
-    this._exec(`pipe-pane -t ${target} -o "cat >> '${absolutePath}'"`);
+    this._exec(['pipe-pane', '-t', target, '-o', command]);
 
     return absolutePath;
   }
@@ -218,8 +297,8 @@ class TmuxClient {
    * @param {string} windowName - Window name
    */
   stopPipePane(sessionName, windowName) {
-    const target = `"${sessionName}:${windowName}"`;
-    this._exec(`pipe-pane -t ${target}`, { ignoreErrors: true });
+    const target = `${sessionName}:${windowName}`;
+    this._exec(['pipe-pane', '-t', target], { ignoreErrors: true });
   }
 
   /**
@@ -228,7 +307,7 @@ class TmuxClient {
    */
   killSession(sessionName) {
     if (this.sessionExists(sessionName)) {
-      this._exec(`kill-session -t "${sessionName}"`, { ignoreErrors: true });
+      this._exec(['kill-session', '-t', sessionName], { ignoreErrors: true });
     }
   }
 
@@ -238,8 +317,8 @@ class TmuxClient {
    * @param {string} windowName - Window name to kill
    */
   killWindow(sessionName, windowName) {
-    const target = `"${sessionName}:${windowName}"`;
-    this._exec(`kill-window -t ${target}`, { ignoreErrors: true });
+    const target = `${sessionName}:${windowName}`;
+    this._exec(['kill-window', '-t', target], { ignoreErrors: true });
   }
 
   /**
@@ -248,7 +327,7 @@ class TmuxClient {
    */
   listSessions(prefix = 'cliagents-') {
     try {
-      const output = this._exec('list-sessions -F "#{session_name}:#{session_created}:#{session_attached}"', {
+      const output = this._exec(['list-sessions', '-F', '#{session_name}:#{session_created}:#{session_attached}'], {
         silent: true
       });
 
@@ -276,7 +355,7 @@ class TmuxClient {
    */
   listWindows(sessionName) {
     try {
-      const output = this._exec(`list-windows -t "${sessionName}" -F "#{window_name}:#{window_active}"`, {
+      const output = this._exec(['list-windows', '-t', sessionName, '-F', '#{window_name}:#{window_active}'], {
         silent: true
       });
 
@@ -324,17 +403,19 @@ class TmuxClient {
           return;
         }
 
-        const currentOutput = this.getHistory(sessionName, windowName);
+        // Optimization: Check only last 100 lines for stability to reduce memory usage
+        const currentOutput = this.getHistory(sessionName, windowName, 100);
 
         if (currentOutput !== lastOutput) {
           lastOutput = currentOutput;
           lastChangeTime = Date.now();
         } else if (Date.now() - lastChangeTime >= stableMs) {
-          resolve(currentOutput);
+          // Return full history upon completion
+          resolve(this.getHistory(sessionName, windowName));
           return;
         }
 
-        setTimeout(check, 100);
+        setTimeout(check, 250);
       };
 
       check();
@@ -370,9 +451,9 @@ class TmuxClient {
    * @returns {string|null} - Current directory or null
    */
   getPaneDirectory(sessionName, windowName) {
-    const target = `"${sessionName}:${windowName}"`;
+    const target = `${sessionName}:${windowName}`;
     try {
-      const output = this._exec(`display-message -t ${target} -p "#{pane_current_path}"`, {
+      const output = this._exec(['display-message', '-t', target, '-p', '#{pane_current_path}'], {
         silent: true
       });
       return output?.trim() || null;
@@ -389,8 +470,8 @@ class TmuxClient {
    * @param {number} height - New height in rows
    */
   resizePane(sessionName, windowName, width = 200, height = 50) {
-    const target = `"${sessionName}:${windowName}"`;
-    this._exec(`resize-pane -t ${target} -x ${width} -y ${height}`, { ignoreErrors: true });
+    const target = `${sessionName}:${windowName}`;
+    this._exec(['resize-pane', '-t', target, '-x', width, '-y', height], { ignoreErrors: true });
   }
 }
 

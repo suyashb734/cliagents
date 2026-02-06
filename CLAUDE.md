@@ -7,8 +7,8 @@ A Node.js server that wraps CLI-based AI agents (Claude Code, Gemini CLI, Codex,
 ```bash
 # Start server
 npm start
-# Server at http://localhost:3001
-# WebSocket at ws://localhost:3001/ws
+# Server at http://localhost:4001
+# WebSocket at ws://localhost:4001/ws
 ```
 
 ## Architecture
@@ -39,8 +39,40 @@ npm start
 | `src/core/adapter.js` | Base adapter class |
 | `src/adapters/claude-code.js` | Claude Code CLI wrapper |
 | `src/adapters/gemini-cli.js` | Gemini CLI wrapper |
+| `src/database/db.js` | Unified database (SQLite) |
+| `src/database/schema.sql` | Database schema (8 tables) |
+| `src/routes/memory.js` | Shared memory REST endpoints |
+| `src/orchestration/handoff.js` | Agent-to-agent task delegation |
 | `src/utils/gemini-config.js` | Gemini config.yaml manager (generation params) |
 | `src/services/transcriptionService.js` | Whisper audio transcription |
+
+## Database Schema
+
+Single unified database: `data/cliagents.db`
+
+```
+┌─────────────────────────────────────────────────────────────┐
+│                      cliagents.db (Unified)                  │
+├─────────────────────────────────────────────────────────────┤
+│  ORCHESTRATION       │  SHARED MEMORY       │  TRACING      │
+│  ├── terminals       │  ├── artifacts       │  ├── traces   │
+│  ├── inbox           │  ├── findings        │  └── spans    │
+│  └── annotations     │  └── context         │               │
+└─────────────────────────────────────────────────────────────┘
+```
+
+### Tables
+
+| Table | Purpose |
+|-------|---------|
+| `terminals` | Registered CLI agent sessions |
+| `inbox` | Message queue for inter-agent communication |
+| `traces` | Orchestration traces for observability |
+| `spans` | Individual operations within a trace |
+| `annotations` | File-based annotations (workspace_id, file_path) |
+| `artifacts` | Code, files, outputs from agents (task_id, key) |
+| `findings` | Insights, bugs, issues from agents (task_id, severity) |
+| `context` | Conversation summaries for agent handoff |
 
 ## API Endpoints
 
@@ -58,6 +90,26 @@ POST /sessions/:id/files     - Upload files to session working directory
 GET  /sessions/:id/files     - List files in session working directory
 DELETE /sessions/:id         - Terminate session
 POST /ask                    - One-shot ask (auto session)
+
+# Shared Memory (Multi-Agent Collaboration)
+POST   /orchestration/memory/artifacts           - Store an artifact
+GET    /orchestration/memory/artifacts/:taskId   - Get all artifacts for a task
+GET    /orchestration/memory/artifacts/:taskId/:key - Get specific artifact
+DELETE /orchestration/memory/artifacts/:taskId/:key - Delete artifact
+
+POST   /orchestration/memory/findings            - Store a finding
+GET    /orchestration/memory/findings/:taskId    - Get all findings for a task
+GET    /orchestration/memory/findings/by-id/:id  - Get finding by ID
+DELETE /orchestration/memory/findings/:id        - Delete finding
+
+POST   /orchestration/memory/context             - Store context
+GET    /orchestration/memory/context/:taskId     - Get context for a task
+
+GET    /orchestration/memory/tasks/:taskId       - Get complete memory for a task
+DELETE /orchestration/memory/tasks/:taskId       - Clear all memory for a task
+
+GET    /orchestration/memory/stats               - Get memory statistics
+POST   /orchestration/memory/cleanup             - Clean up old entries
 ```
 
 ### Session Options (POST /sessions)
@@ -136,7 +188,7 @@ Error codes include:
 
 ### One-shot ask (simplest)
 ```bash
-curl -X POST http://localhost:3001/ask \
+curl -X POST http://localhost:4001/ask \
   -H "Content-Type: application/json" \
   -d '{"message": "What is 2+2?", "adapter": "claude-code"}'
 ```
@@ -144,15 +196,15 @@ curl -X POST http://localhost:3001/ask \
 ### Session-based (preserves context)
 ```bash
 # Create session
-curl -X POST http://localhost:3001/sessions \
+curl -X POST http://localhost:4001/sessions \
   -d '{"adapter": "claude-code"}'
 # Returns: {"sessionId": "abc123", ...}
 
 # Send messages (context preserved)
-curl -X POST http://localhost:3001/sessions/abc123/messages \
+curl -X POST http://localhost:4001/sessions/abc123/messages \
   -d '{"message": "My name is Suyash"}'
 
-curl -X POST http://localhost:3001/sessions/abc123/messages \
+curl -X POST http://localhost:4001/sessions/abc123/messages \
   -d '{"message": "What is my name?"}'
 # Returns: "Your name is Suyash" ✓
 ```

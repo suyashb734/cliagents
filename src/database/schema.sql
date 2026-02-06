@@ -57,24 +57,116 @@ CREATE TABLE IF NOT EXISTS spans (
     FOREIGN KEY (trace_id) REFERENCES traces(trace_id)
 );
 
--- Annotations table: Shared workspace annotations (from LangGraph)
-CREATE TABLE IF NOT EXISTS annotations (
-    id INTEGER PRIMARY KEY AUTOINCREMENT,
-    workspace_id TEXT NOT NULL,
-    terminal_id TEXT NOT NULL,
-    file_path TEXT NOT NULL,
-    line_start INTEGER,
-    line_end INTEGER,
-    type TEXT NOT NULL,                     -- 'bug', 'security', 'performance', 'suggestion'
-    content TEXT NOT NULL,
-    created_at DATETIME DEFAULT CURRENT_TIMESTAMP
-);
-
 -- Indexes for performance
 CREATE INDEX IF NOT EXISTS idx_inbox_receiver_status ON inbox(receiver_id, status);
 CREATE INDEX IF NOT EXISTS idx_inbox_priority ON inbox(priority DESC, created_at);
 CREATE INDEX IF NOT EXISTS idx_terminals_status ON terminals(status);
 CREATE INDEX IF NOT EXISTS idx_terminals_adapter ON terminals(adapter);
 CREATE INDEX IF NOT EXISTS idx_spans_trace ON spans(trace_id);
-CREATE INDEX IF NOT EXISTS idx_annotations_workspace ON annotations(workspace_id);
-CREATE INDEX IF NOT EXISTS idx_annotations_file ON annotations(file_path);
+
+-- ============================================================
+-- SHARED MEMORY TABLES (for multi-agent collaboration)
+-- ============================================================
+
+-- Artifacts: Code, files, and other outputs from agents
+CREATE TABLE IF NOT EXISTS artifacts (
+  id TEXT PRIMARY KEY,
+  task_id TEXT NOT NULL,
+  agent_id TEXT,
+  type TEXT NOT NULL DEFAULT 'code',
+  key TEXT NOT NULL,
+  content TEXT NOT NULL,
+  metadata TEXT,
+  created_at INTEGER DEFAULT (strftime('%s', 'now')),
+  updated_at INTEGER DEFAULT (strftime('%s', 'now')),
+  UNIQUE(task_id, key)
+);
+
+-- Findings: Insights, bugs, issues discovered by agents
+CREATE TABLE IF NOT EXISTS findings (
+  id TEXT PRIMARY KEY,
+  task_id TEXT NOT NULL,
+  agent_id TEXT NOT NULL,
+  agent_profile TEXT,
+  type TEXT NOT NULL DEFAULT 'suggestion',
+  severity TEXT DEFAULT 'info',
+  content TEXT NOT NULL,
+  metadata TEXT,
+  created_at INTEGER DEFAULT (strftime('%s', 'now'))
+);
+
+-- Context: Conversation summaries and key decisions
+CREATE TABLE IF NOT EXISTS context (
+  id TEXT PRIMARY KEY,
+  task_id TEXT NOT NULL,
+  agent_id TEXT NOT NULL,
+  summary TEXT NOT NULL,
+  key_decisions TEXT,
+  pending_items TEXT,
+  created_at INTEGER DEFAULT (strftime('%s', 'now'))
+);
+
+-- Indexes for shared memory tables
+CREATE INDEX IF NOT EXISTS idx_artifacts_task ON artifacts(task_id);
+CREATE INDEX IF NOT EXISTS idx_findings_task ON findings(task_id);
+CREATE INDEX IF NOT EXISTS idx_findings_type ON findings(type);
+CREATE INDEX IF NOT EXISTS idx_context_task ON context(task_id);
+
+-- ============================================================
+-- MESSAGES TABLE (Conversation History)
+-- ============================================================
+-- Stores all conversation messages for auditability and context
+-- CRITICAL: Uses milliseconds (Date.now()) not seconds - agents generate
+-- multiple events/second during tool loops
+
+CREATE TABLE IF NOT EXISTS messages (
+  id INTEGER PRIMARY KEY AUTOINCREMENT,
+  terminal_id TEXT NOT NULL,               -- References terminal (no FK - allows audit after deletion)
+  trace_id TEXT,                           -- For debugging multi-agent workflows
+  role TEXT NOT NULL,                      -- 'user', 'assistant', 'system', 'tool'
+  content TEXT NOT NULL,
+  metadata TEXT,                           -- JSON: { "model", "tokens", "tool_id", "agentProfile" }
+  created_at INTEGER NOT NULL              -- MILLISECONDS (Date.now()), NOT seconds!
+);
+
+-- Indexes for messages table
+CREATE INDEX IF NOT EXISTS idx_messages_terminal_created ON messages(terminal_id, created_at);
+CREATE INDEX IF NOT EXISTS idx_messages_trace ON messages(trace_id);
+
+-- ============================================================
+-- DISCUSSIONS TABLE (Agent-to-Agent Communication)
+-- ============================================================
+-- Enables real-time bidirectional communication between agents
+
+-- Discussions table: Tracks active agent-to-agent conversations
+CREATE TABLE IF NOT EXISTS discussions (
+    id TEXT PRIMARY KEY,                    -- Discussion ID (UUID)
+    task_id TEXT,                           -- Parent task ID (optional)
+    initiator_id TEXT NOT NULL,             -- Terminal that started discussion
+    status TEXT DEFAULT 'active',           -- 'active', 'completed', 'timeout'
+    topic TEXT,                             -- What the discussion is about
+    created_at INTEGER DEFAULT (strftime('%s', 'now') * 1000),
+    completed_at INTEGER,
+    metadata TEXT                           -- JSON blob
+);
+
+-- Discussion messages table: Individual messages in a discussion
+CREATE TABLE IF NOT EXISTS discussion_messages (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    discussion_id TEXT NOT NULL,
+    sender_id TEXT NOT NULL,                -- Sender terminal ID
+    receiver_id TEXT,                       -- Receiver terminal ID (null for broadcast)
+    message_type TEXT NOT NULL,             -- 'question', 'answer', 'info'
+    content TEXT NOT NULL,
+    status TEXT DEFAULT 'pending',          -- 'pending', 'delivered', 'read'
+    created_at INTEGER DEFAULT (strftime('%s', 'now') * 1000),
+    delivered_at INTEGER,
+    FOREIGN KEY (discussion_id) REFERENCES discussions(id)
+);
+
+-- Indexes for discussion tables (performance optimized per Codex review)
+CREATE INDEX IF NOT EXISTS idx_discussions_task ON discussions(task_id);
+CREATE INDEX IF NOT EXISTS idx_discussions_status ON discussions(status);
+CREATE INDEX IF NOT EXISTS idx_discussion_messages_discussion ON discussion_messages(discussion_id);
+-- Composite index for efficient pending message queries (Codex performance recommendation)
+CREATE INDEX IF NOT EXISTS idx_discussion_messages_receiver_status_created ON discussion_messages(receiver_id, status, created_at);

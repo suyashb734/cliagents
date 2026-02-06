@@ -9,7 +9,7 @@
 const fs = require('fs');
 const path = require('path');
 
-const BASE_URL = process.env.TEST_URL || 'http://localhost:3001';
+const BASE_URL = process.env.TEST_URL || 'http://localhost:4001';
 const TEST_DIR = '/tmp/screenshot-test';
 
 async function request(method, endpoint, body = null) {

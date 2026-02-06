@@ -477,7 +477,7 @@ async function main() {
 
   print(`${'─'.repeat(60)}`);
   print();
-  print(`Test your CLIs at: ${c.cyan}http://localhost:3001/dashboard${c.reset}`);
+  print(`Test your CLIs at: ${c.cyan}http://localhost:4001/dashboard${c.reset}`);
   print();
 
   rl.close();

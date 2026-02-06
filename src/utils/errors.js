@@ -38,6 +38,18 @@ const ErrorCodes = {
     message: 'The adapter CLI is not available on this system'
   },
 
+  // Authentication errors
+  AUTH_REQUIRED: {
+    code: 'authentication_required',
+    status: 401,
+    message: 'Authentication required'
+  },
+  AUTH_FAILED: {
+    code: 'authentication_failed',
+    status: 403,
+    message: 'Authentication failed'
+  },
+
   // Server errors (5xx)
   INTERNAL_ERROR: {
     code: 'internal_error',

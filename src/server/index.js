@@ -31,6 +31,7 @@ const {
   getAuthConfig
 } = require('../utils/adapter-auth');
 const { createOpenAIRouter } = require('./openai-compat');
+const { authenticateRequest, validateApiKey } = require('./auth');
 
 // Orchestration components
 const { PersistentSessionManager } = require('../tmux/session-manager');
@@ -41,7 +42,7 @@ const { createOrchestrationRouter } = require('./orchestration-router');
 
 class AgentServer {
   constructor(options = {}) {
-    this.port = options.port || 3001;
+    this.port = options.port || 4001;
     this.host = options.host || '0.0.0.0';
 
     // Initialize session manager
@@ -63,6 +64,9 @@ class AgentServer {
     this.app = express();
     this.app.use(cors());
     this.app.use(express.json({ limit: '50mb' }));
+
+    // Security: Add authentication middleware
+    this.app.use(authenticateRequest);
 
     // Serve static files from public directory
     const publicPath = path.join(__dirname, '../../public');
@@ -739,7 +743,37 @@ class AgentServer {
   }
 
   _setupWebSocket(server) {
-    this.wss = new WebSocketServer({ server, path: '/ws' });
+    this.wss = new WebSocketServer({ 
+      server, 
+      path: '/ws',
+      verifyClient: (info, cb) => {
+        const url = new URL(info.req.url, 'http://localhost');
+        const queryKey = url.searchParams.get('apiKey');
+        const protocols = info.req.headers['sec-websocket-protocol'];
+        
+        // If authentication is disabled (dev mode), validateApiKey returns true immediately
+        if (validateApiKey(null)) {
+          return cb(true);
+        }
+
+        // Check query param
+        if (queryKey && validateApiKey(queryKey)) {
+          return cb(true);
+        }
+
+        // Check protocol header (often used for token passing in browsers)
+        if (protocols) {
+          const parts = protocols.split(',').map(p => p.trim());
+          for (const p of parts) {
+            if (validateApiKey(p)) {
+              return cb(true);
+            }
+          }
+        }
+
+        cb(false, 401, 'Unauthorized');
+      }
+    });
 
     this.wss.on('connection', (ws) => {
       let sessionId = null;
@@ -916,6 +950,13 @@ class AgentServer {
           console.log(`  - ${name}`);
         }
         console.log('');
+
+        // Security Warning
+        if (!process.env.CLI_AGENTS_API_KEY) {
+          console.warn('\n[SECURITY WARNING] CLI_AGENTS_API_KEY environment variable is not set.');
+          console.warn('The server is running without authentication (dev mode).');
+          console.warn('Set CLI_AGENTS_API_KEY to enable authentication.\n');
+        }
 
         resolve(this.server);
       });

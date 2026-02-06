@@ -18,6 +18,16 @@ class SessionManager extends EventEmitter {
     this.maxSessions = options.maxSessions || 10;
     this._isShuttingDown = false;
 
+    // Per-adapter concurrency control
+    // Some CLIs (like Claude Code) don't support multiple concurrent instances
+    this.adapterLocks = new Map();  // adapter -> Promise (current operation)
+    this.adapterConcurrencyLimits = {
+      'claude-code': 1,    // Claude CLI conflicts with concurrent instances
+      'gemini-cli': 3,     // Gemini can handle some concurrency
+      'codex-cli': 2,      // Codex handles moderate concurrency
+      'default': 2
+    };
+
     // Start cleanup interval with proper error handling
     this.cleanupInterval = setInterval(() => {
       this._cleanupStaleSessions().catch(err => {
@@ -25,6 +35,42 @@ class SessionManager extends EventEmitter {
         this.emit('error', { type: 'cleanup_error', error: err });
       });
     }, 60000);
+  }
+
+  /**
+   * Acquire lock for adapter operation (serializes requests for single-instance adapters)
+   * @private
+   */
+  async _acquireAdapterLock(adapterName) {
+    const limit = this.adapterConcurrencyLimits[adapterName] ||
+                  this.adapterConcurrencyLimits.default;
+
+    if (limit > 1) {
+      // No strict serialization needed for adapters that support concurrency
+      return () => {};  // No-op release function
+    }
+
+    // For single-instance adapters (claude-code), serialize requests
+    while (this.adapterLocks.has(adapterName)) {
+      const existingLock = this.adapterLocks.get(adapterName);
+      try {
+        await existingLock;
+      } catch {
+        // Previous operation failed, continue
+      }
+    }
+
+    // Create a new lock
+    let release;
+    const lockPromise = new Promise(resolve => {
+      release = resolve;
+    });
+    this.adapterLocks.set(adapterName, lockPromise);
+
+    return () => {
+      this.adapterLocks.delete(adapterName);
+      release();
+    };
   }
 
   /**
@@ -153,6 +199,10 @@ class SessionManager extends EventEmitter {
       throw new Error(`Adapter '${session.adapterName}' not found`);
     }
 
+    // Acquire adapter lock for single-instance adapters (like Claude)
+    // This serializes requests to prevent concurrent CLI process conflicts
+    const releaseLock = await this._acquireAdapterLock(session.adapterName);
+
     // Update activity timestamp and status
     session.lastActivity = Date.now();
     session.status = 'running';
@@ -172,6 +222,9 @@ class SessionManager extends EventEmitter {
       session.status = 'error';
       session.lastActivity = Date.now();
       throw error;
+    } finally {
+      // Always release the lock
+      releaseLock();
     }
   }
 

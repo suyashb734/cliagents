@@ -3,6 +3,13 @@
  *
  * Agent profiles define the configuration for different types of worker agents,
  * including which adapter to use, system prompts, and timeout settings.
+ *
+ * Config v3 separates roles from adapters:
+ * - roles: Define WHAT to do (systemPrompt, timeout, defaultAdapter)
+ * - adapters: Define WHO does it (capabilities, tools)
+ * - legacyProfiles: Backward compatibility mapping
+ *
+ * A profile is a resolved combination of role + adapter.
  */
 
 const fs = require('fs');
@@ -18,6 +25,7 @@ class AgentProfilesService {
       path.join(process.cwd(), 'config', 'agent-profiles.json');
 
     this.profiles = {};
+    this.rawConfig = null;  // Store raw config for role+adapter lookups
     this.lastModified = 0;
 
     // Load profiles
@@ -37,14 +45,26 @@ class AgentProfilesService {
       }
 
       const content = fs.readFileSync(this.configPath, 'utf8');
-      this.profiles = JSON.parse(content);
-      this.lastModified = stats.mtimeMs;
+      const config = JSON.parse(content);
 
-      console.log(`[AgentProfiles] Loaded ${Object.keys(this.profiles).length} profiles`);
+      // Check if this is v3 format (has roles and adapters sections)
+      if (config.roles && config.adapters) {
+        this.rawConfig = config;
+        this.profiles = this._buildProfilesFromConfig(config);
+        console.log(`[AgentProfiles] Loaded v3 config: ${Object.keys(config.roles).length} roles, ${Object.keys(config.adapters).length} adapters`);
+      } else {
+        // Legacy format - profiles directly at top level
+        this.rawConfig = null;
+        this.profiles = config;
+        console.log(`[AgentProfiles] Loaded ${Object.keys(this.profiles).length} legacy profiles`);
+      }
+
+      this.lastModified = stats.mtimeMs;
     } catch (error) {
       if (error.code === 'ENOENT') {
         console.warn('[AgentProfiles] Config file not found, using empty profiles');
         this.profiles = {};
+        this.rawConfig = null;
       } else {
         console.error('[AgentProfiles] Error loading profiles:', error.message);
       }
@@ -52,7 +72,54 @@ class AgentProfilesService {
   }
 
   /**
-   * Get a profile by name
+   * Build profiles from v3 config structure
+   * @private
+   */
+  _buildProfilesFromConfig(config) {
+    const profiles = {};
+    const { roles, adapters, legacyProfiles } = config;
+
+    // Build profiles from legacy mappings (backward compatibility)
+    for (const [legacyName, mapping] of Object.entries(legacyProfiles || {})) {
+      if (mapping._comment) continue;  // Skip comment entries
+
+      const role = roles[mapping.role];
+      const adapter = adapters[mapping.adapter];
+      if (role && adapter) {
+        profiles[legacyName] = this._mergeRoleAndAdapter(role, adapter, mapping.adapter);
+      }
+    }
+
+    // Also allow direct access by role name (using defaultAdapter)
+    for (const [roleName, role] of Object.entries(roles)) {
+      const adapterName = role.defaultAdapter;
+      const adapter = adapters[adapterName];
+      if (adapter && !profiles[roleName]) {
+        profiles[roleName] = this._mergeRoleAndAdapter(role, adapter, adapterName);
+      }
+    }
+
+    return profiles;
+  }
+
+  /**
+   * Merge a role with an adapter to create a profile
+   * @private
+   */
+  _mergeRoleAndAdapter(role, adapter, adapterName) {
+    return {
+      description: role.description,
+      systemPrompt: role.systemPrompt,
+      adapter: adapterName,
+      timeout: role.timeout || 300,
+      allowedTools: role.claudeOptions?.allowedTools || adapter.defaultAllowedTools || null,
+      permissionMode: role.claudeOptions?.permissionMode || null,
+      capabilities: adapter.capabilities || []
+    };
+  }
+
+  /**
+   * Get a profile by name (legacy profile name or role name)
    * @param {string} name - Profile name
    * @returns {Object|null} - Profile or null if not found
    */
@@ -61,6 +128,72 @@ class AgentProfilesService {
     this.reload();
 
     return this.profiles[name] || null;
+  }
+
+  /**
+   * Get a profile by combining a role with a specific adapter
+   * This is the new API for the role+adapter model
+   * @param {string} roleName - Role name (e.g., 'implement', 'review')
+   * @param {string} adapterName - Adapter name (e.g., 'gemini-cli', 'claude-code')
+   * @returns {Object|null} - Profile or null if role/adapter not found
+   */
+  getProfileByRoleAndAdapter(roleName, adapterName) {
+    this.reload();
+
+    if (!this.rawConfig) {
+      // Legacy config - no role+adapter support
+      return null;
+    }
+
+    const role = this.rawConfig.roles?.[roleName];
+    if (!role) return null;
+
+    // Use specified adapter or fall back to role's default
+    const actualAdapterName = adapterName || role.defaultAdapter;
+    const adapter = this.rawConfig.adapters?.[actualAdapterName];
+    if (!adapter) return null;
+
+    return this._mergeRoleAndAdapter(role, adapter, actualAdapterName);
+  }
+
+  /**
+   * List all available roles
+   * @returns {Array<string>}
+   */
+  listRoles() {
+    this.reload();
+    if (!this.rawConfig) return [];
+    return Object.keys(this.rawConfig.roles || {});
+  }
+
+  /**
+   * List all available adapters
+   * @returns {Array<string>}
+   */
+  listAdapters() {
+    this.reload();
+    if (!this.rawConfig) return [];
+    return Object.keys(this.rawConfig.adapters || {});
+  }
+
+  /**
+   * Get role configuration
+   * @param {string} name - Role name
+   * @returns {Object|null}
+   */
+  getRole(name) {
+    this.reload();
+    return this.rawConfig?.roles?.[name] || null;
+  }
+
+  /**
+   * Get adapter configuration
+   * @param {string} name - Adapter name
+   * @returns {Object|null}
+   */
+  getAdapter(name) {
+    this.reload();
+    return this.rawConfig?.adapters?.[name] || null;
   }
 
   /**
@@ -172,8 +305,52 @@ function loadProfile(name) {
   return getAgentProfiles().getProfile(name);
 }
 
+/**
+ * Load a profile by combining role and adapter
+ * @param {string} role - Role name
+ * @param {string} adapter - Adapter name (optional, uses role's default if not provided)
+ * @returns {Object|null}
+ */
+function loadProfileByRoleAndAdapter(role, adapter) {
+  return getAgentProfiles().getProfileByRoleAndAdapter(role, adapter);
+}
+
+/**
+ * Resolve profile from various input combinations:
+ * - If role is provided, use getProfileByRoleAndAdapter
+ * - If profile is provided (legacy), use getProfile
+ * - Supports custom systemPrompt override
+ * @param {Object} params
+ * @param {string} params.role - Role name (new API)
+ * @param {string} params.adapter - Adapter name (new API)
+ * @param {string} params.profile - Legacy profile name
+ * @param {string} params.systemPrompt - Custom system prompt override
+ * @returns {Object|null}
+ */
+function resolveProfile({ role, adapter, profile, systemPrompt }) {
+  const service = getAgentProfiles();
+  let resolved = null;
+
+  if (role) {
+    // New API: role + optional adapter
+    resolved = service.getProfileByRoleAndAdapter(role, adapter);
+  } else if (profile) {
+    // Legacy API: profile name
+    resolved = service.getProfile(profile);
+  }
+
+  // Apply custom system prompt override
+  if (resolved && systemPrompt) {
+    resolved = { ...resolved, systemPrompt };
+  }
+
+  return resolved;
+}
+
 module.exports = {
   AgentProfilesService,
   getAgentProfiles,
-  loadProfile
+  loadProfile,
+  loadProfileByRoleAndAdapter,
+  resolveProfile
 };

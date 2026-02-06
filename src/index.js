@@ -4,6 +4,9 @@
  * Main entry point - can be used as a module or run directly as a server.
  */
 
+// Load environment variables from .env file
+require('dotenv').config();
+
 // Core exports
 const AgentAdapter = require('./core/adapter');
 const SessionManager = require('./core/session-manager');
@@ -68,7 +71,7 @@ module.exports = {
 
 // Run as server if executed directly
 if (require.main === module) {
-  const port = process.env.PORT || 3001;
+  const port = process.env.PORT || 4001;
 
   // Check for transcription command
   const args = process.argv.slice(2);

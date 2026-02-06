@@ -21,18 +21,35 @@ const { TerminalStatus } = require('../models/terminal-status');
 const CLAUDE_PATTERNS = {
   /**
    * IDLE: Prompt waiting for input
-   * Claude Code shows a `>` prompt when ready for input
-   * Also matches when at the end of a response with empty prompt
+   * Claude Code shows various prompt styles:
+   * - `❯` followed by suggestions like `❯ Try "refactor..."` or just `❯`
+   * - `>` at end of line (prompt character)
+   * - `↵ send` indicator for input mode
+   * - Status bar showing "bypass permissions on" (only when truly idle at startup)
+   *
+   * NOTE: The status bar text "bypass permissions" appears at startup when Claude
+   * is truly idle and waiting. During active processing, the spinner replaces the
+   * prompt, so this pattern is safe for detecting IDLE state.
+   * However, "to cycle)" can appear during processing (in status bar like
+   * "(+4 lines) ⌘⏎ to cycle)"), so we don't include that pattern.
    */
-  IDLE: />\s*$/,
+  IDLE: /❯\s+(?:Try|$)|[>❯]\s*$|↵ send|bypass permissions on/,
 
   /**
    * PROCESSING: Agent is working
    * Claude Code shows animated spinners while thinking/working
-   * Spinners include: ✶ ✢ ✽ ✻ · ✳ and their rotations
-   * Also matches "Thinking..." or tool execution indicators
+   * Spinners include: ✶ ✢ ✽ ✻ ✳ and their rotations
+   *
+   * IMPORTANT: Removed `·` (middle dot) from spinner chars because it appears
+   * in the welcome message "Opus 4.5 · Claude Max · tech@..." causing false positives.
+   *
+   * The pattern requires:
+   * - Spinner character followed by whitespace and then text ending in ... or …
+   * - Or hourglass ⏳
+   * - Or explicit "Thinking..." text
+   * - Or "Worked for" time indicator (active processing)
    */
-  PROCESSING: /[✶✢✽✻·✳⠋⠙⠹⠸⠼⠴⠦⠧⠇⠏].*[.…]|Thinking\.\.\.|⏳|Running|Executing/,
+  PROCESSING: /[✶✢✽✻✳⠋⠙⠹⠸⠼⠴⠦⠧⠇⠏]\s+\S.*[.…]|⏳|Thinking\.\.\.|Worked for \d/,
 
   /**
    * COMPLETED: Response has been delivered
@@ -44,22 +61,27 @@ const CLAUDE_PATTERNS = {
   /**
    * WAITING_PERMISSION: Needs user approval
    * Claude Code prompts with Allow/Deny/Skip for certain operations
-   * Also handles tool approval prompts
+   * IMPORTANT: Must require start-of-line to avoid matching in response content
+   * Real permission prompts appear at the start of lines with specific formats
    */
-  WAITING_PERMISSION: /\b(Allow|Deny|Skip|Approve|Reject)\b.*\?|Do you want to|Permission required/i,
+  WAITING_PERMISSION: /^(?:Allow|Deny|Skip|Approve|Reject)\b.*\?|^Do you want to|^Permission required/mi,
 
   /**
    * WAITING_USER_ANSWER: Presenting choices
    * Interactive menus with ❯ selector or numbered choices
-   * Also handles yes/no questions
+   * IMPORTANT: Must be specific to avoid matching numbered lists in responses
+   * Only match actual interactive choice prompts, not content with numbers
    */
-  WAITING_USER_ANSWER: /❯.*\d+\.|Select.*:|Choose.*:|Which.*\?|^\s*\d+\.\s+/m,
+  WAITING_USER_ANSWER: /❯\s*\d+\.\s+\S|Select one:|Choose an option:|Which.*\?\s*$/m,
 
   /**
    * ERROR: Something went wrong
    * Look for error indicators in the output
+   * IMPORTANT: Only match errors at START of line to avoid false positives from code content
+   * When agents read source files containing "error:" or "failed:", we don't want to detect ERROR
+   * Real CLI errors appear at the start of output lines, not embedded in code
    */
-  ERROR: /\bError\b:|error:|Error:|failed:|FAILED|Exception:|Traceback/i
+  ERROR: /^(?:Error|ERROR)\s*:|^\s*\[?(?:error|ERROR)\]?\s*:|^Traceback/m
 };
 
 class ClaudeCodeDetector extends BaseStatusDetector {

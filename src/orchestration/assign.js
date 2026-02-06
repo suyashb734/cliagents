@@ -11,6 +11,8 @@
 const crypto = require('crypto');
 const { TerminalStatus } = require('../models/terminal-status');
 const { loadProfile } = require('../services/agent-profiles');
+const { getDB } = require('../database/db');
+const { buildEnhancedMessage } = require('./handoff');
 
 /**
  * Generate a trace ID for tracking
@@ -35,16 +37,30 @@ function truncate(text, maxLength = 500) {
  * @param {string} message - Task message to send to the worker
  * @param {Object} options - Additional options
  * @param {string} options.callbackTerminalId - Terminal to notify on completion
+ * @param {string} options.taskId - Task ID for shared memory (findings/context from other agents)
+ * @param {boolean} options.includeSharedContext - Whether to include shared findings/context (default: true if taskId provided)
  * @param {Object} options.context - Shared context (sessionManager, db, etc.)
  * @returns {Promise<Object>} - Info about the spawned worker
  */
 async function assign(agentProfile, message, options = {}) {
   const {
     callbackTerminalId = null,
-    context = {}
+    taskId = null,
+    includeSharedContext = null,
+    context = {},
+    workDir = null
   } = options;
 
-  const { sessionManager, db, inboxService } = context;
+  let { sessionManager, db, inboxService } = context;
+
+  // Ensure db is available if not passed in context
+  if (!db) {
+    try {
+      db = getDB();
+    } catch (e) {
+      // DB might not be initialized in some contexts
+    }
+  }
 
   if (!sessionManager) {
     throw new Error('sessionManager is required in context');
@@ -75,7 +91,8 @@ async function assign(agentProfile, message, options = {}) {
       agentProfile,
       role: 'worker',
       systemPrompt: profile.systemPrompt,
-      allowedTools: profile.allowedTools
+      allowedTools: profile.allowedTools,
+      workDir: workDir || undefined
     });
 
     // Add span for tracking
@@ -92,16 +109,34 @@ async function assign(agentProfile, message, options = {}) {
       throw new Error(`Worker failed to initialize: ${error.message}`);
     }
 
-    // 3. Modify message to include callback instructions if specified
+    // 3. Build message with shared context if taskId provided
     let fullMessage = message;
+    const shouldIncludeContext = includeSharedContext ?? (taskId !== null);
+
+    if (taskId && shouldIncludeContext && db) {
+      try {
+        const priorFindings = db.getFindings(taskId);
+        const priorContext = db.getContext(taskId);
+
+        if (priorFindings.length > 0 || priorContext.length > 0) {
+          fullMessage = buildEnhancedMessage(message, priorFindings, priorContext);
+          console.log(`[assign] Injected shared context for task ${taskId}: ${priorFindings.length} findings, ${priorContext.length} context entries`);
+        }
+      } catch (error) {
+        console.warn(`[assign] Failed to get shared context: ${error.message}`);
+        // Continue with original message
+      }
+    }
+
+    // 4. Modify message to include callback instructions if specified
     if (callbackTerminalId) {
       fullMessage += `\n\n---\nIMPORTANT: When you complete this task, send your results to terminal ${callbackTerminalId} using the send_message endpoint.`;
     }
 
-    // 4. Send task message (non-blocking)
+    // 5. Send task message (non-blocking)
     await sessionManager.sendInput(worker.terminalId, fullMessage);
 
-    // 5. Set up completion monitoring if callback specified
+    // 6. Set up completion monitoring if callback specified
     if (callbackTerminalId && inboxService) {
       setupCompletionMonitor(worker.terminalId, callbackTerminalId, {
         sessionManager,
@@ -113,7 +148,7 @@ async function assign(agentProfile, message, options = {}) {
       });
     }
 
-    // 6. Return immediately
+    // 7. Return immediately
     return {
       success: true,
       terminalId: worker.terminalId,
@@ -121,6 +156,7 @@ async function assign(agentProfile, message, options = {}) {
       adapter: profile.adapter,
       agentProfile,
       callbackTerminalId,
+      taskId,
       status: 'assigned'
     };
 

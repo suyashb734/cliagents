@@ -16,40 +16,59 @@ const { TerminalStatus } = require('../models/terminal-status');
 const CODEX_PATTERNS = {
   /**
    * IDLE: Prompt waiting for input
-   * Codex CLI shows prompt when ready for input
+   * Modern Codex CLI shows:
+   * - `›` prompt character (not regular `>`) at start of line followed by space
+   * - "context left" status bar
+   * - "? for shortcuts" indicator
+   * IMPORTANT: `› 1.` is a selection prompt, NOT idle. Only match `› ` followed by space or empty.
    */
-  IDLE: /(codex|>)\s*$/i,
+  IDLE: /context left|^›\s*$|\? for shortcuts/m,
 
   /**
    * PROCESSING: Agent is working
-   * Codex CLI shows indicators while processing
+   * Codex CLI shows spinners while actively processing
+   * Also matches status lines that indicate active work
+   * IMPORTANT: Only match spinner characters or active status indicators
+   * NOTE: Don't match • (bullet) alone - it's used for both status AND response output
+   * The bullet is only matched when followed by action words (not response content)
    */
-  PROCESSING: /[⠋⠙⠹⠸⠼⠴⠦⠧⠇⠏●○]|Processing|Generating|Thinking|Working/i,
+  PROCESSING: /[⠋⠙⠹⠸⠼⠴⠦⠧⠇⠏●○]|• (?:Working|Explored|Reading|Searching|Thinking|Analyzing|Identifying|I'm preparing|preparing|implementing|processing|Whirring)/i,
 
   /**
    * COMPLETED: Response has been delivered
    * Patterns indicating task completion
+   * Includes "Worked for Xs" timing line that appears after response
    */
-  COMPLETED: /Complete|Done|Finished|Result:/i,
+  COMPLETED: /Complete|Done|Finished|Result:|─ Worked for \d+/i,
 
   /**
    * WAITING_PERMISSION: Needs user approval
    * In full-auto mode, this is bypassed
    * In other modes, asks for confirmation
+   * IMPORTANT: Must require start-of-line to avoid matching "Allow?" in response text
+   * Real CLI permission prompts appear at the start of lines
    */
-  WAITING_PERMISSION: /Confirm|Approve|Allow|Continue\?|y\/n|proceed/i,
+  WAITING_PERMISSION: /^(?:Confirm|Approve|Allow|Continue)\s*\?|^\s*\(y\/n\)|^proceed\s*\?/mi,
 
   /**
    * WAITING_USER_ANSWER: Presenting choices
    * Interactive selection prompts
+   * IMPORTANT: Must be specific to avoid matching code content or markdown
+   * Only match actual CLI selection prompts
+   * Includes rate limit model switch prompts and update prompts
    */
-  WAITING_USER_ANSWER: /Select.*:|Choose.*:|Which.*\?|\[.*\]:/i,
+  WAITING_USER_ANSWER: /^(?:Select|Choose).*:\s*$|Which.*\?\s*$|Press enter to confirm|Switch to.*model|Skip until next version/mi,
 
   /**
    * ERROR: Something went wrong
    * Error patterns in Codex CLI output
+   * IMPORTANT: Only match errors at START of line to avoid false positives from code content
+   * When agents read source files containing "error:" or "failed:", we don't want to detect ERROR
+   * Real CLI errors appear at the start of output lines, not embedded in code
+   * NOTE: OpenAIError and APIError MUST also be start-of-line to avoid matching code content
+   * Also matches usage limit blocks (■ You've hit your usage limit)
    */
-  ERROR: /\bError\b:|error:|Error:|failed:|FAILED|Exception:|OpenAIError|APIError/i
+  ERROR: /^(?:Error|ERROR)\s*:|^\s*\[?(?:error|ERROR)\]?\s*:|^OpenAIError|^APIError|^■ You've hit your usage limit/m
 };
 
 class CodexCliDetector extends BaseStatusDetector {
@@ -83,16 +102,22 @@ class CodexCliDetector extends BaseStatusDetector {
 
   /**
    * Check if output indicates API error
+   * IMPORTANT: These patterns must be specific to actual CLI error messages,
+   * not generic words that might appear in code being read by agents.
+   * Must be at start of line or in clear error context.
    */
   isApiError(output) {
-    return /OpenAIError|API error|authentication failed|invalid.*key/i.test(output);
+    // Only match actual API error patterns at start of line
+    return /^(?:OpenAIError|API error|authentication failed|ERROR:.*invalid.*key)/mi.test(output);
   }
 
   /**
    * Check for token limit errors
+   * Must match actual CLI error messages, not variable names or comments
    */
   isTokenLimitError(output) {
-    return /token.*limit|context.*length|maximum.*tokens/i.test(output);
+    // Only match actual error messages about token limits at start of line
+    return /^(?:Error:.*token|Error:.*context.*length|maximum.*tokens.*exceeded)/mi.test(output);
   }
 
   /**

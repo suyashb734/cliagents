@@ -346,6 +346,9 @@ class CodexCliAdapter extends BaseLLMAdapter {
     // JSON output for structured response
     args.push('--json');
 
+    // Skip git repo check for non-git directories (like /tmp/agent)
+    args.push('--skip-git-repo-check');
+
     // Add prompt as the final argument
     args.push(fullPrompt);
 
