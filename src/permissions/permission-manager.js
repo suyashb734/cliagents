@@ -163,7 +163,8 @@ class PermissionManager extends EventEmitter {
     // Check denied paths first (takes precedence)
     for (const denied of this.deniedPaths) {
       const resolvedDenied = path.resolve(denied);
-      if (resolvedPath.startsWith(resolvedDenied)) {
+      // STRICT CHECK: match exact directory or subdirectory
+      if (resolvedPath === resolvedDenied || resolvedPath.startsWith(resolvedDenied + path.sep)) {
         return this._deny(`Path explicitly denied: ${targetPath}`, toolName);
       }
     }
@@ -171,7 +172,8 @@ class PermissionManager extends EventEmitter {
     // Check if path is within allowed paths
     const isAllowed = this.allowedPaths.some(allowed => {
       const resolvedAllowed = path.resolve(allowed);
-      return resolvedPath.startsWith(resolvedAllowed);
+      // STRICT CHECK: match exact directory or subdirectory
+      return resolvedPath === resolvedAllowed || resolvedPath.startsWith(resolvedAllowed + path.sep);
     });
 
     if (!isAllowed) {
@@ -187,35 +189,56 @@ class PermissionManager extends EventEmitter {
    */
   _checkBashCommand(command, toolName) {
     if (!command || typeof command !== 'string') return { allowed: true };
-    
-    // Check redirections (e.g. echo "text" > file)
-    if (command.includes('>')) {
-      const parts = command.split('>');
-      if (parts[1]) {
-        // Get the first token after >
-        const target = parts[1].trim().split(/\s+/)[0];
-        if (target) {
+
+    // 1. Split on command separators (;, &&, ||)
+    const statements = command.split(/;|&&|\|\|/);
+
+    for (const statement of statements) {
+      // 2. Split on pipe
+      const pipeParts = statement.split('|');
+
+      for (const part of pipeParts) {
+        let cleanPart = part.trim();
+
+        // 3. Handle redirections
+        // Regex to match redirection operators and their targets
+        // Matches: operator, optional space, target (non-whitespace)
+        const redirectionRegex = /(?:>>|2>|&>|>|<)\s*([^\s]+)/g;
+        let match;
+        while ((match = redirectionRegex.exec(cleanPart)) !== null) {
+          const target = match[1];
           const res = this._checkPathPermission(toolName, { path: target });
           if (!res.allowed) return res;
         }
-      }
-    }
-    
-    const parts = command.trim().split(/\s+/);
-    const cmd = parts[0];
-    const restricted = ['cat', 'rm', 'cp', 'mv', 'cd'];
-    
-    if (restricted.includes(cmd)) {
-      for (let i = 1; i < parts.length; i++) {
-        const arg = parts[i];
-        // Skip flags and operators
-        if (!arg.startsWith('-') && !['>', '>>', '|', '&', ';'].includes(arg)) {
-          const res = this._checkPathPermission(toolName, { path: arg });
-          if (!res.allowed) return res;
+
+        // 4. Check all command arguments that look like file paths
+        const tokens = cleanPart.split(/\s+/);
+        for (const token of tokens) {
+          // Skip obviously non-path tokens (operators)
+          if (/^(?:>>|2>|&>|>|<|\||;|&&|\|\|)$/.test(token)) continue;
+
+          // Check for --arg=path
+          let candidate = token;
+          if (candidate.startsWith('--') && candidate.includes('=')) {
+            candidate = candidate.split('=', 2)[1];
+          }
+
+          // Check if it looks like a path
+          // Criteria: starts with /, ./, ../, ~ or contains /
+          if (candidate && (
+            candidate.startsWith('/') ||
+            candidate.startsWith('./') ||
+            candidate.startsWith('../') ||
+            candidate.startsWith('~') ||
+            candidate.includes('/')
+          )) {
+            const res = this._checkPathPermission(toolName, { path: candidate });
+            if (!res.allowed) return res;
+          }
         }
       }
     }
-    
+
     return { allowed: true };
   }
 

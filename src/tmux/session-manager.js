@@ -6,6 +6,7 @@
  */
 
 const path = require('path');
+const os = require('os');
 const fs = require('fs');
 const crypto = require('crypto');
 const { EventEmitter } = require('events');
@@ -129,10 +130,11 @@ const CLI_COMMANDS = {
     // - Other modes: Gemini doesn't support fine-grained modes, fall back to yolo
     // NOTE: Gemini CLI doesn't have --allowedTools or read-only mode like Claude
     const permissionMode = options.permissionMode || 'auto';
-    if (permissionMode === 'default' || permissionMode === 'interceptor') {
+    if (permissionMode === 'default') {
       // Don't add yolo mode - will prompt for confirmations
-      // 'interceptor' mode: PermissionInterceptor will auto-respond to prompts
     } else if (options.yoloMode !== false) {
+      // 'auto', 'interceptor', 'bypassPermissions' all use yolo for Gemini
+      // (PermissionInterceptor only works for Claude Code, not Gemini)
       args.push('--approval-mode', 'yolo');
     }
 
@@ -153,10 +155,11 @@ const CLI_COMMANDS = {
     // - 'auto' (default) or 'bypassPermissions': Use bypass mode (auto-approve all)
     // - 'default' or 'interceptor': Don't use bypass mode (will prompt for confirmations)
     const permissionMode = options.permissionMode || 'auto';
-    if (permissionMode === 'default' || permissionMode === 'interceptor') {
+    if (permissionMode === 'default') {
       // Don't add bypass flag - will prompt for confirmations
     } else {
-      // Use --dangerously-bypass-approvals-and-sandbox to skip ALL interactive prompts
+      // 'auto', 'interceptor', 'bypassPermissions' all use bypass for Codex
+      // (PermissionInterceptor only works for Claude Code, not Codex)
       args.push('--dangerously-bypass-approvals-and-sandbox');
     }
 
@@ -340,7 +343,19 @@ class PersistentSessionManager extends EventEmitter {
 
     // SECURITY: Reject system paths for workDir
     const resolvedWorkDir = path.resolve(workDir);
-    const systemPaths = ['/etc', '/System', '/usr', '/var', '/root', '/bin', '/sbin'];
+    const systemPaths = [
+      '/etc',
+      '/System',
+      '/usr',
+      '/var',
+      '/root',
+      '/bin',
+      '/sbin',
+      path.join(os.homedir(), '.ssh'),
+      path.join(os.homedir(), '.aws'),
+      path.join(os.homedir(), '.gnupg'),
+      path.join(os.homedir(), '.config')
+    ];
     for (const sysPath of systemPaths) {
       if (resolvedWorkDir === sysPath || resolvedWorkDir.startsWith(sysPath + path.sep)) {
         throw new Error(`Invalid working directory: System path ${sysPath} is not allowed`);
@@ -454,28 +469,8 @@ class PersistentSessionManager extends EventEmitter {
     let recoveredCount = 0;
 
     for (const session of sessions) {
-      // Session name format: cliagents-{terminalId}
-      // terminalId is hex, so we extract it.
-      // Expected format: cliagents-123456 (first 6 chars of ID used in name construction)
-      // Wait, in createTerminal: sessionName = `cliagents-${terminalId.slice(0, 6)}`
-      // We can't recover the FULL terminalId from just the session name if it was truncated!
-      // However, let's look at how we store state.
-      // If we can't get the full ID, we might have issues if other systems expect the full 8-byte hex.
-      // Let's check createTerminal again.
-      // terminalId = crypto.randomBytes(4).toString('hex'); -> 8 chars.
-      // sessionName uses slice(0,6).
-      
-      // We need a way to store metadata.
-      // Tmux user options (@options) are perfect for this.
-      // But since we are "recovering" from code that DIDN'T set those, we might be limited.
-      
-      // Actually, let's look at the window name: `${agentProfile || adapter}-${terminalId.slice(6)}`
-      // So session name has first 6 chars, window has the rest?
-      // createTerminal: windowName = `${agentProfile || adapter}-${terminalId.slice(6)}`;
-      
-      // So we can reconstruct the ID!
-      // sessionName gives part 1, windowName gives part 2.
-      
+      // Session name format: cliagents-{first6}
+      // Window name format: agent-{remaining26}
       const sessionName = session.name;
       const windows = this.tmux.listWindows(sessionName);
       if (windows.length === 0) continue;
@@ -486,13 +481,12 @@ class PersistentSessionManager extends EventEmitter {
       // Parse ID parts
       // sessionName: cliagents-XXXXXX
       const idPart1 = sessionName.replace('cliagents-', '');
-      
-      // windowName: adapter-YY
-      // The suffix is the last 2 chars
-      const idPart2 = windowName.slice(-2);
-      
-      // Verify lengths to be sure
-      if (idPart1.length !== 6 || idPart2.length !== 2) {
+
+      // windowName: agent-YYYYYYYYYYYYYYYYYYYYYYYYYY (26 chars)
+      const idPart2 = windowName.replace(/^agent-/, '');
+
+      // Verify lengths to be sure (32 hex chars total)
+      if (idPart1.length !== 6 || idPart2.length !== 26) {
         console.warn(`Skipping session ${sessionName}: Cannot reconstruct ID from names`);
         continue;
       }
@@ -500,8 +494,8 @@ class PersistentSessionManager extends EventEmitter {
       const terminalId = idPart1 + idPart2;
       
       // Parse adapter/profile from window name
-      // windowName format: {adapter/profile}-{idPart2}
-      const prefix = windowName.slice(0, -3); // remove -YY
+      // windowName format: agent-{idPart2}
+      const prefix = 'agent';
       
       // We can't easily distinguish between agentProfile and adapter if they overlap,
       // but for recovery we can default to 'unknown' or try to guess.
@@ -673,69 +667,73 @@ class PersistentSessionManager extends EventEmitter {
       let sawProcessing = assumeProcessingStarted; // Track if we've seen PROCESSING state
 
       const check = () => {
-        const elapsed = Date.now() - startTime;
-        if (elapsed > timeoutMs) {
-          reject(new Error(`Timeout waiting for status '${targetStatus}' after ${timeoutMs}ms`));
-          return;
-        }
-
-        const currentStatus = this.getStatus(terminalId);
-
-        // Track if we've seen PROCESSING (important for IDLE-as-COMPLETED detection)
-        if (currentStatus === TerminalStatus.PROCESSING) {
-          sawProcessing = true;
-        }
-
-        if (currentStatus === targetStatus) {
-          resolve();
-          return;
-        }
-
-        // Also accept 'completed' if waiting for 'idle' (completed implies ready for new input)
-        if (targetStatus === TerminalStatus.IDLE && currentStatus === TerminalStatus.COMPLETED) {
-          resolve();
-          return;
-        }
-
-        // Also accept 'idle' if waiting for 'completed' (idle after task means task is done)
-        // BUT only if we've seen PROCESSING first - this prevents accepting the initial
-        // IDLE state before the CLI starts processing the input
-        if (targetStatus === TerminalStatus.COMPLETED && currentStatus === TerminalStatus.IDLE && sawProcessing) {
-          resolve();
-          return;
-        }
-
-        // Error status should abort only if sustained (3 consecutive checks)
-        // This prevents false positives from transient ERROR-looking output during CLI startup
-        if (currentStatus === TerminalStatus.ERROR) {
-          consecutiveErrors++;
-          // Log what the detector is seeing for debugging
-          const termInfo = this.terminals.get(terminalId);
-          if (termInfo) {
-            const output = this.tmux.getHistory(termInfo.sessionName, termInfo.windowName, 500);
-            console.log(`[DEBUG] Terminal ${terminalId} (${termInfo.adapter}) ERROR detected (${consecutiveErrors}/${errorThreshold}), waiting for ${targetStatus}`);
-
-            // Show which patterns are matching
-            const detector = this.statusDetectors.get(termInfo.adapter);
-            if (detector && detector.getMatchingPatterns) {
-              const matchingPatterns = detector.getMatchingPatterns(output);
-              console.log(`[DEBUG] Matching patterns:`, matchingPatterns);
-            }
-
-            console.log(`[DEBUG] Last 500 chars:`, JSON.stringify(output.slice(-500)));
-          }
-          if (consecutiveErrors >= errorThreshold) {
-            reject(new Error('Terminal entered error state'));
+        try {
+          const elapsed = Date.now() - startTime;
+          if (elapsed > timeoutMs) {
+            reject(new Error(`Timeout waiting for status '${targetStatus}' after ${timeoutMs}ms`));
             return;
           }
-        } else {
-          if (consecutiveErrors > 0) {
-            console.log(`[DEBUG] Terminal ${terminalId} status=${currentStatus}, resetting error count from ${consecutiveErrors}`);
-          }
-          consecutiveErrors = 0; // Reset on non-error status
-        }
 
-        setTimeout(check, pollInterval);
+          const currentStatus = this.getStatus(terminalId);
+
+          // Track if we've seen PROCESSING (important for IDLE-as-COMPLETED detection)
+          if (currentStatus === TerminalStatus.PROCESSING) {
+            sawProcessing = true;
+          }
+
+          if (currentStatus === targetStatus) {
+            resolve();
+            return;
+          }
+
+          // Also accept 'completed' if waiting for 'idle' (completed implies ready for new input)
+          if (targetStatus === TerminalStatus.IDLE && currentStatus === TerminalStatus.COMPLETED) {
+            resolve();
+            return;
+          }
+
+          // Also accept 'idle' if waiting for 'completed' (idle after task means task is done)
+          // BUT only if we've seen PROCESSING first - this prevents accepting the initial
+          // IDLE state before the CLI starts processing the input
+          if (targetStatus === TerminalStatus.COMPLETED && currentStatus === TerminalStatus.IDLE && sawProcessing) {
+            resolve();
+            return;
+          }
+
+          // Error status should abort only if sustained (3 consecutive checks)
+          // This prevents false positives from transient ERROR-looking output during CLI startup
+          if (currentStatus === TerminalStatus.ERROR) {
+            consecutiveErrors++;
+            // Log what the detector is seeing for debugging
+            const termInfo = this.terminals.get(terminalId);
+            if (termInfo) {
+              const output = this.tmux.getHistory(termInfo.sessionName, termInfo.windowName, 500);
+              console.log(`[DEBUG] Terminal ${terminalId} (${termInfo.adapter}) ERROR detected (${consecutiveErrors}/${errorThreshold}), waiting for ${targetStatus}`);
+
+              // Show which patterns are matching
+              const detector = this.statusDetectors.get(termInfo.adapter);
+              if (detector && detector.getMatchingPatterns) {
+                const matchingPatterns = detector.getMatchingPatterns(output);
+                console.log(`[DEBUG] Matching patterns:`, matchingPatterns);
+              }
+
+              console.log(`[DEBUG] Last 500 chars:`, JSON.stringify(output.slice(-500)));
+            }
+            if (consecutiveErrors >= errorThreshold) {
+              reject(new Error('Terminal entered error state'));
+              return;
+            }
+          } else {
+            if (consecutiveErrors > 0) {
+              console.log(`[DEBUG] Terminal ${terminalId} status=${currentStatus}, resetting error count from ${consecutiveErrors}`);
+            }
+            consecutiveErrors = 0; // Reset on non-error status
+          }
+
+          setTimeout(check, pollInterval);
+        } catch (error) {
+          reject(error);
+        }
       };
 
       check();
