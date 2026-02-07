@@ -83,9 +83,10 @@ class BaseStatusDetector {
       return TerminalStatus.IDLE;
     }
 
-    // Default to processing if we can't determine status
-    // This is safer than assuming idle
-    return TerminalStatus.PROCESSING;
+    // Default to idle if we can't determine status
+    // Defaulting to PROCESSING caused sessions to hang indefinitely
+    // when no patterns matched (e.g. during CLI startup with unexpected output)
+    return TerminalStatus.IDLE;
   }
 
   /**
