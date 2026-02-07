@@ -114,38 +114,30 @@ const TOOLS = [
 - The task would benefit from a different AI's strengths (Claude for coding, Gemini for research, Codex for review)
 - You want parallel execution of independent tasks
 
-**NEW: Role + Adapter Model**
-You can now independently choose WHAT to do (role) and WHO does it (adapter):
+**WHY USE THIS:** Subagents use FREE CLI-authenticated tokens (Gemini, Codex) instead of Opus tokens. A code review that costs ~50K Opus tokens costs ~5K when delegated. Use for any task over ~3 tool calls.
 
-Roles (what to do):
-- plan: Create implementation plans
-- implement: Write code based on plans
-- review: Review code for bugs and issues
-- review-security: Security-focused review
-- review-performance: Performance-focused review
-- test: Write and run tests
-- fix: Fix issues from reviews
-- research: Research APIs/docs/best practices
-- architect: Architecture analysis
-- document: Write documentation
+**Role + Adapter Model** — choose WHAT to do and WHO does it:
 
-Adapters (who does it):
-- claude-code: Full coding agent with MCP support, file editing
-- gemini-cli: Fast responses, web search, large context
-- codex-cli: Code review, sandbox execution
+Roles: plan, implement, review, review-security, review-performance, test, fix, research, architect, document
 
-**Usage Examples:**
-1. Use role with default adapter: { role: "implement", message: "..." }
-2. Override adapter: { role: "implement", adapter: "gemini-cli", message: "..." }
-3. Direct adapter access: { adapter: "codex-cli", systemPrompt: "...", message: "..." }
-4. Legacy profile (backward compat): { profile: "implementer", message: "..." }
+Adapters:
+- gemini-cli: Fast (~30s), free, good for research/reviews. NO image support. Watch for boolean logic errors.
+- codex-cli: GPT-5 via ChatGPT (free). NO image support. Only 'default' model works. May refuse non-coding tasks without persona override.
+- claude-code: Full coding agent with MCP, file editing, image support. Uses Claude tokens (expensive).
 
-Timeout presets:
-- "simple": 3 min (quick questions)
-- "standard": 10 min (code analysis) [DEFAULT]
-- "complex": 30 min (large codebases)
+**PARALLEL PATTERN (most useful):**
+1. Launch multiple tasks with wait=false
+2. Poll each with check_task_status until COMPLETED
+3. Collect and synthesize results
 
-For very long tasks, use wait=false and poll with check_task_status.`,
+Example:
+  delegate_task(role="review", adapter="gemini-cli", wait=false, message="Review src/...")  → terminalId A
+  delegate_task(role="review", adapter="codex-cli", wait=false, message="Review src/...")  → terminalId B
+  check_task_status(terminalId=A)  → PROCESSING | COMPLETED with output
+
+Timeout presets: "simple" (3 min), "standard" (10 min, default), "complex" (30 min)
+
+**WHEN NOT TO USE:** Small tasks (<3 tool calls), tasks needing user interaction, anything already in your context.`,
     inputSchema: {
       type: 'object',
       properties: {
@@ -195,16 +187,16 @@ For very long tasks, use wait=false and poll with check_task_status.`,
   },
   {
     name: 'run_workflow',
-    description: `Execute a predefined multi-agent workflow. Use for complex tasks that benefit from multiple specialized agents working together.
+    description: `Execute a predefined multi-agent workflow. Launches multiple subagents (Gemini + Codex + Claude) in parallel or sequence. All subagent tokens are FREE (CLI auth).
 
 Available workflows:
-- code-review: Parallel review for bugs + security + performance (3 agents)
-- feature: Plan → implement → test
-- bugfix: Analyze → fix → test
+- code-review: 3 PARALLEL agents — bugs (claude-code) + security (gemini-cli) + performance (codex-cli)
+- feature: SEQUENTIAL — plan (gemini) → implement (claude) → test (codex)
+- bugfix: SEQUENTIAL — research (gemini) → fix (claude) → test (codex)
 - full-cycle: Plan → implement → review → test → fix
-- research: Research → document
+- research: research (gemini) → document (claude)
 
-**IMPORTANT:** Workflows run multiple agents and can take 2-10 minutes. Use wait=false for async execution to avoid timeouts.`,
+**ALWAYS use wait=false** (default). Workflows take 2-10 min. Returns terminal IDs to poll with check_task_status.`,
     inputSchema: {
       type: 'object',
       properties: {
