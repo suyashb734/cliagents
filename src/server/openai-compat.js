@@ -71,11 +71,31 @@ function generateId() {
 }
 
 /**
+ * Cleanup temporary image files
+ */
+function cleanupImages(images) {
+  if (!images || !Array.isArray(images)) return;
+  
+  for (const img of images) {
+    if (img.type === 'file' && img.path) {
+      try {
+        if (fs.existsSync(img.path)) {
+          fs.unlinkSync(img.path);
+        }
+      } catch (e) {
+        console.error(`[OpenAI Compat] Failed to delete temp file ${img.path}:`, e.message);
+      }
+    }
+  }
+}
+
+/**
  * Extract images from messages and save to temp files if needed
  */
 function extractImagesFromMessages(messages) {
   const images = [];
   const tempDir = '/tmp/cliagents-images/';
+  const MAX_IMAGE_SIZE = 10 * 1024 * 1024; // 10MB limit
 
   if (!fs.existsSync(tempDir)) {
     fs.mkdirSync(tempDir, { recursive: true });
@@ -90,8 +110,14 @@ function extractImagesFromMessages(messages) {
           if (imageUrl.startsWith('data:')) {
             // Base64 image
             try {
+              // Check approximate size (base64 is ~1.33x larger than binary)
+              if (imageUrl.length > MAX_IMAGE_SIZE * 1.4) {
+                console.warn('[OpenAI Compat] Image too large, skipping processing');
+                continue;
+              }
+
               // Format: data:image/png;base64,.....
-              const matches = imageUrl.match(/^data:image\/([a-zA-Z]+);base64,(.+)$/);
+              const matches = imageUrl.match(/^data:image\/([a-zA-Z0-9+.-]+);base64,(.+)$/);
               if (matches) {
                 const ext = matches[1];
                 const data = matches[2];
@@ -313,11 +339,14 @@ function createOpenAIRouter(sessionManager) {
   router.post('/chat/completions', async (req, res) => {
     const startTime = Date.now();
     let sessionId = null;
+    let createdImages = [];
 
     try {
       // Translate request
       const { adapter, model, systemPrompt, message, stream, options, images } =
         translateOpenAIRequest(req.body);
+
+      if (images) createdImages = images;
 
       // Check if adapter is available
       if (!sessionManager.adapters.has(adapter)) {
@@ -475,6 +504,9 @@ function createOpenAIRouter(sessionManager) {
           console.error('[OpenAI Compat] Session cleanup error:', e.message);
         }
       }
+
+      // Clean up temp images
+      cleanupImages(createdImages);
     }
   });
 
