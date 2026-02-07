@@ -159,6 +159,7 @@ class SessionManager extends EventEmitter {
       workDir: options.workDir,
       model: options.model,           // Model selection (adapter-specific)
       jsonSchema: options.jsonSchema, // JSON Schema for structured output (Claude only)
+      jsonMode: options.jsonMode,
       // Generation parameters (Gemini only - writes to ~/.gemini/config.yaml)
       temperature: options.temperature,
       top_p: options.top_p,

@@ -208,10 +208,77 @@ function extractSystemPrompt(messages) {
 }
 
 /**
+ * Extract valid JSON from a response that may contain preamble text.
+ * Tries JSON.parse first (fast path), then finds the first { or [ and works backward
+ * from the last matching } or ] to find valid JSON.
+ * Returns the original text unchanged if no valid JSON is found.
+ */
+function extractJsonFromResponse(text) {
+  if (!text || typeof text !== 'string') return text;
+
+  const trimmed = text.trim();
+
+  // Fast path: already valid JSON
+  try {
+    JSON.parse(trimmed);
+    return trimmed;
+  } catch {
+    // Not valid JSON as-is, try extraction
+  }
+
+  // Find first { or [
+  const firstBrace = trimmed.indexOf('{');
+  const firstBracket = trimmed.indexOf('[');
+
+  let startIdx = -1;
+  let endChar = '';
+
+  if (firstBrace === -1 && firstBracket === -1) return text;
+
+  if (firstBrace === -1) {
+    startIdx = firstBracket;
+    endChar = ']';
+  } else if (firstBracket === -1) {
+    startIdx = firstBrace;
+    endChar = '}';
+  } else if (firstBrace < firstBracket) {
+    startIdx = firstBrace;
+    endChar = '}';
+  } else {
+    startIdx = firstBracket;
+    endChar = ']';
+  }
+
+  // From the last occurrence of the matching close char, work backward
+  for (let endIdx = trimmed.lastIndexOf(endChar); endIdx > startIdx; endIdx = trimmed.lastIndexOf(endChar, endIdx - 1)) {
+    const candidate = trimmed.substring(startIdx, endIdx + 1);
+    try {
+      JSON.parse(candidate);
+      return candidate;
+    } catch {
+      // Try shorter substring
+    }
+  }
+
+  // No valid JSON found, return original
+  return text;
+}
+
+/**
+ * Detect rate limit errors in response text from CLI agents.
+ * CLI agents output rate limit errors as normal text (exit code 0),
+ * so we need to inspect content for known patterns.
+ */
+function detectRateLimitError(text) {
+  if (!text || typeof text !== 'string') return false;
+  return /rate.?limit|overloaded|too many requests|quota exceeded|ResourceExhausted/i.test(text);
+}
+
+/**
  * Translate OpenAI request format to internal format
  */
 function translateOpenAIRequest(body) {
-  const { model, messages, stream, temperature, max_tokens, top_p, stop, response_format } = body;
+  const { model, messages, stream, temperature, max_tokens, top_p, stop, response_format, timeout } = body;
 
   if (!messages || !Array.isArray(messages) || messages.length === 0) {
     throw new Error('messages is required and must be a non-empty array');
@@ -231,7 +298,7 @@ function translateOpenAIRequest(body) {
   const images = extractImagesFromMessages(messages);
 
   // Extract system prompt
-  const systemPrompt = extractSystemPrompt(messages);
+  let systemPrompt = extractSystemPrompt(messages);
 
   // Build prompt from conversation
   const prompt = buildPromptFromMessages(messages);
@@ -253,9 +320,18 @@ function translateOpenAIRequest(body) {
   if (response_format) {
     if (response_format.type === 'json_schema' && response_format.json_schema) {
       options.jsonSchema = response_format.json_schema.schema;
+      options.jsonMode = true;
     } else if (response_format.type === 'json_object') {
       options.jsonMode = true;
     }
+  }
+
+  // Augment system prompt for JSON mode (defense in depth with extraction)
+  if (options.jsonMode) {
+    const jsonInstruction = 'You MUST respond with valid JSON only. Do not include any text before or after the JSON.';
+    systemPrompt = systemPrompt
+      ? `${systemPrompt}\n\n${jsonInstruction}`
+      : jsonInstruction;
   }
 
   return {
@@ -265,6 +341,8 @@ function translateOpenAIRequest(body) {
     message: prompt,
     stream: stream ?? false,
     options,
+    responseFormat: response_format || null,
+    timeout: timeout || null,
     images
   };
 }
@@ -343,7 +421,7 @@ function createOpenAIRouter(sessionManager) {
 
     try {
       // Translate request
-      const { adapter, model, systemPrompt, message, stream, options, images } =
+      const { adapter, model, systemPrompt, message, stream, options, responseFormat, timeout: requestTimeout, images } =
         translateOpenAIRequest(req.body);
 
       if (images) createdImages = images;
@@ -374,6 +452,14 @@ function createOpenAIRouter(sessionManager) {
         });
       }
 
+      // Resolve timeout: body > header > default
+      const effectiveTimeout = requestTimeout
+        || (req.headers['x-request-timeout'] ? parseInt(req.headers['x-request-timeout'], 10) : null)
+        || null;
+      if (effectiveTimeout) {
+        options.timeout = effectiveTimeout;
+      }
+
       // Create ephemeral session
       const sessionOptions = {
         adapter,
@@ -383,6 +469,7 @@ function createOpenAIRouter(sessionManager) {
         top_p: options.top_p,
         max_output_tokens: options.max_output_tokens,
         jsonSchema: options.jsonSchema,
+        jsonMode: options.jsonMode,
         images
       };
 
@@ -431,6 +518,12 @@ function createOpenAIRouter(sessionManager) {
               fullContent += chunk.content;
               const streamChunk = createStreamChunk(id, chunk.content);
               res.write(`data: ${JSON.stringify(streamChunk)}\n\n`);
+            } else if (chunk.type === 'error' && chunk.content && detectRateLimitError(chunk.content)) {
+              // Rate limit error from adapter — send as SSE error event
+              res.write(`data: ${JSON.stringify({ error: { message: chunk.content, type: 'rate_limit_error', code: 'rate_limit_exceeded' } })}\n\n`);
+              res.write('data: [DONE]\n\n');
+              res.end();
+              return;
             } else if (chunk.type === 'result' && chunk.content) {
               // If we get a final result with content we haven't streamed
               if (chunk.content && chunk.content !== fullContent) {
@@ -441,6 +534,14 @@ function createOpenAIRouter(sessionManager) {
                 }
               }
             }
+          }
+
+          // Check if accumulated content is a rate limit error (short response)
+          if (fullContent.length < 500 && detectRateLimitError(fullContent)) {
+            res.write(`data: ${JSON.stringify({ error: { message: fullContent, type: 'rate_limit_error', code: 'rate_limit_exceeded' } })}\n\n`);
+            res.write('data: [DONE]\n\n');
+            res.end();
+            return;
           }
 
           // Send final chunk with finish_reason
@@ -470,6 +571,22 @@ function createOpenAIRouter(sessionManager) {
             }
             finalMetadata = chunk.metadata || {};
           }
+        }
+
+        // Check for rate limit errors in response content
+        if (detectRateLimitError(finalContent)) {
+          return res.status(429).json({
+            error: {
+              message: finalContent,
+              type: 'rate_limit_error',
+              code: 'rate_limit_exceeded'
+            }
+          });
+        }
+
+        // Extract JSON from response if json_object or json_schema mode requested
+        if (responseFormat && (responseFormat.type === 'json_object' || responseFormat.type === 'json_schema')) {
+          finalContent = extractJsonFromResponse(finalContent);
         }
 
         res.json(translateToOpenAIResponse(finalContent, finalMetadata, req.body.model, startTime));
@@ -608,5 +725,7 @@ module.exports = {
   translateOpenAIRequest,
   translateToOpenAIResponse,
   buildPromptFromMessages,
-  extractSystemPrompt
+  extractSystemPrompt,
+  extractJsonFromResponse,
+  detectRateLimitError
 };

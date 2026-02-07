@@ -1116,6 +1116,145 @@ async function testMessagesEndpoint() {
   }
 }
 
+async function testJsonExtractionAndRateLimits() {
+  console.log('\n📋 JSON Extraction, Rate Limit Detection & Timeout Tests');
+
+  const {
+    extractJsonFromResponse,
+    detectRateLimitError,
+    translateOpenAIRequest
+  } = require('../src/server/openai-compat');
+
+  // --- extractJsonFromResponse ---
+
+  await test('extractJsonFromResponse: clean JSON object passes through', async () => {
+    const input = '{"answer": "hello"}';
+    const result = extractJsonFromResponse(input);
+    assert(result === input, `Expected clean pass-through, got: ${result}`);
+    JSON.parse(result); // should not throw
+  });
+
+  await test('extractJsonFromResponse: JSON with preamble text is extracted', async () => {
+    const input = 'Looking at the screenshot, here is the result:\n{"action": "click", "x": 100}';
+    const result = extractJsonFromResponse(input);
+    const parsed = JSON.parse(result);
+    assert(parsed.action === 'click', `Expected action=click, got: ${parsed.action}`);
+    assert(parsed.x === 100, `Expected x=100, got: ${parsed.x}`);
+  });
+
+  await test('extractJsonFromResponse: JSON array is extracted', async () => {
+    const input = 'Here are the colors:\n["red", "green", "blue"]';
+    const result = extractJsonFromResponse(input);
+    const parsed = JSON.parse(result);
+    assert(Array.isArray(parsed), 'Should be an array');
+    assert(parsed.length === 3, `Expected 3 items, got ${parsed.length}`);
+  });
+
+  await test('extractJsonFromResponse: nested JSON with trailing text', async () => {
+    const input = 'Result: {"data": {"nested": true}, "count": 1}\nHope this helps!';
+    const result = extractJsonFromResponse(input);
+    const parsed = JSON.parse(result);
+    assert(parsed.data.nested === true, 'Nested value should be true');
+    assert(parsed.count === 1, 'Count should be 1');
+  });
+
+  await test('extractJsonFromResponse: no JSON returns original text', async () => {
+    const input = 'This is just plain text with no JSON at all.';
+    const result = extractJsonFromResponse(input);
+    assert(result === input, 'Should return original text unchanged');
+  });
+
+  await test('extractJsonFromResponse: handles null/undefined', async () => {
+    assert(extractJsonFromResponse(null) === null, 'null should return null');
+    assert(extractJsonFromResponse(undefined) === undefined, 'undefined should return undefined');
+    assert(extractJsonFromResponse('') === '', 'empty string should return empty');
+  });
+
+  // --- detectRateLimitError ---
+
+  await test('detectRateLimitError: detects "Rate limit exceeded"', async () => {
+    assert(detectRateLimitError('Error: Rate limit exceeded. Please retry.') === true, 'Should detect rate limit');
+  });
+
+  await test('detectRateLimitError: detects "overloaded"', async () => {
+    assert(detectRateLimitError('The model is currently overloaded. Try again later.') === true, 'Should detect overloaded');
+  });
+
+  await test('detectRateLimitError: detects "too many requests"', async () => {
+    assert(detectRateLimitError('Too many requests, slow down.') === true, 'Should detect too many requests');
+  });
+
+  await test('detectRateLimitError: detects "ResourceExhausted"', async () => {
+    assert(detectRateLimitError('ResourceExhausted: Quota limit reached') === true, 'Should detect ResourceExhausted');
+  });
+
+  await test('detectRateLimitError: normal text returns false', async () => {
+    assert(detectRateLimitError('Hello, here is your answer about rates and limits.') === false, 'Normal text should not match');
+  });
+
+  await test('detectRateLimitError: handles null/undefined', async () => {
+    assert(detectRateLimitError(null) === false, 'null should return false');
+    assert(detectRateLimitError(undefined) === false, 'undefined should return false');
+    assert(detectRateLimitError('') === false, 'empty should return false');
+  });
+
+  // --- translateOpenAIRequest: timeout parameter ---
+
+  await test('translateOpenAIRequest: extracts timeout from body', async () => {
+    const result = translateOpenAIRequest({
+      model: 'gemini-2.5-flash-api',
+      messages: [{ role: 'user', content: 'Hello' }],
+      timeout: 300000
+    });
+    assert(result.timeout === 300000, `Expected timeout=300000, got: ${result.timeout}`);
+  });
+
+  await test('translateOpenAIRequest: timeout defaults to null', async () => {
+    const result = translateOpenAIRequest({
+      model: 'gemini-2.5-flash-api',
+      messages: [{ role: 'user', content: 'Hello' }]
+    });
+    assert(result.timeout === null, `Expected timeout=null, got: ${result.timeout}`);
+  });
+
+  // --- translateOpenAIRequest: json_object augments system prompt ---
+
+  await test('translateOpenAIRequest: json_object mode augments system prompt', async () => {
+    const result = translateOpenAIRequest({
+      model: 'gemini-2.5-flash-api',
+      messages: [{ role: 'user', content: 'List colors' }],
+      response_format: { type: 'json_object' }
+    });
+    assert(result.systemPrompt.includes('valid JSON only'), 'System prompt should include JSON instruction');
+    assert(result.options.jsonMode === true, 'jsonMode should be true');
+  });
+
+  await test('translateOpenAIRequest: json_object preserves existing system prompt', async () => {
+    const result = translateOpenAIRequest({
+      model: 'gemini-2.5-flash-api',
+      messages: [
+        { role: 'system', content: 'You are a color expert.' },
+        { role: 'user', content: 'List colors' }
+      ],
+      response_format: { type: 'json_object' }
+    });
+    assert(result.systemPrompt.includes('color expert'), 'Should preserve original system prompt');
+    assert(result.systemPrompt.includes('valid JSON only'), 'Should append JSON instruction');
+  });
+
+  // --- translateOpenAIRequest: returns responseFormat ---
+
+  await test('translateOpenAIRequest: returns responseFormat for post-processing', async () => {
+    const result = translateOpenAIRequest({
+      model: 'gemini-2.5-flash-api',
+      messages: [{ role: 'user', content: 'Hello' }],
+      response_format: { type: 'json_object' }
+    });
+    assert(result.responseFormat !== null, 'responseFormat should be returned');
+    assert(result.responseFormat.type === 'json_object', 'responseFormat type should match');
+  });
+}
+
 // ============================================
 // MAIN
 // ============================================
@@ -1151,6 +1290,7 @@ async function main() {
   await testGeminiApiAdapter();
   await testOpenAICompat();       // OpenAI-compatible API tests
   await testOpenAICompatFeatures();
+  await testJsonExtractionAndRateLimits(); // JSON extraction, rate limits, timeouts
 
   // Summary
   console.log('\n' + '━'.repeat(50));

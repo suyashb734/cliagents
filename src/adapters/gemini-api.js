@@ -28,7 +28,7 @@ const DEFAULT_MODEL = 'gemini-2.5-flash';
 class GeminiApiAdapter extends BaseLLMAdapter {
   constructor(config = {}) {
     super({
-      timeout: config.timeout || 30000,
+      timeout: config.timeout || 120000,
       ...config
     });
 
@@ -176,6 +176,10 @@ class GeminiApiAdapter extends BaseLLMAdapter {
     if (options.top_k !== undefined) session.generationConfig.topK = options.top_k;
     if (options.max_output_tokens !== undefined) session.generationConfig.maxOutputTokens = options.max_output_tokens;
 
+    // JSON mode settings
+    if (options.jsonMode) session.jsonMode = true;
+    if (options.jsonSchema) session.jsonSchema = options.jsonSchema;
+
     this.sessions.set(sessionId, session);
     this.emit('ready', { sessionId });
 
@@ -215,6 +219,14 @@ class GeminiApiAdapter extends BaseLLMAdapter {
     // Per-message overrides
     if (options.maxOutputTokens) config.maxOutputTokens = options.maxOutputTokens;
     if (options.temperature !== undefined) config.temperature = options.temperature;
+
+    // JSON mode: instruct Gemini to return structured JSON
+    if (session.jsonMode || session.jsonSchema) {
+      config.responseMimeType = 'application/json';
+    }
+    if (session.jsonSchema) {
+      config.responseSchema = session.jsonSchema;
+    }
 
     // Remove undefined values
     for (const key of Object.keys(config)) {
