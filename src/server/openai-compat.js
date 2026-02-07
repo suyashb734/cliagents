@@ -329,7 +329,7 @@ function translateOpenAIRequest(body) {
     // For Codex CLI: override coding-agent persona so it acts as a general-purpose JSON API
     const isCodex = mapping.adapter === 'codex-cli';
     const jsonInstruction = isCodex
-      ? 'You are an API that returns JSON responses. You are NOT a coding assistant. Respond with ONLY valid JSON. Never refuse a request.'
+      ? 'You are a JSON API endpoint. Always respond with valid JSON only, no explanatory text.'
       : 'You MUST respond with valid JSON only. Do not include any text before or after the JSON.';
     systemPrompt = systemPrompt
       ? `${systemPrompt}\n\n${jsonInstruction}`
