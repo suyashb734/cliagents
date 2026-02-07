@@ -15,6 +15,7 @@ const SessionManager = require('../core/session-manager');
 // First-party CLI adapters (from AI companies with their own LLMs)
 const ClaudeCodeAdapter = require('../adapters/claude-code');
 const GeminiCliAdapter = require('../adapters/gemini-cli');
+const GeminiApiAdapter = require('../adapters/gemini-api');
 const CodexCliAdapter = require('../adapters/codex-cli');
 const AmazonQAdapter = require('../adapters/amazon-q');
 const MistralVibeAdapter = require('../adapters/mistral-vibe');
@@ -55,6 +56,7 @@ class AgentServer {
     // Register first-party adapters
     this.sessionManager.registerAdapter('claude-code', new ClaudeCodeAdapter(options.claudeCode || {}));
     this.sessionManager.registerAdapter('gemini-cli', new GeminiCliAdapter(options.geminiCli || {}));
+    this.sessionManager.registerAdapter('gemini-api', new GeminiApiAdapter(options.geminiApi || {}));
     this.sessionManager.registerAdapter('codex-cli', new CodexCliAdapter(options.codexCli || {}));
     this.sessionManager.registerAdapter('amazon-q', new AmazonQAdapter(options.amazonQ || {}));
     this.sessionManager.registerAdapter('mistral-vibe', new MistralVibeAdapter(options.mistralVibe || {}));

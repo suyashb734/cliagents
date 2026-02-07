@@ -47,6 +47,7 @@
     "LICENSE"
   ],
   "dependencies": {
+    "@google/genai": "^1.40.0",
     "better-sqlite3": "^12.6.0",
     "cors": "^2.8.5",
     "dotenv": "^16.4.0",

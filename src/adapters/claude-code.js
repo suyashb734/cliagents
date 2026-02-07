@@ -304,7 +304,10 @@ class ClaudeCodeAdapter extends BaseLLMAdapter {
       this.activeProcesses.set(sessionId, proc);
     }
 
-    // Close stdin immediately since we're not sending any input
+    // Write stdin data if provided (for stream-json input with images), then close
+    if (options.stdinData) {
+      proc.stdin.write(options.stdinData);
+    }
     proc.stdin.end();
 
     let timedOut = false;
@@ -512,7 +515,38 @@ class ClaudeCodeAdapter extends BaseLLMAdapter {
     // Build args - resume session if we have a session ID
     // Use stream-json for real-time streaming of agent progress (tool calls, thinking, etc.)
     // Note: --verbose is REQUIRED when using stream-json
-    const args = ['-p', message, '--output-format', 'stream-json', '--verbose', '--strict-mcp-config'];
+    let stdinData = null;
+    let args;
+
+    // Check if we have inline images to send
+    const hasImages = options.images && options.images.length > 0 &&
+      options.images.some(img => img.type === 'file' && img.path);
+
+    if (hasImages) {
+      // Use stream-json INPUT to send images inline (true multimodal vision)
+      // Images are embedded as base64 content blocks in the Anthropic API format
+      args = ['--input-format', 'stream-json', '--output-format', 'stream-json', '--verbose', '--strict-mcp-config'];
+
+      const content = [{ type: 'text', text: message }];
+      for (const img of options.images) {
+        if (img.type === 'file' && img.path && fs.existsSync(img.path)) {
+          const imageData = fs.readFileSync(img.path);
+          const ext = path.extname(img.path).slice(1) || 'png';
+          const mediaType = ext === 'jpg' ? 'image/jpeg' : `image/${ext}`;
+          content.push({
+            type: 'image',
+            source: { type: 'base64', media_type: mediaType, data: imageData.toString('base64') }
+          });
+        }
+      }
+
+      stdinData = JSON.stringify({
+        type: 'user',
+        message: { role: 'user', content }
+      }) + '\n';
+    } else {
+      args = ['-p', message, '--output-format', 'stream-json', '--verbose', '--strict-mcp-config'];
+    }
 
     // For the first message, add system prompt via --system-prompt flag if configured
     if (!session.claudeSessionId && session.systemPrompt) {
@@ -559,7 +593,8 @@ class ClaudeCodeAdapter extends BaseLLMAdapter {
         timeout: options.timeout || this.config.timeout,
         sessionId,
         workDir: session.workDir,
-        maxOutputTokens: session.maxOutputTokens  // Pass session's max_output_tokens
+        maxOutputTokens: session.maxOutputTokens,  // Pass session's max_output_tokens
+        stdinData  // For stream-json input with inline images
       })) {
         if (chunk.type === 'chunk') {
           // Yield chunk immediately for real-time display

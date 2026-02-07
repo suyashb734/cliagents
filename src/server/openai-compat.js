@@ -15,6 +15,8 @@
 
 const express = require('express');
 const crypto = require('crypto');
+const fs = require('fs');
+const path = require('path');
 
 /**
  * Model mapping: OpenAI/Claude/Gemini model names → CLI adapters
@@ -37,11 +39,17 @@ const MODEL_MAP = {
   'claude-3-opus-20240229': { adapter: 'claude-code', model: 'claude-3-opus-20240229' },
   'claude-3-sonnet-20240229': { adapter: 'claude-code', model: 'claude-3-sonnet-20240229' },
 
-  // Gemini models → Gemini CLI
+  // Gemini models → Gemini CLI (for agentic dev work with tool use)
   'gemini-2.5-flash': { adapter: 'gemini-cli', model: 'gemini-2.5-flash' },
   'gemini-2.5-pro': { adapter: 'gemini-cli', model: 'gemini-2.5-pro' },
   'gemini-3-pro-preview': { adapter: 'gemini-cli', model: 'gemini-3-pro-preview' },
   'gemini-pro': { adapter: 'gemini-cli', model: 'default' },
+
+  // Gemini models → Gemini API (for fast production Q&A, no CLI overhead)
+  'gemini-2.5-flash-api': { adapter: 'gemini-api', model: 'gemini-2.5-flash' },
+  'gemini-2.5-pro-api': { adapter: 'gemini-api', model: 'gemini-2.5-pro' },
+  'gemini-2.0-flash-api': { adapter: 'gemini-api', model: 'gemini-2.0-flash' },
+  'gemini-api': { adapter: 'gemini-api', model: 'gemini-2.5-flash' },
 
   // Mistral models → Vibe CLI
   'devstral': { adapter: 'mistral-vibe', model: 'devstral' },
@@ -63,6 +71,55 @@ function generateId() {
 }
 
 /**
+ * Extract images from messages and save to temp files if needed
+ */
+function extractImagesFromMessages(messages) {
+  const images = [];
+  const tempDir = '/tmp/cliagents-images/';
+
+  if (!fs.existsSync(tempDir)) {
+    fs.mkdirSync(tempDir, { recursive: true });
+  }
+
+  for (const msg of messages) {
+    if (Array.isArray(msg.content)) {
+      for (const part of msg.content) {
+        if (part.type === 'image_url' && part.image_url && part.image_url.url) {
+          const imageUrl = part.image_url.url;
+          
+          if (imageUrl.startsWith('data:')) {
+            // Base64 image
+            try {
+              // Format: data:image/png;base64,.....
+              const matches = imageUrl.match(/^data:image\/([a-zA-Z]+);base64,(.+)$/);
+              if (matches) {
+                const ext = matches[1];
+                const data = matches[2];
+                const filename = `img-${crypto.randomBytes(8).toString('hex')}.${ext}`;
+                const filePath = path.join(tempDir, filename);
+                
+                fs.writeFileSync(filePath, Buffer.from(data, 'base64'));
+                images.push({ path: filePath, type: 'file' });
+                
+                // Update message with file path for the prompt builder
+                part.image_url.url = filePath;
+              }
+            } catch (e) {
+              console.error('Failed to process base64 image:', e);
+            }
+          } else {
+            // HTTP URL
+            images.push({ path: imageUrl, type: 'url' });
+          }
+        }
+      }
+    }
+  }
+  
+  return images;
+}
+
+/**
  * Build a single prompt from OpenAI messages array
  * For stateless compatibility, we concatenate all messages
  */
@@ -73,25 +130,30 @@ function buildPromptFromMessages(messages) {
     return '';
   }
 
-  // If only one user message, just return its content
-  if (nonSystemMessages.length === 1 && nonSystemMessages[0].role === 'user') {
-    const content = nonSystemMessages[0].content;
-    // Handle array content (vision messages)
+  // Helper to format content parts
+  const formatContent = (content) => {
     if (Array.isArray(content)) {
       return content
-        .filter(c => c.type === 'text')
-        .map(c => c.text)
+        .map(c => {
+          if (c.type === 'text') return c.text;
+          if (c.type === 'image_url') return `[Attached image: ${c.image_url.url}]`;
+          return '';
+        })
+        .filter(Boolean)
         .join('\n');
     }
     return content;
+  };
+
+  // If only one user message, just return its content
+  if (nonSystemMessages.length === 1 && nonSystemMessages[0].role === 'user') {
+    return formatContent(nonSystemMessages[0].content);
   }
 
   // Multiple messages - format as conversation
   let prompt = '';
   for (const msg of nonSystemMessages) {
-    const content = Array.isArray(msg.content)
-      ? msg.content.filter(c => c.type === 'text').map(c => c.text).join('\n')
-      : msg.content;
+    const content = formatContent(msg.content);
 
     if (msg.role === 'user') {
       prompt += `User: ${content}\n\n`;
@@ -123,7 +185,7 @@ function extractSystemPrompt(messages) {
  * Translate OpenAI request format to internal format
  */
 function translateOpenAIRequest(body) {
-  const { model, messages, stream, temperature, max_tokens, top_p, stop } = body;
+  const { model, messages, stream, temperature, max_tokens, top_p, stop, response_format } = body;
 
   if (!messages || !Array.isArray(messages) || messages.length === 0) {
     throw new Error('messages is required and must be a non-empty array');
@@ -139,6 +201,9 @@ function translateOpenAIRequest(body) {
     }
   }
 
+  // Extract images
+  const images = extractImagesFromMessages(messages);
+
   // Extract system prompt
   const systemPrompt = extractSystemPrompt(messages);
 
@@ -152,18 +217,29 @@ function translateOpenAIRequest(body) {
   // Map model to adapter (default to claude-code if unknown)
   const mapping = MODEL_MAP[model] || { adapter: 'claude-code', model: 'default' };
 
+  const options = {
+    temperature,
+    max_output_tokens: max_tokens,
+    top_p,
+    stop
+  };
+
+  if (response_format) {
+    if (response_format.type === 'json_schema' && response_format.json_schema) {
+      options.jsonSchema = response_format.json_schema.schema;
+    } else if (response_format.type === 'json_object') {
+      options.jsonMode = true;
+    }
+  }
+
   return {
     adapter: mapping.adapter,
     model: mapping.model,
     systemPrompt,
     message: prompt,
     stream: stream ?? false,
-    options: {
-      temperature,
-      max_output_tokens: max_tokens,
-      top_p,
-      stop
-    }
+    options,
+    images
   };
 }
 
@@ -240,7 +316,7 @@ function createOpenAIRouter(sessionManager) {
 
     try {
       // Translate request
-      const { adapter, model, systemPrompt, message, stream, options } =
+      const { adapter, model, systemPrompt, message, stream, options, images } =
         translateOpenAIRequest(req.body);
 
       // Check if adapter is available
@@ -276,11 +352,18 @@ function createOpenAIRouter(sessionManager) {
         systemPrompt,
         temperature: options.temperature,
         top_p: options.top_p,
-        max_output_tokens: options.max_output_tokens
+        max_output_tokens: options.max_output_tokens,
+        jsonSchema: options.jsonSchema,
+        images
       };
 
       const session = await sessionManager.createSession(sessionOptions);
       sessionId = session.sessionId;
+
+      // Pass images to send options so adapters can access image files
+      if (images && images.length > 0) {
+        options.images = images;
+      }
 
       if (stream) {
         // Streaming response

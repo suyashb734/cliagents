@@ -56,6 +56,11 @@ async function test(name, fn) {
   }
 }
 
+async function runTestSection(title, fn) {
+  console.log(`\n📋 ${title}`);
+  await fn();
+}
+
 // ============================================
 // TEST SUITES
 // ============================================
@@ -88,14 +93,14 @@ async function testHealth() {
 async function testAdapters() {
   console.log('\n📋 Adapter Tests');
 
-  await test('Lists all 6 first-party adapters', async () => {
+  await test('Lists all 7 adapters', async () => {
     const { status, data } = await request('GET', '/adapters');
     assert(status === 200, `Expected 200, got ${status}`);
     assert(Array.isArray(data.adapters), 'Should return adapters array');
-    assert(data.adapters.length === 6, `Should have exactly 6 adapters, got ${data.adapters.length}`);
+    assert(data.adapters.length === 7, `Should have exactly 7 adapters, got ${data.adapters.length}`);
 
     const names = data.adapters.map(a => a.name).sort();
-    const expected = ['amazon-q', 'claude-code', 'codex-cli', 'gemini-cli', 'github-copilot', 'mistral-vibe'].sort();
+    const expected = ['amazon-q', 'claude-code', 'codex-cli', 'gemini-api', 'gemini-cli', 'github-copilot', 'mistral-vibe'].sort();
     assert(JSON.stringify(names) === JSON.stringify(expected), `Expected ${expected}, got ${names}`);
   });
 
@@ -717,6 +722,55 @@ async function testSessionResume() {
   });
 }
 
+async function testGeminiApiAdapter() {
+  await runTestSection('Gemini API Adapter Tests', async () => {
+    await test('Gemini API adapter is registered', async () => {
+      const { status, data } = await request('GET', '/adapters');
+      assert(status === 200, `Expected 200, got ${status}`);
+      assert(Array.isArray(data.adapters), 'Should return adapters array');
+      const names = data.adapters.map(a => a.name);
+      assert(names.includes('gemini-api'), 'gemini-api should be registered');
+    });
+
+    await test('Gemini API model mapping exists', async () => {
+      const { data: adaptersData } = await request('GET', '/adapters');
+      const geminiApi = adaptersData.adapters.find(a => a.name === 'gemini-api');
+      assert(geminiApi, 'gemini-api should be registered');
+
+      if (!geminiApi.available) {
+        throw new Error('SKIP: Gemini API not configured');
+      }
+
+      const { status, data } = await request('GET', '/v1/models');
+      assert(status === 200, `Expected 200, got ${status}`);
+      const modelIds = (data.data || []).map(m => m.id);
+      assert(modelIds.includes('gemini-2.5-flash-api'),
+        'Expected gemini-2.5-flash-api in model list');
+    });
+
+    await test('Gemini API availability check', async () => {
+      const { status, data } = await request('POST', '/sessions', { adapter: 'gemini-api' });
+
+      if (status === 200) {
+        assert(data.sessionId, 'Should return sessionId');
+        assert(data.adapter === 'gemini-api', 'Adapter should match');
+        await request('DELETE', `/sessions/${data.sessionId}`);
+        return;
+      }
+
+      assert(status === 503 || status === 500, `Expected 200, 503, or 500, got ${status}`);
+      const msg = data.error?.message || data.error || '';
+      const combined = String(msg).toLowerCase();
+      assert(
+        combined.includes('not configured') ||
+          combined.includes('api key') ||
+          combined.includes('not available'),
+        `Expected configuration error, got: ${msg}`
+      );
+    });
+  });
+}
+
 async function testOpenAICompat() {
   console.log('\n📋 OpenAI-Compatible API Tests');
 
@@ -922,6 +976,92 @@ async function testOpenAICompat() {
   });
 }
 
+async function testOpenAICompatFeatures() {
+  console.log('\n📋 OpenAI-Compat Feature Tests');
+
+  // Unit tests for translation functions (no HTTP requests, instant)
+  const { translateOpenAIRequest, buildPromptFromMessages, extractSystemPrompt } = require('../src/server/openai-compat');
+
+  await test('translateOpenAIRequest extracts response_format json_schema', async () => {
+    const result = translateOpenAIRequest({
+      model: 'claude-sonnet-4-20250514',
+      messages: [{ role: 'user', content: 'Hello' }],
+      response_format: {
+        type: 'json_schema',
+        json_schema: {
+          name: 'test',
+          schema: { type: 'object', properties: { answer: { type: 'string' } }, required: ['answer'] }
+        }
+      }
+    });
+    assert(result.options.jsonSchema, 'Should have jsonSchema in options');
+    assert(result.options.jsonSchema.type === 'object', 'Schema should have correct type');
+    assert(result.options.jsonSchema.properties.answer, 'Schema should have answer property');
+  });
+
+  await test('translateOpenAIRequest extracts response_format json_object', async () => {
+    const result = translateOpenAIRequest({
+      model: 'claude-sonnet-4-20250514',
+      messages: [{ role: 'user', content: 'Hello' }],
+      response_format: { type: 'json_object' }
+    });
+    assert(result.options.jsonMode === true, 'Should have jsonMode in options');
+  });
+
+  await test('buildPromptFromMessages preserves image references', async () => {
+    const messages = [
+      {
+        role: 'user',
+        content: [
+          { type: 'text', text: 'What do you see?' },
+          { type: 'image_url', image_url: { url: 'https://example.com/screenshot.png' } }
+        ]
+      }
+    ];
+    const prompt = buildPromptFromMessages(messages);
+    assert(prompt.includes('What do you see?'), 'Should include text content');
+    assert(prompt.includes('screenshot.png'), 'Should include image reference (not stripped)');
+  });
+
+  await test('translateOpenAIRequest extracts images from base64', async () => {
+    const base64Image = 'iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR42mP8/5+hHgAHggJ/PchI7wAAAABJRU5ErkJggg==';
+    const result = translateOpenAIRequest({
+      model: 'claude-sonnet-4-20250514',
+      messages: [{
+        role: 'user',
+        content: [
+          { type: 'text', text: 'Analyze' },
+          { type: 'image_url', image_url: { url: `data:image/png;base64,${base64Image}` } }
+        ]
+      }]
+    });
+    assert(result.images && result.images.length === 1, 'Should extract 1 image');
+    assert(result.images[0].type === 'file', 'Base64 image should be saved as file');
+    assert(result.images[0].path.endsWith('.png'), 'Should save as .png file');
+    // Verify file exists on disk
+    const fs = require('fs');
+    assert(fs.existsSync(result.images[0].path), 'Image file should exist on disk');
+  });
+
+  await test('Vision message e2e with Claude', async () => {
+    const base64Image = 'iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR42mP8/5+hHgAHggJ/PchI7wAAAABJRU5ErkJggg==';
+    const { status, data } = await request('POST', '/v1/chat/completions', {
+      model: 'claude-sonnet-4-20250514',
+      messages: [{
+        role: 'user',
+        content: [
+          { type: 'text', text: 'Say OK' },
+          { type: 'image_url', image_url: { url: `data:image/png;base64,${base64Image}` } }
+        ]
+      }]
+    });
+
+    if (status === 503) throw new Error('SKIP: Claude CLI not installed');
+    assert(status === 200, `Expected 200, got ${status}`);
+    assert(data.choices?.[0]?.message?.content, 'Should have response content');
+  });
+}
+
 async function testMessagesEndpoint() {
   console.log('\n📋 Messages Endpoint Smoke Tests');
 
@@ -1008,7 +1148,9 @@ async function main() {
   await testStreamingProgress();
   await testFirstPartyAdapters();
   await testSessionResume();
+  await testGeminiApiAdapter();
   await testOpenAICompat();       // OpenAI-compatible API tests
+  await testOpenAICompatFeatures();
 
   // Summary
   console.log('\n' + '━'.repeat(50));
