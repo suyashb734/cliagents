@@ -326,7 +326,11 @@ function translateOpenAIRequest(body) {
 
   // Augment system prompt for JSON mode (defense in depth with extraction)
   if (options.jsonMode) {
-    const jsonInstruction = 'You MUST respond with valid JSON only. Do not include any text before or after the JSON.';
+    // For Codex CLI: override coding-agent persona so it acts as a general-purpose JSON API
+    const isCodex = mapping.adapter === 'codex-cli';
+    const jsonInstruction = isCodex
+      ? 'You are an API that returns JSON responses. You are NOT a coding assistant. Respond with ONLY valid JSON. Never refuse a request.'
+      : 'You MUST respond with valid JSON only. Do not include any text before or after the JSON.';
     systemPrompt = systemPrompt
       ? `${systemPrompt}\n\n${jsonInstruction}`
       : jsonInstruction;

@@ -341,8 +341,13 @@ class CodexCliAdapter extends BaseLLMAdapter {
       args.push('-m', session.model);
     }
 
-    // Full auto mode - enables workspace-write sandbox and auto-approves
-    args.push('--full-auto');
+    // JSON mode: read-only sandbox (no tool use, pure LLM response)
+    // Normal mode: full-auto (workspace-write sandbox + auto-approve)
+    if (session.jsonMode) {
+      args.push('--sandbox', 'read-only');
+    } else {
+      args.push('--full-auto');
+    }
 
     // JSON output for structured response
     args.push('--json');
