@@ -1192,6 +1192,11 @@ async function testJsonExtractionAndRateLimits() {
     assert(detectRateLimitError('Hello, here is your answer about rates and limits.') === false, 'Normal text should not match');
   });
 
+  await test('detectRateLimitError: explanatory text about rate limits is NOT a false positive', async () => {
+    assert(detectRateLimitError('A rate limit is a restriction on API calls.') === false, 'Explanatory text should not match');
+    assert(detectRateLimitError('The rate limit for this API is 100 requests per minute.') === false, 'Informational text should not match');
+  });
+
   await test('detectRateLimitError: handles null/undefined', async () => {
     assert(detectRateLimitError(null) === false, 'null should return false');
     assert(detectRateLimitError(undefined) === false, 'undefined should return false');

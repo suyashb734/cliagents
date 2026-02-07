@@ -268,10 +268,14 @@ function extractJsonFromResponse(text) {
  * Detect rate limit errors in response text from CLI agents.
  * CLI agents output rate limit errors as normal text (exit code 0),
  * so we need to inspect content for known patterns.
+ *
+ * Uses strict patterns that require error-context words to avoid false positives
+ * (e.g. a response explaining "what is a rate limit?" should NOT match).
  */
 function detectRateLimitError(text) {
   if (!text || typeof text !== 'string') return false;
-  return /rate.?limit|overloaded|too many requests|quota exceeded|ResourceExhausted/i.test(text);
+  return /rate.?limit\s*(exceeded|error|reached|hit)|overloaded.*try again|too many requests/i.test(text)
+    || /quota exceeded|ResourceExhausted|429.*too many/i.test(text);
 }
 
 /**
@@ -536,8 +540,8 @@ function createOpenAIRouter(sessionManager) {
             }
           }
 
-          // Check if accumulated content is a rate limit error (short response)
-          if (fullContent.length < 500 && detectRateLimitError(fullContent)) {
+          // Check if accumulated content is a rate limit error (very short response only)
+          if (fullContent.length < 200 && detectRateLimitError(fullContent)) {
             res.write(`data: ${JSON.stringify({ error: { message: fullContent, type: 'rate_limit_error', code: 'rate_limit_exceeded' } })}\n\n`);
             res.write('data: [DONE]\n\n');
             res.end();
