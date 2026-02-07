@@ -183,7 +183,32 @@ class GeminiCliAdapter extends BaseLLMAdapter {
     };
     this._applyGenerationParams(generationParams);
 
-    // Create a new Gemini session by sending an init message
+    // JSON mode: lazy init (no API call until first message, like Codex)
+    if (options.jsonMode) {
+      const session = {
+        geminiSessionRef: null,
+        ready: true,
+        messageCount: 0,
+        systemPrompt: options.systemPrompt,
+        workDir,
+        model,
+        jsonMode: true,
+        allowedTools: options.allowedTools,
+        generationParams
+      };
+      this.sessions.set(sessionId, session);
+      this.emit('ready', { sessionId });
+      logSessionStart(sessionId, this.name, { model: model || 'default', workDir, jsonMode: true });
+      return {
+        sessionId,
+        status: 'ready',
+        adapter: this.name,
+        geminiSessionRef: null,
+        model: model || 'default'
+      };
+    }
+
+    // Non-JSON mode: normal init with session creation
     const initPrompt = options.systemPrompt
       ? `You are starting a new session. ${options.systemPrompt}. Acknowledge with "Ready."`
       : 'You are starting a new session. Acknowledge with "Ready."';
@@ -568,8 +593,59 @@ class GeminiCliAdapter extends BaseLLMAdapter {
       throw new Error(`Session ${sessionId} not ready`);
     }
 
-    // Build args for resume
-    // Use stream-json for real-time streaming of agent progress
+    // JSON mode: single-shot, no tools, no session resume
+    if (session.jsonMode) {
+      // Build prompt with system prompt prepended
+      let fullPrompt = message;
+      if (session.systemPrompt) {
+        fullPrompt = `${session.systemPrompt}\n\n${fullPrompt}`;
+      }
+      const args = [
+        '-p', fullPrompt,
+        '-o', 'json', // JSON output format
+        '-s', 'false', // No sandbox (disables file system tools)
+        '-e', '',     // No extensions (disables MCP tools)
+      ];
+
+      if (session.model && session.model !== 'default') {
+        args.unshift('-m', session.model);
+      }
+
+      // No -y needed since tools are disabled, but add it for safety
+      args.push('-y');
+
+      session.messageCount++;
+
+      try {
+        const result = await this._runGeminiCommand(args, {
+          timeout: options.timeout || this.config.timeout,
+          workDir: session.workDir
+        });
+
+        let content = result.text || '';
+        // Strip markdown code blocks if model wraps JSON in ```json blocks
+        content = content.replace(/^```(?:json)?\s*\n?/i, '').replace(/\n?```\s*$/i, '').trim();
+        logConversation(sessionId, this.name, { prompt: message, response: content, stats: result.stats });
+
+        yield {
+          type: 'result',
+          content: content,
+          metadata: {
+            inputTokens: result.stats?.inputTokens,
+            outputTokens: result.stats?.outputTokens,
+            totalTokens: result.stats?.totalTokens,
+            toolCalls: 0,
+            timedOut: result.timedOut || false
+          }
+        };
+      } catch (error) {
+        logConversation(sessionId, this.name, { prompt: message, error: error.message });
+        yield { type: 'error', content: error.message };
+      }
+      return;
+    }
+
+    // Normal (non-JSON) mode: resume session, stream output
     const args = [
       '-r', session.geminiSessionRef, // Resume by "latest" or session reference
       '-p', message,

@@ -82,7 +82,8 @@ class CodexCliAdapter extends BaseLLMAdapter {
       systemPrompt: options.systemPrompt,
       workDir,
       model,
-      allowedTools: options.allowedTools
+      allowedTools: options.allowedTools,
+      jsonMode: options.jsonMode || false
     };
 
     this.sessions.set(sessionId, session);
@@ -364,6 +365,8 @@ class CodexCliAdapter extends BaseLLMAdapter {
         workDir: session.workDir
       })) {
         if (chunk.type === 'chunk') {
+          yield chunk;
+        } else if (chunk.type === 'progress') {
           yield chunk;
         } else if (chunk.type === 'result') {
           finalContent = chunk.content;

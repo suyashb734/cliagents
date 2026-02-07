@@ -22,14 +22,14 @@ const path = require('path');
  * Model mapping: OpenAI/Claude/Gemini model names → CLI adapters
  */
 const MODEL_MAP = {
-  // OpenAI models → Codex CLI
-  'gpt-4': { adapter: 'codex-cli', model: 'gpt-4o' },
-  'gpt-4o': { adapter: 'codex-cli', model: 'gpt-4o' },
-  'gpt-4o-mini': { adapter: 'codex-cli', model: 'gpt-4o-mini' },
-  'gpt-4-turbo': { adapter: 'codex-cli', model: 'gpt-4o' },
-  'gpt-3.5-turbo': { adapter: 'codex-cli', model: 'gpt-4o-mini' },
-  'o3-mini': { adapter: 'codex-cli', model: 'o3-mini' },
-  'o4-mini': { adapter: 'codex-cli', model: 'o4-mini' },
+  // OpenAI models → Codex CLI (use 'default' — Codex picks the best available model)
+  'gpt-4': { adapter: 'codex-cli', model: 'default' },
+  'gpt-4o': { adapter: 'codex-cli', model: 'default' },
+  'gpt-4o-mini': { adapter: 'codex-cli', model: 'default' },
+  'gpt-4-turbo': { adapter: 'codex-cli', model: 'default' },
+  'gpt-3.5-turbo': { adapter: 'codex-cli', model: 'default' },
+  'o3-mini': { adapter: 'codex-cli', model: 'default' },
+  'o4-mini': { adapter: 'codex-cli', model: 'default' },
 
   // Claude models → Claude Code
   'claude-sonnet-4-20250514': { adapter: 'claude-code', model: 'claude-sonnet-4-20250514' },
@@ -44,12 +44,6 @@ const MODEL_MAP = {
   'gemini-2.5-pro': { adapter: 'gemini-cli', model: 'gemini-2.5-pro' },
   'gemini-3-pro-preview': { adapter: 'gemini-cli', model: 'gemini-3-pro-preview' },
   'gemini-pro': { adapter: 'gemini-cli', model: 'default' },
-
-  // Gemini models → Gemini API (for fast production Q&A, no CLI overhead)
-  'gemini-2.5-flash-api': { adapter: 'gemini-api', model: 'gemini-2.5-flash' },
-  'gemini-2.5-pro-api': { adapter: 'gemini-api', model: 'gemini-2.5-pro' },
-  'gemini-2.0-flash-api': { adapter: 'gemini-api', model: 'gemini-2.0-flash' },
-  'gemini-api': { adapter: 'gemini-api', model: 'gemini-2.5-flash' },
 
   // Mistral models → Vibe CLI
   'devstral': { adapter: 'mistral-vibe', model: 'devstral' },
@@ -574,6 +568,17 @@ function createOpenAIRouter(sessionManager) {
               finalContent = chunk.content;
             }
             finalMetadata = chunk.metadata || {};
+          } else if (chunk.type === 'error') {
+            // Handle adapter error chunks (e.g. model not available, CLI errors)
+            const errorMsg = chunk.content || 'Unknown adapter error';
+            if (detectRateLimitError(errorMsg)) {
+              return res.status(429).json({
+                error: { message: errorMsg, type: 'rate_limit_error', code: 'rate_limit_exceeded' }
+              });
+            }
+            return res.status(500).json({
+              error: { message: errorMsg, type: 'cli_error', code: 'adapter_error' }
+            });
           }
         }
 
