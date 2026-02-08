@@ -443,15 +443,19 @@ class PersistentSessionManager extends EventEmitter {
     // Emit creation event
     this.emit('terminal-created', { terminalId, adapter, role });
 
-    // Auto-dismiss Gemini's "Do you trust this folder?" prompt if it appears
-    // This prompt blocks non-interactive sessions. Option 1 is pre-selected, so Enter accepts it.
+    // Auto-dismiss Gemini's trust prompts if they appear
+    // Old format: "Do you trust this folder? [1] Yes [2] No" (Enter accepts pre-selected option 1)
+    // New format: "This folder is untrusted...Use the /permissions command" (needs /permissions trust)
     if (adapter === 'gemini-cli') {
       // Give Gemini a moment to show the trust prompt (appears within first few seconds)
       await new Promise(resolve => setTimeout(resolve, 5000));
       const earlyOutput = this.tmux.getHistory(sessionName, windowName, 1000);
       if (earlyOutput && (earlyOutput.includes('Do you trust') || earlyOutput.includes('Trust folder'))) {
-        console.log(`[SessionManager] Gemini trust prompt detected for ${terminalId}, auto-trusting...`);
+        console.log(`[SessionManager] Gemini trust prompt (old format) detected for ${terminalId}, auto-trusting...`);
         this.tmux.sendKeys(sessionName, windowName, '', true); // Press Enter to accept pre-selected option
+      } else if (earlyOutput && earlyOutput.includes('untrusted')) {
+        console.log(`[SessionManager] Gemini untrusted folder detected for ${terminalId}, sending /permissions trust...`);
+        this.tmux.sendKeys(sessionName, windowName, '/permissions trust', true);
       }
     }
 
@@ -460,12 +464,20 @@ class PersistentSessionManager extends EventEmitter {
     try {
       await this.waitForStatus(terminalId, TerminalStatus.IDLE, 60000);
     } catch (error) {
-      // If Gemini still stuck on trust prompt, try pressing Enter again
+      // If Gemini still stuck on trust prompt, try dismissing again
       if (adapter === 'gemini-cli') {
         const output = this.tmux.getHistory(sessionName, windowName, 1000);
         if (output && (output.includes('Do you trust') || output.includes('Trust folder'))) {
-          console.log(`[SessionManager] Retrying Gemini trust prompt dismiss for ${terminalId}`);
+          console.log(`[SessionManager] Retrying Gemini trust prompt dismiss (old format) for ${terminalId}`);
           this.tmux.sendKeys(sessionName, windowName, '', true);
+          try {
+            await this.waitForStatus(terminalId, TerminalStatus.IDLE, 30000);
+          } catch (retryError) {
+            console.warn(`Terminal ${terminalId} may not be fully ready:`, retryError.message);
+          }
+        } else if (output && output.includes('untrusted')) {
+          console.log(`[SessionManager] Retrying Gemini untrusted folder fix for ${terminalId}`);
+          this.tmux.sendKeys(sessionName, windowName, '/permissions trust', true);
           try {
             await this.waitForStatus(terminalId, TerminalStatus.IDLE, 30000);
           } catch (retryError) {
