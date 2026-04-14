@@ -201,6 +201,31 @@ async function run() {
       }
     });
 
+    db.registerTerminal(
+      'recovered-main-root',
+      'cliagents-recovered-main',
+      '0',
+      'codex-cli',
+      'main_codex-cli',
+      'main',
+      '/tmp/project',
+      '/tmp/recovered-main.log',
+      {
+        rootSessionId: 'recovered-main-root',
+        parentSessionId: null,
+        sessionKind: 'main',
+        originClient: 'codex',
+        externalSessionRef: 'codex:thread-recovered',
+        lineageDepth: 0,
+        sessionMetadata: {
+          attachMode: 'managed-root-launch',
+          clientName: 'codex',
+          managedLaunch: true
+        }
+      }
+    );
+    db.updateStatus('recovered-main-root', 'idle');
+
     const snapshot = buildRootSessionSnapshot({
       db,
       rootSessionId: 'root-123',
@@ -237,6 +262,18 @@ async function run() {
     assert.strictEqual(managedMainSnapshot.rootType, 'attached_client_root');
     assert.strictEqual(managedMainSnapshot.userFacing, true);
 
+    const recoveredMainSnapshot = buildRootSessionSnapshot({
+      db,
+      rootSessionId: 'recovered-main-root',
+      eventLimit: 50,
+      terminalLimit: 20
+    });
+    assert(recoveredMainSnapshot, 'recovered main snapshot should exist');
+    assert.strictEqual(recoveredMainSnapshot.status, 'running');
+    assert.strictEqual(recoveredMainSnapshot.counts.running, 1);
+    assert.strictEqual(recoveredMainSnapshot.rootType, 'attached_client_root');
+    assert.strictEqual(recoveredMainSnapshot.userFacing, true);
+
     const summaries = listRootSessionSummaries({
       db,
       limit: 10,
@@ -245,7 +282,7 @@ async function run() {
     });
 
     assert.strictEqual(summaries.archivedCount, 1);
-    assert.strictEqual(summaries.roots.length, 2);
+    assert.strictEqual(summaries.roots.length, 3);
     const blockedRootSummary = summaries.roots.find((root) => root.rootSessionId === 'root-123');
     assert(blockedRootSummary, 'Expected blocked attached root summary');
     assert.strictEqual(blockedRootSummary.status, 'blocked');
@@ -259,6 +296,11 @@ async function run() {
     assert.strictEqual(managedMainSummary.rootType, 'attached_client_root');
     assert.strictEqual(managedMainSummary.attention.requiresAttention, false);
     assert.strictEqual(managedMainSummary.counts.running, 1);
+    const recoveredMainSummary = summaries.roots.find((root) => root.rootSessionId === 'recovered-main-root');
+    assert(recoveredMainSummary, 'Expected recovered main root summary');
+    assert.strictEqual(recoveredMainSummary.status, 'running');
+    assert.strictEqual(recoveredMainSummary.rootType, 'attached_client_root');
+    assert.strictEqual(recoveredMainSummary.counts.running, 1);
     assert.strictEqual(summaries.hiddenDetachedCount, 1);
     assert.strictEqual(summaries.hiddenNonUserCount, 0);
 
@@ -271,7 +313,7 @@ async function run() {
       scope: 'all'
     });
     assert.strictEqual(withArchived.archivedCount, 1);
-    assert.strictEqual(withArchived.roots.length, 4);
+    assert.strictEqual(withArchived.roots.length, 5);
     const archivedRoot = withArchived.roots.find((root) => root.rootSessionId === 'legacy-stale-root');
     assert(archivedRoot, 'Expected archived legacy root to be returned when requested');
     assert.strictEqual(archivedRoot.archived, true);

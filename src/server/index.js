@@ -13,13 +13,8 @@ const { execSync } = require('child_process');
 const SessionManager = require('../core/session-manager');
 
 // First-party CLI adapters (from AI companies with their own LLMs)
-const ClaudeCodeAdapter = require('../adapters/claude-code');
-const GeminiCliAdapter = require('../adapters/gemini-cli');
-const GeminiApiAdapter = require('../adapters/gemini-api');
-const CodexCliAdapter = require('../adapters/codex-cli');
-const AmazonQAdapter = require('../adapters/amazon-q');
-const MistralVibeAdapter = require('../adapters/mistral-vibe');
-const GitHubCopilotAdapter = require('../adapters/github-copilot');
+const { DEFAULT_BROKER_ADAPTER } = require('../adapters/active-surface');
+const { registerActiveAdapters } = require('../adapters/runtime-registry');
 
 // Utilities
 const { sendError, errorHandler, ErrorCodes } = require('../utils/errors');
@@ -38,29 +33,50 @@ const { authenticateRequest, validateApiKey } = require('./auth');
 const { PersistentSessionManager } = require('../tmux/session-manager');
 const { createAllDetectors } = require('../status-detectors/factory');
 const { getDB } = require('../database/db');
+const { RunLedgerService } = require('../orchestration/run-ledger');
 const InboxService = require('../services/inbox-service');
 const { createOrchestrationRouter } = require('./orchestration-router');
 
+function isProviderCapacityError(message) {
+  const text = String(message || '');
+  return /rate.?limit|quota|resourceexhausted|quota_exhausted|exhausted your capacity|capacity on this model/i.test(text);
+}
+
 class AgentServer {
   constructor(options = {}) {
-    this.port = options.port || 4001;
-    this.host = options.host || '0.0.0.0';
+    this.port = options.port ?? 4001;
+    this.host = options.host ?? '0.0.0.0';
+    this.cleanupOrphans = options.cleanupOrphans ?? process.env.CLI_AGENTS_CLEANUP_ORPHANS === '1';
+    this.destroyOrchestrationTerminalsOnStop = options.orchestration?.destroyTerminalsOnStop
+      ?? process.env.CLI_AGENTS_DESTROY_TERMINALS_ON_STOP === '1';
+    const pruneEnabledOption = options.orchestration?.pruneOrphanedTerminals;
+    const pruneOlderThanHoursOption = options.orchestration?.pruneOrphanedTerminalHours;
+    const pruneLimitOption = options.orchestration?.pruneOrphanedTerminalLimit;
+    this.orphanedTerminalPruneConfig = {
+      enabled: pruneEnabledOption ?? process.env.CLI_AGENTS_PRUNE_ORPHANED_TERMINALS === '1',
+      olderThanHours: Number(pruneOlderThanHoursOption ?? process.env.CLI_AGENTS_PRUNE_ORPHANED_TERMINALS_HOURS ?? 24),
+      limit: Number(pruneLimitOption ?? process.env.CLI_AGENTS_PRUNE_ORPHANED_TERMINALS_LIMIT ?? 1000)
+    };
+    this.runLedgerSweepTimer = null;
+    this.runLedgerSweepConfig = {
+      enabled: process.env.RUN_LEDGER_ENABLED === '1' && (
+        Number(options.orchestration?.runLedgerReconcileIntervalMs || 0) > 0 ||
+        process.env.RUN_LEDGER_SWEEP_ENABLED === '1'
+      ),
+      intervalMs: Number(options.orchestration?.runLedgerReconcileIntervalMs || process.env.RUN_LEDGER_RECONCILE_INTERVAL_MS || 0),
+      staleMs: Number(options.orchestration?.runLedgerReconcileStaleMs || process.env.RUN_LEDGER_RECONCILE_STALE_MS || 15 * 60 * 1000),
+      limit: Number(options.orchestration?.runLedgerReconcileLimit || process.env.RUN_LEDGER_RECONCILE_LIMIT || 100)
+    };
 
     // Initialize session manager
     this.sessionManager = new SessionManager({
-      defaultAdapter: options.defaultAdapter || 'claude-code',
+      defaultAdapter: options.defaultAdapter || DEFAULT_BROKER_ADAPTER,
       sessionTimeout: options.sessionTimeout || 30 * 60 * 1000,
       maxSessions: options.maxSessions || 10
     });
 
-    // Register first-party adapters
-    this.sessionManager.registerAdapter('claude-code', new ClaudeCodeAdapter(options.claudeCode || {}));
-    this.sessionManager.registerAdapter('gemini-cli', new GeminiCliAdapter(options.geminiCli || {}));
-    this.sessionManager.registerAdapter('gemini-api', new GeminiApiAdapter(options.geminiApi || {}));
-    this.sessionManager.registerAdapter('codex-cli', new CodexCliAdapter(options.codexCli || {}));
-    this.sessionManager.registerAdapter('amazon-q', new AmazonQAdapter(options.amazonQ || {}));
-    this.sessionManager.registerAdapter('mistral-vibe', new MistralVibeAdapter(options.mistralVibe || {}));
-    this.sessionManager.registerAdapter('github-copilot', new GitHubCopilotAdapter(options.githubCopilot || {}));
+    // Register the focused broker adapters
+    registerActiveAdapters(this.sessionManager, options);
 
     // Express app
     this.app = express();
@@ -141,17 +157,25 @@ class AgentServer {
       // Start inbox delivery loop
       inboxService.start();
 
+      const runLedger = process.env.RUN_LEDGER_ENABLED === '1'
+        ? new RunLedgerService(db)
+        : null;
+
       // Store orchestration context
       this.orchestration = {
         db,
+        runLedger,
         sessionManager: persistentSessionManager,
         inboxService,
         enabled: true
       };
 
+      this._startRunLedgerSweep();
+
       // Mount orchestration routes
       const orchestrationRouter = createOrchestrationRouter({
         sessionManager: persistentSessionManager,
+        apiSessionManager: this.sessionManager,
         db,
         inboxService
       });
@@ -169,6 +193,45 @@ class AgentServer {
       console.error('[AgentServer] Failed to initialize orchestration:', error.message);
       this.orchestration = null;
     }
+  }
+
+  _startRunLedgerSweep() {
+    if (!this.orchestration?.runLedger || !this.runLedgerSweepConfig.enabled) {
+      return;
+    }
+
+    const intervalMs = Math.max(1, Number(this.runLedgerSweepConfig.intervalMs || 0));
+    if (!Number.isFinite(intervalMs) || intervalMs <= 0) {
+      return;
+    }
+
+    const staleMs = Math.max(1, Number(this.runLedgerSweepConfig.staleMs || 15 * 60 * 1000));
+    const limit = Math.max(1, Number(this.runLedgerSweepConfig.limit || 100));
+
+    const sweep = () => {
+      try {
+        const result = this.orchestration.runLedger.reconcileStaleRuns({ staleMs, limit });
+        if (result.reconciledCount > 0) {
+          console.log(`[AgentServer] Reconciled ${result.reconciledCount} stale run(s)`);
+        }
+      } catch (error) {
+        console.warn('[AgentServer] Run-ledger reconciliation sweep failed:', error.message);
+      }
+    };
+
+    this.runLedgerSweepTimer = setInterval(sweep, intervalMs);
+    if (typeof this.runLedgerSweepTimer.unref === 'function') {
+      this.runLedgerSweepTimer.unref();
+    }
+  }
+
+  _stopRunLedgerSweep() {
+    if (!this.runLedgerSweepTimer) {
+      return;
+    }
+
+    clearInterval(this.runLedgerSweepTimer);
+    this.runLedgerSweepTimer = null;
   }
 
   /**
@@ -437,6 +500,15 @@ class AgentServer {
         if (error.message?.includes('timed out')) {
           return sendError(res, 'TIMEOUT', { message: error.message });
         }
+        if (isProviderCapacityError(error.message)) {
+          return res.status(429).json({
+            error: {
+              code: 'rate_limit_exceeded',
+              message: error.message,
+              type: 'rate_limit_error'
+            }
+          });
+        }
         sendError(res, 'INTERNAL_ERROR', { message: error.message });
       }
     });
@@ -468,6 +540,15 @@ class AgentServer {
         }
         res.json({ status: 'terminated' });
       } catch (error) {
+        if (isProviderCapacityError(error.message)) {
+          return res.status(429).json({
+            error: {
+              code: 'rate_limit_exceeded',
+              message: error.message,
+              type: 'rate_limit_error'
+            }
+          });
+        }
         sendError(res, 'INTERNAL_ERROR', { message: error.message });
       }
     });
@@ -596,7 +677,10 @@ class AgentServer {
     // Simple one-shot ask (creates session, sends message, returns response, terminates)
     app.post('/ask', async (req, res) => {
       try {
-        const { message, adapter, systemPrompt, timeout, jsonSchema, allowedTools, model } = req.body;
+        const {
+          message, adapter, systemPrompt, timeout, jsonSchema, allowedTools, model,
+          workDir, workingDirectory
+        } = req.body;
         if (!message) {
           return sendError(res, 'MISSING_PARAMETER', { message: 'Message is required', param: 'message' });
         }
@@ -607,13 +691,20 @@ class AgentServer {
           return sendError(res, 'INVALID_PARAMETER', { param: 'message', message: messageValidation.error });
         }
 
+        const resolvedWorkDir = workDir ?? workingDirectory;
+        const workDirValidation = validateWorkDir(resolvedWorkDir);
+        if (!workDirValidation.valid) {
+          return sendError(res, 'INVALID_PARAMETER', { message: workDirValidation.error, param: resolvedWorkDir === workingDirectory ? 'workingDirectory' : 'workDir' });
+        }
+
         // Create session with JSON schema support
         const session = await this.sessionManager.createSession({
           adapter,
           systemPrompt,
           jsonSchema,      // JSON schema for structured output (Claude only)
           allowedTools,    // Allowed tools
-          model            // Model selection
+          model,           // Model selection
+          workDir: workDirValidation.sanitized
         });
 
         try {
@@ -644,6 +735,16 @@ class AgentServer {
     // Serve dashboard page
     app.get('/dashboard', (req, res) => {
       res.sendFile(path.join(__dirname, '../../public/dashboard.html'));
+    });
+
+    // Serve run inspector page
+    app.get('/runs', (req, res) => {
+      res.sendFile(path.join(__dirname, '../../public/runs.html'));
+    });
+
+    // Serve live orchestration console
+    app.get('/console', (req, res) => {
+      res.sendFile(path.join(__dirname, '../../public/console.html'));
     });
 
     // Get status for all adapters
@@ -904,6 +1005,11 @@ class AgentServer {
    * @private
    */
   _cleanupOrphanProcesses() {
+    if (!this.cleanupOrphans) {
+      console.log('[Cleanup] Skipping orphan cleanup (disabled)');
+      return;
+    }
+
     console.log('[Cleanup] Checking for orphaned CLI processes...');
     let killed = 0;
 
@@ -926,22 +1032,60 @@ class AgentServer {
     console.log('[Cleanup] Orphan cleanup complete');
   }
 
+  _pruneHistoricalOrphanedTerminals() {
+    const config = this.orphanedTerminalPruneConfig || {};
+    if (!config.enabled) {
+      console.log('[Cleanup] Skipping historical orphaned terminal prune (disabled)');
+      return;
+    }
+
+    const db = this.orchestration?.db;
+    if (!db || typeof db.pruneOrphanedTerminals !== 'function') {
+      console.log('[Cleanup] Skipping historical orphaned terminal prune (DB unavailable)');
+      return;
+    }
+
+    const olderThanHours = Number.isFinite(config.olderThanHours) && config.olderThanHours > 0
+      ? Math.floor(config.olderThanHours)
+      : 24;
+    const limit = Number.isFinite(config.limit) && config.limit > 0
+      ? Math.floor(config.limit)
+      : 1000;
+
+    try {
+      const result = db.pruneOrphanedTerminals({ olderThanHours, limit });
+      console.log(
+        `[Cleanup] Historical orphaned terminal prune removed ${result.deletedCount} rows older than ${olderThanHours}h`
+      );
+    } catch (error) {
+      console.warn('[Cleanup] Failed to prune historical orphaned terminals:', error.message);
+    }
+  }
+
   /**
    * Start the server
    */
   async start() {
     // Clean up orphaned CLI processes from previous runs
     this._cleanupOrphanProcesses();
+    this._pruneHistoricalOrphanedTerminals();
 
     // Setup graceful shutdown handlers
     this._setupShutdownHandlers();
 
     return new Promise((resolve) => {
       this.server = this.app.listen(this.port, this.host, () => {
+        const address = this.server.address();
+        if (address && typeof address === 'object') {
+          this.port = address.port;
+        }
+
         console.log(`cliagents running at http://${this.host}:${this.port}`);
         console.log(`WebSocket available at ws://${this.host}:${this.port}/ws`);
         console.log(`Chat UI available at http://${this.host}:${this.port}/`);
         console.log(`Dashboard available at http://${this.host}:${this.port}/dashboard`);
+        console.log(`Live console available at http://${this.host}:${this.port}/console`);
+        console.log(`Run inspector available at http://${this.host}:${this.port}/runs`);
         console.log(`OpenAI-compatible API at http://${this.host}:${this.port}/v1/chat/completions`);
 
         this._setupWebSocket(this.server);
@@ -1019,11 +1163,35 @@ class AgentServer {
    * Stop the server
    */
   async stop() {
-    // Close all WebSocket connections
+    this._stopRunLedgerSweep();
+
+    // Stop orchestration background loops first (prevents hanging process on tests/shutdown)
+    if (this.orchestration?.inboxService && typeof this.orchestration.inboxService.stop === 'function') {
+      this.orchestration.inboxService.stop();
+    }
+
+    // Best-effort teardown of orchestration tmux terminals
+    if (this.orchestration?.sessionManager && typeof this.orchestration.sessionManager.destroyAllTerminals === 'function') {
+      try {
+        await this.orchestration.sessionManager.destroyAllTerminals({
+          preserveManagedRoots: !this.destroyOrchestrationTerminalsOnStop
+        });
+      } catch (error) {
+        console.warn('[Shutdown] Failed to destroy orchestration terminals:', error.message);
+      }
+    }
+
+    // Close all WebSocket connections and server
     if (this.wss) {
       for (const client of this.wss.clients) {
-        client.close();
+        try {
+          client.close();
+        } catch {}
       }
+
+      await new Promise((resolve) => this.wss.close(resolve));
+      this.wss = null;
+      this.wsClients.clear();
     }
 
     // Kill all active CLI processes in adapters
@@ -1041,7 +1209,10 @@ class AgentServer {
     // Close HTTP server
     if (this.server) {
       return new Promise((resolve) => {
-        this.server.close(resolve);
+        this.server.close(() => {
+          this.server = null;
+          resolve();
+        });
       });
     }
   }

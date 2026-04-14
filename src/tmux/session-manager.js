@@ -1809,11 +1809,31 @@ class PersistentSessionManager extends EventEmitter {
     this.emit('terminal-destroyed', { terminalId });
   }
 
+  _shouldPreserveTerminalOnStop(terminal) {
+    if (!terminal) {
+      return false;
+    }
+    const sessionKind = String(terminal.sessionKind || '').trim().toLowerCase();
+    const metadata = terminal.sessionMetadata && typeof terminal.sessionMetadata === 'object'
+      ? terminal.sessionMetadata
+      : null;
+    return Boolean(
+      metadata?.managedLaunch
+      || sessionKind === 'main'
+      || sessionKind === 'attach'
+    );
+  }
+
   /**
    * Destroy all terminals
    */
-  async destroyAllTerminals() {
-    for (const terminalId of this.terminals.keys()) {
+  async destroyAllTerminals(options = {}) {
+    const preserveManagedRoots = options.preserveManagedRoots === true;
+    for (const terminalId of Array.from(this.terminals.keys())) {
+      const terminal = this.terminals.get(terminalId);
+      if (preserveManagedRoots && this._shouldPreserveTerminalOnStop(terminal)) {
+        continue;
+      }
       await this.destroyTerminal(terminalId);
     }
   }

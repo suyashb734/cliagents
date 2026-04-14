@@ -11,6 +11,7 @@ const TEST_FILES = [
   'test-adapter-conformance-runtime.js',
   'test-cli-commands.js',
   'test-managed-root-launch.js',
+  'test-managed-root-recovery.js',
   'test-gemini-model-fallback.js',
   'test-opencode-cli.js',
   'test-status-detection.js',

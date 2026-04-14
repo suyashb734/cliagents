@@ -469,7 +469,29 @@ function listRootSessionSummaries({
 
   const normalizedScope = normalizeRootScope(scope);
   const scanLimit = includeArchived ? limit : Math.max(limit * 5, limit + 50);
-  const summaries = db.listRootSessions({ limit: scanLimit }).map((row) => {
+  const rootRows = new Map();
+  for (const row of db.listRootSessions({ limit: scanLimit })) {
+    rootRows.set(row.root_session_id, row);
+  }
+
+  if (db.listTerminals) {
+    const terminalScanLimit = Math.max(scanLimit, terminalLimit, 200);
+    for (const terminal of db.listTerminals({ limit: terminalScanLimit })) {
+      const rootSessionId = terminal.root_session_id || terminal.rootSessionId || terminal.terminal_id || terminal.terminalId;
+      if (!rootSessionId || rootRows.has(rootSessionId)) {
+        continue;
+      }
+      const lastSeenAt = terminal.last_active || terminal.lastActive || terminal.created_at || terminal.createdAt || null;
+      rootRows.set(rootSessionId, {
+        root_session_id: rootSessionId,
+        last_recorded_at: lastSeenAt,
+        last_occurred_at: lastSeenAt,
+        event_count: 0
+      });
+    }
+  }
+
+  const summaries = Array.from(rootRows.values()).map((row) => {
     const snapshot = buildRootSessionSnapshot({
       db,
       rootSessionId: row.root_session_id,
@@ -492,6 +514,13 @@ function listRootSessionSummaries({
       attention: snapshot?.attention || { requiresAttention: false, reasons: [] },
       counts: snapshot?.counts || null
     };
+  }).sort((left, right) => {
+    const leftTime = normalizeTimestamp(left.lastOccurredAt || left.lastRecordedAt) || 0;
+    const rightTime = normalizeTimestamp(right.lastOccurredAt || right.lastRecordedAt) || 0;
+    if (rightTime !== leftTime) {
+      return rightTime - leftTime;
+    }
+    return String(left.rootSessionId).localeCompare(String(right.rootSessionId));
   });
 
   let archivedCount = 0;
