@@ -1,24 +1,31 @@
 {
   "name": "cliagents",
   "version": "1.0.0",
-  "description": "HTTP server for CLI-based AI agents. Unified API for Claude Code, Gemini CLI, Codex, Aider, Goose, and more.",
+  "description": "Local broker for Codex CLI, Gemini CLI, and Qwen CLI with orchestration, consensus, and inspection APIs.",
   "main": "src/index.js",
+  "bin": {
+    "cliagents": "bin/cliagents.js"
+  },
   "type": "commonjs",
   "scripts": {
-    "start": "node src/index.js",
-    "dev": "node --watch src/index.js",
+    "start": "node scripts/run-with-supported-node.js src/index.js",
+    "dev": "node scripts/run-with-supported-node.js --node-arg=--watch src/index.js",
     "setup": "node src/scripts/setup-auth.js",
-    "test": "node tests/run-all.js"
+    "test": "node scripts/run-with-supported-node.js tests/test-focused-surface.js",
+    "test:focused": "node scripts/run-with-supported-node.js tests/test-focused-surface.js",
+    "test:runtime": "node scripts/run-with-supported-node.js tests/test-runtime-consistency.js",
+    "test:broad": "node scripts/run-with-supported-node.js tests/test-broad-api-surface.js"
   },
   "keywords": [
     "ai",
     "agent",
     "cli",
-    "claude",
     "gemini",
     "codex",
-    "aider",
-    "goose",
+    "qwen",
+    "orchestration",
+    "consensus",
+    "mcp",
     "api",
     "rest",
     "websocket",
@@ -36,9 +43,10 @@
   },
   "homepage": "https://github.com/suyashb734/cliagents#readme",
   "engines": {
-    "node": ">=18.11.0"
+    "node": ">=20 <25"
   },
   "files": [
+    "bin",
     "src",
     "public",
     "config",
@@ -53,6 +61,9 @@
     "dotenv": "^16.4.0",
     "express": "^4.18.2",
     "openai": "^4.0.0",
+    "sqlite": "^5.1.1",
+    "sqlite3": "^6.0.1",
     "ws": "^8.14.2"
-  }
+  },
+  "packageManager": "pnpm@10.28.2+sha512.41872f037ad22f7348e3b1debbaf7e867cfd448f2726d9cf74c08f19507c31d2c8e7a11525b983febc2df640b5438dee6023ebb1f84ed43cc2d654d2bc326264"
 }

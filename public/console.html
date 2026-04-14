@@ -1,0 +1,1655 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>cliagents - Live Console</title>
+  <style>
+    :root {
+      --bg-primary: #0d1117;
+      --bg-secondary: #161b22;
+      --bg-tertiary: #21262d;
+      --border-color: #30363d;
+      --text-primary: #e6edf3;
+      --text-secondary: #8b949e;
+      --accent-blue: #58a6ff;
+      --accent-green: #3fb950;
+      --accent-yellow: #d29922;
+      --accent-red: #f85149;
+      --accent-purple: #a371f7;
+    }
+
+    * {
+      box-sizing: border-box;
+      margin: 0;
+      padding: 0;
+    }
+
+    body {
+      font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, Oxygen, Ubuntu, sans-serif;
+      background: var(--bg-primary);
+      color: var(--text-primary);
+      min-height: 100vh;
+      padding: 20px;
+    }
+
+    a {
+      color: inherit;
+      text-decoration: none;
+    }
+
+    code, pre, textarea {
+      font-family: ui-monospace, SFMono-Regular, SF Mono, Menlo, Consolas, monospace;
+    }
+
+    .container {
+      max-width: 1680px;
+      margin: 0 auto;
+    }
+
+    header {
+      display: flex;
+      justify-content: space-between;
+      align-items: flex-start;
+      gap: 16px;
+      margin-bottom: 24px;
+      padding-bottom: 20px;
+      border-bottom: 1px solid var(--border-color);
+    }
+
+    h1 {
+      font-size: 1.8rem;
+      font-weight: 600;
+      margin-bottom: 8px;
+    }
+
+    .subtitle {
+      color: var(--text-secondary);
+      max-width: 920px;
+      line-height: 1.5;
+    }
+
+    .header-actions {
+      display: flex;
+      align-items: center;
+      gap: 12px;
+      flex-wrap: wrap;
+    }
+
+    .btn {
+      padding: 8px 14px;
+      border-radius: 8px;
+      border: 1px solid var(--border-color);
+      background: var(--bg-secondary);
+      color: var(--text-primary);
+      font-size: 14px;
+      cursor: pointer;
+      display: inline-flex;
+      align-items: center;
+      gap: 6px;
+    }
+
+    .btn:hover {
+      background: var(--bg-tertiary);
+      border-color: var(--text-secondary);
+    }
+
+    .btn-primary {
+      background: var(--accent-blue);
+      border-color: var(--accent-blue);
+      color: white;
+    }
+
+    .card {
+      background: var(--bg-secondary);
+      border: 1px solid var(--border-color);
+      border-radius: 12px;
+      overflow: hidden;
+    }
+
+    .stats-bar {
+      display: grid;
+      grid-template-columns: repeat(auto-fit, minmax(180px, 1fr));
+      gap: 16px;
+      margin-bottom: 24px;
+    }
+
+    .stat-card {
+      background: var(--bg-secondary);
+      border: 1px solid var(--border-color);
+      border-radius: 12px;
+      padding: 16px 18px;
+    }
+
+    .stat-label {
+      font-size: 12px;
+      color: var(--text-secondary);
+      text-transform: uppercase;
+      letter-spacing: 0.5px;
+      margin-bottom: 8px;
+    }
+
+    .stat-value {
+      font-size: 28px;
+      font-weight: 600;
+    }
+
+    .layout {
+      display: grid;
+      grid-template-columns: minmax(320px, 420px) minmax(0, 1fr);
+      gap: 20px;
+      align-items: start;
+    }
+
+    .stack {
+      display: grid;
+      gap: 20px;
+    }
+
+    .panel-header {
+      display: flex;
+      justify-content: space-between;
+      align-items: center;
+      gap: 10px;
+      padding: 16px 18px;
+      border-bottom: 1px solid var(--border-color);
+    }
+
+    .panel-title {
+      font-size: 15px;
+      font-weight: 600;
+    }
+
+    .panel-subtitle {
+      font-size: 12px;
+      color: var(--text-secondary);
+    }
+
+    .panel-actions {
+      display: flex;
+      align-items: center;
+      gap: 8px;
+      flex-wrap: wrap;
+    }
+
+    .toggle-label {
+      display: inline-flex;
+      align-items: center;
+      gap: 6px;
+      color: var(--text-secondary);
+      font-size: 12px;
+      white-space: nowrap;
+    }
+
+    .toggle-label input {
+      accent-color: var(--accent-blue);
+    }
+
+    .compact-select {
+      min-width: 130px;
+      max-width: 180px;
+    }
+
+    .small-input,
+    .reply-box textarea {
+      width: 100%;
+      padding: 10px 12px;
+      border-radius: 8px;
+      border: 1px solid var(--border-color);
+      background: var(--bg-tertiary);
+      color: var(--text-primary);
+      font-size: 14px;
+    }
+
+    .api-key-box {
+      display: flex;
+      align-items: center;
+      gap: 8px;
+      min-width: 300px;
+    }
+
+    .list {
+      max-height: 36vh;
+      overflow: auto;
+    }
+
+    .row {
+      padding: 14px 18px;
+      border-bottom: 1px solid var(--border-color);
+      cursor: pointer;
+    }
+
+    .row:hover,
+    .row.active {
+      background: rgba(88, 166, 255, 0.08);
+    }
+
+    .row.stale {
+      border-left: 3px solid rgba(210, 153, 34, 0.7);
+    }
+
+    .row:last-child {
+      border-bottom: 0;
+    }
+
+    .row-top {
+      display: flex;
+      justify-content: space-between;
+      align-items: center;
+      gap: 10px;
+      margin-bottom: 8px;
+    }
+
+    .row-title {
+      font-size: 14px;
+      font-weight: 600;
+      word-break: break-all;
+    }
+
+    .row-meta,
+    .detail-meta {
+      display: grid;
+      grid-template-columns: repeat(2, minmax(0, 1fr));
+      gap: 6px 12px;
+      font-size: 12px;
+      color: var(--text-secondary);
+    }
+
+    .status-pill {
+      display: inline-flex;
+      align-items: center;
+      padding: 4px 10px;
+      border-radius: 999px;
+      border: 1px solid var(--border-color);
+      font-size: 11px;
+      text-transform: uppercase;
+      letter-spacing: 0.5px;
+      white-space: nowrap;
+    }
+
+    .status-completed,
+    .status-idle { color: var(--accent-green); border-color: rgba(63, 185, 80, 0.35); }
+    .status-processing,
+    .status-running,
+    .status-pending { color: var(--accent-blue); border-color: rgba(88, 166, 255, 0.35); }
+    .status-waiting_permission,
+    .status-waiting_user_answer,
+    .status-partial { color: var(--accent-yellow); border-color: rgba(210, 153, 34, 0.35); }
+    .status-error,
+    .status-failed,
+    .status-abandoned,
+    .status-cancelled { color: var(--accent-red); border-color: rgba(248, 81, 73, 0.35); }
+
+    .detail-body {
+      padding: 18px;
+      display: grid;
+      gap: 16px;
+    }
+
+    .detail-grid {
+      display: grid;
+      grid-template-columns: repeat(2, minmax(0, 1fr));
+      gap: 8px 14px;
+      font-size: 13px;
+    }
+
+    .detail-label {
+      color: var(--text-secondary);
+      font-size: 12px;
+      text-transform: uppercase;
+      letter-spacing: 0.5px;
+      margin-bottom: 4px;
+    }
+
+    .terminal-output,
+    .message-list {
+      background: var(--bg-primary);
+      border: 1px solid var(--border-color);
+      border-radius: 10px;
+      padding: 14px;
+      max-height: 320px;
+      overflow: auto;
+    }
+
+    .terminal-output pre {
+      white-space: pre-wrap;
+      word-break: break-word;
+      line-height: 1.45;
+      font-size: 12px;
+    }
+
+    .message-item {
+      padding: 10px 0;
+      border-bottom: 1px solid rgba(48, 54, 61, 0.7);
+    }
+
+    .message-item:last-child {
+      border-bottom: 0;
+      padding-bottom: 0;
+    }
+
+    .message-head {
+      display: flex;
+      justify-content: space-between;
+      gap: 12px;
+      margin-bottom: 6px;
+      font-size: 12px;
+      color: var(--text-secondary);
+    }
+
+    .message-body {
+      font-size: 13px;
+      line-height: 1.5;
+      white-space: pre-wrap;
+      word-break: break-word;
+    }
+
+    .reply-box {
+      display: grid;
+      gap: 10px;
+    }
+
+    .reply-actions {
+      display: flex;
+      justify-content: space-between;
+      gap: 10px;
+      align-items: center;
+      flex-wrap: wrap;
+    }
+
+    .hint,
+    .empty-state {
+      color: var(--text-secondary);
+      font-size: 13px;
+      line-height: 1.5;
+    }
+
+    .empty-state {
+      padding: 18px;
+    }
+
+    .connection-ok { color: var(--accent-green); }
+    .connection-warn { color: var(--accent-yellow); }
+    .connection-bad { color: var(--accent-red); }
+
+    .warning-banner {
+      padding: 12px 14px;
+      border-radius: 10px;
+      border: 1px solid rgba(210, 153, 34, 0.35);
+      background: rgba(210, 153, 34, 0.08);
+      color: var(--text-primary);
+      font-size: 13px;
+      line-height: 1.5;
+    }
+
+    .detail-actions {
+      display: flex;
+      align-items: center;
+      gap: 10px;
+      flex-wrap: wrap;
+    }
+
+    .tree-list,
+    .timeline-list {
+      display: grid;
+      gap: 10px;
+    }
+
+    .tree-item,
+    .timeline-item {
+      border: 1px solid var(--border-color);
+      border-radius: 10px;
+      background: var(--bg-primary);
+      padding: 12px 14px;
+    }
+
+    .tree-head,
+    .timeline-head {
+      display: flex;
+      justify-content: space-between;
+      align-items: center;
+      gap: 10px;
+      margin-bottom: 8px;
+    }
+
+    .tree-title {
+      font-size: 13px;
+      font-weight: 600;
+      word-break: break-all;
+    }
+
+    .tree-meta,
+    .timeline-meta {
+      display: grid;
+      grid-template-columns: repeat(2, minmax(0, 1fr));
+      gap: 6px 12px;
+      font-size: 12px;
+      color: var(--text-secondary);
+    }
+
+    .tree-depth-0 { margin-left: 0; }
+    .tree-depth-1 { margin-left: 18px; }
+    .tree-depth-2 { margin-left: 36px; }
+    .tree-depth-3 { margin-left: 54px; }
+    .tree-depth-4 { margin-left: 72px; }
+
+    .timeline-body {
+      font-size: 13px;
+      line-height: 1.5;
+      white-space: pre-wrap;
+      word-break: break-word;
+    }
+
+    @media (max-width: 1080px) {
+      .layout {
+        grid-template-columns: 1fr;
+      }
+
+      .api-key-box {
+        min-width: 0;
+        width: 100%;
+      }
+    }
+  </style>
+</head>
+<body>
+  <div class="container">
+    <header>
+      <div>
+        <h1>Live Console</h1>
+        <div class="subtitle">
+          Monitor active terminals, inspect agent-to-agent discussion transcripts, and send follow-up input from one browser.
+          The server already binds to <code>0.0.0.0</code> by default, so this page is usable from an iPad on the same network.
+          If <code>CLI_AGENTS_API_KEY</code> is enabled, store it below so both <code>fetch</code> and <code>/ws</code> can authenticate.
+        </div>
+      </div>
+      <div class="header-actions">
+        <div class="api-key-box">
+          <input class="small-input" id="api-key-input" type="password" placeholder="Optional API key for remote access">
+          <button class="btn" id="save-api-key" type="button">Save Key</button>
+        </div>
+        <a href="/" class="btn">Chat UI</a>
+        <a href="/dashboard" class="btn">Dashboard</a>
+        <a href="/runs" class="btn">Run Inspector</a>
+        <button class="btn btn-primary" id="refresh-all" type="button">Refresh</button>
+      </div>
+    </header>
+
+    <div class="stats-bar">
+      <div class="stat-card">
+        <div class="stat-label">Active Terminals</div>
+        <div class="stat-value" id="stat-terminals">-</div>
+      </div>
+      <div class="stat-card">
+        <div class="stat-label">Running Discussions</div>
+        <div class="stat-value" id="stat-discussions">-</div>
+      </div>
+      <div class="stat-card">
+        <div class="stat-label">WebSocket</div>
+        <div class="stat-value" id="stat-ws">-</div>
+      </div>
+      <div class="stat-card">
+        <div class="stat-label">Selected Target</div>
+        <div class="stat-value" id="stat-selection">-</div>
+      </div>
+    </div>
+
+    <div class="layout">
+      <div class="stack">
+        <section class="card">
+          <div class="panel-header">
+            <div>
+              <div class="panel-title">Active Terminals</div>
+              <div class="panel-subtitle">Uses <code>/orchestration/terminals</code> and WebSocket orchestration events.</div>
+            </div>
+            <div class="panel-actions">
+              <button class="btn" id="reconcile-runs" type="button">Reconcile Stale Runs</button>
+              <span class="panel-subtitle" id="terminals-summary">Loading...</span>
+            </div>
+          </div>
+          <div class="list" id="terminals-list"></div>
+        </section>
+
+        <section class="card">
+          <div class="panel-header">
+            <div>
+              <div class="panel-title">cliagents Root Sessions</div>
+              <div class="panel-subtitle">Reads recent <code>/orchestration/session-events</code> and groups them by cliagents root session. Attached client roots are the main sessions; detached workers are shown separately.</div>
+            </div>
+            <div class="panel-actions">
+              <label class="toggle-label" for="include-archived-roots">
+                <input id="include-archived-roots" type="checkbox">
+                <span>Show archived</span>
+              </label>
+              <select class="compact-select" id="session-root-scope">
+                <option value="user">My roots</option>
+                <option value="all">All roots</option>
+                <option value="detached">Detached workers</option>
+                <option value="legacy">Legacy only</option>
+              </select>
+              <select class="compact-select" id="session-root-filter">
+                <option value="all">All roots</option>
+                <option value="actionable">Needs attention</option>
+                <option value="active">Active only</option>
+                <option value="completed">Completed only</option>
+              </select>
+              <span class="panel-subtitle" id="session-roots-summary">Loading...</span>
+            </div>
+          </div>
+          <div class="list" id="session-roots-list"></div>
+        </section>
+
+        <section class="card">
+          <div class="panel-header">
+            <div>
+              <div class="panel-title">Recent Discussions</div>
+              <div class="panel-subtitle">Reads <code>/orchestration/runs?kind=discussion</code> and replays <code>/orchestration/discussions/:id</code>.</div>
+            </div>
+            <div class="panel-actions">
+              <span class="panel-subtitle" id="discussions-summary">Loading...</span>
+            </div>
+          </div>
+          <div class="list" id="discussions-list"></div>
+        </section>
+      </div>
+
+      <div class="stack">
+        <section class="card">
+          <div class="panel-header">
+            <div>
+              <div class="panel-title">Control-Plane Tree</div>
+              <div class="panel-subtitle">cliagents root sessions, child workers, and replayable orchestration events.</div>
+            </div>
+            <div class="panel-actions">
+              <span class="panel-subtitle" id="session-tree-status">No cliagents root session selected</span>
+            </div>
+          </div>
+          <div class="detail-body" id="session-tree-detail">
+            <div class="empty-state">Select a cliagents root session to inspect worker lineage and ordered control-plane events.</div>
+          </div>
+        </section>
+
+        <section class="card">
+          <div class="panel-header">
+            <div>
+              <div class="panel-title">Terminal Detail</div>
+              <div class="panel-subtitle">Live output, persisted terminal messages, and human follow-up input.</div>
+            </div>
+            <div class="panel-actions">
+              <span class="panel-subtitle" id="terminal-detail-status">No terminal selected</span>
+            </div>
+          </div>
+          <div class="detail-body" id="terminal-detail">
+            <div class="empty-state">Select a terminal to see its status, output, persisted messages, and reply box.</div>
+          </div>
+        </section>
+
+        <section class="card">
+          <div class="panel-header">
+            <div>
+              <div class="panel-title">Agent Discussion</div>
+              <div class="panel-subtitle">Past and live transcripts for multi-agent discussion runs.</div>
+            </div>
+            <div class="panel-actions">
+              <span class="panel-subtitle" id="discussion-detail-status">No discussion selected</span>
+            </div>
+          </div>
+          <div class="detail-body" id="discussion-detail">
+            <div class="empty-state">Select a discussion run to inspect round summaries, judge output, and raw discussion messages.</div>
+          </div>
+        </section>
+      </div>
+    </div>
+  </div>
+
+  <script>
+    const STALE_TERMINAL_MS = 10 * 60 * 1000;
+    const ROOT_FILTER_OPTIONS = new Set(['all', 'actionable', 'active', 'completed']);
+    const ROOT_SCOPE_OPTIONS = new Set(['user', 'all', 'detached', 'legacy']);
+    const ACTIVE_ROOT_STATUSES = new Set(['running', 'processing', 'pending', 'partial', 'blocked', 'needs_attention']);
+    const urlState = new URLSearchParams(window.location.search);
+
+    const state = {
+      apiKey: localStorage.getItem('cliagents.console.apiKey') || '',
+      terminals: [],
+      discussionRuns: [],
+      sessionRoots: [],
+      sessionRootsArchivedCount: 0,
+      sessionRootsHiddenDetachedCount: 0,
+      sessionRootsHiddenNonUserCount: 0,
+      includeArchivedRoots: urlState.get('archived') === '1',
+      rootScope: ROOT_SCOPE_OPTIONS.has(urlState.get('scope')) ? urlState.get('scope') : 'user',
+      rootStatusFilter: ROOT_FILTER_OPTIONS.has(urlState.get('roots')) ? urlState.get('roots') : 'all',
+      selectedRootSessionId: urlState.get('root') || null,
+      selectedTerminalId: urlState.get('terminal') || null,
+      selectedDiscussionId: urlState.get('discussion') || null,
+      selectedRunId: urlState.get('run') || null,
+      socket: null,
+      socketConnected: false,
+      refreshTimer: null
+    };
+
+    const elements = {
+      apiKeyInput: document.getElementById('api-key-input'),
+      saveApiKey: document.getElementById('save-api-key'),
+      refreshAll: document.getElementById('refresh-all'),
+      reconcileRuns: document.getElementById('reconcile-runs'),
+      statTerminals: document.getElementById('stat-terminals'),
+      statDiscussions: document.getElementById('stat-discussions'),
+      statWs: document.getElementById('stat-ws'),
+      statSelection: document.getElementById('stat-selection'),
+      terminalsSummary: document.getElementById('terminals-summary'),
+      terminalsList: document.getElementById('terminals-list'),
+      includeArchivedRoots: document.getElementById('include-archived-roots'),
+      sessionRootScope: document.getElementById('session-root-scope'),
+      sessionRootFilter: document.getElementById('session-root-filter'),
+      sessionRootsSummary: document.getElementById('session-roots-summary'),
+      sessionRootsList: document.getElementById('session-roots-list'),
+      discussionsSummary: document.getElementById('discussions-summary'),
+      discussionsList: document.getElementById('discussions-list'),
+      sessionTreeDetail: document.getElementById('session-tree-detail'),
+      sessionTreeStatus: document.getElementById('session-tree-status'),
+      terminalDetail: document.getElementById('terminal-detail'),
+      terminalDetailStatus: document.getElementById('terminal-detail-status'),
+      discussionDetail: document.getElementById('discussion-detail'),
+      discussionDetailStatus: document.getElementById('discussion-detail-status')
+    };
+
+    function getAuthHeaders() {
+      return state.apiKey
+        ? { 'Authorization': `Bearer ${state.apiKey}`, 'X-API-Key': state.apiKey }
+        : {};
+    }
+
+    async function fetchJson(path, options = {}) {
+      const response = await fetch(path, {
+        ...options,
+        headers: {
+          'Content-Type': 'application/json',
+          ...getAuthHeaders(),
+          ...(options.headers || {})
+        }
+      });
+
+      const text = await response.text();
+      let data = null;
+      try {
+        data = text ? JSON.parse(text) : null;
+      } catch {
+        data = text;
+      }
+
+      if (!response.ok) {
+        const message = data?.error?.message || data?.message || text || `${response.status} ${response.statusText}`;
+        throw new Error(message);
+      }
+
+      return data;
+    }
+
+    function formatTimestamp(value) {
+      if (!value) return 'n/a';
+      return new Date(value).toLocaleString();
+    }
+
+    function timestampAgeMs(value) {
+      if (!value) return Number.POSITIVE_INFINITY;
+      return Date.now() - new Date(value).getTime();
+    }
+
+    function isTerminalSettled(status) {
+      return ['completed', 'idle', 'error', 'failed', 'cancelled', 'abandoned'].includes(String(status || '').toLowerCase());
+    }
+
+    function isTerminalStale(terminal) {
+      return !!terminal && !isTerminalSettled(terminal.status) && timestampAgeMs(terminal.lastActive || terminal.createdAt) > STALE_TERMINAL_MS;
+    }
+
+    function statusClass(status) {
+      return `status-pill status-${String(status || 'unknown').replace(/[^a-z0-9_]+/gi, '_').toLowerCase()}`;
+    }
+
+    function escapeHtml(value) {
+      return String(value || '')
+        .replace(/&/g, '&amp;')
+        .replace(/</g, '&lt;')
+        .replace(/>/g, '&gt;')
+        .replace(/"/g, '&quot;')
+        .replace(/'/g, '&#39;');
+    }
+
+    function syncUrlState() {
+      const params = new URLSearchParams();
+      if (state.includeArchivedRoots) params.set('archived', '1');
+      if (state.rootScope && state.rootScope !== 'user') params.set('scope', state.rootScope);
+      if (state.rootStatusFilter && state.rootStatusFilter !== 'all') params.set('roots', state.rootStatusFilter);
+      if (state.selectedRootSessionId) params.set('root', state.selectedRootSessionId);
+      if (state.selectedTerminalId) params.set('terminal', state.selectedTerminalId);
+      if (state.selectedDiscussionId) params.set('discussion', state.selectedDiscussionId);
+      if (state.selectedRunId) params.set('run', state.selectedRunId);
+      const query = params.toString();
+      const nextUrl = query ? `${window.location.pathname}?${query}` : window.location.pathname;
+      window.history.replaceState(null, '', nextUrl);
+    }
+
+    function getVisibleSessionRoots() {
+      const filter = state.rootStatusFilter || 'all';
+      return state.sessionRoots.filter((root) => {
+        if (filter === 'all') return true;
+        if (filter === 'actionable') {
+          return Boolean(root.attention?.requiresAttention);
+        }
+        if (filter === 'active') {
+          return ACTIVE_ROOT_STATUSES.has(String(root.status || root.latestEventType || '').toLowerCase());
+        }
+        if (filter === 'completed') {
+          return String(root.status || root.latestEventType || '').toLowerCase() === 'completed';
+        }
+        return true;
+      });
+    }
+
+    function updateStats() {
+      const activeTerminals = state.terminals.filter((terminal) => !isTerminalSettled(terminal.status)).length;
+      const runningDiscussions = state.discussionRuns.filter((run) => ['running', 'pending', 'partial'].includes(run.status)).length;
+      const selected = state.selectedRootSessionId || state.selectedTerminalId || state.selectedDiscussionId || 'none';
+
+      elements.statTerminals.textContent = String(activeTerminals);
+      elements.statDiscussions.textContent = String(runningDiscussions);
+      elements.statWs.textContent = state.socketConnected ? 'Live' : 'Polling';
+      elements.statWs.className = `stat-value ${state.socketConnected ? 'connection-ok' : 'connection-warn'}`;
+      elements.statSelection.textContent = selected.length > 18 ? `${selected.slice(0, 18)}…` : selected;
+    }
+
+    function saveApiKey() {
+      state.apiKey = elements.apiKeyInput.value.trim();
+      if (state.apiKey) {
+        localStorage.setItem('cliagents.console.apiKey', state.apiKey);
+      } else {
+        localStorage.removeItem('cliagents.console.apiKey');
+      }
+      reconnectSocket();
+      refreshAll();
+    }
+
+    async function reconcileStaleRuns() {
+      try {
+        const result = await fetchJson('/orchestration/runs/reconcile', {
+          method: 'POST',
+          body: JSON.stringify({
+            staleMs: STALE_TERMINAL_MS,
+            limit: 100
+          })
+        });
+        await refreshAll();
+        window.alert(`Reconciled ${result.reconciledCount || 0} stale run(s).`);
+      } catch (error) {
+        window.alert(`Reconcile failed: ${error.message}`);
+      }
+    }
+
+    async function destroySelectedTerminal(terminalId) {
+      if (!terminalId) return;
+      const confirmed = window.confirm(`Destroy terminal ${terminalId}?`);
+      if (!confirmed) return;
+
+      try {
+        await fetchJson(`/orchestration/terminals/${encodeURIComponent(terminalId)}`, {
+          method: 'DELETE'
+        });
+        if (state.selectedTerminalId === terminalId) {
+          state.selectedTerminalId = null;
+          syncUrlState();
+        }
+        await refreshAll();
+      } catch (error) {
+        window.alert(`Destroy failed: ${error.message}`);
+      }
+    }
+
+    function renderTerminals() {
+      const staleCount = state.terminals.filter(isTerminalStale).length;
+      elements.terminalsSummary.textContent = staleCount
+        ? `${state.terminals.length} loaded • ${staleCount} stale`
+        : `${state.terminals.length} loaded`;
+      if (!state.terminals.length) {
+        elements.terminalsList.innerHTML = '<div class="empty-state">No terminals are currently tracked.</div>';
+        updateStats();
+        return;
+      }
+
+      elements.terminalsList.innerHTML = state.terminals.map((terminal) => `
+        <div class="row ${terminal.terminalId === state.selectedTerminalId ? 'active' : ''} ${isTerminalStale(terminal) ? 'stale' : ''}" data-terminal-id="${terminal.terminalId}">
+          <div class="row-top">
+            <div class="row-title">${escapeHtml(terminal.agentProfile || terminal.terminalId)}</div>
+            <span class="${statusClass(terminal.status)}">${escapeHtml(terminal.status)}</span>
+          </div>
+          <div class="row-meta">
+            <div><strong>Adapter:</strong> ${escapeHtml(terminal.adapter)}</div>
+            <div><strong>Role:</strong> ${escapeHtml(terminal.role || 'n/a')}</div>
+            <div><strong>Created:</strong> ${escapeHtml(formatTimestamp(terminal.createdAt))}</div>
+            <div><strong>Last Active:</strong> ${escapeHtml(formatTimestamp(terminal.lastActive))}</div>
+            <div><strong>Health:</strong> ${escapeHtml(isTerminalStale(terminal) ? 'stale' : 'active')}</div>
+          </div>
+        </div>
+      `).join('');
+
+      elements.terminalsList.querySelectorAll('[data-terminal-id]').forEach((node) => {
+        node.addEventListener('click', () => {
+          state.selectedTerminalId = node.dataset.terminalId;
+          syncUrlState();
+          renderTerminals();
+          refreshSelectedTerminal();
+          updateStats();
+        });
+      });
+
+      updateStats();
+    }
+
+    function renderDiscussions() {
+      elements.discussionsSummary.textContent = `${state.discussionRuns.length} loaded`;
+      if (!state.discussionRuns.length) {
+        elements.discussionsList.innerHTML = '<div class="empty-state">No discussion runs found. This pane depends on <code>/orchestration/runs?kind=discussion</code>.</div>';
+        updateStats();
+        return;
+      }
+
+      elements.discussionsList.innerHTML = state.discussionRuns.map((run) => `
+        <div class="row ${run.id === state.selectedRunId ? 'active' : ''}" data-run-id="${run.id}" data-discussion-id="${run.discussionId || ''}">
+          <div class="row-top">
+            <div class="row-title">${escapeHtml(run.id)}</div>
+            <span class="${statusClass(run.status)}">${escapeHtml(run.status)}</span>
+          </div>
+          <div class="row-meta">
+            <div><strong>Discussion:</strong> ${escapeHtml(run.discussionId || 'n/a')}</div>
+            <div><strong>Decision:</strong> ${escapeHtml(run.decisionSource || 'n/a')}</div>
+            <div><strong>Started:</strong> ${escapeHtml(formatTimestamp(run.startedAt))}</div>
+            <div><strong>Summary:</strong> ${escapeHtml((run.inputSummary || '').slice(0, 70) || 'n/a')}</div>
+          </div>
+        </div>
+      `).join('');
+
+      elements.discussionsList.querySelectorAll('[data-run-id]').forEach((node) => {
+        node.addEventListener('click', () => {
+          state.selectedRunId = node.dataset.runId;
+          state.selectedDiscussionId = node.dataset.discussionId || null;
+          syncUrlState();
+          renderDiscussions();
+          refreshSelectedDiscussion();
+          updateStats();
+        });
+      });
+
+      updateStats();
+    }
+
+    function deriveSessionRoots(events) {
+      const grouped = new Map();
+
+      for (const event of events || []) {
+        const rootSessionId = event.root_session_id;
+        if (!rootSessionId) continue;
+
+        if (!grouped.has(rootSessionId)) {
+          grouped.set(rootSessionId, {
+            rootSessionId,
+            originClient: event.origin_client || 'unknown',
+            startedAt: event.occurred_at,
+            lastOccurredAt: event.occurred_at,
+            latestEventType: event.event_type,
+            latestSummary: event.payload_summary || '',
+            eventCount: 0,
+            runId: event.run_id || null,
+            discussionId: event.discussion_id || null,
+            reuseEvents: 0,
+            reusedSessionIds: new Set()
+          });
+        }
+
+        const root = grouped.get(rootSessionId);
+        root.eventCount += 1;
+        if (event.event_type === 'session_resumed') {
+          root.reuseEvents += 1;
+          if (event.session_id) {
+            root.reusedSessionIds.add(event.session_id);
+          }
+        }
+        root.startedAt = Math.min(root.startedAt || event.occurred_at, event.occurred_at || root.startedAt || Date.now());
+        if ((event.occurred_at || 0) >= (root.lastOccurredAt || 0)) {
+          root.lastOccurredAt = event.occurred_at || root.lastOccurredAt;
+          root.latestEventType = event.event_type || root.latestEventType;
+          root.latestSummary = event.payload_summary || root.latestSummary;
+          root.runId = event.run_id || root.runId;
+          root.discussionId = event.discussion_id || root.discussionId;
+          root.originClient = event.origin_client || root.originClient;
+        }
+      }
+
+      return Array.from(grouped.values())
+        .map((root) => ({
+          ...root,
+          reusedSessions: root.reusedSessionIds.size
+        }))
+        .sort((left, right) => (right.lastOccurredAt || 0) - (left.lastOccurredAt || 0));
+    }
+
+    function normalizeRootSummary(root) {
+      const counts = root?.counts || {};
+      const attention = root?.attention || { requiresAttention: false, reasons: [] };
+      return {
+        rootSessionId: root.rootSessionId,
+        originClient: root.originClient || 'unknown',
+        rootType: root.rootType || 'workflow_root',
+        userFacing: root.userFacing !== false,
+        externalSessionRef: root.externalSessionRef || null,
+        clientName: root.clientName || null,
+        startedAt: root.startedAt || root.lastRecordedAt || root.lastOccurredAt || null,
+        lastOccurredAt: root.lastOccurredAt || root.lastRecordedAt || null,
+        latestEventType: root.status || 'unknown',
+        latestSummary: root.latestConclusion?.summary || '',
+        eventCount: root.eventCount || counts.sessions || 0,
+        runId: root.runId || null,
+        discussionId: root.discussionId || null,
+        reuseEvents: counts.reuseEvents || 0,
+        reusedSessions: counts.reusedSessions || 0,
+        status: root.status || 'unknown',
+        attention,
+        latestConclusion: root.latestConclusion || null,
+        archived: Boolean(root.archived)
+      };
+    }
+
+    function renderSessionRoots() {
+      const visibleRoots = getVisibleSessionRoots();
+      const archivedSuffix = state.sessionRootsArchivedCount > 0
+        ? state.includeArchivedRoots
+          ? ` • ${state.sessionRootsArchivedCount} archived included`
+          : ` • ${state.sessionRootsArchivedCount} archived hidden`
+        : '';
+      const hiddenDetachedSuffix = state.sessionRootsHiddenDetachedCount > 0
+        ? ` • ${state.sessionRootsHiddenDetachedCount} detached worker roots hidden`
+        : '';
+      const filterSuffix = state.rootStatusFilter !== 'all'
+        ? ` • filter: ${state.rootStatusFilter}`
+        : '';
+      const scopeSuffix = state.rootScope !== 'user'
+        ? ` • scope: ${state.rootScope}`
+        : '';
+      elements.sessionRootsSummary.textContent = `${visibleRoots.length} shown of ${state.sessionRoots.length}${archivedSuffix}${hiddenDetachedSuffix}${scopeSuffix}${filterSuffix}`;
+      if (!state.sessionRoots.length) {
+        elements.sessionRootsList.innerHTML = '<div class="empty-state">No control-plane roots recorded yet.</div>';
+        updateStats();
+        return;
+      }
+      if (!visibleRoots.length) {
+        elements.sessionRootsList.innerHTML = '<div class="empty-state">No cliagents root sessions match the current filters.</div>';
+        updateStats();
+        return;
+      }
+
+      elements.sessionRootsList.innerHTML = visibleRoots.map((root) => `
+        <div class="row ${root.rootSessionId === state.selectedRootSessionId ? 'active' : ''}" data-root-session-id="${root.rootSessionId}">
+          <div class="row-top">
+            <div class="row-title">${escapeHtml(root.rootSessionId)}</div>
+            <span class="${statusClass(root.status || root.latestEventType || 'unknown')}">${escapeHtml(root.status || root.latestEventType || 'unknown')}</span>
+          </div>
+          <div class="row-meta">
+            <div><strong>Origin:</strong> ${escapeHtml(root.originClient || 'unknown')}</div>
+            <div><strong>Type:</strong> ${escapeHtml(root.rootType || 'workflow_root')}</div>
+            <div><strong>Events:</strong> ${escapeHtml(String(root.eventCount || 0))}</div>
+            <div><strong>Reuse Events:</strong> ${escapeHtml(String(root.reuseEvents || 0))}</div>
+            <div><strong>Reused Sessions:</strong> ${escapeHtml(String(root.reusedSessions || 0))}</div>
+            <div><strong>Started:</strong> ${escapeHtml(formatTimestamp(root.startedAt))}</div>
+            <div><strong>Last:</strong> ${escapeHtml(formatTimestamp(root.lastOccurredAt))}</div>
+            <div><strong>Run:</strong> ${escapeHtml(root.runId || 'n/a')}</div>
+            <div><strong>Discussion:</strong> ${escapeHtml(root.discussionId || 'n/a')}</div>
+          </div>
+          ${root.archived ? '<div class="hint">Archived legacy root</div>' : ''}
+          ${root.attention?.requiresAttention ? `<div class="hint">Attention: ${escapeHtml(root.attention.reasons.map((reason) => reason.code).join(', ') || 'required')}</div>` : ''}
+          ${root.latestSummary ? `<div class="hint">${escapeHtml(root.latestSummary)}</div>` : ''}
+        </div>
+      `).join('');
+
+      elements.sessionRootsList.querySelectorAll('[data-root-session-id]').forEach((node) => {
+        node.addEventListener('click', () => {
+          state.selectedRootSessionId = node.dataset.rootSessionId;
+          syncUrlState();
+          renderSessionRoots();
+          refreshSelectedSessionRoot();
+          updateStats();
+        });
+      });
+
+      updateStats();
+    }
+
+    async function refreshTerminals() {
+      const data = await fetchJson('/orchestration/terminals');
+      state.terminals = (data.terminals || []).slice().sort((a, b) => (b.lastActive || 0) - (a.lastActive || 0));
+      renderTerminals();
+    }
+
+    async function refreshDiscussionRuns() {
+      try {
+        const data = await fetchJson('/orchestration/runs?kind=discussion&limit=20');
+        state.discussionRuns = data.runs || [];
+      } catch (error) {
+        state.discussionRuns = [];
+        elements.discussionsSummary.textContent = error.message;
+      }
+      renderDiscussions();
+    }
+
+    async function refreshSessionRoots() {
+      try {
+        const query = state.includeArchivedRoots
+          ? `/orchestration/root-sessions?limit=80&scope=${encodeURIComponent(state.rootScope)}&includeArchived=1`
+          : `/orchestration/root-sessions?limit=80&scope=${encodeURIComponent(state.rootScope)}`;
+        const data = await fetchJson(query);
+        state.sessionRoots = (data.roots || []).map(normalizeRootSummary);
+        state.sessionRootsArchivedCount = Number(data.archivedCount || 0);
+        state.sessionRootsHiddenDetachedCount = Number(data.hiddenDetachedCount || 0);
+        state.sessionRootsHiddenNonUserCount = Number(data.hiddenNonUserCount || 0);
+      } catch (error) {
+        try {
+          const data = await fetchJson('/orchestration/session-events?limit=400');
+          state.sessionRoots = deriveSessionRoots(data.events || []);
+          state.sessionRootsArchivedCount = 0;
+          state.sessionRootsHiddenDetachedCount = 0;
+          state.sessionRootsHiddenNonUserCount = 0;
+        } catch (fallbackError) {
+          state.sessionRoots = [];
+          state.sessionRootsArchivedCount = 0;
+          state.sessionRootsHiddenDetachedCount = 0;
+          state.sessionRootsHiddenNonUserCount = 0;
+          elements.sessionRootsSummary.textContent = fallbackError.message;
+        }
+      }
+      renderSessionRoots();
+    }
+
+    function buildTerminalDetailMarkup(terminal, outputText, messages, options = {}) {
+      const prefix = options.prefix || 'terminal-detail';
+      const status = terminal?.status || 'unknown';
+      const blocked = ['waiting_permission', 'waiting_user_answer'].includes(status);
+      const stale = isTerminalStale(terminal);
+      return `
+        ${stale ? `
+          <div class="warning-banner">
+            This terminal looks stale. Its last activity is older than ${Math.round(STALE_TERMINAL_MS / 60000)} minutes while still marked ${escapeHtml(status)}.
+            Use <strong>Destroy Terminal</strong> if the worker is wedged, or <strong>Reconcile Stale Runs</strong> to correct the run ledger.
+          </div>
+        ` : ''}
+
+        <div class="detail-grid">
+          <div>
+            <div class="detail-label">Terminal ID</div>
+            <div>${escapeHtml(terminal.terminalId)}</div>
+          </div>
+          <div>
+            <div class="detail-label">Adapter</div>
+            <div>${escapeHtml(terminal.adapter)}</div>
+          </div>
+          <div>
+            <div class="detail-label">Role</div>
+            <div>${escapeHtml(terminal.role || 'n/a')}</div>
+          </div>
+          <div>
+            <div class="detail-label">Status</div>
+            <div><span class="${statusClass(status)}">${escapeHtml(status)}</span></div>
+          </div>
+          <div>
+            <div class="detail-label">Created</div>
+            <div>${escapeHtml(formatTimestamp(terminal.createdAt))}</div>
+          </div>
+          <div>
+            <div class="detail-label">Last Active</div>
+            <div>${escapeHtml(formatTimestamp(terminal.lastActive))}</div>
+          </div>
+        </div>
+
+        <div>
+          <div class="detail-label">Live Output</div>
+          <div class="terminal-output"><pre>${escapeHtml(outputText || 'No terminal output available.')}</pre></div>
+        </div>
+
+        <div>
+          <div class="detail-label">Persisted Messages</div>
+          <div class="message-list">
+            ${messages.length ? messages.map((message) => `
+              <div class="message-item">
+                <div class="message-head">
+                  <span>${escapeHtml(message.role || message.message_type || 'message')}</span>
+                  <span>${escapeHtml(formatTimestamp(message.created_at || message.createdAt))}</span>
+                </div>
+                <div class="message-body">${escapeHtml(message.content || message.message || '')}</div>
+              </div>
+            `).join('') : '<div class="empty-state">No persisted terminal messages yet.</div>'}
+          </div>
+        </div>
+
+        <div class="reply-box">
+          <div class="detail-label">Reply to Terminal</div>
+          <textarea id="${prefix}-reply-input" rows="4" placeholder="Send input to the selected terminal. Useful for approval prompts, follow-up instructions, or remote vibe-coding from an iPad."></textarea>
+          <div class="reply-actions">
+            <div class="hint">${blocked ? 'This terminal is waiting on human input.' : 'You can still send follow-up input even when the terminal is processing.'}</div>
+            <button class="btn btn-primary" id="${prefix}-reply-send" type="button">Send Reply</button>
+          </div>
+        </div>
+
+        <div class="detail-actions">
+          <button class="btn" id="${prefix}-destroy" type="button">Destroy Terminal</button>
+          <button class="btn" id="${prefix}-reconcile-runs" type="button">Reconcile Stale Runs</button>
+          <div class="hint">Attach command: <code>${escapeHtml(terminal.attachCommand || 'n/a')}</code></div>
+        </div>
+      `;
+    }
+
+    function bindTerminalDetailActions(terminal, prefix, refreshFn) {
+      document.getElementById(`${prefix}-reply-send`)?.addEventListener('click', async () => {
+        const textarea = document.getElementById(`${prefix}-reply-input`);
+        const message = textarea.value.trim();
+        if (!message) return;
+        await fetchJson(`/orchestration/terminals/${encodeURIComponent(terminal.terminalId)}/input`, {
+          method: 'POST',
+          body: JSON.stringify({ message })
+        });
+        textarea.value = '';
+        await refreshFn();
+      });
+      document.getElementById(`${prefix}-destroy`)?.addEventListener('click', () => destroySelectedTerminal(terminal.terminalId));
+      document.getElementById(`${prefix}-reconcile-runs`)?.addEventListener('click', reconcileStaleRuns);
+    }
+
+    function renderTerminalDetailCard(terminal, outputText, messages) {
+      const status = terminal?.status || 'unknown';
+      elements.terminalDetailStatus.textContent = `${terminal.agentProfile || terminal.terminalId} • ${status}`;
+      elements.terminalDetail.innerHTML = buildTerminalDetailMarkup(terminal, outputText, messages, {
+        prefix: 'terminal-detail'
+      });
+      bindTerminalDetailActions(terminal, 'terminal-detail', refreshSelectedTerminal);
+    }
+
+    async function refreshSelectedTerminal() {
+      if (!state.selectedTerminalId) {
+        elements.terminalDetailStatus.textContent = 'No terminal selected';
+        elements.terminalDetail.innerHTML = '<div class="empty-state">Select a terminal to see its status, output, persisted messages, and reply box.</div>';
+        return;
+      }
+
+      try {
+        const [terminal, output, messages] = await Promise.all([
+          fetchJson(`/orchestration/terminals/${encodeURIComponent(state.selectedTerminalId)}`),
+          fetchJson(`/orchestration/terminals/${encodeURIComponent(state.selectedTerminalId)}/output?lines=250`),
+          fetchJson(`/orchestration/terminals/${encodeURIComponent(state.selectedTerminalId)}/messages?limit=200`)
+        ]);
+        renderTerminalDetailCard(terminal, output.output, messages.messages || []);
+      } catch (error) {
+        elements.terminalDetailStatus.textContent = 'Terminal unavailable';
+        elements.terminalDetail.innerHTML = `<div class="empty-state">${escapeHtml(error.message)}</div>`;
+      }
+    }
+
+    function buildSessionTree(events) {
+      const nodes = new Map();
+
+      function ensureNode(sessionId) {
+        if (!nodes.has(sessionId)) {
+          nodes.set(sessionId, {
+            sessionId,
+            parentSessionId: null,
+            firstSequence: Number.POSITIVE_INFINITY,
+            lastOccurredAt: 0,
+            sessionKind: 'unknown',
+            adapter: null,
+            role: null,
+            name: null,
+            latestEventType: null,
+            latestSummary: null,
+            resumeCount: 0,
+            wasReused: false,
+            lastReuseReason: null,
+            events: [],
+            children: []
+          });
+        }
+        return nodes.get(sessionId);
+      }
+
+      for (const event of events || []) {
+        const sessionId = event.session_id;
+        if (!sessionId) continue;
+        const node = ensureNode(sessionId);
+        const payload = event.payload_json || {};
+        node.parentSessionId = event.parent_session_id || node.parentSessionId;
+        node.firstSequence = Math.min(node.firstSequence, Number(event.sequence_no || Number.MAX_SAFE_INTEGER));
+        node.lastOccurredAt = Math.max(node.lastOccurredAt || 0, event.occurred_at || 0);
+        node.sessionKind = payload.sessionKind || node.sessionKind;
+        node.adapter = payload.adapter || node.adapter;
+        node.role = payload.role || node.role;
+        node.name = payload.name || node.name;
+        node.latestEventType = event.event_type || node.latestEventType;
+        node.latestSummary = event.payload_summary || node.latestSummary;
+        if (event.event_type === 'session_resumed') {
+          node.resumeCount += 1;
+          node.wasReused = true;
+          node.lastReuseReason = payload.reuseReason || node.lastReuseReason;
+        }
+        node.events.push(event);
+      }
+
+      for (const node of nodes.values()) {
+        if (node.parentSessionId && nodes.has(node.parentSessionId) && node.parentSessionId !== node.sessionId) {
+          nodes.get(node.parentSessionId).children.push(node);
+        }
+      }
+
+      for (const node of nodes.values()) {
+        node.children.sort((left, right) => left.firstSequence - right.firstSequence);
+      }
+
+      return nodes;
+    }
+
+    function flattenSessionTree(nodes, rootSessionId, depth = 0, rows = []) {
+      const node = nodes.get(rootSessionId);
+      if (!node) return rows;
+      rows.push({ ...node, depth });
+      for (const child of node.children || []) {
+        flattenSessionTree(nodes, child.sessionId, depth + 1, rows);
+      }
+      return rows;
+    }
+
+    function renderRootTerminalSection(rootTerminalBundle) {
+      if (!rootTerminalBundle) {
+        return '';
+      }
+      if (rootTerminalBundle.error) {
+        return `
+          <div>
+            <div class="detail-label">Root Terminal</div>
+            <div class="warning-banner">
+              Root terminal ${escapeHtml(rootTerminalBundle.terminalId || 'unknown')} could not be loaded: ${escapeHtml(rootTerminalBundle.error)}
+            </div>
+          </div>
+        `;
+      }
+      return `
+        <div>
+          <div class="detail-label">Root Terminal</div>
+          ${buildTerminalDetailMarkup(
+            rootTerminalBundle.terminal,
+            rootTerminalBundle.outputText,
+            rootTerminalBundle.messages,
+            { prefix: 'root-terminal' }
+          )}
+        </div>
+      `;
+    }
+
+    function renderSessionTreeDetail(events, snapshot = null, rootTerminalBundle = null) {
+      if (!state.selectedRootSessionId) {
+        elements.sessionTreeStatus.textContent = 'No cliagents root session selected';
+        elements.sessionTreeDetail.innerHTML = '<div class="empty-state">Select a cliagents root session to inspect worker lineage and ordered control-plane events.</div>';
+        return;
+      }
+
+      const roots = snapshot || state.sessionRoots.find((root) => root.rootSessionId === state.selectedRootSessionId) || null;
+      const nodes = buildSessionTree(events);
+      const rows = flattenSessionTree(nodes, state.selectedRootSessionId);
+      const reusedSessions = rows.filter((node) => node.wasReused).length;
+      const reuseEvents = rows.reduce((total, node) => total + (node.resumeCount || 0), 0);
+      const attentionCodes = roots?.attention?.reasons?.map((reason) => reason.code).join(', ') || 'none';
+
+      elements.sessionTreeStatus.textContent = `${state.selectedRootSessionId} • ${events.length} event(s)`;
+      elements.sessionTreeDetail.innerHTML = `
+        <div class="detail-grid">
+          <div>
+            <div class="detail-label">cliagents Root Session</div>
+            <div>${escapeHtml(state.selectedRootSessionId)}</div>
+          </div>
+          <div>
+            <div class="detail-label">Origin</div>
+            <div>${escapeHtml(roots?.originClient || 'unknown')}</div>
+          </div>
+          <div>
+            <div class="detail-label">Run</div>
+            <div>${escapeHtml(roots?.runId || 'n/a')}</div>
+          </div>
+          <div>
+            <div class="detail-label">Discussion</div>
+            <div>${escapeHtml(roots?.discussionId || 'n/a')}</div>
+          </div>
+          <div>
+            <div class="detail-label">Started</div>
+            <div>${escapeHtml(formatTimestamp(roots?.startedAt))}</div>
+          </div>
+          <div>
+            <div class="detail-label">Last Event</div>
+            <div>${escapeHtml(formatTimestamp(roots?.lastOccurredAt))}</div>
+          </div>
+          <div>
+            <div class="detail-label">Reuse Events</div>
+            <div>${escapeHtml(String(roots?.reuseEvents ?? reuseEvents))}</div>
+          </div>
+          <div>
+            <div class="detail-label">Reused Sessions</div>
+            <div>${escapeHtml(String(roots?.reusedSessions ?? reusedSessions))}</div>
+          </div>
+          <div>
+            <div class="detail-label">Attention</div>
+            <div>${escapeHtml(attentionCodes)}</div>
+          </div>
+          <div>
+            <div class="detail-label">Latest Conclusion</div>
+            <div>${escapeHtml(roots?.latestConclusion?.summary || roots?.latestSummary || 'n/a')}</div>
+          </div>
+        </div>
+
+        ${renderRootTerminalSection(rootTerminalBundle)}
+
+        <div>
+          <div class="detail-label">Session Hierarchy</div>
+          <div class="tree-list">
+            ${rows.length ? rows.map((node) => `
+              <div class="tree-item tree-depth-${Math.min(node.depth, 4)}">
+                <div class="tree-head">
+                  <div class="tree-title">${escapeHtml(node.name || node.sessionId)}</div>
+                  <span class="${statusClass(node.latestEventType || 'unknown')}">${escapeHtml(node.latestEventType || 'unknown')}</span>
+                </div>
+                <div class="tree-meta">
+                  <div><strong>Session:</strong> ${escapeHtml(node.sessionId)}</div>
+                  <div><strong>Kind:</strong> ${escapeHtml(node.sessionKind || 'unknown')}</div>
+                  <div><strong>Adapter:</strong> ${escapeHtml(node.adapter || 'n/a')}</div>
+                  <div><strong>Role:</strong> ${escapeHtml(node.role || 'n/a')}</div>
+                  <div><strong>Reused:</strong> ${escapeHtml(node.wasReused ? 'yes' : 'no')}</div>
+                  <div><strong>Resume Count:</strong> ${escapeHtml(String(node.resumeCount || 0))}</div>
+                  <div><strong>Children:</strong> ${escapeHtml(String((node.children || []).length))}</div>
+                  <div><strong>Last:</strong> ${escapeHtml(formatTimestamp(node.lastOccurredAt))}</div>
+                </div>
+                ${node.lastReuseReason ? `<div class="hint">Reuse reason: ${escapeHtml(node.lastReuseReason)}</div>` : ''}
+                <div class="hint">${escapeHtml(node.latestSummary || 'No summary available.')}</div>
+              </div>
+            `).join('') : '<div class="empty-state">No session nodes recorded for this root yet.</div>'}
+          </div>
+        </div>
+
+        <div>
+          <div class="detail-label">Ordered Event Timeline</div>
+          <div class="timeline-list">
+            ${events.length ? events.map((event) => `
+              <div class="timeline-item">
+                <div class="timeline-head">
+                  <div class="tree-title">${escapeHtml(event.event_type)}</div>
+                  <span class="panel-subtitle">#${escapeHtml(String(event.sequence_no || 'n/a'))}</span>
+                </div>
+                <div class="timeline-meta">
+                  <div><strong>Session:</strong> ${escapeHtml(event.session_id || 'n/a')}</div>
+                  <div><strong>Parent:</strong> ${escapeHtml(event.parent_session_id || 'n/a')}</div>
+                  <div><strong>Run:</strong> ${escapeHtml(event.run_id || 'n/a')}</div>
+                  <div><strong>Discussion:</strong> ${escapeHtml(event.discussion_id || 'n/a')}</div>
+                  <div><strong>Origin:</strong> ${escapeHtml(event.origin_client || 'n/a')}</div>
+                  <div><strong>Occurred:</strong> ${escapeHtml(formatTimestamp(event.occurred_at))}</div>
+                </div>
+                <div class="timeline-body">${escapeHtml(event.payload_summary || '')}</div>
+              </div>
+            `).join('') : '<div class="empty-state">No session events recorded for this root yet.</div>'}
+          </div>
+        </div>
+      `;
+
+      if (rootTerminalBundle && !rootTerminalBundle.error) {
+        bindTerminalDetailActions(rootTerminalBundle.terminal, 'root-terminal', refreshSelectedSessionRoot);
+      }
+    }
+
+    async function refreshSelectedSessionRoot() {
+      if (!state.selectedRootSessionId) {
+        elements.sessionTreeStatus.textContent = 'No cliagents root session selected';
+        elements.sessionTreeDetail.innerHTML = '<div class="empty-state">Select a cliagents root session to inspect worker lineage and ordered control-plane events.</div>';
+        return;
+      }
+
+      try {
+        const [eventsData, rootData] = await Promise.all([
+          fetchJson(`/orchestration/session-events?rootSessionId=${encodeURIComponent(state.selectedRootSessionId)}&limit=400`),
+          fetchJson(`/orchestration/root-sessions/${encodeURIComponent(state.selectedRootSessionId)}?eventLimit=400&terminalLimit=200`)
+        ]);
+        let rootTerminalBundle = null;
+        const rootTerminalId = rootData?.rootSession?.terminalId || null;
+        if (rootTerminalId) {
+          const [terminalResult, outputResult, messagesResult] = await Promise.allSettled([
+            fetchJson(`/orchestration/terminals/${encodeURIComponent(rootTerminalId)}`),
+            fetchJson(`/orchestration/terminals/${encodeURIComponent(rootTerminalId)}/output?lines=250`),
+            fetchJson(`/orchestration/terminals/${encodeURIComponent(rootTerminalId)}/messages?limit=200`)
+          ]);
+          if (
+            terminalResult.status === 'fulfilled'
+            && outputResult.status === 'fulfilled'
+            && messagesResult.status === 'fulfilled'
+          ) {
+            rootTerminalBundle = {
+              terminal: terminalResult.value,
+              outputText: outputResult.value.output || '',
+              messages: messagesResult.value.messages || []
+            };
+          } else {
+            const failedResult = [terminalResult, outputResult, messagesResult]
+              .find((result) => result.status === 'rejected');
+            rootTerminalBundle = {
+              terminalId: rootTerminalId,
+              error: failedResult?.reason?.message || 'Failed to load root terminal state.'
+            };
+          }
+        }
+        renderSessionTreeDetail(eventsData.events || [], rootData || null, rootTerminalBundle);
+      } catch (error) {
+        elements.sessionTreeStatus.textContent = 'Session tree unavailable';
+        elements.sessionTreeDetail.innerHTML = `<div class="empty-state">${escapeHtml(error.message)}</div>`;
+      }
+    }
+
+    function renderDiscussionDetail(runDetail, discussionPayload) {
+      const run = runDetail?.run || {};
+      const discussion = discussionPayload?.discussion || {};
+      const messages = discussionPayload?.messages || [];
+      const participantOutputs = (runDetail?.outputs || []).filter((entry) => ['participant_final', 'judge_final'].includes(entry.outputKind));
+
+      elements.discussionDetailStatus.textContent = `${run.id || state.selectedRunId} • ${run.status || 'unknown'}`;
+      elements.discussionDetail.innerHTML = `
+        <div class="detail-grid">
+          <div>
+            <div class="detail-label">Run ID</div>
+            <div>${escapeHtml(run.id || 'n/a')}</div>
+          </div>
+          <div>
+            <div class="detail-label">Discussion ID</div>
+            <div>${escapeHtml(discussion.id || state.selectedDiscussionId || 'n/a')}</div>
+          </div>
+          <div>
+            <div class="detail-label">Status</div>
+            <div><span class="${statusClass(run.status || discussion.status || 'unknown')}">${escapeHtml(run.status || discussion.status || 'unknown')}</span></div>
+          </div>
+          <div>
+            <div class="detail-label">Started</div>
+            <div>${escapeHtml(formatTimestamp(run.startedAt || discussion.created_at))}</div>
+          </div>
+        </div>
+
+        <div>
+          <div class="detail-label">Run Summary</div>
+          <div class="hint">${escapeHtml(run.decisionSummary || run.inputSummary || discussion.topic || 'No summary available.')}</div>
+        </div>
+
+        <div>
+          <div class="detail-label">Round / Judge Outputs</div>
+          <div class="message-list">
+            ${participantOutputs.length ? participantOutputs.map((entry) => `
+              <div class="message-item">
+                <div class="message-head">
+                  <span>${escapeHtml(entry.outputKind)}</span>
+                  <span>${escapeHtml(entry.participantId || 'aggregate')}</span>
+                </div>
+                <div class="message-body">${escapeHtml(entry.fullText || entry.previewText || '')}</div>
+              </div>
+            `).join('') : '<div class="empty-state">No persisted round outputs recorded for this run yet.</div>'}
+          </div>
+        </div>
+
+        <div>
+          <div class="detail-label">Raw Discussion Messages</div>
+          <div class="message-list">
+            ${messages.length ? messages.map((message) => `
+              <div class="message-item">
+                <div class="message-head">
+                  <span>${escapeHtml(message.sender_id)}${message.receiver_id ? ` → ${escapeHtml(message.receiver_id)}` : ''}</span>
+                  <span>${escapeHtml(formatTimestamp(message.created_at || message.createdAt))}</span>
+                </div>
+                <div class="message-body">${escapeHtml(message.content || '')}</div>
+              </div>
+            `).join('') : '<div class="empty-state">No discussion messages stored yet.</div>'}
+          </div>
+        </div>
+      `;
+    }
+
+    async function refreshSelectedDiscussion() {
+      if (!state.selectedRunId && !state.selectedDiscussionId) {
+        elements.discussionDetailStatus.textContent = 'No discussion selected';
+        elements.discussionDetail.innerHTML = '<div class="empty-state">Select a discussion run to inspect round summaries, judge output, and raw discussion messages.</div>';
+        return;
+      }
+
+      try {
+        const runDetail = state.selectedRunId
+          ? await fetchJson(`/orchestration/runs/${encodeURIComponent(state.selectedRunId)}`)
+          : null;
+        const discussionId = runDetail?.run?.discussionId || runDetail?.run?.discussion_id || runDetail?.discussion?.id || state.selectedDiscussionId;
+        const discussionPayload = discussionId
+          ? await fetchJson(`/orchestration/discussions/${encodeURIComponent(discussionId)}`)
+          : { discussion: null, messages: [] };
+
+        renderDiscussionDetail(runDetail, discussionPayload);
+      } catch (error) {
+        elements.discussionDetailStatus.textContent = 'Discussion unavailable';
+        elements.discussionDetail.innerHTML = `<div class="empty-state">${escapeHtml(error.message)}</div>`;
+      }
+    }
+
+    function reconnectSocket() {
+      if (state.socket) {
+        state.socket.onopen = null;
+        state.socket.onclose = null;
+        state.socket.onmessage = null;
+        state.socket.close();
+        state.socket = null;
+      }
+
+      const protocol = window.location.protocol === 'https:' ? 'wss:' : 'ws:';
+      const url = new URL(`${protocol}//${window.location.host}/ws`);
+      if (state.apiKey) {
+        url.searchParams.set('apiKey', state.apiKey);
+      }
+
+      try {
+        const socket = new WebSocket(url.toString());
+        state.socket = socket;
+
+        socket.onopen = () => {
+          state.socketConnected = true;
+          updateStats();
+        };
+
+        socket.onclose = () => {
+          state.socketConnected = false;
+          updateStats();
+          window.setTimeout(() => {
+            if (state.socket === socket) {
+              reconnectSocket();
+            }
+          }, 3000);
+        };
+
+        socket.onmessage = (event) => {
+          const message = JSON.parse(event.data);
+          if (String(message.type || '').startsWith('orchestration:')) {
+            refreshTerminals();
+            refreshSessionRoots();
+            refreshDiscussionRuns();
+            if (state.selectedRootSessionId) {
+              refreshSelectedSessionRoot();
+            }
+            if (state.selectedTerminalId) {
+              refreshSelectedTerminal();
+            }
+            if (state.selectedRunId || state.selectedDiscussionId) {
+              refreshSelectedDiscussion();
+            }
+          }
+        };
+      } catch {
+        state.socketConnected = false;
+        updateStats();
+      }
+    }
+
+    async function refreshAll() {
+      await Promise.allSettled([
+        refreshTerminals(),
+        refreshSessionRoots(),
+        refreshDiscussionRuns(),
+        refreshSelectedSessionRoot(),
+        refreshSelectedTerminal(),
+        refreshSelectedDiscussion()
+      ]);
+      updateStats();
+    }
+
+    function startPolling() {
+      if (state.refreshTimer) {
+        window.clearInterval(state.refreshTimer);
+      }
+      state.refreshTimer = window.setInterval(() => {
+        refreshAll();
+      }, 4000);
+    }
+
+    elements.apiKeyInput.value = state.apiKey;
+    elements.includeArchivedRoots.checked = state.includeArchivedRoots;
+    elements.sessionRootScope.value = state.rootScope;
+    elements.sessionRootFilter.value = state.rootStatusFilter;
+    elements.saveApiKey.addEventListener('click', saveApiKey);
+    elements.refreshAll.addEventListener('click', refreshAll);
+    elements.reconcileRuns.addEventListener('click', reconcileStaleRuns);
+    elements.includeArchivedRoots.addEventListener('change', async (event) => {
+      state.includeArchivedRoots = Boolean(event.target.checked);
+      syncUrlState();
+      await refreshSessionRoots();
+      if (state.selectedRootSessionId) {
+        await refreshSelectedSessionRoot();
+      }
+    });
+    elements.sessionRootScope.addEventListener('change', async (event) => {
+      state.rootScope = ROOT_SCOPE_OPTIONS.has(event.target.value) ? event.target.value : 'user';
+      syncUrlState();
+      await refreshSessionRoots();
+      if (state.selectedRootSessionId) {
+        await refreshSelectedSessionRoot();
+      }
+    });
+    elements.sessionRootFilter.addEventListener('change', (event) => {
+      const nextFilter = ROOT_FILTER_OPTIONS.has(event.target.value) ? event.target.value : 'all';
+      state.rootStatusFilter = nextFilter;
+      syncUrlState();
+      renderSessionRoots();
+    });
+
+    reconnectSocket();
+    syncUrlState();
+    refreshAll();
+    startPolling();
+  </script>
+</body>
+</html>
