@@ -863,7 +863,9 @@ function printManagedRootRecoveryResult(result, previousCandidate, launchOptions
   console.log(`  profile: ${launchOptions.profile}`);
   console.log(`  recovery_reason: ${previousCandidate.recoveryReason || 'stale-root'}`);
   console.log(`  external_session_ref: ${result.externalSessionRef || previousCandidate.externalSessionRef || 'n/a'}`);
-  if (previousCandidate.resumeCommand) {
+  if (previousCandidate.adapter === 'codex-cli' && previousCandidate.resumeSessionId) {
+    console.log(`  provider_resume: automatic (${previousCandidate.resumeCommand || `codex resume ${previousCandidate.resumeSessionId}`})`);
+  } else if (previousCandidate.resumeCommand) {
     console.log(`  provider_resume_command: ${previousCandidate.resumeCommand}`);
   }
   console.log(`  console_url: ${new URL(result.consoleUrl || '/console', getCliagentsBaseUrl()).toString()}`);

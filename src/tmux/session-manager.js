@@ -119,6 +119,21 @@ function resolveGeminiCommandModel(model) {
   return inferGeminiBrokerDefaultModel() || null;
 }
 
+function resolveCodexResumeSessionId(options = {}) {
+  const directSessionId = String(options.resumeSessionId || '').trim();
+  if (directSessionId && /^[A-Za-z0-9._:-]+$/.test(directSessionId)) {
+    return directSessionId;
+  }
+
+  const resumeCommand = String(options.resumeCommand || '').trim();
+  const commandMatch = resumeCommand.match(/^codex\s+resume\s+([A-Za-z0-9._:-]+)/i);
+  if (commandMatch) {
+    return String(commandMatch[1] || '').trim() || null;
+  }
+
+  return null;
+}
+
 function buildGeminiOneShotRunnerCommand(message, terminal) {
   const runnerPath = path.join(__dirname, '../scripts/run-gemini-oneshot.js');
   const workDir = terminal.workDir || process.cwd();
@@ -269,7 +284,8 @@ const CLI_COMMANDS = {
 
     // User-facing session: preserve the native Codex terminal UI.
     // Avoid CI=true here because Codex switches to a less rich terminal mode.
-    const args = ['codex'];
+    const resumeSessionId = resolveCodexResumeSessionId(options);
+    const args = resumeSessionId ? ['codex', 'resume', resumeSessionId] : ['codex'];
 
     // Permission mode handling:
     // - 'auto' (default) or 'bypassPermissions': Use bypass mode (auto-approve all)
@@ -1403,6 +1419,7 @@ class PersistentSessionManager extends EventEmitter {
       sessionKind = null,
       originClient = null,
       externalSessionRef = null,
+      providerThreadRef = null,
       lineageDepth = null,
       sessionMetadata = null,
       launchEnvironment = null,
@@ -1453,6 +1470,17 @@ class PersistentSessionManager extends EventEmitter {
         }
       }
     }
+
+    const recoveryMetadata = sessionMetadata && typeof sessionMetadata === 'object'
+      ? sessionMetadata
+      : {};
+    const providerResumeSessionId = adapter === 'codex-cli'
+      ? String(recoveryMetadata.providerResumeSessionId || '').trim() || null
+      : null;
+    const providerResumeCommand = adapter === 'codex-cli'
+      ? String(recoveryMetadata.providerResumeCommand || '').trim() || null
+      : null;
+    const resolvedProviderThreadRef = providerThreadRef || providerResumeSessionId || null;
 
     const reusableTerminal = this._findReusableTerminal({
       adapter,
@@ -1545,6 +1573,8 @@ class PersistentSessionManager extends EventEmitter {
       systemPrompt,
       model,
       allowedTools,
+      resumeSessionId: providerResumeSessionId,
+      resumeCommand: providerResumeCommand,
       // Pass permissionMode if not 'auto', otherwise use legacy skip behavior
       permissionMode: effectivePermissionMode !== 'auto' ? effectivePermissionMode : null,
       dangerouslySkipPermissions: effectivePermissionMode === 'auto',
@@ -1588,7 +1618,7 @@ class PersistentSessionManager extends EventEmitter {
         : (controlPlaneEnabled && parentSessionId ? 1 : 0),
       sessionMetadata: sessionMetadata || null,
       harnessSessionId: terminalId,
-      providerThreadRef: null,
+      providerThreadRef: resolvedProviderThreadRef,
       adoptedAt: null,
       captureMode: 'raw-tty'
     };

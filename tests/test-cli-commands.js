@@ -50,6 +50,17 @@ test('Codex interactive command bypasses approvals by default', () => {
   assert(cmd.includes('--model o4-mini'), `Expected model flag, got: ${cmd}`);
 });
 
+test('Codex interactive command can start by resuming a prior session', () => {
+  const cmd = CLI_COMMANDS['codex-cli']({
+    model: 'o4-mini',
+    resumeSessionId: '019d94a6-2cd8-7742-8e4e-123456789abc'
+  });
+
+  assert(cmd.startsWith('codex resume 019d94a6-2cd8-7742-8e4e-123456789abc'), `Expected codex resume prefix, got: ${cmd}`);
+  assert(cmd.includes('--dangerously-bypass-approvals-and-sandbox'), `Expected bypass flag, got: ${cmd}`);
+  assert(cmd.includes('--model o4-mini'), `Expected model flag, got: ${cmd}`);
+});
+
 test('Codex orchestration command uses ready marker', () => {
   const cmd = CLI_COMMANDS['codex-cli']({ orchestration: true });
   assert.strictEqual(cmd, 'echo "CODEX_READY_FOR_ORCHESTRATION"');

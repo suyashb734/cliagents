@@ -132,6 +132,28 @@ async function run() {
     assert.strictEqual(persistedTerminal.origin_client, 'mcp');
     assert.strictEqual(persistedTerminal.external_session_ref, 'opencode:thread-42');
 
+    const recoveredRoot = await manager.createTerminal({
+      adapter: 'codex-cli',
+      role: 'main',
+      workDir: rootDir,
+      originClient: 'codex',
+      externalSessionRef: 'codex:managed:resume-test',
+      sessionKind: 'main',
+      sessionMetadata: {
+        clientName: 'codex',
+        attachMode: 'managed-root-launch',
+        managedLaunch: true,
+        recoveredManagedRoot: true,
+        providerResumeCommand: 'codex resume 019d94a6-2cd8-7742-8e4e-123456789abc',
+        providerResumeSessionId: '019d94a6-2cd8-7742-8e4e-123456789abc'
+      }
+    });
+    const recoveredHistory = fakeTmux.getHistory(recoveredRoot.sessionName, recoveredRoot.windowName);
+    assert(recoveredHistory.includes('codex resume 019d94a6-2cd8-7742-8e4e-123456789abc'), 'expected recovered root to launch Codex in resume mode');
+    assert.strictEqual(recoveredRoot.providerThreadRef, '019d94a6-2cd8-7742-8e4e-123456789abc');
+    const persistedRecoveredRoot = db.getTerminal(recoveredRoot.terminalId);
+    assert.strictEqual(persistedRecoveredRoot.provider_thread_ref, '019d94a6-2cd8-7742-8e4e-123456789abc');
+
     let events = db.listSessionEvents({ rootSessionId: 'aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa' });
     assert.strictEqual(events.length, 2);
     assert.strictEqual(events[0].event_type, 'session_started');
