@@ -228,6 +228,30 @@ async function run() {
     assert(recoveredClaudeHistory.includes('--continue'), 'expected recovered Claude root to continue the latest provider session');
     assert(!recoveredClaudeHistory.includes('--session-id'), 'did not expect a fresh provider session binding for recovered Claude root');
 
+    const recoveredClaudeResumeThreadRef = 'cccccccc-1111-2222-3333-444444444444';
+    const recoveredClaudeExactRoot = await manager.createTerminal({
+      adapter: 'claude-code',
+      role: 'main',
+      workDir: rootDir,
+      originClient: 'claude',
+      externalSessionRef: 'claude:managed:exact-resume-test',
+      sessionKind: 'main',
+      permissionMode: 'default',
+      sessionMetadata: {
+        clientName: 'claude',
+        attachMode: 'managed-root-launch',
+        managedLaunch: true,
+        recoveredManagedRoot: true,
+        providerResumeSessionId: recoveredClaudeResumeThreadRef
+      }
+    });
+    const recoveredClaudeExactHistory = fakeTmux.getHistory(recoveredClaudeExactRoot.sessionName, recoveredClaudeExactRoot.windowName);
+    assert(recoveredClaudeExactHistory.includes(`--resume ${recoveredClaudeResumeThreadRef}`), 'expected recovered Claude root to resume the exact provider session');
+    assert(!recoveredClaudeExactHistory.includes('--continue'), 'did not expect recovered Claude root with an exact session id to fall back to latest-session continue');
+    assert.strictEqual(recoveredClaudeExactRoot.providerThreadRef, recoveredClaudeResumeThreadRef);
+    const persistedRecoveredClaudeExactRoot = db.getTerminal(recoveredClaudeExactRoot.terminalId);
+    assert.strictEqual(persistedRecoveredClaudeExactRoot.provider_thread_ref, recoveredClaudeResumeThreadRef);
+
     const recoveredGeminiRoot = await manager.createTerminal({
       adapter: 'gemini-cli',
       role: 'main',

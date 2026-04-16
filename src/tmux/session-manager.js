@@ -1693,8 +1693,12 @@ class PersistentSessionManager extends EventEmitter {
           sessionMetadata: recoveryMetadata
         })
       : 'legacy';
-    const providerResumeSessionId = adapter === 'codex-cli'
-      ? String(recoveryMetadata.providerResumeSessionId || '').trim() || null
+    const shouldHonorProviderResumeSessionId = recoveredManagedRoot || resolvedSessionKind === 'main';
+    const providerResumeSessionId = shouldHonorProviderResumeSessionId
+      ? resolveProviderResumeSessionId(adapter, {
+          resumeSessionId: recoveryMetadata.providerResumeSessionId,
+          resumeCommand: recoveryMetadata.providerResumeCommand
+        })
       : null;
     const providerResumeCommand = adapter === 'codex-cli'
       ? String(recoveryMetadata.providerResumeCommand || '').trim() || null
