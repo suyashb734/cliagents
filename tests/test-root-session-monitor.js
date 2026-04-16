@@ -257,8 +257,9 @@ async function run() {
       terminalLimit: 20
     });
     assert(managedMainSnapshot, 'managed main snapshot should exist');
-    assert.strictEqual(managedMainSnapshot.status, 'running');
-    assert.strictEqual(managedMainSnapshot.counts.running, 1);
+    assert.strictEqual(managedMainSnapshot.status, 'idle');
+    assert.strictEqual(managedMainSnapshot.counts.running, 0);
+    assert.strictEqual(managedMainSnapshot.counts.idle, 1);
     assert.strictEqual(managedMainSnapshot.rootType, 'attached_client_root');
     assert.strictEqual(managedMainSnapshot.userFacing, true);
 
@@ -269,10 +270,122 @@ async function run() {
       terminalLimit: 20
     });
     assert(recoveredMainSnapshot, 'recovered main snapshot should exist');
-    assert.strictEqual(recoveredMainSnapshot.status, 'running');
-    assert.strictEqual(recoveredMainSnapshot.counts.running, 1);
+    assert.strictEqual(recoveredMainSnapshot.status, 'idle');
+    assert.strictEqual(recoveredMainSnapshot.counts.running, 0);
+    assert.strictEqual(recoveredMainSnapshot.counts.idle, 1);
     assert.strictEqual(recoveredMainSnapshot.rootType, 'attached_client_root');
     assert.strictEqual(recoveredMainSnapshot.userFacing, true);
+
+    db.registerTerminal(
+      'live-refresh-root',
+      'cliagents-live-refresh',
+      '0',
+      'claude-code',
+      'main_claude-code',
+      'main',
+      '/tmp/project',
+      '/tmp/live-refresh.log',
+      {
+        rootSessionId: 'live-refresh-root',
+        parentSessionId: null,
+        sessionKind: 'main',
+        originClient: 'claude',
+        externalSessionRef: 'claude:thread-live-refresh',
+        lineageDepth: 0,
+        sessionMetadata: {
+          attachMode: 'managed-root-launch',
+          clientName: 'claude'
+        }
+      }
+    );
+    db.updateStatus('live-refresh-root', 'processing');
+    db.addSessionEvent({
+      rootSessionId: 'live-refresh-root',
+      sessionId: 'live-refresh-root',
+      eventType: 'session_started',
+      originClient: 'claude',
+      idempotencyKey: 'live-refresh-start',
+      payloadJson: {
+        sessionKind: 'main',
+        adapter: 'claude-code',
+        externalSessionRef: 'claude:thread-live-refresh'
+      },
+      metadata: {
+        clientName: 'claude',
+        attachMode: 'managed-root-launch'
+      }
+    });
+
+    const liveRefreshSnapshot = buildRootSessionSnapshot({
+      db,
+      rootSessionId: 'live-refresh-root',
+      eventLimit: 50,
+      terminalLimit: 20,
+      liveTerminalResolver: () => ({
+        terminalId: 'live-refresh-root',
+        taskState: 'idle',
+        processState: 'alive',
+        sessionKind: 'main',
+        originClient: 'claude',
+        externalSessionRef: 'claude:thread-live-refresh',
+        sessionMetadata: {
+          attachMode: 'managed-root-launch',
+          clientName: 'claude'
+        }
+      })
+    });
+    assert(liveRefreshSnapshot, 'live refresh snapshot should exist');
+    assert.strictEqual(liveRefreshSnapshot.status, 'idle');
+    assert.strictEqual(liveRefreshSnapshot.counts.running, 0);
+    assert.strictEqual(liveRefreshSnapshot.counts.idle, 1);
+
+    db.addSessionEvent({
+      rootSessionId: 'interrupted-root',
+      sessionId: 'interrupted-root',
+      eventType: 'session_started',
+      originClient: 'codex',
+      idempotencyKey: 'interrupted-start',
+      payloadJson: {
+        sessionKind: 'main',
+        adapter: 'codex-cli',
+        externalSessionRef: 'codex:thread-interrupted'
+      },
+      metadata: {
+        clientName: 'codex',
+        attachMode: 'managed-root-launch'
+      }
+    });
+    db.addSessionEvent({
+      rootSessionId: 'interrupted-root',
+      sessionId: 'interrupted-root',
+      eventType: 'session_terminated',
+      originClient: 'codex',
+      idempotencyKey: 'interrupted-error',
+      payloadJson: {
+        status: 'error',
+        attentionCode: 'conversation_interrupted',
+        attentionMessage: 'Conversation interrupted - tell the model what to do differently.',
+        resumeCommand: 'codex resume 019d94a6-2cd8-7742-8e4e-123456789abc'
+      },
+      metadata: {
+        clientName: 'codex',
+        attachMode: 'managed-root-launch'
+      }
+    });
+
+    const interruptedSnapshot = buildRootSessionSnapshot({
+      db,
+      rootSessionId: 'interrupted-root',
+      eventLimit: 50,
+      terminalLimit: 20
+    });
+    assert(interruptedSnapshot, 'interrupted snapshot should exist');
+    assert.strictEqual(interruptedSnapshot.status, 'needs_attention');
+    assert(interruptedSnapshot.attention.requiresAttention, 'interrupted root should require attention');
+    assert(interruptedSnapshot.attention.reasons.some((reason) => (
+      reason.code === 'failed_session'
+      && reason.resumeCommand === 'codex resume 019d94a6-2cd8-7742-8e4e-123456789abc'
+    )));
 
     const summaries = listRootSessionSummaries({
       db,
@@ -282,7 +395,7 @@ async function run() {
     });
 
     assert.strictEqual(summaries.archivedCount, 1);
-    assert.strictEqual(summaries.roots.length, 3);
+    assert.strictEqual(summaries.roots.length, 5);
     const blockedRootSummary = summaries.roots.find((root) => root.rootSessionId === 'root-123');
     assert(blockedRootSummary, 'Expected blocked attached root summary');
     assert.strictEqual(blockedRootSummary.status, 'blocked');
@@ -292,15 +405,24 @@ async function run() {
     assert.strictEqual(blockedRootSummary.counts.reusedSessions, 1);
     const managedMainSummary = summaries.roots.find((root) => root.rootSessionId === 'managed-main-root');
     assert(managedMainSummary, 'Expected managed main root summary');
-    assert.strictEqual(managedMainSummary.status, 'running');
+    assert.strictEqual(managedMainSummary.status, 'idle');
     assert.strictEqual(managedMainSummary.rootType, 'attached_client_root');
     assert.strictEqual(managedMainSummary.attention.requiresAttention, false);
-    assert.strictEqual(managedMainSummary.counts.running, 1);
+    assert.strictEqual(managedMainSummary.counts.running, 0);
+    assert.strictEqual(managedMainSummary.counts.idle, 1);
     const recoveredMainSummary = summaries.roots.find((root) => root.rootSessionId === 'recovered-main-root');
     assert(recoveredMainSummary, 'Expected recovered main root summary');
-    assert.strictEqual(recoveredMainSummary.status, 'running');
+    assert.strictEqual(recoveredMainSummary.status, 'idle');
     assert.strictEqual(recoveredMainSummary.rootType, 'attached_client_root');
-    assert.strictEqual(recoveredMainSummary.counts.running, 1);
+    assert.strictEqual(recoveredMainSummary.counts.running, 0);
+    assert.strictEqual(recoveredMainSummary.counts.idle, 1);
+    const liveRefreshSummary = summaries.roots.find((root) => root.rootSessionId === 'live-refresh-root');
+    assert(liveRefreshSummary, 'Expected live-refresh root summary');
+    assert.strictEqual(liveRefreshSummary.status, 'running');
+    const interruptedSummary = summaries.roots.find((root) => root.rootSessionId === 'interrupted-root');
+    assert(interruptedSummary, 'Expected interrupted root summary');
+    assert.strictEqual(interruptedSummary.status, 'needs_attention');
+    assert(interruptedSummary.attention.reasons.some((reason) => reason.resumeCommand), 'Expected interrupted summary to preserve resume command');
     assert.strictEqual(summaries.hiddenDetachedCount, 1);
     assert.strictEqual(summaries.hiddenNonUserCount, 0);
 
@@ -313,7 +435,7 @@ async function run() {
       scope: 'all'
     });
     assert.strictEqual(withArchived.archivedCount, 1);
-    assert.strictEqual(withArchived.roots.length, 5);
+    assert.strictEqual(withArchived.roots.length, 7);
     const archivedRoot = withArchived.roots.find((root) => root.rootSessionId === 'legacy-stale-root');
     assert(archivedRoot, 'Expected archived legacy root to be returned when requested');
     assert.strictEqual(archivedRoot.archived, true);

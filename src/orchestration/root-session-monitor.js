@@ -1,6 +1,6 @@
 'use strict';
 
-const ACTIVE_TERMINAL_STATUSES = new Set(['processing', 'queued']);
+const BUSY_TERMINAL_STATUSES = new Set(['processing', 'queued', 'running']);
 const DEFAULT_ARCHIVE_LEGACY_AFTER_MS = 30 * 60 * 1000;
 const ROOT_SCOPE_VALUES = new Set(['user', 'all', 'detached', 'legacy']);
 const USER_FACING_ORIGIN_CLIENTS = new Set([
@@ -51,11 +51,14 @@ function inferSessionStatus(node) {
   if (node.stale) return 'stale';
   if (node.destroyed) return 'destroyed';
 
-  if (node.terminalStatus) {
-    return node.terminalStatus;
+  if (node.taskState || node.terminalStatus) {
+    return node.taskState || node.terminalStatus;
   }
 
   if (node.terminated) {
+    if (node.terminationStatus === 'error' || node.attentionCode) {
+      return 'error';
+    }
     return node.exitCode && node.exitCode !== 0 ? 'error' : 'completed';
   }
 
@@ -101,6 +104,8 @@ function buildSessionMap(events, terminals, rootSessionId) {
         sessionMetadata: null,
         terminalId: null,
         terminalStatus: null,
+        taskState: null,
+        processState: null,
         lastActiveAt: null,
         lastEventType: null,
         lastEventAt: null,
@@ -109,7 +114,11 @@ function buildSessionMap(events, terminals, rootSessionId) {
         stale: false,
         destroyed: false,
         terminated: false,
+        terminationStatus: null,
         exitCode: null,
+        attentionCode: null,
+        attentionMessage: null,
+        resumeCommand: null,
         latestConclusion: null,
         resumeCount: 0,
         wasReused: false,
@@ -156,9 +165,13 @@ function buildSessionMap(events, terminals, rootSessionId) {
       node.destroyed = true;
     } else if (event.event_type === 'session_terminated') {
       node.terminated = true;
+      node.terminationStatus = payload.status || node.terminationStatus;
       if (payload.exitCode !== undefined && payload.exitCode !== null) {
         node.exitCode = payload.exitCode;
       }
+      node.attentionCode = payload.attentionCode || node.attentionCode;
+      node.attentionMessage = payload.attentionMessage || node.attentionMessage;
+      node.resumeCommand = payload.resumeCommand || node.resumeCommand;
     } else if (event.event_type === 'user_input_requested') {
       node.blocked = true;
     } else if (event.event_type === 'user_input_received') {
@@ -184,6 +197,11 @@ function buildSessionMap(events, terminals, rootSessionId) {
     node.lineageDepth = terminal.lineage_depth ?? node.lineageDepth;
     node.sessionMetadata = parseMetadataField(terminal.session_metadata) || node.sessionMetadata;
     node.terminalStatus = terminal.status || node.terminalStatus;
+    node.taskState = terminal.task_state || terminal.taskState || terminal.status || node.taskState;
+    node.processState = terminal.process_state || terminal.processState || node.processState;
+    node.attentionCode = terminal.attention_code || node.attentionCode;
+    node.attentionMessage = terminal.attention_message || node.attentionMessage;
+    node.resumeCommand = terminal.resume_command || node.resumeCommand;
     node.createdAt = terminal.created_at || node.createdAt;
     node.lastActiveAt = terminal.last_active || node.lastActiveAt;
   }
@@ -220,7 +238,8 @@ function buildAttentionSummary(sessionList) {
     reasons.push({
       code: 'failed_session',
       sessionId: session.sessionId,
-      message: `Session ${session.sessionId} failed or exited non-zero.`
+      message: session.attentionMessage || `Session ${session.sessionId} failed or exited non-zero.`,
+      resumeCommand: session.resumeCommand || null
     });
   }
 
@@ -233,15 +252,16 @@ function buildAttentionSummary(sessionList) {
   };
 }
 
-function isActiveRootSession(session) {
+function isBusyRootSession(session) {
+  return Boolean(BUSY_TERMINAL_STATUSES.has(session.status));
+}
+
+function isPromptIdleRootSession(session) {
   return Boolean(
-    ACTIVE_TERMINAL_STATUSES.has(session.status)
-    || session.status === 'running'
-    || (
-      session.status === 'idle'
-      && USER_FACING_SESSION_KINDS.has(String(session.sessionKind || '').trim().toLowerCase())
-      && session.terminalId
-    )
+    session.status === 'idle'
+    && session.processState !== 'exited'
+    && USER_FACING_SESSION_KINDS.has(String(session.sessionKind || '').trim().toLowerCase())
+    && session.terminalId
   );
 }
 
@@ -253,10 +273,15 @@ function deriveRootStatus(sessionList, attention) {
     return 'needs_attention';
   }
 
-  const runningCount = sessionList.filter(isActiveRootSession).length;
+  const runningCount = sessionList.filter(isBusyRootSession).length;
 
   if (runningCount > 0) {
     return 'running';
+  }
+
+  const idleCount = sessionList.filter(isPromptIdleRootSession).length;
+  if (idleCount > 0) {
+    return 'idle';
   }
 
   if (sessionList.length > 0) {
@@ -381,13 +406,54 @@ function shouldArchiveRootSummary(summary, options = {}) {
   return nowMs - lastOccurredAt >= archiveAfterMs;
 }
 
-function buildRootSessionSnapshot({ db, rootSessionId, eventLimit = 400, terminalLimit = 200 }) {
+function buildRootSessionSnapshot({
+  db,
+  rootSessionId,
+  eventLimit = 400,
+  terminalLimit = 200,
+  liveTerminalResolver = null
+}) {
   if (!db?.listSessionEvents || !db?.listTerminals) {
     throw new Error('root session monitoring requires orchestration DB support');
   }
 
   const events = db.listSessionEvents({ rootSessionId, limit: eventLimit });
-  const terminals = db.listTerminals({ rootSessionId, limit: terminalLimit });
+  const terminals = db.listTerminals({ rootSessionId, limit: terminalLimit })
+    .map((terminal) => {
+      if (typeof liveTerminalResolver !== 'function') {
+        return terminal;
+      }
+
+      const terminalId = terminal.terminal_id || terminal.terminalId;
+      if (!terminalId) {
+        return terminal;
+      }
+
+      const liveTerminal = liveTerminalResolver(terminalId);
+      if (!liveTerminal) {
+        return terminal;
+      }
+
+      return {
+        ...terminal,
+        status: liveTerminal.taskState || liveTerminal.status || terminal.status,
+        task_state: liveTerminal.taskState || liveTerminal.status || terminal.status,
+        process_state: liveTerminal.processState || null,
+        attention_code: liveTerminal.attention?.code || null,
+        attention_message: liveTerminal.attention?.message || null,
+        resume_command: liveTerminal.attention?.resumeCommand || null,
+        last_active: liveTerminal.lastActive || terminal.last_active,
+        work_dir: liveTerminal.workDir || terminal.work_dir,
+        adapter: liveTerminal.adapter || terminal.adapter,
+        role: liveTerminal.role || terminal.role,
+        origin_client: liveTerminal.originClient || terminal.origin_client,
+        external_session_ref: liveTerminal.externalSessionRef || terminal.external_session_ref,
+        session_kind: liveTerminal.sessionKind || terminal.session_kind,
+        session_metadata: liveTerminal.sessionMetadata
+          ? JSON.stringify(liveTerminal.sessionMetadata)
+          : terminal.session_metadata
+      };
+    });
 
   if (events.length === 0 && terminals.length === 0) {
     return null;
@@ -421,7 +487,8 @@ function buildRootSessionSnapshot({ db, rootSessionId, eventLimit = 400, termina
   const counts = {
     sessions: sessionList.length,
     terminals: terminals.length,
-    running: sessionList.filter(isActiveRootSession).length,
+    running: sessionList.filter(isBusyRootSession).length,
+    idle: sessionList.filter(isPromptIdleRootSession).length,
     blocked: attention.blockedSessionIds.length,
     stale: attention.staleSessionIds.length,
     failed: attention.failedSessionIds.length,
@@ -461,7 +528,8 @@ function listRootSessionSummaries({
   includeArchived = false,
   archiveAfterMs,
   nowMs,
-  scope = 'user'
+  scope = 'user',
+  liveTerminalResolver = null
 } = {}) {
   if (!db?.listRootSessions) {
     throw new Error('root session listing requires orchestration DB support');
@@ -496,7 +564,8 @@ function listRootSessionSummaries({
       db,
       rootSessionId: row.root_session_id,
       eventLimit,
-      terminalLimit
+      terminalLimit,
+      liveTerminalResolver
     });
 
     return {

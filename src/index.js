@@ -7,8 +7,15 @@
 // Load environment variables from .env file
 require('dotenv').config();
 
+const path = require('path');
+const readline = require('readline');
 const { spawnSync } = require('child_process');
-const { normalizeManagedRootAdapter } = require('./orchestration/managed-root-launch');
+const {
+  normalizeManagedRootAdapter,
+  inferManagedRootOriginClient,
+  normalizeManagedRootLaunchProfile,
+  getManagedRootLaunchProfiles
+} = require('./orchestration/managed-root-launch');
 
 // Core exports
 const AgentAdapter = require('./core/adapter');
@@ -19,6 +26,7 @@ const GeminiCliAdapter = require('./adapters/gemini-cli');
 const CodexCliAdapter = require('./adapters/codex-cli');
 const QwenCliAdapter = require('./adapters/qwen-cli');
 const OpencodeCliAdapter = require('./adapters/opencode-cli');
+const ClaudeCodeAdapter = require('./adapters/claude-code');
 const { registerActiveAdapters } = require('./adapters/runtime-registry');
 
 // Utilities
@@ -32,6 +40,32 @@ const { transcribeAudio } = require('./services/transcriptionService');
 
 function getCliagentsBaseUrl() {
   return process.env.CLIAGENTS_URL || `http://127.0.0.1:${process.env.PORT || 4001}`;
+}
+
+const MANAGED_ROOT_TERMINAL_ENV_KEYS = Object.freeze([
+  'TERM_PROGRAM',
+  'TERM_PROGRAM_VERSION',
+  'COLORTERM',
+  'LC_TERMINAL',
+  'LC_TERMINAL_VERSION',
+  'VTE_VERSION',
+  'KITTY_WINDOW_ID',
+  'KITTY_PUBLIC_KEY',
+  'KITTY_INSTALLATION_DIR',
+  'WT_SESSION',
+  'WT_PROFILE_ID',
+  'TERMUX_VERSION'
+]);
+
+function buildManagedRootLaunchEnvironment(env = process.env) {
+  const launchEnvironment = {};
+  for (const key of MANAGED_ROOT_TERMINAL_ENV_KEYS) {
+    const value = env?.[key];
+    if (typeof value === 'string' && value.trim()) {
+      launchEnvironment[key] = value;
+    }
+  }
+  return launchEnvironment;
 }
 
 async function callCliagentsJson(route, options = {}) {
@@ -73,6 +107,7 @@ function parseLaunchArgs(rawArgs = []) {
   const parsed = {
     adapter: 'codex-cli',
     workDir: process.cwd(),
+    profile: 'guarded-root',
     allowedTools: [],
     detach: false
   };
@@ -94,6 +129,9 @@ function parseLaunchArgs(rawArgs = []) {
       case '--model':
         parsed.model = args.shift();
         break;
+      case '--profile':
+        parsed.profile = args.shift();
+        break;
       case '--permission-mode':
         parsed.permissionMode = args.shift();
         break;
@@ -102,6 +140,16 @@ function parseLaunchArgs(rawArgs = []) {
         break;
       case '--external-session-ref':
         parsed.externalSessionRef = args.shift();
+        break;
+      case '--new':
+      case '--new-root':
+        parsed.forceNewRoot = true;
+        break;
+      case '--resume-root':
+        parsed.resumeRootSessionId = args.shift();
+        break;
+      case '--resume-latest':
+        parsed.resumeLatest = true;
         break;
       case '--allow-tool':
         parsed.allowedTools.push(args.shift());
@@ -116,8 +164,15 @@ function parseLaunchArgs(rawArgs = []) {
   }
 
   parsed.adapter = normalizeManagedRootAdapter(parsed.adapter);
+  parsed.profile = normalizeManagedRootLaunchProfile(parsed.profile).id;
   if (!parsed.workDir) {
     parsed.workDir = process.cwd();
+  }
+  if (parsed.forceNewRoot && (parsed.resumeRootSessionId || parsed.resumeLatest)) {
+    throw new Error('Cannot combine --new-root with --resume-root or --resume-latest');
+  }
+  if (parsed.externalSessionRef && (parsed.resumeRootSessionId || parsed.resumeLatest)) {
+    throw new Error('Cannot combine --external-session-ref with --resume-root or --resume-latest');
   }
   parsed.allowedTools = parsed.allowedTools.filter(Boolean);
   return parsed;
@@ -130,44 +185,547 @@ function printLaunchUsage() {
   console.log('Options:');
   console.log('  --workdir <path>              Working directory for the root terminal');
   console.log('  --model <name>                Model override for the launched root');
-  console.log('  --permission-mode <mode>      Permission mode (default: default)');
+  console.log('  --profile <name>              Launch profile (default: guarded-root)');
+  console.log('  --permission-mode <mode>      Permission mode override');
   console.log('  --system-prompt <text>        Optional system prompt for the root');
   console.log('  --external-session-ref <id>   Stable external session ref to bind');
+  console.log('  --new-root                    Always create a fresh managed root');
+  console.log('  --resume-root <id>            Reattach to a specific live managed root');
+  console.log('  --resume-latest               Reattach to the most recent matching live root');
   console.log('  --allow-tool <tool>           Restrict allowed tools (repeatable)');
   console.log('  --detach                      Create the terminal without attaching');
+  console.log('');
+  console.log('Profiles:');
+  for (const profile of getManagedRootLaunchProfiles()) {
+    console.log(`  ${profile.id.padEnd(18)} ${profile.description}`);
+  }
 }
 
-function attachToManagedSession(launchResult) {
-  const sessionName = launchResult?.sessionName;
-  const attachCommand = launchResult?.attachCommand;
+function parseAdoptArgs(rawArgs = []) {
+  const args = [...rawArgs];
+  const parsed = {
+    adapter: 'codex-cli'
+  };
 
-  if (!sessionName) {
+  if (args[0] && !args[0].startsWith('-')) {
+    parsed.adapter = normalizeManagedRootAdapter(args.shift());
+  }
+
+  while (args.length > 0) {
+    const token = args.shift();
+    switch (token) {
+      case '--tmux':
+      case '--tmux-target':
+        parsed.tmuxTarget = args.shift();
+        break;
+      case '--session':
+        parsed.sessionName = args.shift();
+        break;
+      case '--window':
+        parsed.windowName = args.shift();
+        break;
+      case '--workdir':
+      case '--working-directory':
+        parsed.workDir = args.shift();
+        break;
+      case '--model':
+        parsed.model = args.shift();
+        break;
+      case '--external-session-ref':
+        parsed.externalSessionRef = args.shift();
+        break;
+      case '--root-session-id':
+        parsed.rootSessionId = args.shift();
+        break;
+      case '--help':
+      case '-h':
+        parsed.help = true;
+        break;
+      default:
+        throw new Error(`Unknown adopt argument: ${token}`);
+    }
+  }
+
+  parsed.adapter = normalizeManagedRootAdapter(parsed.adapter);
+  return parsed;
+}
+
+function printAdoptUsage() {
+  console.log('Usage: cliagents adopt <adapter> --tmux <session:window> [options]');
+  console.log('');
+  console.log('Adapters: codex, claude, qwen, gemini, opencode');
+  console.log('Options:');
+  console.log('  --tmux <session:window>       Existing tmux target to adopt');
+  console.log('  --session <name>              Tmux session name (alternative to --tmux)');
+  console.log('  --window <name>               Tmux window name (alternative to --tmux)');
+  console.log('  --workdir <path>              Override detected working directory');
+  console.log('  --model <name>                Model metadata to associate with the root');
+  console.log('  --external-session-ref <id>   Stable external session ref to bind');
+  console.log('  --root-session-id <id>        Reuse an existing broker root ID');
+}
+
+function getAdapterForModelListing(adapter) {
+  switch (normalizeManagedRootAdapter(adapter)) {
+    case 'codex-cli':
+      return new CodexCliAdapter();
+    case 'claude-code':
+      return new ClaudeCodeAdapter();
+    case 'qwen-cli':
+      return new QwenCliAdapter();
+    case 'opencode-cli':
+      return new OpencodeCliAdapter();
+    case 'gemini-cli':
+      return new GeminiCliAdapter();
+    default:
+      throw new Error(`Unknown adapter: ${adapter}`);
+  }
+}
+
+function printListModelsUsage() {
+  console.log('Usage: cliagents list-models <adapter>');
+  console.log('');
+  console.log('Adapters: codex, claude, qwen, gemini, opencode');
+}
+
+function listAdapterModels(rawArgs = []) {
+  const adapterArg = rawArgs[0];
+  if (!adapterArg || adapterArg === '--help' || adapterArg === '-h') {
+    printListModelsUsage();
     return;
   }
 
-  const tmuxArgs = process.env.TMUX
-    ? ['switch-client', '-t', sessionName]
-    : ['attach', '-t', sessionName];
-  const result = spawnSync('tmux', tmuxArgs, { stdio: 'inherit' });
-  if (result.error || result.status !== 0) {
-    const message = result.error?.message || `tmux exited with status ${result.status}`;
-    console.error(`[cliagents] Failed to attach automatically: ${message}`);
-    if (attachCommand) {
-      console.error(`[cliagents] Attach manually with: ${attachCommand}`);
-    }
+  const adapter = normalizeManagedRootAdapter(adapterArg);
+  const adapterInstance = getAdapterForModelListing(adapter);
+  const models = typeof adapterInstance.getAvailableModels === 'function'
+    ? adapterInstance.getAvailableModels()
+    : [];
+
+  console.log(`Models for ${adapter}`);
+  if (!models.length) {
+    console.log('  No explicit model catalog available.');
+    return;
+  }
+
+  for (const model of models) {
+    console.log(`  ${String(model.id || 'unknown').padEnd(28)} ${model.description || model.name || ''}`);
   }
 }
 
+function resolveLaunchWorkDir(workDir) {
+  return path.resolve(workDir || process.cwd());
+}
+
+function deriveManagedRootConsoleUrl(rootSessionId, terminalId) {
+  const consolePath = '/console';
+  const baseUrl = getCliagentsBaseUrl();
+  const url = new URL(consolePath, baseUrl);
+  if (rootSessionId) {
+    url.searchParams.set('root', rootSessionId);
+  }
+  if (terminalId) {
+    url.searchParams.set('terminal', terminalId);
+  }
+  return url.toString();
+}
+
+function normalizeManagedRootResumeCandidate(summary, snapshot, options = {}) {
+  const adapter = normalizeManagedRootAdapter(options.adapter || snapshot?.rootSession?.adapter || summary?.originClient || 'codex-cli');
+  const expectedOriginClient = inferManagedRootOriginClient(adapter);
+  const expectedWorkDir = options.workDir ? resolveLaunchWorkDir(options.workDir) : null;
+  const rootSession = snapshot?.rootSession || {};
+  const rootMetadata = rootSession.sessionMetadata && typeof rootSession.sessionMetadata === 'object'
+    ? rootSession.sessionMetadata
+    : {};
+  const attachMode = String(rootMetadata.attachMode || '').trim().toLowerCase();
+  const managedRoot = rootMetadata.managedLaunch === true
+    || rootMetadata.adoptedRoot === true
+    || attachMode === 'managed-root-launch'
+    || attachMode === 'root-adopt';
+  if (!managedRoot) {
+    return null;
+  }
+  if (String(rootSession.originClient || summary?.originClient || '').trim().toLowerCase() !== expectedOriginClient) {
+    return null;
+  }
+  if (String(rootSession.adapter || '').trim().toLowerCase() !== adapter) {
+    return null;
+  }
+
+  const terminals = Array.isArray(snapshot?.terminals) ? snapshot.terminals : [];
+  const mainTerminal = terminals.find((terminal) => (
+    String(terminal.role || '').trim().toLowerCase() === 'main'
+    && String(terminal.session_kind || '').trim().toLowerCase() === 'main'
+    && terminal.session_name
+    && String(terminal.process_state || '').trim().toLowerCase() !== 'exited'
+    && String(terminal.status || '').trim().toLowerCase() !== 'orphaned'
+  ));
+  if (!mainTerminal) {
+    return null;
+  }
+
+  const candidateWorkDir = mainTerminal.work_dir || rootSession.workDir || null;
+  if (expectedWorkDir && (!candidateWorkDir || resolveLaunchWorkDir(candidateWorkDir) !== expectedWorkDir)) {
+    return null;
+  }
+
+  const rootSessionId = rootSession.sessionId || summary?.rootSessionId || mainTerminal.root_session_id || null;
+  const terminalId = mainTerminal.terminal_id || rootSession.terminalId || null;
+  const sessionName = mainTerminal.session_name || null;
+  if (!rootSessionId || !terminalId || !sessionName) {
+    return null;
+  }
+
+  return {
+    rootSessionId,
+    terminalId,
+    sessionName,
+    windowName: mainTerminal.window_name || null,
+    adapter,
+    originClient: expectedOriginClient,
+    status: String(rootSession.status || summary?.status || mainTerminal.status || 'unknown').trim().toLowerCase() || 'unknown',
+    processState: String(mainTerminal.process_state || rootSession.processState || '').trim().toLowerCase() || null,
+    workDir: candidateWorkDir,
+    model: rootSession.model || null,
+    externalSessionRef: rootSession.externalSessionRef || summary?.externalSessionRef || mainTerminal.external_session_ref || null,
+    launchProfile: rootMetadata.launchProfile || null,
+    lastOccurredAt: summary?.lastOccurredAt || null,
+    lastRecordedAt: summary?.lastRecordedAt || null,
+    attachCommand: `tmux attach -t "${sessionName}"`,
+    consoleUrl: deriveManagedRootConsoleUrl(rootSessionId, terminalId)
+  };
+}
+
+async function listManagedRootResumeCandidates(options = {}, dependencies = {}) {
+  const callJson = dependencies.callCliagentsJson || callCliagentsJson;
+  const adapter = normalizeManagedRootAdapter(options.adapter || 'codex-cli');
+  const rootLimit = Math.max(Number(options.rootLimit || 12), 1);
+  const candidateLimit = Math.max(Number(options.candidateLimit || 5), 1);
+  const listResponse = await callJson(
+    `/orchestration/root-sessions?limit=${encodeURIComponent(rootLimit)}&scope=user&eventLimit=80&terminalLimit=20`
+  );
+  const summaries = Array.isArray(listResponse?.roots) ? listResponse.roots : [];
+  const candidates = [];
+
+  for (const summary of summaries) {
+    if (summary?.originClient !== inferManagedRootOriginClient(adapter)) {
+      continue;
+    }
+
+    const snapshot = await callJson(
+      `/orchestration/root-sessions/${encodeURIComponent(summary.rootSessionId)}?eventLimit=120&terminalLimit=40`
+    );
+    const candidate = normalizeManagedRootResumeCandidate(summary, snapshot, {
+      adapter,
+      workDir: options.workDir
+    });
+    if (!candidate) {
+      continue;
+    }
+    candidates.push(candidate);
+    if (candidates.length >= candidateLimit) {
+      break;
+    }
+  }
+
+  return candidates;
+}
+
+async function getManagedRootResumeCandidate(rootSessionId, options = {}, dependencies = {}) {
+  if (!rootSessionId) {
+    return null;
+  }
+  const callJson = dependencies.callCliagentsJson || callCliagentsJson;
+  const snapshot = await callJson(
+    `/orchestration/root-sessions/${encodeURIComponent(rootSessionId)}?eventLimit=120&terminalLimit=40`
+  );
+  return normalizeManagedRootResumeCandidate(null, snapshot, {
+    adapter: options.adapter,
+    workDir: options.workDir
+  });
+}
+
+function formatManagedRootCandidateAge(candidate) {
+  const rawValue = candidate.lastOccurredAt || candidate.lastRecordedAt || null;
+  const timestamp = rawValue == null ? NaN : Date.parse(rawValue);
+  if (!Number.isFinite(timestamp)) {
+    return 'recent';
+  }
+
+  const diffMs = Math.max(0, Date.now() - timestamp);
+  const diffMinutes = Math.floor(diffMs / 60000);
+  if (diffMinutes < 1) {
+    return 'just now';
+  }
+  if (diffMinutes < 60) {
+    return `${diffMinutes}m ago`;
+  }
+  const diffHours = Math.floor(diffMinutes / 60);
+  if (diffHours < 24) {
+    return `${diffHours}h ago`;
+  }
+  const diffDays = Math.floor(diffHours / 24);
+  return `${diffDays}d ago`;
+}
+
+function createManagedRootSelectionPrompt(candidates, options = {}) {
+  const adapter = options.adapter || 'codex-cli';
+  const workDir = options.workDir || null;
+  const lines = [
+    `Recent ${adapter} roots${workDir ? ` in ${workDir}` : ''}:`
+  ];
+
+  for (let index = 0; index < candidates.length; index += 1) {
+    const candidate = candidates[index];
+    const suffix = [
+      candidate.launchProfile ? `profile=${candidate.launchProfile}` : null,
+      candidate.processState ? `process=${candidate.processState}` : null,
+      candidate.externalSessionRef ? candidate.externalSessionRef : null
+    ].filter(Boolean).join(' • ');
+    lines.push(
+      `  ${index + 1}. ${candidate.status.padEnd(15)} ${formatManagedRootCandidateAge(candidate).padEnd(8)} ${candidate.rootSessionId.slice(0, 12)} ${suffix}`.trimEnd()
+    );
+  }
+
+  lines.push('  Enter  Start a new root');
+  lines.push('');
+  lines.push('Select a root number to reattach, or press Enter for a new root: ');
+  return lines.join('\n');
+}
+
+async function promptForManagedRootSelection(candidates, options = {}) {
+  if (!Array.isArray(candidates) || candidates.length === 0) {
+    return null;
+  }
+
+  const input = options.input || process.stdin;
+  const output = options.output || process.stdout;
+  if (!input.isTTY || !output.isTTY) {
+    return null;
+  }
+
+  const rl = readline.createInterface({ input, output });
+  try {
+    for (;;) {
+      const answer = await new Promise((resolve) => {
+        rl.question(createManagedRootSelectionPrompt(candidates, options), resolve);
+      });
+      const trimmed = String(answer || '').trim();
+      if (!trimmed) {
+        return null;
+      }
+
+      const selectedIndex = Number.parseInt(trimmed, 10);
+      if (Number.isInteger(selectedIndex) && selectedIndex >= 1 && selectedIndex <= candidates.length) {
+        return candidates[selectedIndex - 1];
+      }
+
+      output.write(`Invalid selection: ${trimmed}\n`);
+    }
+  } finally {
+    rl.close();
+  }
+}
+
+async function resolveManagedRootLaunchTarget(launchOptions, dependencies = {}) {
+  if (launchOptions.forceNewRoot) {
+    return { action: 'launch', reason: 'force-new-root' };
+  }
+  if (launchOptions.externalSessionRef) {
+    return { action: 'launch', reason: 'explicit-external-session-ref' };
+  }
+
+  const listCandidates = dependencies.listManagedRootResumeCandidates || listManagedRootResumeCandidates;
+  const getCandidate = dependencies.getManagedRootResumeCandidate || getManagedRootResumeCandidate;
+  const selectCandidate = dependencies.promptForManagedRootSelection || promptForManagedRootSelection;
+  const interactive = dependencies.interactive ?? Boolean(process.stdin.isTTY && process.stdout.isTTY);
+
+  if (launchOptions.resumeRootSessionId) {
+    const candidate = await getCandidate(launchOptions.resumeRootSessionId, {
+      adapter: launchOptions.adapter,
+      workDir: launchOptions.workDir
+    }, dependencies);
+    if (!candidate) {
+      throw new Error(`Managed root ${launchOptions.resumeRootSessionId} is not attachable for adapter ${launchOptions.adapter}`);
+    }
+    return {
+      action: 'resume',
+      reason: 'explicit-resume-root',
+      candidate
+    };
+  }
+
+  const candidates = await listCandidates({
+    adapter: launchOptions.adapter,
+    workDir: launchOptions.workDir
+  }, dependencies);
+
+  if (launchOptions.resumeLatest) {
+    if (!candidates.length) {
+      throw new Error(`No resumable managed roots found for ${launchOptions.adapter} in ${resolveLaunchWorkDir(launchOptions.workDir)}`);
+    }
+    return {
+      action: 'resume',
+      reason: 'resume-latest',
+      candidate: candidates[0]
+    };
+  }
+
+  if (!interactive || launchOptions.detach || !candidates.length) {
+    return {
+      action: 'launch',
+      reason: !candidates.length ? 'no-matching-roots' : 'non-interactive',
+      candidates
+    };
+  }
+
+  const selectedCandidate = await selectCandidate(candidates, {
+    adapter: launchOptions.adapter,
+    workDir: resolveLaunchWorkDir(launchOptions.workDir)
+  });
+  if (!selectedCandidate) {
+    return {
+      action: 'launch',
+      reason: 'interactive-new-root',
+      candidates
+    };
+  }
+
+  return {
+    action: 'resume',
+    reason: 'interactive-selection',
+    candidate: selectedCandidate,
+    candidates
+  };
+}
+
+function printManagedRootLaunchResult(result, launchOptions) {
+  console.log('Managed Root Launched');
+  console.log(`  adapter: ${result.adapter}`);
+  console.log(`  root_session_id: ${result.rootSessionId}`);
+  console.log(`  terminal_id: ${result.terminalId}`);
+  console.log(`  session_name: ${result.sessionName}`);
+  console.log(`  profile: ${launchOptions.profile}`);
+  console.log(`  external_session_ref: ${result.externalSessionRef || 'n/a'}`);
+  console.log(`  console_url: ${new URL(result.consoleUrl || '/console', getCliagentsBaseUrl()).toString()}`);
+  if (result.attachCommand) {
+    console.log(`  attach_command: ${result.attachCommand}`);
+  }
+}
+
+function printManagedRootResumeResult(candidate) {
+  console.log('Managed Root Resumed');
+  console.log(`  adapter: ${candidate.adapter}`);
+  console.log(`  root_session_id: ${candidate.rootSessionId}`);
+  console.log(`  terminal_id: ${candidate.terminalId}`);
+  console.log(`  session_name: ${candidate.sessionName}`);
+  console.log(`  status: ${candidate.status}`);
+  console.log(`  workdir: ${candidate.workDir || 'n/a'}`);
+  console.log(`  external_session_ref: ${candidate.externalSessionRef || 'n/a'}`);
+  console.log(`  console_url: ${candidate.consoleUrl}`);
+  if (candidate.attachCommand) {
+    console.log(`  attach_command: ${candidate.attachCommand}`);
+  }
+}
+
+function attachToManagedSession(launchResult, options = {}) {
+  const sessionName = launchResult?.sessionName;
+  const attachCommand = launchResult?.attachCommand;
+  const spawn = options.spawnSync || spawnSync;
+  const logger = options.logger || console;
+
+  if (!sessionName) {
+    return {
+      attempted: false,
+      attached: false,
+      reason: 'missing_session_name'
+    };
+  }
+
+  const attachAttempts = [];
+  if (process.env.TMUX) {
+    attachAttempts.push({
+      tmuxArgs: ['switch-client', '-t', sessionName],
+      env: process.env,
+      attachMode: 'switch-client'
+    });
+  }
+  const detachedEnv = { ...process.env };
+  delete detachedEnv.TMUX;
+  attachAttempts.push({
+    tmuxArgs: ['attach-session', '-t', sessionName],
+    env: detachedEnv,
+    attachMode: 'attach-session'
+  });
+
+  let lastFailure = null;
+  for (let index = 0; index < attachAttempts.length; index += 1) {
+    const attempt = attachAttempts[index];
+    const result = spawn('tmux', attempt.tmuxArgs, {
+      stdio: 'inherit',
+      env: attempt.env
+    });
+
+    if (!result.error && result.status === 0) {
+      return {
+        attempted: true,
+        attached: true,
+        tmuxArgs: attempt.tmuxArgs,
+        attachMode: attempt.attachMode,
+        fallbackUsed: index > 0,
+        attachCommand: attachCommand || null
+      };
+    }
+
+    lastFailure = {
+      message: result.error?.message || `tmux exited with status ${result.status}`,
+      tmuxArgs: attempt.tmuxArgs,
+      attachMode: attempt.attachMode
+    };
+  }
+
+  if (lastFailure) {
+    logger.warn(`[cliagents] Managed root launched, but automatic tmux attach failed: ${lastFailure.message}`);
+    if (attachCommand) {
+      logger.warn(`[cliagents] The root is still running. Attach manually with: ${attachCommand}`);
+    }
+    return {
+      attempted: true,
+      attached: false,
+      message: lastFailure.message,
+      tmuxArgs: lastFailure.tmuxArgs,
+      attachMode: lastFailure.attachMode,
+      fallbackUsed: attachAttempts.length > 1,
+      attachCommand: attachCommand || null
+    };
+  }
+
+  return {
+    attempted: true,
+    attached: true,
+    tmuxArgs: attachAttempts[0].tmuxArgs,
+    attachMode: attachAttempts[0].attachMode,
+    fallbackUsed: false,
+    attachCommand: attachCommand || null
+  };
+}
+
 async function launchManagedRootSession(options = {}) {
+  const profile = normalizeManagedRootLaunchProfile(options.profile);
+  const launchEnvironment = buildManagedRootLaunchEnvironment();
   return callCliagentsJson('/orchestration/root-sessions/launch', {
     method: 'POST',
     body: {
       adapter: options.adapter,
       workDir: options.workDir,
       model: options.model || null,
-      permissionMode: options.permissionMode || 'default',
+      permissionMode: options.permissionMode || profile.permissionMode || 'default',
       systemPrompt: options.systemPrompt || null,
       externalSessionRef: options.externalSessionRef || null,
+      sessionMetadata: {
+        launchProfile: profile.id,
+        launchEnvironment
+      },
+      launchEnvironment,
       allowedTools: Array.isArray(options.allowedTools) && options.allowedTools.length > 0
         ? options.allowedTools
         : null
@@ -182,20 +740,56 @@ async function handleLaunchCommand(rawArgs = []) {
     return;
   }
 
+  const launchTarget = await resolveManagedRootLaunchTarget(launchOptions);
+  if (launchTarget.action === 'resume') {
+    const candidate = launchTarget.candidate;
+    printManagedRootResumeResult(candidate);
+    if (!launchOptions.detach && process.stdout.isTTY) {
+      attachToManagedSession(candidate);
+    }
+    return;
+  }
+
   const result = await launchManagedRootSession(launchOptions);
-  console.log('Managed Root Launched');
+  printManagedRootLaunchResult(result, launchOptions);
+  if (!launchOptions.detach && process.stdout.isTTY) {
+    attachToManagedSession(result);
+  }
+}
+
+async function adoptManagedRootSession(options = {}) {
+  return callCliagentsJson('/orchestration/root-sessions/adopt', {
+    method: 'POST',
+    body: {
+      adapter: options.adapter,
+      tmuxTarget: options.tmuxTarget || null,
+      sessionName: options.sessionName || null,
+      windowName: options.windowName || null,
+      workDir: options.workDir || null,
+      model: options.model || null,
+      externalSessionRef: options.externalSessionRef || null,
+      rootSessionId: options.rootSessionId || null
+    }
+  });
+}
+
+async function handleAdoptCommand(rawArgs = []) {
+  const adoptOptions = parseAdoptArgs(rawArgs);
+  if (adoptOptions.help) {
+    printAdoptUsage();
+    return;
+  }
+
+  const result = await adoptManagedRootSession(adoptOptions);
+  console.log('Managed Root Adopted');
   console.log(`  adapter: ${result.adapter}`);
   console.log(`  root_session_id: ${result.rootSessionId}`);
   console.log(`  terminal_id: ${result.terminalId}`);
-  console.log(`  session_name: ${result.sessionName}`);
+  console.log(`  tmux_target: ${result.tmuxTarget}`);
   console.log(`  external_session_ref: ${result.externalSessionRef || 'n/a'}`);
   console.log(`  console_url: ${new URL(result.consoleUrl || '/console', getCliagentsBaseUrl()).toString()}`);
   if (result.attachCommand) {
     console.log(`  attach_command: ${result.attachCommand}`);
-  }
-
-  if (!launchOptions.detach && process.stdout.isTTY) {
-    attachToManagedSession(result);
   }
 }
 
@@ -220,8 +814,19 @@ module.exports = {
 
   // Managed root launch helpers
   parseLaunchArgs,
+  resolveLaunchWorkDir,
+  normalizeManagedRootResumeCandidate,
+  listManagedRootResumeCandidates,
+  getManagedRootResumeCandidate,
+  promptForManagedRootSelection,
+  resolveManagedRootLaunchTarget,
   launchManagedRootSession,
+  attachToManagedSession,
   handleLaunchCommand,
+  handleAdoptCommand,
+  listAdapterModels,
+  parseAdoptArgs,
+  adoptManagedRootSession,
 
   // Quick-start factory
   createServer: (options = {}) => new AgentServer(options),
@@ -246,6 +851,24 @@ if (require.main === module) {
       console.error(`[cliagents] Launch failed: ${error.message}`);
       process.exit(1);
     });
+    return;
+  }
+
+  if (command === 'adopt') {
+    handleAdoptCommand(args.slice(1)).catch((error) => {
+      console.error(`[cliagents] Adopt failed: ${error.message}`);
+      process.exit(1);
+    });
+    return;
+  }
+
+  if (command === 'list-models') {
+    try {
+      listAdapterModels(args.slice(1));
+    } catch (error) {
+      console.error(`[cliagents] list-models failed: ${error.message}`);
+      process.exit(1);
+    }
     return;
   }
 

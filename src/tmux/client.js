@@ -12,6 +12,7 @@ const crypto = require('crypto');
 
 // Regex for validating session/window names (alphanumeric, dash, underscore only)
 const SAFE_NAME_PATTERN = /^[a-zA-Z0-9_-]+$/;
+const TMUX_SERVER_BOOTSTRAP_STATE = new Set();
 
 class TmuxClient {
   constructor(options = {}) {
@@ -26,6 +27,7 @@ class TmuxClient {
 
     // Verify tmux is available
     this._verifyTmux();
+    this._ensurePreferredServerOptions();
   }
 
   /**
@@ -37,6 +39,62 @@ class TmuxClient {
     } catch (error) {
       throw new Error('tmux is not installed or not in PATH. Install with: brew install tmux');
     }
+  }
+
+  _ensurePreferredServerOptions() {
+    const bootstrapKey = this.socketPath || '__default__';
+    if (TMUX_SERVER_BOOTSTRAP_STATE.has(bootstrapKey)) {
+      return;
+    }
+
+    const currentDefaultTerminal = this._exec(['show-options', '-gv', 'default-terminal'], {
+      ignoreErrors: true,
+      silent: true
+    }) || '';
+    if (!String(currentDefaultTerminal).trim()) {
+      this._exec(['set-option', '-g', 'default-terminal', 'tmux-256color'], {
+        ignoreErrors: true,
+        silent: true
+      });
+    }
+
+    const currentTerminalFeatures = this._exec(['show-options', '-gv', 'terminal-features'], {
+      ignoreErrors: true,
+      silent: true
+    }) || '';
+    if (!/RGB/.test(currentTerminalFeatures)) {
+      this._exec([
+        'set-option',
+        '-ag',
+        'terminal-features',
+        ',xterm-256color:RGB,screen-256color:RGB,tmux-256color:RGB,wezterm:RGB,kitty:RGB,alacritty:RGB,foot:RGB,st-256color:RGB'
+      ], {
+        ignoreErrors: true,
+        silent: true
+      });
+    }
+
+    const currentTerminalOverrides = this._exec(['show-options', '-gv', 'terminal-overrides'], {
+      ignoreErrors: true,
+      silent: true
+    }) || '';
+    if (!/(?:^|,)\*:Tc|(?:^|,)\*:RGB|(?:^|,)tmux-256color:Tc|(?:^|,)tmux-256color:RGB/.test(currentTerminalOverrides)) {
+      this._exec(['set-option', '-ag', 'terminal-overrides', ',*:Tc'], {
+        ignoreErrors: true,
+        silent: true
+      });
+    }
+
+    this._exec(['set-option', '-g', 'focus-events', 'on'], {
+      ignoreErrors: true,
+      silent: true
+    });
+    this._exec(['set-option', '-g', 'extended-keys', 'on'], {
+      ignoreErrors: true,
+      silent: true
+    });
+
+    TMUX_SERVER_BOOTSTRAP_STATE.add(bootstrapKey);
   }
 
   /**
@@ -159,6 +217,15 @@ class TmuxClient {
       CLIAGENTS_TERMINAL_ID: terminalId,
       ...env
     };
+    const spawnEnv = { ...process.env };
+
+    for (const [key, value] of Object.entries(envVars)) {
+      if (value == null) {
+        delete spawnEnv[key];
+      } else {
+        spawnEnv[key] = value;
+      }
+    }
 
     // Create detached session
     const args = ['new-session', '-d', '-s', sessionName, '-n', windowName];
@@ -168,13 +235,17 @@ class TmuxClient {
     }
     
     this._exec(args, {
-      env: { ...process.env, ...envVars }
+      env: spawnEnv
     });
 
     // Set environment variables in the session
     for (const [key, value] of Object.entries(envVars)) {
-      // Use set-environment which handles escaping safely when passed as args
-      this._exec(['set-environment', '-t', sessionName, key, value]);
+      if (value == null) {
+        this._exec(['set-environment', '-rt', sessionName, key], { ignoreErrors: true, silent: true });
+      } else {
+        // Use set-environment which handles escaping safely when passed as args
+        this._exec(['set-environment', '-t', sessionName, key, value]);
+      }
     }
 
     return true;
@@ -488,6 +559,24 @@ class TmuxClient {
     const target = `${sessionName}:${windowName}`;
     try {
       const output = this._exec(['display-message', '-t', target, '-p', '#{pane_current_path}'], {
+        silent: true
+      });
+      return output?.trim() || null;
+    } catch (error) {
+      return null;
+    }
+  }
+
+  /**
+   * Get the pane's current foreground command.
+   * @param {string} sessionName - Session name
+   * @param {string} windowName - Window name
+   * @returns {string|null} - Foreground command or null
+   */
+  getPaneCurrentCommand(sessionName, windowName) {
+    const target = `${sessionName}:${windowName}`;
+    try {
+      const output = this._exec(['display-message', '-t', target, '-p', '#{pane_current_command}'], {
         silent: true
       });
       return output?.trim() || null;

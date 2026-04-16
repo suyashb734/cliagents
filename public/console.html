@@ -201,6 +201,20 @@
       font-size: 14px;
     }
 
+    .reply-box textarea {
+      min-height: 136px;
+      padding: 12px 14px;
+      border: 0;
+      border-radius: 0;
+      background: transparent;
+      resize: vertical;
+      line-height: 1.5;
+    }
+
+    .reply-box textarea:focus {
+      outline: none;
+    }
+
     .api-key-box {
       display: flex;
       align-items: center;
@@ -211,6 +225,125 @@
     .list {
       max-height: 36vh;
       overflow: auto;
+    }
+
+    .root-card-grid {
+      display: grid;
+      grid-template-columns: repeat(auto-fit, minmax(320px, 1fr));
+      gap: 14px;
+      padding: 14px;
+    }
+
+    .root-card {
+      border: 1px solid var(--border-color);
+      border-radius: 12px;
+      background: var(--bg-primary);
+      padding: 14px;
+      display: grid;
+      gap: 12px;
+      cursor: pointer;
+      transition: border-color 120ms ease, background 120ms ease, transform 120ms ease;
+    }
+
+    .root-card:hover,
+    .root-card.active {
+      border-color: rgba(88, 166, 255, 0.52);
+      background: rgba(88, 166, 255, 0.08);
+      transform: translateY(-1px);
+    }
+
+    .root-card.attention {
+      border-color: rgba(210, 153, 34, 0.48);
+      background: rgba(210, 153, 34, 0.08);
+    }
+
+    .root-card-head {
+      display: flex;
+      justify-content: space-between;
+      align-items: flex-start;
+      gap: 12px;
+    }
+
+    .root-card-title-wrap {
+      display: grid;
+      gap: 4px;
+      min-width: 0;
+    }
+
+    .root-card-title {
+      font-size: 14px;
+      font-weight: 600;
+      word-break: break-word;
+    }
+
+    .root-card-subtitle {
+      font-size: 12px;
+      color: var(--text-secondary);
+      word-break: break-all;
+    }
+
+    .root-card-meta {
+      display: grid;
+      grid-template-columns: repeat(2, minmax(0, 1fr));
+      gap: 8px 12px;
+      font-size: 12px;
+      color: var(--text-secondary);
+    }
+
+    .root-card-meta strong {
+      color: var(--text-primary);
+      font-weight: 600;
+    }
+
+    .root-card-summary {
+      font-size: 12px;
+      color: var(--text-secondary);
+      line-height: 1.5;
+      white-space: pre-wrap;
+      word-break: break-word;
+    }
+
+    .root-card-children {
+      display: grid;
+      gap: 8px;
+    }
+
+    .child-session-item {
+      border: 1px solid rgba(48, 54, 61, 0.9);
+      border-radius: 10px;
+      padding: 10px 12px;
+      background: rgba(13, 17, 23, 0.88);
+      display: grid;
+      gap: 6px;
+    }
+
+    .child-session-head {
+      display: flex;
+      justify-content: space-between;
+      align-items: center;
+      gap: 10px;
+    }
+
+    .child-session-title {
+      font-size: 13px;
+      font-weight: 600;
+      word-break: break-word;
+    }
+
+    .child-session-meta {
+      display: flex;
+      gap: 8px;
+      flex-wrap: wrap;
+      color: var(--text-secondary);
+      font-size: 12px;
+    }
+
+    .child-session-summary {
+      font-size: 12px;
+      color: var(--text-secondary);
+      line-height: 1.45;
+      white-space: pre-wrap;
+      word-break: break-word;
     }
 
     .row {
@@ -346,15 +479,98 @@
 
     .reply-box {
       display: grid;
-      gap: 10px;
+      gap: 12px;
+      padding: 16px;
+      border-radius: 12px;
+      border: 1px solid rgba(88, 166, 255, 0.28);
+      background:
+        linear-gradient(180deg, rgba(88, 166, 255, 0.1), rgba(13, 17, 23, 0.96) 40%),
+        var(--bg-secondary);
+      box-shadow: inset 0 1px 0 rgba(255, 255, 255, 0.04);
+    }
+
+    .reply-box-header {
+      display: flex;
+      justify-content: space-between;
+      align-items: flex-start;
+      gap: 12px;
+      flex-wrap: wrap;
+    }
+
+    .reply-box-title-wrap {
+      display: grid;
+      gap: 4px;
+    }
+
+    .reply-box-title {
+      font-size: 13px;
+      font-weight: 600;
+      letter-spacing: 0.02em;
+      text-transform: uppercase;
+    }
+
+    .reply-box-subtitle {
+      color: var(--text-secondary);
+      font-size: 12px;
+      line-height: 1.45;
+      max-width: 720px;
+    }
+
+    .reply-box-badge {
+      display: inline-flex;
+      align-items: center;
+      padding: 5px 10px;
+      border-radius: 999px;
+      border: 1px solid rgba(88, 166, 255, 0.35);
+      background: rgba(88, 166, 255, 0.14);
+      color: #c6ddff;
+      font-size: 11px;
+      font-weight: 600;
+      letter-spacing: 0.04em;
+      text-transform: uppercase;
+      white-space: nowrap;
+    }
+
+    .reply-input-shell {
+      display: grid;
+      grid-template-columns: auto minmax(0, 1fr);
+      border-radius: 10px;
+      border: 1px solid rgba(88, 166, 255, 0.22);
+      background: rgba(13, 17, 23, 0.9);
+      overflow: hidden;
+      transition: border-color 120ms ease, box-shadow 120ms ease, background 120ms ease;
+    }
+
+    .reply-input-shell:focus-within {
+      border-color: rgba(88, 166, 255, 0.65);
+      background: rgba(13, 17, 23, 0.98);
+      box-shadow:
+        0 0 0 1px rgba(88, 166, 255, 0.25),
+        0 0 0 4px rgba(88, 166, 255, 0.08);
+    }
+
+    .reply-input-gutter {
+      display: flex;
+      align-items: flex-start;
+      justify-content: center;
+      padding: 12px 10px;
+      min-width: 38px;
+      border-right: 1px solid rgba(88, 166, 255, 0.16);
+      background: rgba(88, 166, 255, 0.08);
+      color: var(--accent-blue);
+      font-size: 16px;
+      font-weight: 700;
+      line-height: 1.2;
+      user-select: none;
     }
 
     .reply-actions {
       display: flex;
       justify-content: space-between;
-      gap: 10px;
+      gap: 12px;
       align-items: center;
       flex-wrap: wrap;
+      padding-top: 2px;
     }
 
     .hint,
@@ -626,6 +842,7 @@
       selectedRunId: urlState.get('run') || null,
       socket: null,
       socketConnected: false,
+      rootSnapshots: {},
       refreshTimer: null
     };
 
@@ -960,6 +1177,92 @@
       };
     }
 
+    function getRootSnapshot(rootSessionId) {
+      return state.rootSnapshots?.[rootSessionId] || null;
+    }
+
+    function getRootChildSessions(snapshot) {
+      if (!snapshot || !Array.isArray(snapshot.sessions)) {
+        return [];
+      }
+
+      const directChildren = snapshot.sessions.filter((session) => (
+        session
+        && session.sessionId !== snapshot.rootSessionId
+        && session.parentSessionId === snapshot.rootSessionId
+      ));
+
+      if (directChildren.length > 0) {
+        return directChildren;
+      }
+
+      return snapshot.sessions.filter((session) => session && session.sessionId !== snapshot.rootSessionId);
+    }
+
+    function summarizeRootCard(root) {
+      const summary = root?.latestConclusion?.summary || root?.latestSummary || '';
+      const attentionMessage = root?.attention?.reasons?.[0]?.message || '';
+      if (!summary && attentionMessage) {
+        return attentionMessage.length > 180 ? `${attentionMessage.slice(0, 179).trimEnd()}…` : attentionMessage;
+      }
+      if (!summary) {
+        return 'No decision or summary recorded yet.';
+      }
+      return summary.length > 180 ? `${summary.slice(0, 179).trimEnd()}…` : summary;
+    }
+
+    function buildRootCardTitle(root) {
+      return root.externalSessionRef || root.clientName || root.rootSessionId;
+    }
+
+    function renderRootChildSessions(snapshot) {
+      const childSessions = getRootChildSessions(snapshot);
+      if (!childSessions.length) {
+        return '<div class="hint">No child sessions recorded for this root yet.</div>';
+      }
+
+      return childSessions.map((session) => `
+        <div class="child-session-item">
+          <div class="child-session-head">
+            <div class="child-session-title">${escapeHtml(session.name || session.sessionId)}</div>
+            <span class="${statusClass(session.status || session.lastEventType || 'unknown')}">${escapeHtml(session.status || session.lastEventType || 'unknown')}</span>
+          </div>
+          <div class="child-session-meta">
+            <span><strong>Kind:</strong> ${escapeHtml(session.sessionKind || 'unknown')}</span>
+            <span><strong>Adapter:</strong> ${escapeHtml(session.adapter || 'n/a')}</span>
+            <span><strong>Role:</strong> ${escapeHtml(session.role || 'n/a')}</span>
+          </div>
+          <div class="child-session-summary">${escapeHtml(session.latestConclusion?.summary || session.lastReuseReason || session.latestSummary || 'No conclusion recorded yet.')}</div>
+        </div>
+      `).join('');
+    }
+
+    async function hydrateVisibleRootSnapshots(roots) {
+      const rootIds = roots
+        .map((root) => root?.rootSessionId)
+        .filter(Boolean)
+        .slice(0, 24);
+
+      const nextSnapshots = { ...(state.rootSnapshots || {}) };
+      const results = await Promise.allSettled(rootIds.map((rootSessionId) => (
+        fetchJson(`/orchestration/root-sessions/${encodeURIComponent(rootSessionId)}?eventLimit=160&terminalLimit=80`)
+      )));
+
+      results.forEach((result, index) => {
+        const rootSessionId = rootIds[index];
+        if (!rootSessionId) {
+          return;
+        }
+        if (result.status === 'fulfilled') {
+          nextSnapshots[rootSessionId] = result.value;
+        } else if (!nextSnapshots[rootSessionId]) {
+          nextSnapshots[rootSessionId] = { rootSessionId, error: result.reason?.message || 'Failed to load root snapshot.' };
+        }
+      });
+
+      state.rootSnapshots = nextSnapshots;
+    }
+
     function renderSessionRoots() {
       const visibleRoots = getVisibleSessionRoots();
       const archivedSuffix = state.sessionRootsArchivedCount > 0
@@ -988,28 +1291,42 @@
         return;
       }
 
-      elements.sessionRootsList.innerHTML = visibleRoots.map((root) => `
-        <div class="row ${root.rootSessionId === state.selectedRootSessionId ? 'active' : ''}" data-root-session-id="${root.rootSessionId}">
-          <div class="row-top">
-            <div class="row-title">${escapeHtml(root.rootSessionId)}</div>
-            <span class="${statusClass(root.status || root.latestEventType || 'unknown')}">${escapeHtml(root.status || root.latestEventType || 'unknown')}</span>
-          </div>
-          <div class="row-meta">
-            <div><strong>Origin:</strong> ${escapeHtml(root.originClient || 'unknown')}</div>
-            <div><strong>Type:</strong> ${escapeHtml(root.rootType || 'workflow_root')}</div>
-            <div><strong>Events:</strong> ${escapeHtml(String(root.eventCount || 0))}</div>
-            <div><strong>Reuse Events:</strong> ${escapeHtml(String(root.reuseEvents || 0))}</div>
-            <div><strong>Reused Sessions:</strong> ${escapeHtml(String(root.reusedSessions || 0))}</div>
-            <div><strong>Started:</strong> ${escapeHtml(formatTimestamp(root.startedAt))}</div>
-            <div><strong>Last:</strong> ${escapeHtml(formatTimestamp(root.lastOccurredAt))}</div>
-            <div><strong>Run:</strong> ${escapeHtml(root.runId || 'n/a')}</div>
-            <div><strong>Discussion:</strong> ${escapeHtml(root.discussionId || 'n/a')}</div>
-          </div>
-          ${root.archived ? '<div class="hint">Archived legacy root</div>' : ''}
-          ${root.attention?.requiresAttention ? `<div class="hint">Attention: ${escapeHtml(root.attention.reasons.map((reason) => reason.code).join(', ') || 'required')}</div>` : ''}
-          ${root.latestSummary ? `<div class="hint">${escapeHtml(root.latestSummary)}</div>` : ''}
+      elements.sessionRootsList.innerHTML = `
+        <div class="root-card-grid">
+          ${visibleRoots.map((root) => {
+            const snapshot = getRootSnapshot(root.rootSessionId);
+            const childSessions = getRootChildSessions(snapshot);
+            return `
+              <div class="root-card ${root.rootSessionId === state.selectedRootSessionId ? 'active' : ''} ${root.attention?.requiresAttention ? 'attention' : ''}" data-root-session-id="${root.rootSessionId}">
+                <div class="root-card-head">
+                  <div class="root-card-title-wrap">
+                    <div class="root-card-title">${escapeHtml(buildRootCardTitle(root))}</div>
+                    <div class="root-card-subtitle">${escapeHtml(root.rootSessionId)}</div>
+                  </div>
+                  <span class="${statusClass(root.status || root.latestEventType || 'unknown')}">${escapeHtml(root.status || root.latestEventType || 'unknown')}</span>
+                </div>
+                <div class="root-card-meta">
+                  <div><strong>Origin:</strong> ${escapeHtml(root.originClient || 'unknown')}</div>
+                  <div><strong>Type:</strong> ${escapeHtml(root.rootType || 'workflow_root')}</div>
+                  <div><strong>Children:</strong> ${escapeHtml(String(childSessions.length))}</div>
+                  <div><strong>Events:</strong> ${escapeHtml(String(root.eventCount || 0))}</div>
+                  <div><strong>Started:</strong> ${escapeHtml(formatTimestamp(root.startedAt))}</div>
+                  <div><strong>Last:</strong> ${escapeHtml(formatTimestamp(root.lastOccurredAt))}</div>
+                </div>
+                <div class="root-card-summary">${escapeHtml(summarizeRootCard(root))}</div>
+                <div>
+                  <div class="detail-label">Child Sessions</div>
+                  <div class="root-card-children">
+                    ${snapshot?.error
+                      ? `<div class="warning-banner">${escapeHtml(snapshot.error)}</div>`
+                      : renderRootChildSessions(snapshot)}
+                  </div>
+                </div>
+              </div>
+            `;
+          }).join('')}
         </div>
-      `).join('');
+      `;
 
       elements.sessionRootsList.querySelectorAll('[data-root-session-id]').forEach((node) => {
         node.addEventListener('click', () => {
@@ -1066,6 +1383,7 @@
           elements.sessionRootsSummary.textContent = fallbackError.message;
         }
       }
+      await hydrateVisibleRootSnapshots(getVisibleSessionRoots());
       renderSessionRoots();
     }
 
@@ -1074,7 +1392,15 @@
       const status = terminal?.status || 'unknown';
       const blocked = ['waiting_permission', 'waiting_user_answer'].includes(status);
       const stale = isTerminalStale(terminal);
+      const attention = terminal?.attention || null;
       return `
+        ${attention ? `
+          <div class="warning-banner">
+            ${escapeHtml(attention.message || 'This terminal needs attention.')}
+            ${attention.resumeCommand ? `<div class="hint">Resume command: <code>${escapeHtml(attention.resumeCommand)}</code></div>` : ''}
+          </div>
+        ` : ''}
+
         ${stale ? `
           <div class="warning-banner">
             This terminal looks stale. Its last activity is older than ${Math.round(STALE_TERMINAL_MS / 60000)} minutes while still marked ${escapeHtml(status)}.
@@ -1130,10 +1456,23 @@
         </div>
 
         <div class="reply-box">
-          <div class="detail-label">Reply to Terminal</div>
-          <textarea id="${prefix}-reply-input" rows="4" placeholder="Send input to the selected terminal. Useful for approval prompts, follow-up instructions, or remote vibe-coding from an iPad."></textarea>
+          <div class="reply-box-header">
+            <div class="reply-box-title-wrap">
+              <div class="reply-box-title">Reply to Terminal</div>
+              <div class="reply-box-subtitle">
+                ${blocked
+                  ? 'This terminal is paused and waiting for human input. Send a reply to unblock it.'
+                  : 'Compose follow-up input, approvals, or steering prompts from the browser without losing the live terminal context.'}
+              </div>
+            </div>
+            <div class="reply-box-badge">${blocked ? 'Needs Reply' : 'Composer'}</div>
+          </div>
+          <div class="reply-input-shell">
+            <div class="reply-input-gutter">›</div>
+            <textarea id="${prefix}-reply-input" rows="4" placeholder="Type the next instruction, approval, or follow-up message for this terminal."></textarea>
+          </div>
           <div class="reply-actions">
-            <div class="hint">${blocked ? 'This terminal is waiting on human input.' : 'You can still send follow-up input even when the terminal is processing.'}</div>
+            <div class="hint">${blocked ? 'Waiting on human input.' : 'You can still send follow-up input while the terminal is processing.'} Use <code>Ctrl+Enter</code> or <code>Cmd+Enter</code> to send.</div>
             <button class="btn btn-primary" id="${prefix}-reply-send" type="button">Send Reply</button>
           </div>
         </div>
@@ -1147,17 +1486,51 @@
     }
 
     function bindTerminalDetailActions(terminal, prefix, refreshFn) {
-      document.getElementById(`${prefix}-reply-send`)?.addEventListener('click', async () => {
-        const textarea = document.getElementById(`${prefix}-reply-input`);
+      const textarea = document.getElementById(`${prefix}-reply-input`);
+      const sendButton = document.getElementById(`${prefix}-reply-send`);
+      const sendReply = async () => {
+        if (!textarea) return;
         const message = textarea.value.trim();
         if (!message) return;
-        await fetchJson(`/orchestration/terminals/${encodeURIComponent(terminal.terminalId)}/input`, {
-          method: 'POST',
-          body: JSON.stringify({ message })
-        });
-        textarea.value = '';
-        await refreshFn();
+        if (sendButton) {
+          sendButton.disabled = true;
+          sendButton.textContent = 'Sending...';
+        }
+        textarea.disabled = true;
+        try {
+          await fetchJson(`/orchestration/terminals/${encodeURIComponent(terminal.terminalId)}/input`, {
+            method: 'POST',
+            body: JSON.stringify({ message })
+          });
+          textarea.value = '';
+          await refreshFn();
+        } finally {
+          const refreshedTextarea = document.getElementById(`${prefix}-reply-input`);
+          const refreshedButton = document.getElementById(`${prefix}-reply-send`);
+          if (refreshedTextarea) {
+            refreshedTextarea.disabled = false;
+            refreshedTextarea.focus();
+          } else {
+            textarea.disabled = false;
+          }
+          if (refreshedButton) {
+            refreshedButton.disabled = false;
+            refreshedButton.textContent = 'Send Reply';
+          } else if (sendButton) {
+            sendButton.disabled = false;
+            sendButton.textContent = 'Send Reply';
+          }
+        }
+      };
+
+      sendButton?.addEventListener('click', sendReply);
+      textarea?.addEventListener('keydown', (event) => {
+        if ((event.metaKey || event.ctrlKey) && event.key === 'Enter') {
+          event.preventDefault();
+          sendReply();
+        }
       });
+
       document.getElementById(`${prefix}-destroy`)?.addEventListener('click', () => destroySelectedTerminal(terminal.terminalId));
       document.getElementById(`${prefix}-reconcile-runs`)?.addEventListener('click', reconcileStaleRuns);
     }
@@ -1299,12 +1672,23 @@
       const roots = snapshot || state.sessionRoots.find((root) => root.rootSessionId === state.selectedRootSessionId) || null;
       const nodes = buildSessionTree(events);
       const rows = flattenSessionTree(nodes, state.selectedRootSessionId);
+      const childRows = rows.filter((node) => node.sessionId !== state.selectedRootSessionId);
       const reusedSessions = rows.filter((node) => node.wasReused).length;
       const reuseEvents = rows.reduce((total, node) => total + (node.resumeCount || 0), 0);
       const attentionCodes = roots?.attention?.reasons?.map((reason) => reason.code).join(', ') || 'none';
+      const attentionReasons = roots?.attention?.reasons || [];
 
       elements.sessionTreeStatus.textContent = `${state.selectedRootSessionId} • ${events.length} event(s)`;
       elements.sessionTreeDetail.innerHTML = `
+        ${attentionReasons.length ? `
+          <div class="warning-banner">
+            ${attentionReasons.map((reason) => escapeHtml(reason.message || reason.code || 'Attention required.')).join('<br>')}
+            ${attentionReasons.find((reason) => reason.resumeCommand)?.resumeCommand
+              ? `<div class="hint">Resume command: <code>${escapeHtml(attentionReasons.find((reason) => reason.resumeCommand).resumeCommand)}</code></div>`
+              : ''}
+          </div>
+        ` : ''}
+
         <div class="detail-grid">
           <div>
             <div class="detail-label">cliagents Root Session</div>
@@ -1351,9 +1735,9 @@
         ${renderRootTerminalSection(rootTerminalBundle)}
 
         <div>
-          <div class="detail-label">Session Hierarchy</div>
+          <div class="detail-label">Child Sessions</div>
           <div class="tree-list">
-            ${rows.length ? rows.map((node) => `
+            ${childRows.length ? childRows.map((node) => `
               <div class="tree-item tree-depth-${Math.min(node.depth, 4)}">
                 <div class="tree-head">
                   <div class="tree-title">${escapeHtml(node.name || node.sessionId)}</div>
@@ -1372,7 +1756,7 @@
                 ${node.lastReuseReason ? `<div class="hint">Reuse reason: ${escapeHtml(node.lastReuseReason)}</div>` : ''}
                 <div class="hint">${escapeHtml(node.latestSummary || 'No summary available.')}</div>
               </div>
-            `).join('') : '<div class="empty-state">No session nodes recorded for this root yet.</div>'}
+            `).join('') : '<div class="empty-state">No child sessions recorded for this root yet.</div>'}
           </div>
         </div>
 
@@ -1446,6 +1830,19 @@
         }
         renderSessionTreeDetail(eventsData.events || [], rootData || null, rootTerminalBundle);
       } catch (error) {
+        if (
+          state.selectedTerminalId
+          && /root session .* not found|root_session_not_found/i.test(String(error.message || ''))
+        ) {
+          try {
+            const terminal = await fetchJson(`/orchestration/terminals/${encodeURIComponent(state.selectedTerminalId)}`);
+            if (terminal?.rootSessionId && terminal.rootSessionId !== state.selectedRootSessionId) {
+              state.selectedRootSessionId = terminal.rootSessionId;
+              syncUrlState();
+              return refreshSelectedSessionRoot();
+            }
+          } catch {}
+        }
         elements.sessionTreeStatus.textContent = 'Session tree unavailable';
         elements.sessionTreeDetail.innerHTML = `<div class="empty-state">${escapeHtml(error.message)}</div>`;
       }

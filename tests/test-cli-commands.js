@@ -6,6 +6,7 @@
 
 const assert = require('assert');
 const { CLI_COMMANDS } = require('../src/tmux/session-manager');
+const { parseAdoptArgs, attachToManagedSession } = require('../src/index');
 
 let passed = 0;
 let failed = 0;
@@ -44,7 +45,7 @@ console.log('\n--- Codex CLI ---');
 test('Codex interactive command bypasses approvals by default', () => {
   const cmd = CLI_COMMANDS['codex-cli']({ model: 'o4-mini' });
 
-  assert(cmd.startsWith('CI=true codex'), `Expected CI=true codex prefix, got: ${cmd}`);
+  assert(cmd.startsWith('codex'), `Expected codex prefix, got: ${cmd}`);
   assert(cmd.includes('--dangerously-bypass-approvals-and-sandbox'), `Expected bypass flag, got: ${cmd}`);
   assert(cmd.includes('--model o4-mini'), `Expected model flag, got: ${cmd}`);
 });
@@ -104,6 +105,77 @@ test('Claude interactive command omits allowedTools when the list is empty', () 
   });
 
   assert(!cmd.includes('--allowedTools'), `Did not expect empty allowedTools flag, got: ${cmd}`);
+});
+
+console.log('\n--- Adopt CLI ---');
+
+test('Adopt CLI parses tmux target and adapter correctly', () => {
+  const parsed = parseAdoptArgs(['claude', '--tmux', 'workspace:agent', '--external-session-ref', 'claude:thread-1']);
+  assert.strictEqual(parsed.adapter, 'claude-code');
+  assert.strictEqual(parsed.tmuxTarget, 'workspace:agent');
+  assert.strictEqual(parsed.externalSessionRef, 'claude:thread-1');
+});
+
+console.log('\n--- Launch Attach ---');
+
+test('Managed root attach failure is reported as non-fatal warning', () => {
+  const warnings = [];
+  const logger = {
+    warn: (message) => warnings.push(message)
+  };
+
+  const result = attachToManagedSession({
+    sessionName: 'cliagents-abcd12',
+    attachCommand: 'tmux attach -t "cliagents-abcd12"'
+  }, {
+    spawnSync: () => ({ status: 1 }),
+    logger
+  });
+
+  assert.strictEqual(result.attempted, true);
+  assert.strictEqual(result.attached, false);
+  assert(result.message.includes('tmux exited with status 1'));
+  assert(warnings.some((message) => message.includes('Managed root launched, but automatic tmux attach failed')));
+  assert(warnings.some((message) => message.includes('The root is still running. Attach manually with')));
+});
+
+test('Managed root attach falls back to attach-session when TMUX is set but switch-client fails', () => {
+  const warnings = [];
+  const logger = {
+    warn: (message) => warnings.push(message)
+  };
+  const calls = [];
+  const originalTmux = process.env.TMUX;
+  process.env.TMUX = '/tmp/tmux-stale,1234,0';
+
+  try {
+    const result = attachToManagedSession({
+      sessionName: 'cliagents-abcd12',
+      attachCommand: 'tmux attach -t "cliagents-abcd12"'
+    }, {
+      spawnSync: (command, args, options) => {
+        calls.push({ command, args, env: options.env });
+        return calls.length === 1 ? { status: 1 } : { status: 0 };
+      },
+      logger
+    });
+
+    assert.strictEqual(result.attempted, true);
+    assert.strictEqual(result.attached, true);
+    assert.strictEqual(result.attachMode, 'attach-session');
+    assert.strictEqual(result.fallbackUsed, true);
+    assert.strictEqual(calls.length, 2);
+    assert.deepStrictEqual(calls[0].args, ['switch-client', '-t', 'cliagents-abcd12']);
+    assert.deepStrictEqual(calls[1].args, ['attach-session', '-t', 'cliagents-abcd12']);
+    assert.strictEqual(Object.prototype.hasOwnProperty.call(calls[1].env, 'TMUX'), false);
+    assert.strictEqual(warnings.length, 0);
+  } finally {
+    if (originalTmux === undefined) {
+      delete process.env.TMUX;
+    } else {
+      process.env.TMUX = originalTmux;
+    }
+  }
 });
 
 console.log(`\n${passed} passed, ${failed} failed`);

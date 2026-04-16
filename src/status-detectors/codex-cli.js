@@ -21,8 +21,9 @@ const CODEX_PATTERNS = {
    * - "context left" status bar
    * - "? for shortcuts" indicator
    * IMPORTANT: `› 1.` is a selection prompt, NOT idle. Only match `› ` followed by space or empty.
+   * Orchestration mode: matches shell prompts and explicit ready marker
    */
-  IDLE: /context left|^›\s*$|\? for shortcuts/m,
+  IDLE: /context left|^›\s*$|\? for shortcuts|^CODEX_READY_FOR_ORCHESTRATION$|^[\w.-]+@[\w.-]+.*[#$%>]\s*$/m,
 
   /**
    * PROCESSING: Agent is working
@@ -68,7 +69,7 @@ const CODEX_PATTERNS = {
    * NOTE: OpenAIError and APIError MUST also be start-of-line to avoid matching code content
    * Also matches usage limit blocks (■ You've hit your usage limit)
    */
-  ERROR: /^(?:Error|ERROR)\s*:|^\s*\[?(?:error|ERROR)\]?\s*:|^OpenAIError|^APIError|^■ You've hit your usage limit/m
+  ERROR: /^(?:Error|ERROR)\s*:|^\s*\[?(?:error|ERROR)\]?\s*:|^OpenAIError|^APIError|^■ You've hit your usage limit|Conversation interrupted - tell the model what to do differently\./m
 };
 
 class CodexCliDetector extends BaseStatusDetector {
@@ -96,6 +97,18 @@ class CodexCliDetector extends BaseStatusDetector {
       return TerminalStatus.ERROR;
     }
 
+    // ORCHESTRATION FIX:
+    // Check for explicit Shell Prompt at the very end of output.
+    const lines = tail.trim().split('\n');
+    if (lines.length > 0) {
+      const lastLine = lines[lines.length - 1];
+      
+      // Check for shell prompt at end (Orchestration Idle)
+      if (/^[\w.-]+@[\w.-]+.*[#$%>]\s*$/.test(lastLine)) {
+        return TerminalStatus.IDLE;
+      }
+    }
+
     // Fall back to pattern-based detection
     return super.detectStatus(output);
   }
@@ -118,6 +131,31 @@ class CodexCliDetector extends BaseStatusDetector {
   isTokenLimitError(output) {
     // Only match actual error messages about token limits at start of line
     return /^(?:Error:.*token|Error:.*context.*length|maximum.*tokens.*exceeded)/mi.test(output);
+  }
+
+  /**
+   * Extract interruption metadata from Codex output when the interactive session aborts.
+   * @param {string} output
+   * @returns {{code: string, message: string, resumeCommand: string|null, resumeSessionId: string|null}|null}
+   */
+  extractInterruption(output) {
+    const tail = this.getTail(output);
+
+    if (!/Conversation interrupted - tell the model what to do differently\./i.test(tail)) {
+      return null;
+    }
+
+    const resumeMatch = tail.match(/To continue this session,\s*run\s*codex resume\s*([0-9a-f-\s]+)/i);
+    const resumeSessionId = resumeMatch
+      ? String(resumeMatch[1] || '').replace(/\s+/g, '').trim()
+      : null;
+
+    return {
+      code: 'conversation_interrupted',
+      message: 'Conversation interrupted - tell the model what to do differently.',
+      resumeCommand: resumeSessionId ? `codex resume ${resumeSessionId}` : null,
+      resumeSessionId: resumeSessionId || null
+    };
   }
 
   /**

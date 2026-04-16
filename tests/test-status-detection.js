@@ -84,6 +84,20 @@ Done.
   assert.strictEqual(detector.detectStatus(completedOutput), TerminalStatus.COMPLETED,
     'Should detect COMPLETED from Worked for indicator');
 
+  const interruptedOutput = `
+■ Conversation interrupted - tell the model what to do differently.
+Something went wrong? Hit /feedback to report the issue.
+To continue this session, run codex resume 019d94a6-2cd8-7742-8e4e-123456789abc`;
+  assert.strictEqual(detector.detectStatus(interruptedOutput), TerminalStatus.ERROR,
+    'Should detect ERROR from conversation interrupted banner');
+  const interruption = detector.extractInterruption(interruptedOutput);
+  assert(interruption, 'Should extract interruption metadata');
+  assert.strictEqual(interruption.code, 'conversation_interrupted');
+  assert.strictEqual(
+    interruption.resumeCommand,
+    'codex resume 019d94a6-2cd8-7742-8e4e-123456789abc'
+  );
+
   console.log('  ✅ Codex CLI detection works correctly');
 }
 
