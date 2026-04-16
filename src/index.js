@@ -57,6 +57,8 @@ const MANAGED_ROOT_TERMINAL_ENV_KEYS = Object.freeze([
   'TERMUX_VERSION'
 ]);
 
+const MANAGED_ROOT_SHELL_COMMANDS = new Set(['bash', 'sh', 'zsh', 'fish']);
+
 function buildManagedRootLaunchEnvironment(env = process.env) {
   const launchEnvironment = {};
   for (const key of MANAGED_ROOT_TERMINAL_ENV_KEYS) {
@@ -109,7 +111,10 @@ function parseLaunchArgs(rawArgs = []) {
     workDir: process.cwd(),
     profile: 'guarded-root',
     allowedTools: [],
-    detach: false
+    detach: false,
+    profileExplicit: false,
+    modelExplicit: false,
+    permissionModeExplicit: false
   };
 
   if (args[0] && !args[0].startsWith('-')) {
@@ -128,12 +133,15 @@ function parseLaunchArgs(rawArgs = []) {
         break;
       case '--model':
         parsed.model = args.shift();
+        parsed.modelExplicit = true;
         break;
       case '--profile':
         parsed.profile = args.shift();
+        parsed.profileExplicit = true;
         break;
       case '--permission-mode':
         parsed.permissionMode = args.shift();
+        parsed.permissionModeExplicit = true;
         break;
       case '--system-prompt':
         parsed.systemPrompt = args.shift();
@@ -150,6 +158,12 @@ function parseLaunchArgs(rawArgs = []) {
         break;
       case '--resume-latest':
         parsed.resumeLatest = true;
+        break;
+      case '--recover-root':
+        parsed.recoverRootSessionId = args.shift();
+        break;
+      case '--recover-latest':
+        parsed.recoverLatest = true;
         break;
       case '--allow-tool':
         parsed.allowedTools.push(args.shift());
@@ -168,11 +182,16 @@ function parseLaunchArgs(rawArgs = []) {
   if (!parsed.workDir) {
     parsed.workDir = process.cwd();
   }
-  if (parsed.forceNewRoot && (parsed.resumeRootSessionId || parsed.resumeLatest)) {
-    throw new Error('Cannot combine --new-root with --resume-root or --resume-latest');
+  const hasResumeFlag = Boolean(parsed.resumeRootSessionId || parsed.resumeLatest);
+  const hasRecoverFlag = Boolean(parsed.recoverRootSessionId || parsed.recoverLatest);
+  if (parsed.forceNewRoot && (hasResumeFlag || hasRecoverFlag)) {
+    throw new Error('Cannot combine --new-root with resume or recover flags');
   }
-  if (parsed.externalSessionRef && (parsed.resumeRootSessionId || parsed.resumeLatest)) {
-    throw new Error('Cannot combine --external-session-ref with --resume-root or --resume-latest');
+  if (parsed.externalSessionRef && (hasResumeFlag || hasRecoverFlag)) {
+    throw new Error('Cannot combine --external-session-ref with resume or recover flags');
+  }
+  if (hasResumeFlag && hasRecoverFlag) {
+    throw new Error('Cannot combine resume and recover flags in the same launch command');
   }
   parsed.allowedTools = parsed.allowedTools.filter(Boolean);
   return parsed;
@@ -192,6 +211,8 @@ function printLaunchUsage() {
   console.log('  --new-root                    Always create a fresh managed root');
   console.log('  --resume-root <id>            Reattach to a specific live managed root');
   console.log('  --resume-latest               Reattach to the most recent matching live root');
+  console.log('  --recover-root <id>           Recover a specific stale or shell-only managed root');
+  console.log('  --recover-latest              Recover the most recent stale or shell-only root');
   console.log('  --allow-tool <tool>           Restrict allowed tools (repeatable)');
   console.log('  --detach                      Create the terminal without attaching');
   console.log('');
@@ -328,7 +349,55 @@ function deriveManagedRootConsoleUrl(rootSessionId, terminalId) {
   return url.toString();
 }
 
-function normalizeManagedRootResumeCandidate(summary, snapshot, options = {}) {
+function normalizeManagedRootCurrentCommand(command) {
+  const normalized = String(command || '').trim().toLowerCase();
+  return normalized || null;
+}
+
+function isManagedRootShellCommand(command) {
+  const normalized = normalizeManagedRootCurrentCommand(command);
+  return normalized ? MANAGED_ROOT_SHELL_COMMANDS.has(normalized) : false;
+}
+
+function extractManagedRootRecoveryHint(snapshot, rootSessionId) {
+  const sessions = Array.isArray(snapshot?.sessions) ? snapshot.sessions : [];
+  const events = Array.isArray(snapshot?.events) ? snapshot.events : [];
+  const mainSession = sessions.find((session) => (
+    session?.sessionId === rootSessionId
+    || (
+      String(session?.role || '').trim().toLowerCase() === 'main'
+      && String(session?.sessionKind || '').trim().toLowerCase() === 'main'
+    )
+  )) || null;
+
+  let resumeCommand = mainSession?.resumeCommand || null;
+  let attentionMessage = mainSession?.attentionMessage || null;
+  let resumeSessionId = null;
+
+  for (let index = events.length - 1; index >= 0; index -= 1) {
+    const payload = events[index]?.payload_json || {};
+    if (!resumeCommand && payload.resumeCommand) {
+      resumeCommand = payload.resumeCommand;
+    }
+    if (!resumeSessionId && payload.resumeSessionId) {
+      resumeSessionId = payload.resumeSessionId;
+    }
+    if (!attentionMessage && payload.attentionMessage) {
+      attentionMessage = payload.attentionMessage;
+    }
+    if (resumeCommand && resumeSessionId && attentionMessage) {
+      break;
+    }
+  }
+
+  return {
+    resumeCommand,
+    resumeSessionId,
+    attentionMessage
+  };
+}
+
+function buildManagedRootLaunchCandidate(summary, snapshot, options = {}) {
   const adapter = normalizeManagedRootAdapter(options.adapter || snapshot?.rootSession?.adapter || summary?.originClient || 'codex-cli');
   const expectedOriginClient = inferManagedRootOriginClient(adapter);
   const expectedWorkDir = options.workDir ? resolveLaunchWorkDir(options.workDir) : null;
@@ -356,55 +425,96 @@ function normalizeManagedRootResumeCandidate(summary, snapshot, options = {}) {
     String(terminal.role || '').trim().toLowerCase() === 'main'
     && String(terminal.session_kind || '').trim().toLowerCase() === 'main'
     && terminal.session_name
-    && String(terminal.process_state || '').trim().toLowerCase() !== 'exited'
-    && String(terminal.status || '').trim().toLowerCase() !== 'orphaned'
-  ));
-  if (!mainTerminal) {
-    return null;
-  }
+  )) || null;
 
-  const candidateWorkDir = mainTerminal.work_dir || rootSession.workDir || null;
+  const candidateWorkDir = mainTerminal?.work_dir || rootSession.workDir || rootMetadata.workspaceRoot || null;
   if (expectedWorkDir && (!candidateWorkDir || resolveLaunchWorkDir(candidateWorkDir) !== expectedWorkDir)) {
     return null;
   }
 
-  const rootSessionId = rootSession.sessionId || summary?.rootSessionId || mainTerminal.root_session_id || null;
-  const terminalId = mainTerminal.terminal_id || rootSession.terminalId || null;
-  const sessionName = mainTerminal.session_name || null;
-  if (!rootSessionId || !terminalId || !sessionName) {
+  const rootSessionId = rootSession.sessionId || summary?.rootSessionId || mainTerminal?.root_session_id || null;
+  if (!rootSessionId) {
     return null;
+  }
+
+  const terminalId = mainTerminal?.terminal_id || rootSession.terminalId || null;
+  const sessionName = mainTerminal?.session_name || null;
+  const processState = String(mainTerminal?.process_state || rootSession.processState || '').trim().toLowerCase() || null;
+  const terminalStatus = String(mainTerminal?.status || rootSession.terminalStatus || '').trim().toLowerCase() || null;
+  const currentCommand = normalizeManagedRootCurrentCommand(mainTerminal?.current_command || mainTerminal?.currentCommand || null);
+  const hasLiveTerminal = Boolean(sessionName)
+    && processState !== 'exited'
+    && terminalStatus !== 'orphaned';
+  const shellOnlyRoot = hasLiveTerminal && isManagedRootShellCommand(currentCommand);
+  const recoveryHint = extractManagedRootRecoveryHint(snapshot, rootSessionId);
+  const launchAction = hasLiveTerminal && !shellOnlyRoot ? 'resume' : 'recover';
+  let recoveryReason = null;
+  if (launchAction === 'recover') {
+    if (shellOnlyRoot) {
+      recoveryReason = 'provider-exited';
+    } else if (terminalStatus === 'orphaned') {
+      recoveryReason = 'orphaned';
+    } else if (processState === 'exited') {
+      recoveryReason = 'process-exited';
+    } else {
+      recoveryReason = 'no-live-terminal';
+    }
   }
 
   return {
     rootSessionId,
     terminalId,
     sessionName,
-    windowName: mainTerminal.window_name || null,
+    windowName: mainTerminal?.window_name || null,
     adapter,
     originClient: expectedOriginClient,
-    status: String(rootSession.status || summary?.status || mainTerminal.status || 'unknown').trim().toLowerCase() || 'unknown',
-    processState: String(mainTerminal.process_state || rootSession.processState || '').trim().toLowerCase() || null,
+    status: String(rootSession.status || summary?.status || terminalStatus || 'unknown').trim().toLowerCase() || 'unknown',
+    processState,
     workDir: candidateWorkDir,
     model: rootSession.model || null,
-    externalSessionRef: rootSession.externalSessionRef || summary?.externalSessionRef || mainTerminal.external_session_ref || null,
+    externalSessionRef: rootSession.externalSessionRef || summary?.externalSessionRef || mainTerminal?.external_session_ref || null,
     launchProfile: rootMetadata.launchProfile || null,
     lastOccurredAt: summary?.lastOccurredAt || null,
     lastRecordedAt: summary?.lastRecordedAt || null,
-    attachCommand: `tmux attach -t "${sessionName}"`,
+    currentCommand,
+    launchAction,
+    recoveryReason,
+    resumeCommand: recoveryHint.resumeCommand,
+    resumeSessionId: recoveryHint.resumeSessionId,
+    attentionMessage: recoveryHint.attentionMessage,
+    attachCommand: sessionName ? `tmux attach -t "${sessionName}"` : null,
     consoleUrl: deriveManagedRootConsoleUrl(rootSessionId, terminalId)
   };
 }
 
-async function listManagedRootResumeCandidates(options = {}, dependencies = {}) {
+function normalizeManagedRootResumeCandidate(summary, snapshot, options = {}) {
+  const candidate = buildManagedRootLaunchCandidate(summary, snapshot, options);
+  if (!candidate || candidate.launchAction !== 'resume') {
+    return null;
+  }
+  if (!candidate.terminalId || !candidate.sessionName) {
+    return null;
+  }
+  return candidate;
+}
+
+function normalizeManagedRootRecoveryCandidate(summary, snapshot, options = {}) {
+  const candidate = buildManagedRootLaunchCandidate(summary, snapshot, options);
+  return candidate?.launchAction === 'recover' ? candidate : null;
+}
+
+async function listManagedRootLaunchCandidates(options = {}, dependencies = {}) {
   const callJson = dependencies.callCliagentsJson || callCliagentsJson;
   const adapter = normalizeManagedRootAdapter(options.adapter || 'codex-cli');
   const rootLimit = Math.max(Number(options.rootLimit || 12), 1);
-  const candidateLimit = Math.max(Number(options.candidateLimit || 5), 1);
+  const resumeLimit = Math.max(Number(options.resumeLimit || options.candidateLimit || 5), 1);
+  const recoveryLimit = Math.max(Number(options.recoveryLimit || options.candidateLimit || 5), 1);
   const listResponse = await callJson(
     `/orchestration/root-sessions?limit=${encodeURIComponent(rootLimit)}&scope=user&eventLimit=80&terminalLimit=20`
   );
   const summaries = Array.isArray(listResponse?.roots) ? listResponse.roots : [];
-  const candidates = [];
+  const resumeCandidates = [];
+  const recoverCandidates = [];
 
   for (const summary of summaries) {
     if (summary?.originClient !== inferManagedRootOriginClient(adapter)) {
@@ -414,20 +524,40 @@ async function listManagedRootResumeCandidates(options = {}, dependencies = {}) 
     const snapshot = await callJson(
       `/orchestration/root-sessions/${encodeURIComponent(summary.rootSessionId)}?eventLimit=120&terminalLimit=40`
     );
-    const candidate = normalizeManagedRootResumeCandidate(summary, snapshot, {
+    const candidate = buildManagedRootLaunchCandidate(summary, snapshot, {
       adapter,
       workDir: options.workDir
     });
     if (!candidate) {
       continue;
     }
-    candidates.push(candidate);
-    if (candidates.length >= candidateLimit) {
-      break;
+
+    if (candidate.launchAction === 'resume') {
+      if (resumeCandidates.length < resumeLimit) {
+        resumeCandidates.push(candidate);
+      }
+      continue;
+    }
+
+    if (recoverCandidates.length < recoveryLimit) {
+      recoverCandidates.push(candidate);
     }
   }
 
-  return candidates;
+  return {
+    resumeCandidates,
+    recoverCandidates
+  };
+}
+
+async function listManagedRootResumeCandidates(options = {}, dependencies = {}) {
+  const candidates = await listManagedRootLaunchCandidates(options, dependencies);
+  return candidates.resumeCandidates;
+}
+
+async function listManagedRootRecoveryCandidates(options = {}, dependencies = {}) {
+  const candidates = await listManagedRootLaunchCandidates(options, dependencies);
+  return candidates.recoverCandidates;
 }
 
 async function getManagedRootResumeCandidate(rootSessionId, options = {}, dependencies = {}) {
@@ -439,6 +569,20 @@ async function getManagedRootResumeCandidate(rootSessionId, options = {}, depend
     `/orchestration/root-sessions/${encodeURIComponent(rootSessionId)}?eventLimit=120&terminalLimit=40`
   );
   return normalizeManagedRootResumeCandidate(null, snapshot, {
+    adapter: options.adapter,
+    workDir: options.workDir
+  });
+}
+
+async function getManagedRootRecoveryCandidate(rootSessionId, options = {}, dependencies = {}) {
+  if (!rootSessionId) {
+    return null;
+  }
+  const callJson = dependencies.callCliagentsJson || callCliagentsJson;
+  const snapshot = await callJson(
+    `/orchestration/root-sessions/${encodeURIComponent(rootSessionId)}?eventLimit=120&terminalLimit=40`
+  );
+  return normalizeManagedRootRecoveryCandidate(null, snapshot, {
     adapter: options.adapter,
     workDir: options.workDir
   });
@@ -467,33 +611,84 @@ function formatManagedRootCandidateAge(candidate) {
   return `${diffDays}d ago`;
 }
 
+function describeManagedRootSelectionCandidate(candidate) {
+  const details = [
+    candidate.launchProfile ? `profile=${candidate.launchProfile}` : null,
+    candidate.processState ? `process=${candidate.processState}` : null,
+    candidate.currentCommand ? `cmd=${candidate.currentCommand}` : null,
+    candidate.recoveryReason ? `recovery=${candidate.recoveryReason}` : null,
+    candidate.externalSessionRef ? candidate.externalSessionRef : null
+  ].filter(Boolean).join(' • ');
+
+  return {
+    age: formatManagedRootCandidateAge(candidate),
+    details
+  };
+}
+
+function normalizeManagedRootSelectionGroups(candidates) {
+  if (Array.isArray(candidates)) {
+    return {
+      resumeCandidates: candidates,
+      recoverCandidates: []
+    };
+  }
+
+  return {
+    resumeCandidates: Array.isArray(candidates?.resumeCandidates) ? candidates.resumeCandidates : [],
+    recoverCandidates: Array.isArray(candidates?.recoverCandidates) ? candidates.recoverCandidates : []
+  };
+}
+
 function createManagedRootSelectionPrompt(candidates, options = {}) {
   const adapter = options.adapter || 'codex-cli';
   const workDir = options.workDir || null;
+  const { resumeCandidates, recoverCandidates } = normalizeManagedRootSelectionGroups(candidates);
   const lines = [
     `Recent ${adapter} roots${workDir ? ` in ${workDir}` : ''}:`
   ];
+  const selectionEntries = [];
+  let selectionIndex = 1;
 
-  for (let index = 0; index < candidates.length; index += 1) {
-    const candidate = candidates[index];
-    const suffix = [
-      candidate.launchProfile ? `profile=${candidate.launchProfile}` : null,
-      candidate.processState ? `process=${candidate.processState}` : null,
-      candidate.externalSessionRef ? candidate.externalSessionRef : null
-    ].filter(Boolean).join(' • ');
-    lines.push(
-      `  ${index + 1}. ${candidate.status.padEnd(15)} ${formatManagedRootCandidateAge(candidate).padEnd(8)} ${candidate.rootSessionId.slice(0, 12)} ${suffix}`.trimEnd()
-    );
+  if (resumeCandidates.length > 0) {
+    lines.push('  Live roots:');
+    for (const candidate of resumeCandidates) {
+      const description = describeManagedRootSelectionCandidate(candidate);
+      lines.push(
+        `  ${selectionIndex}. resume  ${candidate.status.padEnd(15)} ${description.age.padEnd(8)} ${candidate.rootSessionId.slice(0, 12)} ${description.details}`.trimEnd()
+      );
+      selectionEntries.push({ selectionIndex, candidate });
+      selectionIndex += 1;
+    }
+  }
+
+  if (recoverCandidates.length > 0) {
+    if (resumeCandidates.length > 0) {
+      lines.push('');
+    }
+    lines.push('  Recoverable roots:');
+    for (const candidate of recoverCandidates) {
+      const description = describeManagedRootSelectionCandidate(candidate);
+      lines.push(
+        `  ${selectionIndex}. recover ${candidate.status.padEnd(15)} ${description.age.padEnd(8)} ${candidate.rootSessionId.slice(0, 12)} ${description.details}`.trimEnd()
+      );
+      selectionEntries.push({ selectionIndex, candidate });
+      selectionIndex += 1;
+    }
   }
 
   lines.push('  Enter  Start a new root');
   lines.push('');
-  lines.push('Select a root number to reattach, or press Enter for a new root: ');
-  return lines.join('\n');
+  lines.push('Select a root number to resume or recover, or press Enter for a new root: ');
+  return {
+    text: lines.join('\n'),
+    selectionEntries
+  };
 }
 
 async function promptForManagedRootSelection(candidates, options = {}) {
-  if (!Array.isArray(candidates) || candidates.length === 0) {
+  const { resumeCandidates, recoverCandidates } = normalizeManagedRootSelectionGroups(candidates);
+  if (resumeCandidates.length === 0 && recoverCandidates.length === 0) {
     return null;
   }
 
@@ -506,8 +701,9 @@ async function promptForManagedRootSelection(candidates, options = {}) {
   const rl = readline.createInterface({ input, output });
   try {
     for (;;) {
+      const prompt = createManagedRootSelectionPrompt(candidates, options);
       const answer = await new Promise((resolve) => {
-        rl.question(createManagedRootSelectionPrompt(candidates, options), resolve);
+        rl.question(prompt.text, resolve);
       });
       const trimmed = String(answer || '').trim();
       if (!trimmed) {
@@ -515,8 +711,9 @@ async function promptForManagedRootSelection(candidates, options = {}) {
       }
 
       const selectedIndex = Number.parseInt(trimmed, 10);
-      if (Number.isInteger(selectedIndex) && selectedIndex >= 1 && selectedIndex <= candidates.length) {
-        return candidates[selectedIndex - 1];
+      const selectedEntry = prompt.selectionEntries.find((entry) => entry.selectionIndex === selectedIndex);
+      if (Number.isInteger(selectedIndex) && selectedEntry) {
+        return selectedEntry.candidate;
       }
 
       output.write(`Invalid selection: ${trimmed}\n`);
@@ -534,8 +731,9 @@ async function resolveManagedRootLaunchTarget(launchOptions, dependencies = {}) 
     return { action: 'launch', reason: 'explicit-external-session-ref' };
   }
 
-  const listCandidates = dependencies.listManagedRootResumeCandidates || listManagedRootResumeCandidates;
+  const listCandidates = dependencies.listManagedRootLaunchCandidates || listManagedRootLaunchCandidates;
   const getCandidate = dependencies.getManagedRootResumeCandidate || getManagedRootResumeCandidate;
+  const getRecoveryCandidate = dependencies.getManagedRootRecoveryCandidate || getManagedRootRecoveryCandidate;
   const selectCandidate = dependencies.promptForManagedRootSelection || promptForManagedRootSelection;
   const interactive = dependencies.interactive ?? Boolean(process.stdin.isTTY && process.stdout.isTTY);
 
@@ -554,26 +752,54 @@ async function resolveManagedRootLaunchTarget(launchOptions, dependencies = {}) 
     };
   }
 
+  if (launchOptions.recoverRootSessionId) {
+    const candidate = await getRecoveryCandidate(launchOptions.recoverRootSessionId, {
+      adapter: launchOptions.adapter,
+      workDir: launchOptions.workDir
+    }, dependencies);
+    if (!candidate) {
+      throw new Error(`Managed root ${launchOptions.recoverRootSessionId} is not recoverable for adapter ${launchOptions.adapter}`);
+    }
+    return {
+      action: 'recover',
+      reason: 'explicit-recover-root',
+      candidate
+    };
+  }
+
   const candidates = await listCandidates({
     adapter: launchOptions.adapter,
     workDir: launchOptions.workDir
   }, dependencies);
+  const resumeCandidates = Array.isArray(candidates?.resumeCandidates) ? candidates.resumeCandidates : [];
+  const recoverCandidates = Array.isArray(candidates?.recoverCandidates) ? candidates.recoverCandidates : [];
 
   if (launchOptions.resumeLatest) {
-    if (!candidates.length) {
+    if (!resumeCandidates.length) {
       throw new Error(`No resumable managed roots found for ${launchOptions.adapter} in ${resolveLaunchWorkDir(launchOptions.workDir)}`);
     }
     return {
       action: 'resume',
       reason: 'resume-latest',
-      candidate: candidates[0]
+      candidate: resumeCandidates[0]
     };
   }
 
-  if (!interactive || launchOptions.detach || !candidates.length) {
+  if (launchOptions.recoverLatest) {
+    if (!recoverCandidates.length) {
+      throw new Error(`No recoverable managed roots found for ${launchOptions.adapter} in ${resolveLaunchWorkDir(launchOptions.workDir)}`);
+    }
+    return {
+      action: 'recover',
+      reason: 'recover-latest',
+      candidate: recoverCandidates[0]
+    };
+  }
+
+  if (!interactive || launchOptions.detach || (resumeCandidates.length === 0 && recoverCandidates.length === 0)) {
     return {
       action: 'launch',
-      reason: !candidates.length ? 'no-matching-roots' : 'non-interactive',
+      reason: (resumeCandidates.length === 0 && recoverCandidates.length === 0) ? 'no-matching-roots' : 'non-interactive',
       candidates
     };
   }
@@ -591,7 +817,7 @@ async function resolveManagedRootLaunchTarget(launchOptions, dependencies = {}) 
   }
 
   return {
-    action: 'resume',
+    action: selectedCandidate.launchAction === 'recover' ? 'recover' : 'resume',
     reason: 'interactive-selection',
     candidate: selectedCandidate,
     candidates
@@ -624,6 +850,25 @@ function printManagedRootResumeResult(candidate) {
   console.log(`  console_url: ${candidate.consoleUrl}`);
   if (candidate.attachCommand) {
     console.log(`  attach_command: ${candidate.attachCommand}`);
+  }
+}
+
+function printManagedRootRecoveryResult(result, previousCandidate, launchOptions) {
+  console.log('Managed Root Recovered');
+  console.log(`  adapter: ${result.adapter}`);
+  console.log(`  previous_root_session_id: ${previousCandidate.rootSessionId}`);
+  console.log(`  root_session_id: ${result.rootSessionId}`);
+  console.log(`  terminal_id: ${result.terminalId}`);
+  console.log(`  session_name: ${result.sessionName}`);
+  console.log(`  profile: ${launchOptions.profile}`);
+  console.log(`  recovery_reason: ${previousCandidate.recoveryReason || 'stale-root'}`);
+  console.log(`  external_session_ref: ${result.externalSessionRef || previousCandidate.externalSessionRef || 'n/a'}`);
+  if (previousCandidate.resumeCommand) {
+    console.log(`  provider_resume_command: ${previousCandidate.resumeCommand}`);
+  }
+  console.log(`  console_url: ${new URL(result.consoleUrl || '/console', getCliagentsBaseUrl()).toString()}`);
+  if (result.attachCommand) {
+    console.log(`  attach_command: ${result.attachCommand}`);
   }
 }
 
@@ -712,6 +957,9 @@ function attachToManagedSession(launchResult, options = {}) {
 async function launchManagedRootSession(options = {}) {
   const profile = normalizeManagedRootLaunchProfile(options.profile);
   const launchEnvironment = buildManagedRootLaunchEnvironment();
+  const extraSessionMetadata = options.sessionMetadata && typeof options.sessionMetadata === 'object'
+    ? options.sessionMetadata
+    : {};
   return callCliagentsJson('/orchestration/root-sessions/launch', {
     method: 'POST',
     body: {
@@ -722,6 +970,7 @@ async function launchManagedRootSession(options = {}) {
       systemPrompt: options.systemPrompt || null,
       externalSessionRef: options.externalSessionRef || null,
       sessionMetadata: {
+        ...extraSessionMetadata,
         launchProfile: profile.id,
         launchEnvironment
       },
@@ -731,6 +980,29 @@ async function launchManagedRootSession(options = {}) {
         : null
     }
   });
+}
+
+function buildManagedRootRecoveryLaunchOptions(launchOptions, candidate) {
+  return {
+    ...launchOptions,
+    adapter: candidate.adapter || launchOptions.adapter,
+    workDir: candidate.workDir || launchOptions.workDir,
+    profile: launchOptions.profileExplicit ? launchOptions.profile : (candidate.launchProfile || launchOptions.profile),
+    model: launchOptions.modelExplicit ? launchOptions.model : (candidate.model || launchOptions.model || null),
+    permissionMode: launchOptions.permissionModeExplicit ? launchOptions.permissionMode : null,
+    externalSessionRef: candidate.externalSessionRef || null,
+    sessionMetadata: {
+      recoveredManagedRoot: true,
+      recoveredFromRootSessionId: candidate.rootSessionId,
+      recoveredFromTerminalId: candidate.terminalId || null,
+      recoveryReason: candidate.recoveryReason || 'stale-root',
+      previousRootStatus: candidate.status || null,
+      previousProcessState: candidate.processState || null,
+      previousCurrentCommand: candidate.currentCommand || null,
+      providerResumeCommand: candidate.resumeCommand || null,
+      providerResumeSessionId: candidate.resumeSessionId || null
+    }
+  };
 }
 
 async function handleLaunchCommand(rawArgs = []) {
@@ -746,6 +1018,16 @@ async function handleLaunchCommand(rawArgs = []) {
     printManagedRootResumeResult(candidate);
     if (!launchOptions.detach && process.stdout.isTTY) {
       attachToManagedSession(candidate);
+    }
+    return;
+  }
+
+  if (launchTarget.action === 'recover') {
+    const recoveryOptions = buildManagedRootRecoveryLaunchOptions(launchOptions, launchTarget.candidate);
+    const result = await launchManagedRootSession(recoveryOptions);
+    printManagedRootRecoveryResult(result, launchTarget.candidate, recoveryOptions);
+    if (!launchOptions.detach && process.stdout.isTTY) {
+      attachToManagedSession(result);
     }
     return;
   }
@@ -815,12 +1097,18 @@ module.exports = {
   // Managed root launch helpers
   parseLaunchArgs,
   resolveLaunchWorkDir,
+  buildManagedRootLaunchCandidate,
   normalizeManagedRootResumeCandidate,
+  normalizeManagedRootRecoveryCandidate,
+  listManagedRootLaunchCandidates,
   listManagedRootResumeCandidates,
+  listManagedRootRecoveryCandidates,
   getManagedRootResumeCandidate,
+  getManagedRootRecoveryCandidate,
   promptForManagedRootSelection,
   resolveManagedRootLaunchTarget,
   launchManagedRootSession,
+  buildManagedRootRecoveryLaunchOptions,
   attachToManagedSession,
   handleLaunchCommand,
   handleAdoptCommand,

@@ -1229,6 +1229,13 @@ class PersistentSessionManager extends EventEmitter {
     return this.tmux.sessionExists(terminal.sessionName) ? 'alive' : 'exited';
   }
 
+  _getCurrentCommand(terminal) {
+    if (!terminal || typeof this.tmux?.getPaneCurrentCommand !== 'function') {
+      return null;
+    }
+    return this.tmux.getPaneCurrentCommand(terminal.sessionName, terminal.windowName) || null;
+  }
+
   _extractCodexAttention(output) {
     if (!output) {
       return null;
@@ -1301,6 +1308,7 @@ class PersistentSessionManager extends EventEmitter {
     const taskState = this.getStatus(terminal.terminalId);
     const processState = this._getProcessState(terminal);
     const attention = this._getTerminalAttention(terminal);
+    const currentCommand = this._getCurrentCommand(terminal);
     return {
       terminalId: terminal.terminalId,
       sessionName: terminal.sessionName,
@@ -1326,6 +1334,7 @@ class PersistentSessionManager extends EventEmitter {
       status: taskState,
       taskState,
       processState,
+      currentCommand,
       attention,
       reused: false,
       reuseReason: null,
@@ -2423,6 +2432,7 @@ class PersistentSessionManager extends EventEmitter {
       status: taskState,
       taskState,
       processState: this._getProcessState(reconciledTerminal),
+      currentCommand: this._getCurrentCommand(reconciledTerminal),
       attention
     };
   }
@@ -2443,6 +2453,7 @@ class PersistentSessionManager extends EventEmitter {
           status: taskState,
           taskState,
           processState: this._getProcessState(terminal),
+          currentCommand: this._getCurrentCommand(terminal),
           attention
         };
       });

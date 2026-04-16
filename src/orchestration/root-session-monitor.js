@@ -439,6 +439,7 @@ function buildRootSessionSnapshot({
         status: liveTerminal.taskState || liveTerminal.status || terminal.status,
         task_state: liveTerminal.taskState || liveTerminal.status || terminal.status,
         process_state: liveTerminal.processState || null,
+        current_command: liveTerminal.currentCommand || null,
         attention_code: liveTerminal.attention?.code || null,
         attention_message: liveTerminal.attention?.message || null,
         resume_command: liveTerminal.attention?.resumeCommand || null,
