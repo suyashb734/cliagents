@@ -8,7 +8,7 @@ const os = require('os');
 const path = require('path');
 
 const { OrchestrationDB } = require('../src/database/db');
-const { CodexCliDetector } = require('../src/status-detectors');
+const { ClaudeCodeDetector, CodexCliDetector } = require('../src/status-detectors');
 const {
   PersistentSessionManager,
   TerminalStatus
@@ -18,6 +18,14 @@ function makeTempDir(prefix) {
   const baseDir = path.join('/Users/mojave/Documents/AI-projects/cliagents', '.tmp-tests');
   fs.mkdirSync(baseDir, { recursive: true });
   return fs.mkdtempSync(path.join(baseDir, prefix));
+}
+
+function normalizeUuid(value) {
+  const compact = String(value || '').replace(/-/g, '').toLowerCase();
+  if (!/^[0-9a-f]{32}$/.test(compact)) {
+    return null;
+  }
+  return `${compact.slice(0, 8)}-${compact.slice(8, 12)}-${compact.slice(12, 16)}-${compact.slice(16, 20)}-${compact.slice(20)}`;
 }
 
 class FakeTmuxClient {
@@ -94,11 +102,13 @@ async function run() {
   const logDir = path.join(rootDir, 'logs');
   const db = new OrchestrationDB({ dbPath, dataDir: rootDir });
   const fakeTmux = new FakeTmuxClient();
+  const originalClaudePath = process.env.CLIAGENTS_CLAUDE_PATH;
 
   const realSetTimeout = global.setTimeout;
   global.setTimeout = (fn, _ms, ...args) => realSetTimeout(fn, 0, ...args);
 
   try {
+    process.env.CLIAGENTS_CLAUDE_PATH = '/usr/local/bin/claude';
     const manager = new PersistentSessionManager({
       db,
       tmuxClient: fakeTmux,
@@ -108,6 +118,7 @@ async function run() {
       sessionEventsEnabled: true
     });
     manager.registerStatusDetector('codex-cli', new CodexCliDetector());
+    manager.registerStatusDetector('claude-code', new ClaudeCodeDetector());
 
     const terminal = await manager.createTerminal({
       adapter: 'codex-cli',
@@ -154,6 +165,124 @@ async function run() {
     const persistedRecoveredRoot = db.getTerminal(recoveredRoot.terminalId);
     assert.strictEqual(persistedRecoveredRoot.provider_thread_ref, '019d94a6-2cd8-7742-8e4e-123456789abc');
 
+    const claudeRootSessionId = 'bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb';
+    const claudeProviderThreadRef = 'bbbbbbbb-bbbb-bbbb-bbbb-bbbbbbbbbbbb';
+    const claudeRoot = await manager.createTerminal({
+      adapter: 'claude-code',
+      role: 'main',
+      workDir: rootDir,
+      rootSessionId: claudeRootSessionId,
+      originClient: 'claude',
+      externalSessionRef: 'claude:managed:bind-test',
+      sessionKind: 'main',
+      sessionMetadata: {
+        clientName: 'claude',
+        attachMode: 'managed-root-launch',
+        managedLaunch: true
+      },
+      permissionMode: 'default'
+    });
+    const claudeHistory = fakeTmux.getHistory(claudeRoot.sessionName, claudeRoot.windowName);
+    assert(claudeHistory.includes(`--session-id ${claudeProviderThreadRef}`), 'expected managed Claude root to bind an exact provider session id');
+    assert.strictEqual(claudeRoot.providerThreadRef, claudeProviderThreadRef);
+    const persistedClaudeRoot = db.getTerminal(claudeRoot.terminalId);
+    assert.strictEqual(persistedClaudeRoot.provider_thread_ref, claudeProviderThreadRef);
+
+    const qwenRootSessionId = 'cccccccccccccccccccccccccccccccc';
+    const qwenProviderThreadRef = 'cccccccc-cccc-cccc-cccc-cccccccccccc';
+    const qwenRoot = await manager.createTerminal({
+      adapter: 'qwen-cli',
+      role: 'main',
+      workDir: rootDir,
+      rootSessionId: qwenRootSessionId,
+      originClient: 'qwen',
+      externalSessionRef: 'qwen:managed:bind-test',
+      sessionKind: 'main',
+      sessionMetadata: {
+        clientName: 'qwen',
+        attachMode: 'managed-root-launch',
+        managedLaunch: true
+      }
+    });
+    const qwenHistory = fakeTmux.getHistory(qwenRoot.sessionName, qwenRoot.windowName);
+    assert(qwenHistory.includes(`--session-id ${qwenProviderThreadRef}`), 'expected managed Qwen root to bind an exact provider session id');
+    assert.strictEqual(qwenRoot.providerThreadRef, qwenProviderThreadRef);
+
+    const recoveredClaudeRoot = await manager.createTerminal({
+      adapter: 'claude-code',
+      role: 'main',
+      workDir: rootDir,
+      originClient: 'claude',
+      externalSessionRef: 'claude:managed:continue-test',
+      sessionKind: 'main',
+      permissionMode: 'default',
+      sessionMetadata: {
+        clientName: 'claude',
+        attachMode: 'managed-root-launch',
+        managedLaunch: true,
+        recoveredManagedRoot: true,
+        providerResumeLatest: true
+      }
+    });
+    const recoveredClaudeHistory = fakeTmux.getHistory(recoveredClaudeRoot.sessionName, recoveredClaudeRoot.windowName);
+    assert(recoveredClaudeHistory.includes('--continue'), 'expected recovered Claude root to continue the latest provider session');
+    assert(!recoveredClaudeHistory.includes('--session-id'), 'did not expect a fresh provider session binding for recovered Claude root');
+
+    const recoveredGeminiRoot = await manager.createTerminal({
+      adapter: 'gemini-cli',
+      role: 'main',
+      workDir: rootDir,
+      originClient: 'gemini',
+      externalSessionRef: 'gemini:managed:continue-test',
+      sessionKind: 'main',
+      sessionMetadata: {
+        clientName: 'gemini',
+        attachMode: 'managed-root-launch',
+        managedLaunch: true,
+        recoveredManagedRoot: true,
+        providerResumeLatest: true
+      }
+    });
+    const recoveredGeminiHistory = fakeTmux.getHistory(recoveredGeminiRoot.sessionName, recoveredGeminiRoot.windowName);
+    assert(recoveredGeminiHistory.includes('--resume latest'), 'expected recovered Gemini root to resume the latest provider session');
+
+    const recoveredQwenRoot = await manager.createTerminal({
+      adapter: 'qwen-cli',
+      role: 'main',
+      workDir: rootDir,
+      originClient: 'qwen',
+      externalSessionRef: 'qwen:managed:continue-test',
+      sessionKind: 'main',
+      sessionMetadata: {
+        clientName: 'qwen',
+        attachMode: 'managed-root-launch',
+        managedLaunch: true,
+        recoveredManagedRoot: true,
+        providerResumeLatest: true
+      }
+    });
+    const recoveredQwenHistory = fakeTmux.getHistory(recoveredQwenRoot.sessionName, recoveredQwenRoot.windowName);
+    assert(recoveredQwenHistory.includes('--continue'), 'expected recovered Qwen root to continue the latest provider session');
+    assert(!recoveredQwenHistory.includes('--session-id'), 'did not expect a fresh provider session binding for recovered Qwen root');
+
+    const recoveredOpenCodeRoot = await manager.createTerminal({
+      adapter: 'opencode-cli',
+      role: 'main',
+      workDir: rootDir,
+      originClient: 'opencode',
+      externalSessionRef: 'opencode:managed:continue-test',
+      sessionKind: 'main',
+      sessionMetadata: {
+        clientName: 'opencode',
+        attachMode: 'managed-root-launch',
+        managedLaunch: true,
+        recoveredManagedRoot: true,
+        providerResumeLatest: true
+      }
+    });
+    const recoveredOpenCodeHistory = fakeTmux.getHistory(recoveredOpenCodeRoot.sessionName, recoveredOpenCodeRoot.windowName);
+    assert(recoveredOpenCodeHistory.includes('--continue'), 'expected recovered OpenCode root to continue the latest provider session');
+
     let events = db.listSessionEvents({ rootSessionId: 'aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa' });
     assert.strictEqual(events.length, 2);
     assert.strictEqual(events[0].event_type, 'session_started');
@@ -188,6 +317,128 @@ async function run() {
     assert.strictEqual(events.length, 3);
     assert.strictEqual(events[2].event_type, 'session_terminated');
     assert.strictEqual(events[2].payload_json.exitCode, 0);
+
+    const claudeWorkerRootSessionId = 'dddddddddddddddddddddddddddddddd';
+    const expectedClaudeChildThreadRef = null;
+    const claudeWorker = await manager.createTerminal({
+      adapter: 'claude-code',
+      role: 'worker',
+      agentProfile: 'review_claude-code',
+      rootSessionId: claudeWorkerRootSessionId,
+      parentSessionId: claudeWorkerRootSessionId,
+      sessionKind: 'reviewer',
+      originClient: 'mcp',
+      externalSessionRef: 'codex:thread-1',
+      permissionMode: 'auto',
+      systemPrompt: 'Review carefully and be explicit about regressions.',
+      allowedTools: ['Read', 'Write'],
+      workDir: rootDir
+    });
+    const claudeWorkerReadyHistory = fakeTmux.getHistory(claudeWorker.sessionName, claudeWorker.windowName);
+    assert(claudeWorkerReadyHistory.includes('CLAUDE_READY_FOR_ORCHESTRATION'), 'expected Claude worker ready marker');
+    assert.strictEqual(claudeWorker.providerThreadRef, expectedClaudeChildThreadRef);
+
+    await manager.sendInput(claudeWorker.terminalId, 'Review the managed-root recovery patch.');
+    const liveClaudeWorker = manager.terminals.get(claudeWorker.terminalId);
+    const claudeWorkerHistory = fakeTmux.getHistory(liveClaudeWorker.sessionName, liveClaudeWorker.windowName);
+    const rootProviderThreadRef = normalizeUuid(claudeWorkerRootSessionId);
+    const claudeWorkerProviderThreadRef = 'dddddddd-dddd-dddd-dddd-dddddddddddd';
+    assert.strictEqual(liveClaudeWorker.providerThreadRef, null);
+    assert(claudeWorkerHistory.includes('/usr/local/bin/claude'), `expected explicit Claude path, got: ${claudeWorkerHistory}`);
+    assert(!claudeWorkerHistory.includes('--session-id'), `did not expect first Claude worker send to bind a provider session id, got: ${claudeWorkerHistory}`);
+    assert(!claudeWorkerHistory.includes(`--session-id ${rootProviderThreadRef}`), `Claude worker should not bind to broker root session id, got: ${claudeWorkerHistory}`);
+    assert(!claudeWorkerHistory.includes('--resume'), `did not expect first Claude worker send to resume a provider thread, got: ${claudeWorkerHistory}`);
+    assert(claudeWorkerHistory.includes('--dangerously-skip-permissions'), `expected Claude worker auto-approval flag, got: ${claudeWorkerHistory}`);
+    assert(claudeWorkerHistory.includes('--allowed-tools "Read,Write"'), `expected Claude worker tool restriction, got: ${claudeWorkerHistory}`);
+    assert(claudeWorkerHistory.includes('--system-prompt "Review carefully and be explicit about regressions."'), `expected Claude worker system prompt on first send, got: ${claudeWorkerHistory}`);
+
+    const persistedClaudeWorker = db.getTerminal(claudeWorker.terminalId);
+    assert.strictEqual(persistedClaudeWorker.provider_thread_ref, liveClaudeWorker.providerThreadRef);
+
+    fs.writeFileSync(
+      liveClaudeWorker.logPath,
+      [
+        liveClaudeWorker.activeRun.startMarker,
+        `{"type":"system","session_id":"${claudeWorkerProviderThreadRef}"}`,
+        'Claude review complete.',
+        `${liveClaudeWorker.activeRun.exitMarkerPrefix}0`
+      ].join('\n'),
+      'utf8'
+    );
+    fakeTmux.setHistory(
+      liveClaudeWorker.sessionName,
+      liveClaudeWorker.windowName,
+      `{"type":"system","session_id":"${claudeWorkerProviderThreadRef}"}\nClaude review complete.\n`
+    );
+    fakeTmux.setCurrentCommand(liveClaudeWorker.sessionName, liveClaudeWorker.windowName, 'zsh');
+    assert.strictEqual(manager.getStatus(claudeWorker.terminalId), TerminalStatus.COMPLETED);
+    assert.strictEqual(liveClaudeWorker.providerThreadRef, claudeWorkerProviderThreadRef);
+
+    const persistedClaudeWorkerAfterCompletion = db.getTerminal(claudeWorker.terminalId);
+    assert.strictEqual(persistedClaudeWorkerAfterCompletion.provider_thread_ref, claudeWorkerProviderThreadRef);
+
+    const beforeClaudeResumeHistory = fakeTmux.getHistory(liveClaudeWorker.sessionName, liveClaudeWorker.windowName);
+    await manager.sendInput(claudeWorker.terminalId, 'Continue the same review with follow-up concerns.');
+    const resumedClaudeWorkerHistory = fakeTmux.getHistory(liveClaudeWorker.sessionName, liveClaudeWorker.windowName).slice(beforeClaudeResumeHistory.length);
+    assert(resumedClaudeWorkerHistory.includes(`--resume ${claudeWorkerProviderThreadRef}`), `expected Claude worker follow-up send to resume its provider thread, got: ${resumedClaudeWorkerHistory}`);
+    fs.writeFileSync(
+      liveClaudeWorker.logPath,
+      [
+        liveClaudeWorker.activeRun.startMarker,
+        `{"type":"system","session_id":"${claudeWorkerProviderThreadRef}"}`,
+        'Claude follow-up review complete.',
+        `${liveClaudeWorker.activeRun.exitMarkerPrefix}0`
+      ].join('\n'),
+      'utf8'
+    );
+    fakeTmux.setHistory(
+      liveClaudeWorker.sessionName,
+      liveClaudeWorker.windowName,
+      `{"type":"system","session_id":"${claudeWorkerProviderThreadRef}"}\nClaude follow-up review complete.\n`
+    );
+    fakeTmux.setCurrentCommand(liveClaudeWorker.sessionName, liveClaudeWorker.windowName, 'zsh');
+    assert.strictEqual(manager.getStatus(claudeWorker.terminalId), TerminalStatus.COMPLETED);
+
+    const reusedClaudeWorker = await manager.createTerminal({
+      adapter: 'claude-code',
+      role: 'worker',
+      agentProfile: 'review_claude-code',
+      rootSessionId: claudeWorkerRootSessionId,
+      parentSessionId: claudeWorkerRootSessionId,
+      sessionKind: 'reviewer',
+      originClient: 'mcp',
+      externalSessionRef: 'codex:thread-1',
+      permissionMode: 'auto',
+      systemPrompt: 'Review carefully and be explicit about regressions.',
+      allowedTools: ['Read', 'Write'],
+      workDir: rootDir
+    });
+    assert.strictEqual(reusedClaudeWorker.reused, true);
+    assert.strictEqual(reusedClaudeWorker.terminalId, claudeWorker.terminalId);
+    assert.strictEqual(liveClaudeWorker.providerThreadRef, null);
+    assert.strictEqual(liveClaudeWorker.messageCount, 0);
+    assert.strictEqual(liveClaudeWorker.status, TerminalStatus.IDLE);
+
+    const beforeReusedClaudeHistory = fakeTmux.getHistory(liveClaudeWorker.sessionName, liveClaudeWorker.windowName);
+    await manager.sendInput(reusedClaudeWorker.terminalId, 'Start a fresh Claude review task.');
+    const reusedClaudeHistory = fakeTmux.getHistory(liveClaudeWorker.sessionName, liveClaudeWorker.windowName).slice(beforeReusedClaudeHistory.length);
+    assert(!reusedClaudeHistory.includes(`--resume ${claudeWorkerProviderThreadRef}`), `did not expect reused Claude worker to resume the prior provider thread, got: ${reusedClaudeHistory}`);
+    assert(!reusedClaudeHistory.includes('--session-id'), `did not expect reused Claude worker to bind a provider session id before output sync, got: ${reusedClaudeHistory}`);
+
+    const implicitClaudeChild = await manager.createTerminal({
+      adapter: 'claude-code',
+      role: 'worker',
+      rootSessionId: 'eeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee',
+      originClient: 'mcp',
+      externalSessionRef: 'codex:thread-implicit',
+      sessionMetadata: {
+        providerResumeSessionId: 'ffffffff-ffff-ffff-ffff-ffffffffffff'
+      },
+      permissionMode: 'auto',
+      workDir: rootDir
+    });
+    assert.strictEqual(implicitClaudeChild.sessionKind, 'subagent');
+    assert.strictEqual(manager.terminals.get(implicitClaudeChild.terminalId).providerThreadRef, null);
 
     const rootTerminalId = 'bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb';
     const rootSessionName = 'cliagents-root';
@@ -357,6 +608,11 @@ async function run() {
     console.log('\nSession control-plane runtime tests passed');
   } finally {
     global.setTimeout = realSetTimeout;
+    if (originalClaudePath === undefined) {
+      delete process.env.CLIAGENTS_CLAUDE_PATH;
+    } else {
+      process.env.CLIAGENTS_CLAUDE_PATH = originalClaudePath;
+    }
     db.close();
   }
 }

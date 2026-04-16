@@ -13,6 +13,7 @@ const { EventEmitter } = require('events');
 const TmuxClient = require('./client');
 const { MANAGED_ROOT_ADAPTERS } = require('../adapters/active-surface');
 const GeminiCliAdapter = require('../adapters/gemini-cli');
+const { resolveClaudeCliPath } = require('../utils/claude-cli-path');
 const { extractOutput, stripAnsiCodes } = require('../utils/output-extractor');
 
 const inferGeminiBrokerDefaultModel = GeminiCliAdapter.inferGeminiBrokerDefaultModel;
@@ -119,6 +120,24 @@ function resolveGeminiCommandModel(model) {
   return inferGeminiBrokerDefaultModel() || null;
 }
 
+function normalizeUuid(value) {
+  const trimmed = String(value || '').trim().toLowerCase();
+  if (/^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/.test(trimmed)) {
+    return trimmed;
+  }
+
+  const compact = trimmed.replace(/-/g, '');
+  if (/^[0-9a-f]{32}$/.test(compact)) {
+    return `${compact.slice(0, 8)}-${compact.slice(8, 12)}-${compact.slice(12, 16)}-${compact.slice(16, 20)}-${compact.slice(20)}`;
+  }
+
+  return null;
+}
+
+function supportsManagedRootSessionBinding(adapter) {
+  return adapter === 'claude-code' || adapter === 'qwen-cli';
+}
+
 function resolveCodexResumeSessionId(options = {}) {
   const directSessionId = String(options.resumeSessionId || '').trim();
   if (directSessionId && /^[A-Za-z0-9._:-]+$/.test(directSessionId)) {
@@ -129,6 +148,19 @@ function resolveCodexResumeSessionId(options = {}) {
   const commandMatch = resumeCommand.match(/^codex\s+resume\s+([A-Za-z0-9._:-]+)/i);
   if (commandMatch) {
     return String(commandMatch[1] || '').trim() || null;
+  }
+
+  return null;
+}
+
+function resolveProviderResumeSessionId(adapter, options = {}) {
+  if (adapter === 'codex-cli') {
+    return resolveCodexResumeSessionId(options);
+  }
+
+  const directSessionId = String(options.resumeSessionId || '').trim();
+  if (directSessionId && /^[A-Za-z0-9._:-]+$/.test(directSessionId)) {
+    return directSessionId;
   }
 
   return null;
@@ -153,6 +185,96 @@ function buildGeminiOneShotRunnerCommand(message, terminal) {
   }
 
   return args.join(' ');
+}
+
+function buildClaudeOneShotCommand(message, terminal) {
+  const claudePath = resolveClaudeCliPath();
+  const workDir = terminal.workDir || process.cwd();
+  const providerThreadRef = normalizeUuid(terminal.providerThreadRef || null);
+  const messageCount = Number.isInteger(terminal.messageCount) ? terminal.messageCount : 0;
+  const permissionMode = terminal.permissionMode || 'auto';
+
+  const args = [
+    `"${escapeForDoubleQuotes(claudePath)}"`
+  ];
+
+  if (terminal.model) {
+    args.push('--model', `"${escapeForDoubleQuotes(terminal.model)}"`);
+  }
+
+  args.push(
+    '-p',
+    `"${escapeForDoubleQuotes(message)}"`,
+    '--output-format', 'stream-json',
+    '--verbose',
+    '--strict-mcp-config'
+  );
+
+  if (!messageCount && terminal.systemPrompt) {
+    args.push('--system-prompt', `"${escapeForDoubleQuotes(terminal.systemPrompt)}"`);
+  }
+
+  if (Array.isArray(terminal.allowedTools) && terminal.allowedTools.length > 0) {
+    args.push('--allowed-tools', `"${escapeForDoubleQuotes(terminal.allowedTools.join(','))}"`);
+  }
+
+  if (providerThreadRef) {
+    if (messageCount > 0) {
+      args.push('--resume', providerThreadRef);
+    } else {
+      args.push('--session-id', providerThreadRef);
+    }
+  }
+
+  args.push('--add-dir', `"${escapeForDoubleQuotes(workDir)}"`);
+
+  if (permissionMode) {
+    const validModes = ['plan', 'default', 'acceptEdits', 'bypassPermissions', 'delegate', 'dontAsk'];
+    if (validModes.includes(permissionMode)) {
+      args.push('--permission-mode', permissionMode);
+    } else if (permissionMode === 'interceptor') {
+      args.push('--permission-mode', 'default');
+    } else {
+      args.push('--dangerously-skip-permissions');
+    }
+  } else {
+    args.push('--dangerously-skip-permissions');
+  }
+
+  return {
+    command: args.join(' '),
+    providerThreadRef
+  };
+}
+
+function deriveControlPlaneSessionKind(options = {}) {
+  const explicitSessionKind = String(options.sessionKind || '').trim();
+  if (explicitSessionKind) {
+    return explicitSessionKind;
+  }
+
+  if (options.parentSessionId) {
+    return 'subagent';
+  }
+
+  const role = String(options.role || '').trim().toLowerCase();
+  const metadata = options.sessionMetadata && typeof options.sessionMetadata === 'object'
+    ? options.sessionMetadata
+    : {};
+
+  if (role === 'main' || metadata.managedLaunch === true) {
+    return 'main';
+  }
+
+  return 'subagent';
+}
+
+function shouldResetProviderStateOnReuse(terminal) {
+  if (!terminal) {
+    return false;
+  }
+
+  return terminal.adapter === 'claude-code' && terminal.role !== 'main' && terminal.sessionKind !== 'main';
 }
 
 function shouldPreserveRichTerminalUi(options = {}) {
@@ -189,7 +311,13 @@ function normalizeLaunchEnvironment(env) {
  */
 const CLI_COMMANDS = {
   'claude-code': (options = {}) => {
-    const args = ['claude'];
+    const isOrchestration = options.role === 'worker' || options.orchestration;
+    if (isOrchestration) {
+      return 'echo "CLAUDE_READY_FOR_ORCHESTRATION"';
+    }
+
+    const args = [resolveClaudeCliPath()];
+    const resumeSessionId = resolveProviderResumeSessionId('claude-code', options);
 
     // Permission mode: plan, default, acceptEdits, bypassPermissions, interceptor, etc.
     // 'plan' mode creates plans without executing (read-only)
@@ -213,6 +341,14 @@ const CLI_COMMANDS = {
     // Model selection
     if (options.model) {
       args.push('--model', options.model);
+    }
+
+    if (resumeSessionId) {
+      args.push('--resume', resumeSessionId);
+    } else if (options.resumeLatest) {
+      args.push('--continue');
+    } else if (options.providerSessionId) {
+      args.push('--session-id', options.providerSessionId);
     }
 
     // System prompt (if any - initial conversation prompt)
@@ -245,6 +381,7 @@ const CLI_COMMANDS = {
 
     // User-facing session: normal interactive mode
     const args = ['gemini'];
+    const resumeSessionId = resolveProviderResumeSessionId('gemini-cli', options);
 
     // Permission mode handling:
     // - 'auto' (default) or 'bypassPermissions': Use yolo mode (auto-approve all)
@@ -263,6 +400,12 @@ const CLI_COMMANDS = {
     const resolvedModel = resolveGeminiCommandModel(options.model);
     if (resolvedModel) {
       args.push('-m', resolvedModel);
+    }
+
+    if (resumeSessionId) {
+      args.push('--resume', resumeSessionId);
+    } else if (options.resumeLatest) {
+      args.push('--resume', 'latest');
     }
 
     return args.join(' ');
@@ -285,7 +428,9 @@ const CLI_COMMANDS = {
     // User-facing session: preserve the native Codex terminal UI.
     // Avoid CI=true here because Codex switches to a less rich terminal mode.
     const resumeSessionId = resolveCodexResumeSessionId(options);
-    const args = resumeSessionId ? ['codex', 'resume', resumeSessionId] : ['codex'];
+    const args = resumeSessionId
+      ? ['codex', 'resume', resumeSessionId]
+      : (options.resumeLatest ? ['codex', 'resume', '--last'] : ['codex']);
 
     // Permission mode handling:
     // - 'auto' (default) or 'bypassPermissions': Use bypass mode (auto-approve all)
@@ -317,6 +462,7 @@ const CLI_COMMANDS = {
     }
 
     const args = ['qwen'];
+    const resumeSessionId = resolveProviderResumeSessionId('qwen-cli', options);
 
     // Permission handling: default to yolo for automation unless explicitly default mode.
     const permissionMode = options.permissionMode || 'auto';
@@ -326,6 +472,14 @@ const CLI_COMMANDS = {
 
     if (options.model) {
       args.push('-m', options.model);
+    }
+
+    if (resumeSessionId) {
+      args.push('--resume', resumeSessionId);
+    } else if (options.resumeLatest) {
+      args.push('--continue');
+    } else if (options.providerSessionId) {
+      args.push('--session-id', options.providerSessionId);
     }
 
     return args.join(' ');
@@ -338,8 +492,14 @@ const CLI_COMMANDS = {
     }
 
     const args = ['opencode'];
+    const resumeSessionId = resolveProviderResumeSessionId('opencode-cli', options);
     if (options.model) {
       args.push('--model', options.model);
+    }
+    if (resumeSessionId) {
+      args.push('--session', resumeSessionId);
+    } else if (options.resumeLatest) {
+      args.push('--continue');
     }
     return args.join(' ');
   }
@@ -1051,6 +1211,38 @@ class PersistentSessionManager extends EventEmitter {
     return `printf '\\n${startMarker}\\n'; ${command}; __cliagents_status=$?; printf '\\n${exitMarkerPrefix}%s\\n' "$__cliagents_status"`;
   }
 
+  _updateProviderThreadRef(terminal, providerThreadRef) {
+    const normalizedProviderThreadRef = normalizeUuid(providerThreadRef);
+    if (!terminal || !normalizedProviderThreadRef || terminal.providerThreadRef === normalizedProviderThreadRef) {
+      return terminal?.providerThreadRef || null;
+    }
+
+    terminal.providerThreadRef = normalizedProviderThreadRef;
+    if (this.db?.updateTerminalBinding) {
+      this.db.updateTerminalBinding(terminal.terminalId, {
+        providerThreadRef: normalizedProviderThreadRef
+      });
+    }
+
+    return normalizedProviderThreadRef;
+  }
+
+  _syncProviderThreadRefFromOutput(terminal, output, detector) {
+    if (!terminal || terminal.adapter !== 'claude-code' || !output) {
+      return terminal?.providerThreadRef || null;
+    }
+
+    const extractSessionId = typeof detector?.extractSessionId === 'function'
+      ? detector.extractSessionId.bind(detector)
+      : null;
+    const sessionId = extractSessionId ? extractSessionId(output) : null;
+    if (!sessionId) {
+      return terminal.providerThreadRef || null;
+    }
+
+    return this._updateProviderThreadRef(terminal, sessionId);
+  }
+
   /**
    * Detect state for the currently tracked one-shot run, if any.
    * @param {Object} terminal
@@ -1065,6 +1257,7 @@ class PersistentSessionManager extends EventEmitter {
     }
 
     const tail = String(output || '').slice(run.baselineOutputLength);
+    this._syncProviderThreadRefFromOutput(terminal, tail, detector);
     const exitPattern = new RegExp(`${run.exitMarkerPrefix}(\\d+)`);
     const exitMatch = tail.match(exitPattern);
 
@@ -1076,6 +1269,7 @@ class PersistentSessionManager extends EventEmitter {
     }
 
     const logTail = terminal.logPath ? this.readLogTail(terminal.terminalId, 12000) : '';
+    this._syncProviderThreadRefFromOutput(terminal, logTail, detector);
     const logExitMatch = logTail.match(exitPattern);
     if (logExitMatch) {
       const exitCode = Number.parseInt(logExitMatch[1], 10);
@@ -1126,7 +1320,7 @@ class PersistentSessionManager extends EventEmitter {
       role: options.role || 'worker',
       workDir: path.resolve(options.workDir || this.workDir),
       model: options.model || null,
-      sessionKind: options.sessionKind || (parentSessionId ? 'subagent' : 'main'),
+      sessionKind: deriveControlPlaneSessionKind(options),
       permissionMode: options.permissionMode || 'auto',
       allowedTools: normalizedAllowedTools,
       systemPromptHash: hashSessionShape(options.systemPrompt || '')
@@ -1359,9 +1553,23 @@ class PersistentSessionManager extends EventEmitter {
   }
 
   _reuseTerminal(terminal, options = {}) {
+    const resetProviderState = options.resetProviderState === true || shouldResetProviderStateOnReuse(terminal);
+
     terminal.lastActive = new Date();
+    terminal.status = TerminalStatus.IDLE;
+    terminal.attention = null;
+    terminal.activeRun = null;
+    if (resetProviderState) {
+      terminal.providerThreadRef = null;
+      terminal.messageCount = 0;
+    }
     this._reserveTerminal(terminal);
-    if (this.db) {
+    if (this.db?.updateTerminalBinding && resetProviderState) {
+      this.db.updateTerminalBinding(terminal.terminalId, {
+        providerThreadRef: null,
+        status: TerminalStatus.IDLE
+      });
+    } else if (this.db) {
       this.db.updateStatus(terminal.terminalId, terminal.status || TerminalStatus.IDLE);
     }
 
@@ -1427,6 +1635,8 @@ class PersistentSessionManager extends EventEmitter {
       forceFreshSession = false
     } = options;
 
+    const effectiveRootSessionId = rootSessionId || null;
+
     const controlPlaneEnabled = this.sessionGraphWritesEnabled && (
       !!rootSessionId ||
       !!parentSessionId ||
@@ -1474,13 +1684,21 @@ class PersistentSessionManager extends EventEmitter {
     const recoveryMetadata = sessionMetadata && typeof sessionMetadata === 'object'
       ? sessionMetadata
       : {};
+    const recoveredManagedRoot = recoveryMetadata.recoveredManagedRoot === true;
+    const resolvedSessionKind = controlPlaneEnabled
+      ? deriveControlPlaneSessionKind({
+          role,
+          parentSessionId,
+          sessionKind,
+          sessionMetadata: recoveryMetadata
+        })
+      : 'legacy';
     const providerResumeSessionId = adapter === 'codex-cli'
       ? String(recoveryMetadata.providerResumeSessionId || '').trim() || null
       : null;
     const providerResumeCommand = adapter === 'codex-cli'
       ? String(recoveryMetadata.providerResumeCommand || '').trim() || null
       : null;
-    const resolvedProviderThreadRef = providerThreadRef || providerResumeSessionId || null;
 
     const reusableTerminal = this._findReusableTerminal({
       adapter,
@@ -1500,12 +1718,26 @@ class PersistentSessionManager extends EventEmitter {
     if (reusableTerminal) {
       return this._reuseTerminal(reusableTerminal, {
         reuseReason: 'matching-root-session-shape',
-        sessionMetadata
+        sessionMetadata,
+        resetProviderState: resolvedSessionKind !== 'main'
       });
     }
 
     // Generate IDs
     const terminalId = generateTerminalId();
+    const resolvedRootSessionId = controlPlaneEnabled ? (effectiveRootSessionId || terminalId) : terminalId;
+    const shouldBindManagedRootProviderSessionId = (
+      !recoveredManagedRoot
+      && supportsManagedRootSessionBinding(adapter)
+      && resolvedSessionKind === 'main'
+      && (role === 'main' || recoveryMetadata.managedLaunch === true)
+    );
+    const derivedManagedRootProviderSessionId = shouldBindManagedRootProviderSessionId
+      ? normalizeUuid(providerThreadRef || resolvedRootSessionId)
+      : null;
+    const boundProviderSessionId = providerThreadRef || derivedManagedRootProviderSessionId || null;
+    const resolvedProviderThreadRef = boundProviderSessionId || providerResumeSessionId || null;
+    const shouldResumeLatestProviderSession = recoveredManagedRoot && !providerResumeSessionId;
     const sessionName = `cliagents-${terminalId.slice(0, 6)}`;
     // Truncate prefix to ensure window name stays under 50-char tmux limit
     // Format: prefix (max 23 chars) + dash + terminalId suffix (26 chars) = max 50
@@ -1545,7 +1777,7 @@ class PersistentSessionManager extends EventEmitter {
 
     // Preserve richer native UI for user-facing managed roots; keep worker/orchestration
     // sessions plain for easier capture, parsing, and browser replay.
-    const sessionEnv = shouldPreserveRichTerminalUi({ role, sessionKind, sessionMetadata })
+    const sessionEnv = shouldPreserveRichTerminalUi({ role, sessionKind: resolvedSessionKind, sessionMetadata })
       ? {
           NO_COLOR: null,
           CI: null,
@@ -1573,8 +1805,10 @@ class PersistentSessionManager extends EventEmitter {
       systemPrompt,
       model,
       allowedTools,
+      providerSessionId: derivedManagedRootProviderSessionId,
       resumeSessionId: providerResumeSessionId,
       resumeCommand: providerResumeCommand,
+      resumeLatest: shouldResumeLatestProviderSession,
       // Pass permissionMode if not 'auto', otherwise use legacy skip behavior
       permissionMode: effectivePermissionMode !== 'auto' ? effectivePermissionMode : null,
       dangerouslySkipPermissions: effectivePermissionMode === 'auto',
@@ -1603,14 +1837,18 @@ class PersistentSessionManager extends EventEmitter {
       role,
       workDir,
       model,
+      systemPrompt,
+      allowedTools: Array.isArray(allowedTools) ? [...allowedTools] : null,
+      permissionMode: effectivePermissionMode,
       logPath,
       status: TerminalStatus.IDLE,
       createdAt: new Date(),
       lastActive: new Date(),
       activeRun: null,
-      rootSessionId: controlPlaneEnabled ? (rootSessionId || terminalId) : terminalId,
+      messageCount: 0,
+      rootSessionId: resolvedRootSessionId,
       parentSessionId: controlPlaneEnabled ? (parentSessionId || null) : null,
-      sessionKind: controlPlaneEnabled ? (sessionKind || (parentSessionId ? 'subagent' : 'main')) : 'legacy',
+      sessionKind: resolvedSessionKind,
       originClient: controlPlaneEnabled ? (originClient || 'system') : 'legacy',
       externalSessionRef: controlPlaneEnabled ? (externalSessionRef || null) : null,
       lineageDepth: Number.isInteger(lineageDepth)
@@ -1634,7 +1872,8 @@ class PersistentSessionManager extends EventEmitter {
       permissionMode: effectivePermissionMode,
       rootSessionId: terminal.rootSessionId,
       parentSessionId: terminal.parentSessionId,
-      sessionKind: terminal.sessionKind
+      sessionKind: terminal.sessionKind,
+      sessionMetadata: sessionMetadata || null
     }));
     this._reserveTerminal(terminal);
 
@@ -2044,6 +2283,7 @@ class PersistentSessionManager extends EventEmitter {
 
     // For orchestration terminals, use non-interactive mode to avoid blocking prompts
     const isGeminiOrchestration = terminal.adapter === 'gemini-cli' && terminal.role === 'worker';
+    const isClaudeOrchestration = terminal.adapter === 'claude-code' && terminal.role === 'worker';
     const isCodexOrchestration = terminal.adapter === 'codex-cli' && terminal.role === 'worker';
     const isQwenOrchestration = terminal.adapter === 'qwen-cli' && terminal.role === 'worker';
     const isOpencodeOrchestration = terminal.adapter === 'opencode-cli' && terminal.role === 'worker';
@@ -2058,6 +2298,28 @@ class PersistentSessionManager extends EventEmitter {
         terminal.sessionName,
         terminal.windowName,
         this._wrapTrackedOneShotCommand(terminal, geminiCommand),
+        true
+      );
+    } else if (isClaudeOrchestration) {
+      if (Number.isInteger(terminal.messageCount) && terminal.messageCount > 0) {
+        const claudeDetector = this.statusDetectors.get(terminal.adapter);
+        const recentClaudeOutput = [
+          this.tmux?.getHistory ? this.tmux.getHistory(terminal.sessionName, terminal.windowName, 250) : '',
+          terminal.logPath ? this.readLogTail(terminal.terminalId, 12000) : ''
+        ].filter(Boolean).join('\n');
+        this._syncProviderThreadRefFromOutput(terminal, recentClaudeOutput, claudeDetector);
+      }
+
+      const claudeCommand = buildClaudeOneShotCommand(message, terminal);
+      if (claudeCommand.providerThreadRef && claudeCommand.providerThreadRef !== terminal.providerThreadRef) {
+        this._updateProviderThreadRef(terminal, claudeCommand.providerThreadRef);
+      }
+      terminal.messageCount = Number.isInteger(terminal.messageCount) ? terminal.messageCount + 1 : 1;
+
+      this.tmux.sendKeys(
+        terminal.sessionName,
+        terminal.windowName,
+        this._wrapTrackedOneShotCommand(terminal, claudeCommand.command),
         true
       );
     } else if (isCodexOrchestration) {

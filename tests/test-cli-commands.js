@@ -6,7 +6,13 @@
 
 const assert = require('assert');
 const { CLI_COMMANDS } = require('../src/tmux/session-manager');
-const { parseAdoptArgs, attachToManagedSession } = require('../src/index');
+const ClaudeCodeAdapter = require('../src/adapters/claude-code');
+const {
+  parseAdoptArgs,
+  attachToManagedSession,
+  buildManagedRootLaunchCandidate,
+  buildManagedRootRecoveryLaunchOptions
+} = require('../src/index');
 
 let passed = 0;
 let failed = 0;
@@ -40,6 +46,11 @@ test('Gemini orchestration command uses ready marker', () => {
   assert.strictEqual(cmd, 'echo "GEMINI_READY_FOR_ORCHESTRATION"');
 });
 
+test('Gemini recovered root can resume the latest provider session automatically', () => {
+  const cmd = CLI_COMMANDS['gemini-cli']({ resumeLatest: true });
+  assert.strictEqual(cmd, 'gemini --approval-mode yolo --resume latest');
+});
+
 console.log('\n--- Codex CLI ---');
 
 test('Codex interactive command bypasses approvals by default', () => {
@@ -66,6 +77,12 @@ test('Codex orchestration command uses ready marker', () => {
   assert.strictEqual(cmd, 'echo "CODEX_READY_FOR_ORCHESTRATION"');
 });
 
+test('Codex recovered root can resume the latest provider session automatically', () => {
+  const cmd = CLI_COMMANDS['codex-cli']({ resumeLatest: true });
+  assert(cmd.startsWith('codex resume --last'), `Expected codex latest resume prefix, got: ${cmd}`);
+  assert(cmd.includes('--dangerously-bypass-approvals-and-sandbox'), `Expected bypass flag, got: ${cmd}`);
+});
+
 console.log('\n--- Qwen CLI ---');
 
 test('Qwen interactive command uses yolo by default', () => {
@@ -79,6 +96,16 @@ test('Qwen interactive command uses yolo by default', () => {
 test('Qwen orchestration command uses ready marker', () => {
   const cmd = CLI_COMMANDS['qwen-cli']({ orchestration: true });
   assert.strictEqual(cmd, 'echo "QWEN_READY_FOR_ORCHESTRATION"');
+});
+
+test('Qwen managed root binds a provider session id on first launch', () => {
+  const cmd = CLI_COMMANDS['qwen-cli']({ providerSessionId: '019d94a6-2cd8-7742-8e4e-123456789abc' });
+  assert(cmd.includes('--session-id 019d94a6-2cd8-7742-8e4e-123456789abc'), `Expected session binding flag, got: ${cmd}`);
+});
+
+test('Qwen recovered root can resume the latest provider session automatically', () => {
+  const cmd = CLI_COMMANDS['qwen-cli']({ resumeLatest: true });
+  assert.strictEqual(cmd, 'qwen -y --continue');
 });
 
 console.log('\n--- OpenCode CLI ---');
@@ -95,7 +122,17 @@ test('OpenCode orchestration command uses ready marker', () => {
   assert.strictEqual(cmd, 'echo "OPENCODE_READY_FOR_ORCHESTRATION"');
 });
 
+test('OpenCode recovered root can resume the latest provider session automatically', () => {
+  const cmd = CLI_COMMANDS['opencode-cli']({ resumeLatest: true });
+  assert.strictEqual(cmd, 'opencode --continue');
+});
+
 console.log('\n--- Claude Code ---');
+
+test('Claude orchestration command uses ready marker', () => {
+  const cmd = CLI_COMMANDS['claude-code']({ orchestration: true });
+  assert.strictEqual(cmd, 'echo "CLAUDE_READY_FOR_ORCHESTRATION"');
+});
 
 test('Claude interactive command respects explicit default permission mode', () => {
   const cmd = CLI_COMMANDS['claude-code']({
@@ -103,7 +140,7 @@ test('Claude interactive command respects explicit default permission mode', () 
     model: 'claude-sonnet-4-5-20250514'
   });
 
-  assert(cmd.startsWith('claude'), `Expected to start with "claude", got: ${cmd}`);
+  assert(cmd.split(' ')[0].endsWith('claude'), `Expected Claude executable prefix, got: ${cmd}`);
   assert(cmd.includes('--permission-mode default'), `Expected default permission mode, got: ${cmd}`);
   assert(cmd.includes('--output-format stream-json'), `Expected stream-json output, got: ${cmd}`);
   assert(cmd.includes('--model claude-sonnet-4-5-20250514'), `Expected model flag, got: ${cmd}`);
@@ -116,6 +153,124 @@ test('Claude interactive command omits allowedTools when the list is empty', () 
   });
 
   assert(!cmd.includes('--allowedTools'), `Did not expect empty allowedTools flag, got: ${cmd}`);
+});
+
+test('Claude managed root binds a provider session id on first launch', () => {
+  const cmd = CLI_COMMANDS['claude-code']({
+    permissionMode: 'default',
+    providerSessionId: '019d94a6-2cd8-7742-8e4e-123456789abc'
+  });
+
+  assert(cmd.includes('--session-id 019d94a6-2cd8-7742-8e4e-123456789abc'), `Expected session binding flag, got: ${cmd}`);
+});
+
+test('Claude recovered root can resume the latest provider session automatically', () => {
+  const cmd = CLI_COMMANDS['claude-code']({
+    permissionMode: 'default',
+    resumeLatest: true
+  });
+
+  assert(cmd.includes('--continue'), `Expected continue flag, got: ${cmd}`);
+  assert(!cmd.includes('--session-id'), `Did not expect session binding for latest resume, got: ${cmd}`);
+});
+
+test('Claude command builder honors CLIAGENTS_CLAUDE_PATH override', () => {
+  const originalClaudePath = process.env.CLIAGENTS_CLAUDE_PATH;
+  process.env.CLIAGENTS_CLAUDE_PATH = '/usr/local/bin/claude';
+
+  try {
+    const cmd = CLI_COMMANDS['claude-code']({
+      permissionMode: 'default'
+    });
+    assert(cmd.startsWith('/usr/local/bin/claude '), `Expected explicit Claude binary path, got: ${cmd}`);
+  } finally {
+    if (originalClaudePath === undefined) {
+      delete process.env.CLIAGENTS_CLAUDE_PATH;
+    } else {
+      process.env.CLIAGENTS_CLAUDE_PATH = originalClaudePath;
+    }
+  }
+});
+
+test('Claude adapter honors CLIAGENTS_CLAUDE_PATH override', () => {
+  const originalClaudePath = process.env.CLIAGENTS_CLAUDE_PATH;
+  process.env.CLIAGENTS_CLAUDE_PATH = '/usr/local/bin/claude';
+
+  try {
+    const adapter = new ClaudeCodeAdapter();
+    assert.strictEqual(adapter._getClaudePath(), '/usr/local/bin/claude');
+  } finally {
+    if (originalClaudePath === undefined) {
+      delete process.env.CLIAGENTS_CLAUDE_PATH;
+    } else {
+      process.env.CLIAGENTS_CLAUDE_PATH = originalClaudePath;
+    }
+  }
+});
+
+console.log('\n--- Managed Root Recovery ---');
+
+test('Managed root recovery falls back to provider thread ref when explicit resume session id is missing', () => {
+  const rootSessionId = 'aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa';
+  const providerThreadRef = '019d94a6-2cd8-7742-8e4e-123456789abc';
+  const candidate = buildManagedRootLaunchCandidate({
+    rootSessionId,
+    originClient: 'claude',
+    status: 'needs_attention'
+  }, {
+    rootSession: {
+      sessionId: rootSessionId,
+      adapter: 'claude-code',
+      originClient: 'claude',
+      status: 'needs_attention',
+      processState: 'exited',
+      workDir: '/tmp/project',
+      providerThreadRef,
+      sessionMetadata: {
+        attachMode: 'managed-root-launch',
+        managedLaunch: true,
+        clientName: 'claude'
+      }
+    },
+    terminals: [{
+      terminal_id: rootSessionId,
+      session_name: 'cliagents-aaaaaa',
+      role: 'main',
+      session_kind: 'main',
+      process_state: 'exited',
+      status: 'idle',
+      work_dir: '/tmp/project',
+      provider_thread_ref: providerThreadRef
+    }],
+    sessions: [{
+      sessionId: rootSessionId,
+      role: 'main',
+      sessionKind: 'main',
+      providerThreadRef
+    }],
+    events: []
+  }, {
+    adapter: 'claude-code',
+    workDir: '/tmp/project'
+  });
+
+  assert(candidate, 'Expected a managed root recovery candidate');
+  assert.strictEqual(candidate.launchAction, 'recover');
+  assert.strictEqual(candidate.providerThreadRef, providerThreadRef);
+
+  const recoveryOptions = buildManagedRootRecoveryLaunchOptions({
+    adapter: 'claude-code',
+    workDir: '/tmp/project',
+    profile: 'guarded-root',
+    profileExplicit: false,
+    model: null,
+    modelExplicit: false,
+    permissionMode: null,
+    permissionModeExplicit: false
+  }, candidate);
+
+  assert.strictEqual(recoveryOptions.sessionMetadata.providerResumeSessionId, providerThreadRef);
+  assert.strictEqual(recoveryOptions.sessionMetadata.providerResumeLatest, false);
 });
 
 console.log('\n--- Adopt CLI ---');
