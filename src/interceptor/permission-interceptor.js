@@ -91,8 +91,18 @@ class PermissionInterceptor extends EventEmitter {
       throw new Error(`Terminal not found: ${terminalId}`);
     }
 
-    // Get parser for this adapter
-    const parser = getParser(terminal.adapter);
+    // Get parser for this adapter.
+    // Some adapters (e.g. qwen-cli in one-shot/yolo mode) do not currently
+    // expose interactive permission prompts we can intercept.
+    // In that case, skip interceptor startup instead of failing handoff.
+    let parser;
+    try {
+      parser = getParser(terminal.adapter);
+    } catch (error) {
+      const message = error?.message || String(error);
+      console.warn(`[interceptor] Skipping for adapter ${terminal.adapter}: ${message}`);
+      return () => {};
+    }
 
     // Create interceptor state
     const state = {

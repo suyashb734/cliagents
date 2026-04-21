@@ -58,6 +58,9 @@ const MANAGED_ROOT_TERMINAL_ENV_KEYS = Object.freeze([
 ]);
 
 const MANAGED_ROOT_SHELL_COMMANDS = new Set(['bash', 'sh', 'zsh', 'fish']);
+const ROOT_SESSION_SCOPE_VALUES = new Set(['user', 'all', 'detached', 'legacy']);
+const LIVE_ROOT_SESSION_STATUSES = new Set(['running', 'processing', 'pending', 'partial', 'blocked', 'needs_attention', 'idle']);
+const DUMB_TERMINAL_VALUES = new Set(['', 'dumb', 'unknown']);
 
 function buildManagedRootLaunchEnvironment(env = process.env) {
   const launchEnvironment = {};
@@ -67,7 +70,36 @@ function buildManagedRootLaunchEnvironment(env = process.env) {
       launchEnvironment[key] = value;
     }
   }
+  const columns = Number.parseInt(process.stdout?.columns, 10);
+  const rows = Number.parseInt(process.stdout?.rows, 10);
+  if (Number.isInteger(columns) && columns > 0) {
+    launchEnvironment.COLUMNS = String(columns);
+  } else if (typeof env?.COLUMNS === 'string' && env.COLUMNS.trim()) {
+    launchEnvironment.COLUMNS = env.COLUMNS.trim();
+  }
+  if (Number.isInteger(rows) && rows > 0) {
+    launchEnvironment.LINES = String(rows);
+  } else if (typeof env?.LINES === 'string' && env.LINES.trim()) {
+    launchEnvironment.LINES = env.LINES.trim();
+  }
   return launchEnvironment;
+}
+
+function buildManagedRootAttachEnvironment(env = process.env) {
+  const attachEnv = { ...env };
+  const normalizedTerm = String(attachEnv.TERM || '').trim().toLowerCase();
+
+  // Codex Desktop's shell can report TERM=dumb even though the actual
+  // terminal renderer supports a richer tmux client surface.
+  if (DUMB_TERMINAL_VALUES.has(normalizedTerm)) {
+    attachEnv.TERM = 'xterm-256color';
+  }
+
+  if (!String(attachEnv.COLORTERM || '').trim()) {
+    attachEnv.COLORTERM = 'truecolor';
+  }
+
+  return attachEnv;
 }
 
 async function callCliagentsJson(route, options = {}) {
@@ -308,6 +340,262 @@ function printListModelsUsage() {
   console.log('Adapters: codex, claude, qwen, gemini, opencode');
 }
 
+function normalizeRootSessionScope(scope) {
+  const normalized = String(scope || 'user').trim().toLowerCase();
+  return ROOT_SESSION_SCOPE_VALUES.has(normalized) ? normalized : 'user';
+}
+
+function parseListRootsArgs(rawArgs = []) {
+  const args = [...rawArgs];
+  const parsed = {
+    adapter: null,
+    includeArchived: false,
+    json: false,
+    limit: 12,
+    liveOnly: true,
+    scope: 'user',
+    workDir: null
+  };
+
+  if (args[0] && !args[0].startsWith('-')) {
+    parsed.adapter = normalizeManagedRootAdapter(args.shift());
+  }
+
+  while (args.length > 0) {
+    const token = args.shift();
+    switch (token) {
+      case '--limit': {
+        const value = Number.parseInt(String(args.shift() || '').trim(), 10);
+        if (!Number.isInteger(value) || value < 1) {
+          throw new Error('Invalid --limit value');
+        }
+        parsed.limit = value;
+        break;
+      }
+      case '--scope':
+        parsed.scope = normalizeRootSessionScope(args.shift());
+        break;
+      case '--workdir':
+      case '--working-directory':
+        parsed.workDir = resolveLaunchWorkDir(args.shift());
+        break;
+      case '--archived':
+        parsed.includeArchived = true;
+        break;
+      case '--all':
+        parsed.liveOnly = false;
+        break;
+      case '--live-only':
+        parsed.liveOnly = true;
+        break;
+      case '--json':
+        parsed.json = true;
+        break;
+      case '--help':
+      case '-h':
+        parsed.help = true;
+        break;
+      default:
+        throw new Error(`Unknown list-roots argument: ${token}`);
+    }
+  }
+
+  return parsed;
+}
+
+function printListRootsUsage() {
+  console.log('Usage: cliagents list-roots [adapter] [options]');
+  console.log('');
+  console.log('Adapters: codex, claude, qwen, gemini, opencode');
+  console.log('Options:');
+  console.log('  --limit <n>                   Maximum number of roots to inspect (default: 12)');
+  console.log('  --scope <scope>               Root scope: user, all, detached, legacy');
+  console.log('  --workdir <path>              Filter roots to a specific working directory');
+  console.log('  --archived                    Include archived legacy roots');
+  console.log('  --all                         Show live and historical roots');
+  console.log('  --live-only                   Show only live/attachable roots (default)');
+  console.log('  --json                        Emit JSON instead of text');
+}
+
+function parseAttachRootArgs(rawArgs = []) {
+  const args = [...rawArgs];
+  const parsed = {
+    adapter: null,
+    includeArchived: false,
+    latest: false,
+    printOnly: false,
+    scope: 'user',
+    workDir: null
+  };
+
+  if (args[0] && !args[0].startsWith('-')) {
+    parsed.rootSessionId = args.shift();
+  }
+
+  while (args.length > 0) {
+    const token = args.shift();
+    switch (token) {
+      case '--latest':
+        parsed.latest = true;
+        break;
+      case '--adapter':
+        parsed.adapter = normalizeManagedRootAdapter(args.shift());
+        break;
+      case '--scope':
+        parsed.scope = normalizeRootSessionScope(args.shift());
+        break;
+      case '--workdir':
+      case '--working-directory':
+        parsed.workDir = resolveLaunchWorkDir(args.shift());
+        break;
+      case '--archived':
+        parsed.includeArchived = true;
+        break;
+      case '--print-only':
+        parsed.printOnly = true;
+        break;
+      case '--help':
+      case '-h':
+        parsed.help = true;
+        break;
+      default:
+        throw new Error(`Unknown attach-root argument: ${token}`);
+    }
+  }
+
+  if (parsed.latest && parsed.rootSessionId) {
+    throw new Error('Cannot combine an explicit root session id with --latest');
+  }
+  if (!parsed.latest && !parsed.rootSessionId && !parsed.help) {
+    throw new Error('attach-root requires a <rootSessionId> or --latest');
+  }
+
+  return parsed;
+}
+
+function printAttachRootUsage() {
+  console.log('Usage: cliagents attach-root <rootSessionId> [options]');
+  console.log('   or: cliagents attach-root --latest [options]');
+  console.log('');
+  console.log('Options:');
+  console.log('  --latest                      Attach to the most recent live root');
+  console.log('  --adapter <adapter>           Limit --latest to one adapter');
+  console.log('  --scope <scope>               Root scope: user, all, detached, legacy');
+  console.log('  --workdir <path>              Limit --latest to a specific working directory');
+  console.log('  --archived                    Include archived legacy roots when searching');
+  console.log('  --print-only                  Print the attach command without attaching');
+}
+
+function parseServePort(value, fallback = 4001) {
+  if (value === undefined || value === null || value === '') {
+    return fallback;
+  }
+  const parsed = Number.parseInt(String(value).trim(), 10);
+  if (!Number.isInteger(parsed) || parsed < 0 || parsed > 65535) {
+    throw new Error(`Invalid port: ${value}`);
+  }
+  return parsed;
+}
+
+function parseServeArgs(rawArgs = [], env = process.env) {
+  const args = [...rawArgs];
+  const parsed = {
+    host: String(env.CLIAGENTS_HOST || env.HOST || '0.0.0.0').trim() || '0.0.0.0',
+    port: parseServePort(env.PORT, 4001),
+    orchestration: {
+      dataDir: env.CLIAGENTS_DATA_DIR || null,
+      logDir: env.CLIAGENTS_LOG_DIR || null,
+      tmuxSocketPath: env.CLIAGENTS_TMUX_SOCKET || null,
+      workDir: env.CLIAGENTS_WORK_DIR || process.cwd(),
+      destroyTerminalsOnStop: env.CLIAGENTS_DESTROY_TERMINALS_ON_STOP === '1'
+    }
+  };
+
+  while (args.length > 0) {
+    const token = args.shift();
+    switch (token) {
+      case '--host':
+        parsed.host = String(args.shift() || '').trim() || parsed.host;
+        break;
+      case '--port':
+        parsed.port = parseServePort(args.shift(), parsed.port);
+        break;
+      case '--data-dir':
+        parsed.orchestration.dataDir = args.shift() || null;
+        break;
+      case '--log-dir':
+        parsed.orchestration.logDir = args.shift() || null;
+        break;
+      case '--tmux-socket':
+        parsed.orchestration.tmuxSocketPath = args.shift() || null;
+        break;
+      case '--workdir':
+      case '--working-directory':
+        parsed.orchestration.workDir = args.shift() || process.cwd();
+        break;
+      case '--destroy-terminals-on-stop':
+        parsed.orchestration.destroyTerminalsOnStop = true;
+        break;
+      case '--preserve-terminals-on-stop':
+        parsed.orchestration.destroyTerminalsOnStop = false;
+        break;
+      case '--help':
+      case '-h':
+        parsed.help = true;
+        break;
+      default:
+        throw new Error(`Unknown serve argument: ${token}`);
+    }
+  }
+
+  return parsed;
+}
+
+function printServeUsage() {
+  console.log('Usage: cliagents serve [options]');
+  console.log('       cliagents [options]');
+  console.log('');
+  console.log('Options:');
+  console.log('  --host <host>                Host to bind (default: 0.0.0.0)');
+  console.log('  --port <port>                Port to bind (default: 4001)');
+  console.log('  --data-dir <path>            Broker data directory');
+  console.log('  --log-dir <path>             Broker terminal log directory');
+  console.log('  --tmux-socket <path>         Isolated tmux socket for this broker');
+  console.log('  --workdir <path>             Default orchestration working directory');
+  console.log('  --destroy-terminals-on-stop  Tear down broker terminals on shutdown');
+  console.log('  --preserve-terminals-on-stop Keep managed roots alive on shutdown');
+}
+
+function printServerReadyBanner(port) {
+  console.log('\nAPI Endpoints:');
+  console.log('  GET  /health              - Health check');
+  console.log('  GET  /adapters            - List available adapters');
+  console.log('  POST /sessions            - Create new session');
+  console.log('  GET  /sessions            - List all sessions');
+  console.log('  GET  /sessions/:id        - Get session info');
+  console.log('  POST /sessions/:id/messages - Send message');
+  console.log('  POST /sessions/:id/parse  - Parse response text');
+  console.log('  DELETE /sessions/:id      - Terminate session');
+  console.log('  POST /ask                 - One-shot ask (auto session)');
+  console.log('\nWebSocket: ws://localhost:' + port + '/ws');
+  console.log('\nReady to accept connections!\n');
+}
+
+async function handleServeCommand(rawArgs = [], env = process.env) {
+  const serveOptions = parseServeArgs(rawArgs, env);
+  if (serveOptions.help) {
+    printServeUsage();
+    return null;
+  }
+
+  const server = new AgentServer(serveOptions);
+  await server.start();
+  const address = server.server?.address();
+  const resolvedPort = address && typeof address === 'object' ? address.port : server.port;
+  printServerReadyBanner(resolvedPort);
+  return server;
+}
+
 function listAdapterModels(rawArgs = []) {
   const adapterArg = rawArgs[0];
   if (!adapterArg || adapterArg === '--help' || adapterArg === '-h') {
@@ -336,6 +624,198 @@ function resolveLaunchWorkDir(workDir) {
   return path.resolve(workDir || process.cwd());
 }
 
+function normalizeActivityTimestamp(value) {
+  if (value == null) {
+    return 0;
+  }
+  if (typeof value === 'number' && Number.isFinite(value)) {
+    return value;
+  }
+  const parsed = Date.parse(value);
+  return Number.isFinite(parsed) ? parsed : 0;
+}
+
+function getRootSessionActivityAge(record) {
+  return formatManagedRootCandidateAge({
+    lastOccurredAt: record?.lastOccurredAt || null,
+    lastRecordedAt: record?.lastRecordedAt || null
+  });
+}
+
+function getRootSessionMainTerminal(snapshot) {
+  const terminals = Array.isArray(snapshot?.terminals) ? snapshot.terminals : [];
+  return terminals.find((terminal) => (
+    String(terminal?.role || '').trim().toLowerCase() === 'main'
+    && String(terminal?.session_kind || '').trim().toLowerCase() === 'main'
+  )) || terminals.find((terminal) => (
+    terminal
+    && terminal.root_session_id
+    && snapshot?.rootSessionId
+    && terminal.root_session_id === snapshot.rootSessionId
+  )) || null;
+}
+
+function getRootSessionWorkDir(snapshot) {
+  const rootSession = snapshot?.rootSession || {};
+  const sessionMetadata = rootSession.sessionMetadata && typeof rootSession.sessionMetadata === 'object'
+    ? rootSession.sessionMetadata
+    : {};
+  const mainTerminal = getRootSessionMainTerminal(snapshot);
+  return mainTerminal?.work_dir || rootSession.workDir || sessionMetadata.workspaceRoot || null;
+}
+
+function buildRootSessionOperatorRecord(summary, snapshot, options = {}) {
+  if (!summary) {
+    return null;
+  }
+
+  const rootSession = snapshot?.rootSession || {};
+  const mainTerminal = getRootSessionMainTerminal(snapshot);
+  const adapter = String(mainTerminal?.adapter || rootSession.adapter || '').trim().toLowerCase() || null;
+  const originClient = String(summary.originClient || rootSession.originClient || '').trim().toLowerCase() || null;
+
+  if (options.adapter) {
+    const normalizedAdapter = normalizeManagedRootAdapter(options.adapter);
+    const expectedOriginClient = inferManagedRootOriginClient(normalizedAdapter);
+    if (adapter !== normalizedAdapter && originClient !== expectedOriginClient) {
+      return null;
+    }
+  }
+
+  const workDir = getRootSessionWorkDir(snapshot);
+  if (options.workDir && (!workDir || resolveLaunchWorkDir(workDir) !== resolveLaunchWorkDir(options.workDir))) {
+    return null;
+  }
+
+  const status = String(summary.status || snapshot?.status || mainTerminal?.status || rootSession.status || 'unknown').trim().toLowerCase() || 'unknown';
+  const processState = String(mainTerminal?.process_state || rootSession.processState || '').trim().toLowerCase() || null;
+  const terminalStatus = String(mainTerminal?.status || rootSession.terminalStatus || '').trim().toLowerCase() || null;
+  const sessionName = mainTerminal?.session_name || null;
+  const live = typeof summary.live === 'boolean'
+    ? summary.live
+    : (
+      Boolean(sessionName)
+      && LIVE_ROOT_SESSION_STATUSES.has(status)
+      && processState !== 'exited'
+      && terminalStatus !== 'orphaned'
+    );
+  const interactiveTerminalId = summary.interactiveTerminalId || snapshot?.interactiveTerminalId || mainTerminal?.terminal_id || rootSession.terminalId || null;
+
+  return {
+    rootSessionId: summary.rootSessionId,
+    status,
+    live,
+    archived: Boolean(summary.archived),
+    originClient,
+    rootType: summary.rootType || snapshot?.rootType || null,
+    rootMode: summary.rootMode || snapshot?.rootMode || null,
+    externalSessionRef: summary.externalSessionRef || snapshot?.externalSessionRef || null,
+    clientName: summary.clientName || snapshot?.clientName || null,
+    terminalId: interactiveTerminalId,
+    sessionName,
+    adapter,
+    workDir,
+    processState,
+    terminalStatus,
+    lastOccurredAt: summary.lastOccurredAt || null,
+    lastRecordedAt: summary.lastRecordedAt || null,
+    attention: summary.attention || snapshot?.attention || { requiresAttention: false, reasons: [] },
+    latestSummary: summary.activitySummary || snapshot?.activitySummary || summary.latestConclusion?.summary || '',
+    activityExcerpt: summary.activityExcerpt || snapshot?.activityExcerpt || '',
+    activitySource: summary.activitySource || snapshot?.activitySource || 'fallback',
+    attachCommand: sessionName ? `tmux attach -t "${sessionName}"` : null,
+    consoleUrl: deriveManagedRootConsoleUrl(summary.rootSessionId, interactiveTerminalId)
+  };
+}
+
+function compareRootSessionOperatorRecords(left, right) {
+  if (Boolean(left?.live) !== Boolean(right?.live)) {
+    return left.live ? -1 : 1;
+  }
+  if (Boolean(left?.attention?.requiresAttention) !== Boolean(right?.attention?.requiresAttention)) {
+    return left.attention?.requiresAttention ? -1 : 1;
+  }
+  const rightTime = normalizeActivityTimestamp(right?.lastOccurredAt || right?.lastRecordedAt);
+  const leftTime = normalizeActivityTimestamp(left?.lastOccurredAt || left?.lastRecordedAt);
+  if (rightTime !== leftTime) {
+    return rightTime - leftTime;
+  }
+  return String(left?.rootSessionId || '').localeCompare(String(right?.rootSessionId || ''));
+}
+
+async function listOperatorRootSessions(options = {}, dependencies = {}) {
+  const callJson = dependencies.callCliagentsJson || callCliagentsJson;
+  const limit = Math.max(Number(options.limit || 12), 1);
+  const scope = normalizeRootSessionScope(options.scope || 'user');
+  const params = new URLSearchParams({
+    limit: String(limit),
+    scope
+  });
+  const statusFilter = options.statusFilter || (options.liveOnly === false ? 'all' : 'live');
+  if (statusFilter && statusFilter !== 'all') {
+    params.set('statusFilter', statusFilter);
+  }
+  if (options.includeArchived) {
+    params.set('includeArchived', '1');
+  }
+
+  const listResponse = await callJson(`/orchestration/root-sessions?${params.toString()}`);
+  const summaries = Array.isArray(listResponse?.roots) ? listResponse.roots : [];
+  const results = await Promise.allSettled(summaries.map((summary) => (
+    callJson(`/orchestration/root-sessions/${encodeURIComponent(summary.rootSessionId)}?eventLimit=120&terminalLimit=40`)
+  )));
+
+  const roots = [];
+  results.forEach((result, index) => {
+    const summary = summaries[index];
+    if (!summary) {
+      return;
+    }
+    const snapshot = result.status === 'fulfilled' ? result.value : null;
+    const record = buildRootSessionOperatorRecord(summary, snapshot, options);
+    if (record) {
+      roots.push(record);
+    }
+  });
+
+  roots.sort(compareRootSessionOperatorRecords);
+  return options.liveOnly === false ? roots : roots.filter((record) => record.live);
+}
+
+function printOperatorRootSessionList(records, options = {}) {
+  const scope = normalizeRootSessionScope(options.scope || 'user');
+  console.log(`Root Sessions (${scope})`);
+  if (!records.length) {
+    console.log('  No matching root sessions found.');
+    return;
+  }
+
+  const liveRoots = records.filter((record) => record.live);
+  const historicalRoots = records.filter((record) => !record.live);
+  const sections = [
+    { title: 'Live roots', entries: liveRoots },
+    { title: 'Historical roots', entries: historicalRoots }
+  ].filter((section) => section.entries.length > 0);
+
+  for (const section of sections) {
+    console.log(`\n${section.title}:`);
+    for (const record of section.entries) {
+      const details = [
+        record.adapter || record.originClient || 'unknown',
+        record.workDir ? path.basename(record.workDir) : null,
+        record.externalSessionRef || null
+      ].filter(Boolean).join(' • ');
+      console.log(`  ${record.rootSessionId}  ${String(record.status).padEnd(16)} ${getRootSessionActivityAge(record)}${details ? `  ${details}` : ''}`);
+      if (record.sessionName) {
+        console.log(`    tmux: ${record.sessionName}`);
+      }
+      if (record.attachCommand) {
+        console.log(`    attach: ${record.attachCommand}`);
+      }
+    }
+  }
+}
+
 function deriveManagedRootConsoleUrl(rootSessionId, terminalId) {
   const consolePath = '/console';
   const baseUrl = getCliagentsBaseUrl();
@@ -359,6 +839,48 @@ function isManagedRootShellCommand(command) {
   return normalized ? MANAGED_ROOT_SHELL_COMMANDS.has(normalized) : false;
 }
 
+function buildManagedRootProviderResumeCommand(adapter, sessionId) {
+  const normalizedAdapter = normalizeManagedRootAdapter(adapter || 'codex-cli');
+  const normalizedSessionId = String(sessionId || '').trim();
+  if (!normalizedSessionId) {
+    return null;
+  }
+
+  switch (normalizedAdapter) {
+    case 'claude-code':
+      return `claude --resume ${normalizedSessionId}`;
+    case 'gemini-cli':
+      return `gemini --resume ${normalizedSessionId}`;
+    case 'codex-cli':
+      return `codex resume ${normalizedSessionId}`;
+    case 'qwen-cli':
+      return `qwen --resume ${normalizedSessionId}`;
+    case 'opencode-cli':
+      return `opencode --session ${normalizedSessionId}`;
+    default:
+      return null;
+  }
+}
+
+function buildManagedRootProviderLatestResumeCommand(adapter) {
+  const normalizedAdapter = normalizeManagedRootAdapter(adapter || 'codex-cli');
+
+  switch (normalizedAdapter) {
+    case 'claude-code':
+      return 'claude --continue';
+    case 'gemini-cli':
+      return 'gemini --resume latest';
+    case 'codex-cli':
+      return 'codex resume --last';
+    case 'qwen-cli':
+      return 'qwen --continue';
+    case 'opencode-cli':
+      return 'opencode --continue';
+    default:
+      return null;
+  }
+}
+
 function extractManagedRootRecoveryHint(snapshot, rootSessionId) {
   const sessions = Array.isArray(snapshot?.sessions) ? snapshot.sessions : [];
   const events = Array.isArray(snapshot?.events) ? snapshot.events : [];
@@ -373,6 +895,7 @@ function extractManagedRootRecoveryHint(snapshot, rootSessionId) {
   let resumeCommand = mainSession?.resumeCommand || null;
   let attentionMessage = mainSession?.attentionMessage || null;
   let resumeSessionId = null;
+  const providerThreadRef = mainSession?.providerThreadRef || null;
 
   for (let index = events.length - 1; index >= 0; index -= 1) {
     const payload = events[index]?.payload_json || {};
@@ -393,7 +916,8 @@ function extractManagedRootRecoveryHint(snapshot, rootSessionId) {
   return {
     resumeCommand,
     resumeSessionId,
-    attentionMessage
+    attentionMessage,
+    providerThreadRef
   };
 }
 
@@ -409,7 +933,11 @@ function buildManagedRootLaunchCandidate(summary, snapshot, options = {}) {
   const managedRoot = rootMetadata.managedLaunch === true
     || rootMetadata.adoptedRoot === true
     || attachMode === 'managed-root-launch'
-    || attachMode === 'root-adopt';
+    || attachMode === 'root-adopt'
+    || summary?.rootMode === 'managed'
+    || summary?.rootMode === 'adopted'
+    || snapshot?.rootMode === 'managed'
+    || snapshot?.rootMode === 'adopted';
   if (!managedRoot) {
     return null;
   }
@@ -437,7 +965,7 @@ function buildManagedRootLaunchCandidate(summary, snapshot, options = {}) {
     return null;
   }
 
-  const terminalId = mainTerminal?.terminal_id || rootSession.terminalId || null;
+  const terminalId = summary?.interactiveTerminalId || snapshot?.interactiveTerminalId || mainTerminal?.terminal_id || rootSession.terminalId || null;
   const sessionName = mainTerminal?.session_name || null;
   const processState = String(mainTerminal?.process_state || rootSession.processState || '').trim().toLowerCase() || null;
   const terminalStatus = String(mainTerminal?.status || rootSession.terminalStatus || '').trim().toLowerCase() || null;
@@ -447,6 +975,11 @@ function buildManagedRootLaunchCandidate(summary, snapshot, options = {}) {
     && terminalStatus !== 'orphaned';
   const shellOnlyRoot = hasLiveTerminal && isManagedRootShellCommand(currentCommand);
   const recoveryHint = extractManagedRootRecoveryHint(snapshot, rootSessionId);
+  const providerThreadRef = recoveryHint.providerThreadRef
+    || rootSession.providerThreadRef
+    || mainTerminal?.provider_thread_ref
+    || mainTerminal?.providerThreadRef
+    || null;
   const launchAction = hasLiveTerminal && !shellOnlyRoot ? 'resume' : 'recover';
   let recoveryReason = null;
   if (launchAction === 'recover') {
@@ -476,11 +1009,21 @@ function buildManagedRootLaunchCandidate(summary, snapshot, options = {}) {
     launchProfile: rootMetadata.launchProfile || null,
     lastOccurredAt: summary?.lastOccurredAt || null,
     lastRecordedAt: summary?.lastRecordedAt || null,
+    latestSummary: snapshot?.activitySummary
+      || summary?.activitySummary
+      || rootSession.latestConclusion?.summary
+      || summary?.latestConclusion?.summary
+      || summary?.latestSummary
+      || recoveryHint.attentionMessage
+      || null,
+    activityExcerpt: snapshot?.activityExcerpt || summary?.activityExcerpt || null,
+    rootMode: snapshot?.rootMode || summary?.rootMode || null,
     currentCommand,
     launchAction,
     recoveryReason,
     resumeCommand: recoveryHint.resumeCommand,
     resumeSessionId: recoveryHint.resumeSessionId,
+    providerThreadRef,
     attentionMessage: recoveryHint.attentionMessage,
     attachCommand: sessionName ? `tmux attach -t "${sessionName}"` : null,
     consoleUrl: deriveManagedRootConsoleUrl(rootSessionId, terminalId)
@@ -560,6 +1103,124 @@ async function listManagedRootRecoveryCandidates(options = {}, dependencies = {}
   return candidates.recoverCandidates;
 }
 
+function buildRootSessionSummaryFromSnapshot(rootSessionId, snapshot) {
+  const rootSession = snapshot?.rootSession || {};
+  const lastOccurredAt = (() => {
+    const sessions = Array.isArray(snapshot?.sessions) ? snapshot.sessions : [];
+    const events = Array.isArray(snapshot?.events) ? snapshot.events : [];
+    const sessionTimestamp = sessions.reduce((max, session) => (
+      Math.max(max, normalizeActivityTimestamp(session?.lastEventAt || session?.lastActiveAt || session?.createdAt))
+    ), 0);
+    const eventTimestamp = events.reduce((max, event) => (
+      Math.max(max, normalizeActivityTimestamp(event?.occurred_at || event?.recorded_at))
+    ), 0);
+    const lastTimestamp = Math.max(sessionTimestamp, eventTimestamp);
+    return lastTimestamp > 0 ? new Date(lastTimestamp).toISOString() : null;
+  })();
+
+  return {
+    rootSessionId,
+    status: snapshot?.status || rootSession.status || 'unknown',
+    originClient: rootSession.originClient || null,
+    rootType: snapshot?.rootType || null,
+    rootMode: snapshot?.rootMode || null,
+    interactiveTerminalId: snapshot?.interactiveTerminalId || null,
+    externalSessionRef: snapshot?.externalSessionRef || rootSession.externalSessionRef || null,
+    clientName: snapshot?.clientName || null,
+    attention: snapshot?.attention || { requiresAttention: false, reasons: [] },
+    latestConclusion: snapshot?.latestConclusion || null,
+    activitySummary: snapshot?.activitySummary || null,
+    activityExcerpt: snapshot?.activityExcerpt || null,
+    activitySource: snapshot?.activitySource || 'fallback',
+    lastOccurredAt,
+    live: typeof snapshot?.counts?.live === 'number' ? snapshot.counts.live > 0 : null
+  };
+}
+
+async function getOperatorRootSession(rootSessionId, options = {}, dependencies = {}) {
+  if (!rootSessionId) {
+    return null;
+  }
+  const callJson = dependencies.callCliagentsJson || callCliagentsJson;
+  const snapshot = await callJson(
+    `/orchestration/root-sessions/${encodeURIComponent(rootSessionId)}?eventLimit=120&terminalLimit=40`
+  );
+  return buildRootSessionOperatorRecord(
+    buildRootSessionSummaryFromSnapshot(rootSessionId, snapshot),
+    snapshot,
+    options
+  );
+}
+
+async function handleListRootsCommand(rawArgs = [], dependencies = {}) {
+  const options = parseListRootsArgs(rawArgs);
+  if (options.help) {
+    printListRootsUsage();
+    return;
+  }
+
+  const roots = await listOperatorRootSessions(options, dependencies);
+  if (options.json) {
+    console.log(JSON.stringify(roots, null, 2));
+    return;
+  }
+
+  printOperatorRootSessionList(roots, options);
+}
+
+async function handleAttachRootCommand(rawArgs = [], dependencies = {}) {
+  const options = parseAttachRootArgs(rawArgs);
+  if (options.help) {
+    printAttachRootUsage();
+    return;
+  }
+
+  const roots = options.latest
+    ? await listOperatorRootSessions({
+        adapter: options.adapter,
+        includeArchived: options.includeArchived,
+        limit: 20,
+        liveOnly: true,
+        scope: options.scope,
+        workDir: options.workDir
+      }, dependencies)
+    : null;
+
+  const record = options.latest
+    ? roots[0] || null
+    : await getOperatorRootSession(options.rootSessionId, {
+        adapter: options.adapter,
+        workDir: options.workDir
+      }, dependencies);
+
+  if (!record) {
+    if (options.latest) {
+      throw new Error('No live root sessions matched the current filters');
+    }
+    throw new Error(`Root session ${options.rootSessionId} was not found or did not match the requested filters`);
+  }
+
+  if (!record.sessionName || !record.attachCommand) {
+    throw new Error(`Root session ${record.rootSessionId} does not have an attachable tmux session`);
+  }
+
+  console.log('Managed Root Selected');
+  console.log(`  root_session_id: ${record.rootSessionId}`);
+  console.log(`  adapter: ${record.adapter || record.originClient || 'unknown'}`);
+  console.log(`  status: ${record.status}`);
+  console.log(`  session_name: ${record.sessionName}`);
+  console.log(`  workdir: ${record.workDir || 'n/a'}`);
+  console.log(`  console_url: ${record.consoleUrl}`);
+  console.log(`  attach_command: ${record.attachCommand}`);
+
+  if (!options.printOnly && process.stdout.isTTY) {
+    attachToManagedSession(record, {
+      logger: dependencies.logger,
+      spawnSync: dependencies.spawnSync
+    });
+  }
+}
+
 async function getManagedRootResumeCandidate(rootSessionId, options = {}, dependencies = {}) {
   if (!rootSessionId) {
     return null;
@@ -611,18 +1272,38 @@ function formatManagedRootCandidateAge(candidate) {
   return `${diffDays}d ago`;
 }
 
+function truncateManagedRootPromptText(value, maxLength = 140) {
+  const normalized = String(value || '').replace(/\s+/g, ' ').trim();
+  if (!normalized) {
+    return '';
+  }
+  if (normalized.length <= maxLength) {
+    return normalized;
+  }
+  return `${normalized.slice(0, Math.max(0, maxLength - 1)).trimEnd()}…`;
+}
+
 function describeManagedRootSelectionCandidate(candidate) {
-  const details = [
+  const workDir = candidate.workDir ? resolveLaunchWorkDir(candidate.workDir) : null;
+  const workDirName = workDir ? (path.basename(workDir) || workDir) : null;
+  const metadata = [
+    workDirName ? `dir=${workDirName}` : null,
+    candidate.model ? `model=${candidate.model}` : null,
     candidate.launchProfile ? `profile=${candidate.launchProfile}` : null,
     candidate.processState ? `process=${candidate.processState}` : null,
     candidate.currentCommand ? `cmd=${candidate.currentCommand}` : null,
     candidate.recoveryReason ? `recovery=${candidate.recoveryReason}` : null,
     candidate.externalSessionRef ? candidate.externalSessionRef : null
   ].filter(Boolean).join(' • ');
+  const summary = truncateManagedRootPromptText(candidate.latestSummary || candidate.attentionMessage || '');
+  const excerpt = truncateManagedRootPromptText(candidate.activityExcerpt || '', 120);
 
   return {
     age: formatManagedRootCandidateAge(candidate),
-    details
+    workDir,
+    metadata,
+    summary,
+    excerpt
   };
 }
 
@@ -655,8 +1336,17 @@ function createManagedRootSelectionPrompt(candidates, options = {}) {
     for (const candidate of resumeCandidates) {
       const description = describeManagedRootSelectionCandidate(candidate);
       lines.push(
-        `  ${selectionIndex}. resume  ${candidate.status.padEnd(15)} ${description.age.padEnd(8)} ${candidate.rootSessionId.slice(0, 12)} ${description.details}`.trimEnd()
+        `  ${selectionIndex}. resume  ${candidate.status.padEnd(15)} ${description.age.padEnd(8)} ${candidate.rootSessionId.slice(0, 12)}${description.metadata ? ` ${description.metadata}` : ''}`.trimEnd()
       );
+      if (description.workDir) {
+        lines.push(`     workdir: ${description.workDir}`);
+      }
+      if (description.summary) {
+        lines.push(`     summary: ${description.summary}`);
+      }
+      if (description.excerpt && description.excerpt !== description.summary) {
+        lines.push(`     excerpt: ${description.excerpt}`);
+      }
       selectionEntries.push({ selectionIndex, candidate });
       selectionIndex += 1;
     }
@@ -670,8 +1360,17 @@ function createManagedRootSelectionPrompt(candidates, options = {}) {
     for (const candidate of recoverCandidates) {
       const description = describeManagedRootSelectionCandidate(candidate);
       lines.push(
-        `  ${selectionIndex}. recover ${candidate.status.padEnd(15)} ${description.age.padEnd(8)} ${candidate.rootSessionId.slice(0, 12)} ${description.details}`.trimEnd()
+        `  ${selectionIndex}. recover ${candidate.status.padEnd(15)} ${description.age.padEnd(8)} ${candidate.rootSessionId.slice(0, 12)}${description.metadata ? ` ${description.metadata}` : ''}`.trimEnd()
       );
+      if (description.workDir) {
+        lines.push(`     workdir: ${description.workDir}`);
+      }
+      if (description.summary) {
+        lines.push(`     summary: ${description.summary}`);
+      }
+      if (description.excerpt && description.excerpt !== description.summary) {
+        lines.push(`     excerpt: ${description.excerpt}`);
+      }
       selectionEntries.push({ selectionIndex, candidate });
       selectionIndex += 1;
     }
@@ -831,7 +1530,11 @@ function printManagedRootLaunchResult(result, launchOptions) {
   console.log(`  terminal_id: ${result.terminalId}`);
   console.log(`  session_name: ${result.sessionName}`);
   console.log(`  profile: ${launchOptions.profile}`);
+  if (result.providerStartMode) {
+    console.log(`  provider_start: ${result.providerStartMode}`);
+  }
   console.log(`  external_session_ref: ${result.externalSessionRef || 'n/a'}`);
+  console.log(`  workdir: ${result.workDir || launchOptions.workDir || 'n/a'}`);
   console.log(`  console_url: ${new URL(result.consoleUrl || '/console', getCliagentsBaseUrl()).toString()}`);
   if (result.attachCommand) {
     console.log(`  attach_command: ${result.attachCommand}`);
@@ -854,6 +1557,11 @@ function printManagedRootResumeResult(candidate) {
 }
 
 function printManagedRootRecoveryResult(result, previousCandidate, launchOptions) {
+  const exactProviderResumeId = previousCandidate.resumeSessionId || previousCandidate.providerThreadRef || null;
+  const automaticProviderResumeCommand = previousCandidate.resumeCommand
+    || buildManagedRootProviderResumeCommand(previousCandidate.adapter, exactProviderResumeId)
+    || buildManagedRootProviderLatestResumeCommand(previousCandidate.adapter);
+
   console.log('Managed Root Recovered');
   console.log(`  adapter: ${result.adapter}`);
   console.log(`  previous_root_session_id: ${previousCandidate.rootSessionId}`);
@@ -861,12 +1569,13 @@ function printManagedRootRecoveryResult(result, previousCandidate, launchOptions
   console.log(`  terminal_id: ${result.terminalId}`);
   console.log(`  session_name: ${result.sessionName}`);
   console.log(`  profile: ${launchOptions.profile}`);
+  if (result.providerStartMode) {
+    console.log(`  provider_start: ${result.providerStartMode}`);
+  }
   console.log(`  recovery_reason: ${previousCandidate.recoveryReason || 'stale-root'}`);
   console.log(`  external_session_ref: ${result.externalSessionRef || previousCandidate.externalSessionRef || 'n/a'}`);
-  if (previousCandidate.adapter === 'codex-cli' && previousCandidate.resumeSessionId) {
-    console.log(`  provider_resume: automatic (${previousCandidate.resumeCommand || `codex resume ${previousCandidate.resumeSessionId}`})`);
-  } else if (previousCandidate.resumeCommand) {
-    console.log(`  provider_resume_command: ${previousCandidate.resumeCommand}`);
+  if (automaticProviderResumeCommand) {
+    console.log(`  provider_resume: automatic (${automaticProviderResumeCommand})`);
   }
   console.log(`  console_url: ${new URL(result.consoleUrl || '/console', getCliagentsBaseUrl()).toString()}`);
   if (result.attachCommand) {
@@ -888,18 +1597,24 @@ function attachToManagedSession(launchResult, options = {}) {
     };
   }
 
+  const socketMatch = typeof attachCommand === 'string'
+    ? attachCommand.match(/\btmux\s+-S\s+("([^"]+)"|'([^']+)'|(\S+))/)
+    : null;
+  const tmuxSocketPath = socketMatch?.[2] || socketMatch?.[3] || socketMatch?.[4] || null;
+  const tmuxPrefixArgs = tmuxSocketPath ? ['-S', tmuxSocketPath] : [];
+  const attachEnv = buildManagedRootAttachEnvironment(process.env);
   const attachAttempts = [];
   if (process.env.TMUX) {
     attachAttempts.push({
-      tmuxArgs: ['switch-client', '-t', sessionName],
-      env: process.env,
+      tmuxArgs: [...tmuxPrefixArgs, 'switch-client', '-t', sessionName],
+      env: attachEnv,
       attachMode: 'switch-client'
     });
   }
-  const detachedEnv = { ...process.env };
+  const detachedEnv = { ...attachEnv };
   delete detachedEnv.TMUX;
   attachAttempts.push({
-    tmuxArgs: ['attach-session', '-t', sessionName],
+    tmuxArgs: [...tmuxPrefixArgs, 'attach-session', '-t', sessionName],
     env: detachedEnv,
     attachMode: 'attach-session'
   });
@@ -977,6 +1692,7 @@ async function launchManagedRootSession(options = {}) {
         launchEnvironment
       },
       launchEnvironment,
+      deferProviderStartUntilAttached: options.deferProviderStartUntilAttached === true,
       allowedTools: Array.isArray(options.allowedTools) && options.allowedTools.length > 0
         ? options.allowedTools
         : null
@@ -985,6 +1701,8 @@ async function launchManagedRootSession(options = {}) {
 }
 
 function buildManagedRootRecoveryLaunchOptions(launchOptions, candidate) {
+  const providerResumeSessionId = candidate.resumeSessionId || candidate.providerThreadRef || null;
+
   return {
     ...launchOptions,
     adapter: candidate.adapter || launchOptions.adapter,
@@ -1002,7 +1720,8 @@ function buildManagedRootRecoveryLaunchOptions(launchOptions, candidate) {
       previousProcessState: candidate.processState || null,
       previousCurrentCommand: candidate.currentCommand || null,
       providerResumeCommand: candidate.resumeCommand || null,
-      providerResumeSessionId: candidate.resumeSessionId || null
+      providerResumeSessionId,
+      providerResumeLatest: !providerResumeSessionId
     }
   };
 }
@@ -1013,6 +1732,7 @@ async function handleLaunchCommand(rawArgs = []) {
     printLaunchUsage();
     return;
   }
+  const deferProviderStartUntilAttached = !launchOptions.detach && Boolean(process.stdin.isTTY && process.stdout.isTTY);
 
   const launchTarget = await resolveManagedRootLaunchTarget(launchOptions);
   if (launchTarget.action === 'resume') {
@@ -1026,6 +1746,7 @@ async function handleLaunchCommand(rawArgs = []) {
 
   if (launchTarget.action === 'recover') {
     const recoveryOptions = buildManagedRootRecoveryLaunchOptions(launchOptions, launchTarget.candidate);
+    recoveryOptions.deferProviderStartUntilAttached = deferProviderStartUntilAttached;
     const result = await launchManagedRootSession(recoveryOptions);
     printManagedRootRecoveryResult(result, launchTarget.candidate, recoveryOptions);
     if (!launchOptions.detach && process.stdout.isTTY) {
@@ -1034,7 +1755,10 @@ async function handleLaunchCommand(rawArgs = []) {
     return;
   }
 
-  const result = await launchManagedRootSession(launchOptions);
+  const result = await launchManagedRootSession({
+    ...launchOptions,
+    deferProviderStartUntilAttached
+  });
   printManagedRootLaunchResult(result, launchOptions);
   if (!launchOptions.detach && process.stdout.isTTY) {
     attachToManagedSession(result);
@@ -1102,6 +1826,7 @@ module.exports = {
   buildManagedRootLaunchCandidate,
   normalizeManagedRootResumeCandidate,
   normalizeManagedRootRecoveryCandidate,
+  createManagedRootSelectionPrompt,
   listManagedRootLaunchCandidates,
   listManagedRootResumeCandidates,
   listManagedRootRecoveryCandidates,
@@ -1113,16 +1838,24 @@ module.exports = {
   buildManagedRootRecoveryLaunchOptions,
   attachToManagedSession,
   handleLaunchCommand,
+  handleListRootsCommand,
+  handleAttachRootCommand,
   handleAdoptCommand,
+  handleServeCommand,
   listAdapterModels,
+  listOperatorRootSessions,
+  getOperatorRootSession,
   parseAdoptArgs,
+  parseAttachRootArgs,
+  parseListRootsArgs,
+  parseServeArgs,
   adoptManagedRootSession,
 
   // Quick-start factory
   createServer: (options = {}) => new AgentServer(options),
 
   // Create standalone session manager (without HTTP server)
-  // Registers the focused broker adapters
+  // Register the active broker adapters
   createSessionManager: (options = {}) => {
     const manager = new SessionManager(options);
     registerActiveAdapters(manager, options);
@@ -1135,20 +1868,39 @@ module.exports = {
 if (require.main === module) {
   const args = process.argv.slice(2);
   const command = args[0];
+  const runCliCommand = (promise, failureLabel) => {
+    promise
+      .then(() => {
+        process.exit(0);
+      })
+      .catch((error) => {
+        console.error(`[cliagents] ${failureLabel} failed: ${error.message}`);
+        process.exit(1);
+      });
+  };
 
   if (command === 'launch') {
-    handleLaunchCommand(args.slice(1)).catch((error) => {
-      console.error(`[cliagents] Launch failed: ${error.message}`);
-      process.exit(1);
-    });
+    runCliCommand(handleLaunchCommand(args.slice(1)), 'Launch');
     return;
   }
 
   if (command === 'adopt') {
-    handleAdoptCommand(args.slice(1)).catch((error) => {
-      console.error(`[cliagents] Adopt failed: ${error.message}`);
-      process.exit(1);
-    });
+    runCliCommand(handleAdoptCommand(args.slice(1)), 'Adopt');
+    return;
+  }
+
+  if (command === 'list-roots') {
+    runCliCommand(handleListRootsCommand(args.slice(1)), 'list-roots');
+    return;
+  }
+
+  if (command === 'attach-root') {
+    runCliCommand(handleAttachRootCommand(args.slice(1)), 'attach-root');
+    return;
+  }
+
+  if (command === 'root' && args[1] === 'attach') {
+    runCliCommand(handleAttachRootCommand(args.slice(2)), 'root attach');
     return;
   }
 
@@ -1162,7 +1914,14 @@ if (require.main === module) {
     return;
   }
 
-  const port = process.env.PORT || 4001;
+  if (command === 'serve') {
+    handleServeCommand(args.slice(1)).catch((error) => {
+      console.error(`[cliagents] Serve failed: ${error.message}`);
+      process.exit(1);
+    });
+    return;
+  }
+
   const transcribeIndex = args.indexOf('--transcribe');
 
   if (transcribeIndex !== -1) {
@@ -1186,21 +1945,18 @@ if (require.main === module) {
     return; // Exit here, don't start the server
   }
 
-  const server = new AgentServer({ port });
+  const shouldTreatAsServeArgs = args.length > 0 && String(command || '').startsWith('-');
+  if (shouldTreatAsServeArgs) {
+    handleServeCommand(args).catch((error) => {
+      console.error(`[cliagents] Serve failed: ${error.message}`);
+      process.exit(1);
+    });
+    return;
+  }
 
-  server.start().then(() => {
-    console.log('\nAPI Endpoints:');
-    console.log('  GET  /health              - Health check');
-    console.log('  GET  /adapters            - List available adapters');
-    console.log('  POST /sessions            - Create new session');
-    console.log('  GET  /sessions            - List all sessions');
-    console.log('  GET  /sessions/:id        - Get session info');
-    console.log('  POST /sessions/:id/messages - Send message');
-    console.log('  POST /sessions/:id/parse  - Parse response text');
-    console.log('  DELETE /sessions/:id      - Terminate session');
-    console.log('  POST /ask                 - One-shot ask (auto session)');
-    console.log('\nWebSocket: ws://localhost:' + port + '/ws');
-    console.log('\nReady to accept connections!\n');
+  handleServeCommand([]).catch((error) => {
+    console.error(`[cliagents] Serve failed: ${error.message}`);
+    process.exit(1);
   });
 
   // Note: Graceful shutdown handlers are registered by AgentServer._setupShutdownHandlers()

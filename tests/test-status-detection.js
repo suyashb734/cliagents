@@ -145,6 +145,14 @@ async function testOpencodeCliDetection() {
   assert.strictEqual(detector.detectStatus(completedOutput), TerminalStatus.COMPLETED,
     'Should detect COMPLETED from step_finish event');
 
+  const errorOutput = '\nERROR 2026-04-20T10:55:30 service=llm error={"error":{"type":"SubscriptionUsageLimitError","message":"Subscription quota exceeded. You can continue using free models."}}';
+  assert.strictEqual(detector.detectStatus(errorOutput), TerminalStatus.ERROR,
+    'Should detect ERROR from printed OpenCode provider logs');
+
+  const jsonErrorOutput = '\n{"type":"error","message":"Subscription quota exceeded"}';
+  assert.strictEqual(detector.detectStatus(jsonErrorOutput), TerminalStatus.ERROR,
+    'Should detect ERROR from JSON error event');
+
   console.log('  ✅ OpenCode CLI detection works correctly');
 }
 
@@ -164,6 +172,18 @@ async function testClaudeCodeDetection() {
   const completedOutput = '\n⏺ Review complete\n';
   assert.strictEqual(detector.detectStatus(completedOutput), TerminalStatus.COMPLETED,
     'Should detect COMPLETED from Claude response markers');
+
+  const promptAfterResponseOutput = `
+⏺ UI root smoke.
+
+────────────────────────────────────────
+❯
+────────────────────────────────────────
+  ⬆ /gsd:update │ Sonnet 4.6 │ cliagents ░░░░░░░░░░ 9%
+  PR #2
+`;
+  assert.strictEqual(detector.detectStatus(promptAfterResponseOutput), TerminalStatus.IDLE,
+    'Should prefer IDLE once the Claude prompt is back after a response');
 
   console.log('  ✅ Claude Code detection works correctly');
 }

@@ -23,6 +23,7 @@ const { loadProfile } = require('../services/agent-profiles');
 const { summarizeOutput, createHandoffSummary, extractKeyDecisions, extractPendingItems } = require('../utils/context-summarizer');
 const { getDB } = require('../database/db');
 const { isAdapterAuthenticated } = require('../utils/adapter-auth');
+const { defineAdapterReadiness } = require('../adapters/contract');
 // Use unified output extraction (Gap #3 resolution)
 const { extractOutput: extractOutputShared, stripAnsiCodes } = require('../utils/output-extractor');
 // Permission interceptor for fine-grained permission control
@@ -62,6 +63,35 @@ function truncate(text, maxLength = 2000) {
   if (!text) return '';
   if (text.length <= maxLength) return text;
   return text.substring(0, maxLength) + '... [truncated]';
+}
+
+/**
+ * Detect terminal-scraped failures that should not be reported as successful handoffs.
+ */
+function detectExecutionFailure(output, fullOutput = '') {
+  const combined = [output, fullOutput]
+    .filter((value) => typeof value === 'string' && value.trim())
+    .join('\n');
+
+  if (!combined.trim()) {
+    return 'Worker completed without producing output';
+  }
+
+  const failurePatterns = [
+    [/you'?ve hit your usage limit/i, 'Worker hit its usage limit'],
+    [/rate limit exceeded|too many requests|resourceexhausted/i, 'Worker hit a rate limit'],
+    [/not authenticated|authentication failed|please log in|login required/i, 'Worker is not authenticated'],
+    [/process exited with code \d+/i, 'Worker process exited with a non-zero status'],
+    [/error:\s*(quota|auth|authentication|permission|timeout)/i, 'Worker reported an execution error']
+  ];
+
+  for (const [pattern, message] of failurePatterns) {
+    if (pattern.test(combined)) {
+      return message;
+    }
+  }
+
+  return null;
 }
 
 /**
@@ -192,6 +222,76 @@ function extractOutput(output, adapter) {
   return extractOutputShared(output, adapter);
 }
 
+function getLegacyInitReadiness(adapter) {
+  if (adapter === 'claude-code') {
+    return {
+      initTimeoutMs: 45000,
+      promptHandlers: [
+        {
+          matchAny: ['Settings Error', 'Continue without these settings'],
+          actions: ['Down', 'Enter'],
+          description: 'continue-without-invalid-claude-settings'
+        }
+      ]
+    };
+  }
+
+  if (adapter === 'codex-cli') {
+    return {
+      initTimeoutMs: 90000,
+      promptHandlers: [
+        {
+          matchAny: ['Update now', 'Skip until next version'],
+          actions: ['Down', 'Enter'],
+          description: 'skip-codex-update-menu'
+        },
+        {
+          matchAny: ['Press enter to continue', 'Update available'],
+          actions: ['Enter'],
+          description: 'dismiss-codex-update-info'
+        }
+      ]
+    };
+  }
+
+  if (adapter === 'gemini-cli') {
+    return {
+      initTimeoutMs: 60000,
+      promptHandlers: [
+        {
+          matchAny: ['Do you trust this folder', 'Trust folder'],
+          actions: ['Enter'],
+          description: 'accept-gemini-trust-folder'
+        }
+      ]
+    };
+  }
+
+  if (adapter === 'qwen-cli') {
+    return {
+      initTimeoutMs: 60000
+    };
+  }
+
+  return {
+    initTimeoutMs: 45000
+  };
+}
+
+function resolveInitReadinessPolicy(adapter, options = {}) {
+  const runtimeAdapter = options.runtimeAdapter || null;
+  const runtimeContract = typeof runtimeAdapter?.getContract === 'function'
+    ? runtimeAdapter.getContract()
+    : null;
+  const contractReadiness = runtimeContract?.readiness || null;
+
+  return defineAdapterReadiness({
+    ...getLegacyInitReadiness(adapter),
+    ...(contractReadiness || {}),
+    ...(options.readiness || {})
+  });
+}
+
 /**
  * Handle blocking interactive prompts during CLI initialization.
  *
@@ -202,68 +302,61 @@ function extractOutput(output, adapter) {
  *
  * This function detects these prompts and auto-dismisses them.
  */
-async function handleInitPrompts(sessionManager, terminalId, adapter, traceId) {
-  // Wait for CLI to start and potentially show blocking prompts
-  await new Promise(resolve => setTimeout(resolve, 5000));
+async function handleInitPrompts(sessionManager, terminalId, adapter, traceId, options = {}) {
+  const readinessPolicy = options.readinessPolicy
+    ? defineAdapterReadiness(options.readinessPolicy)
+    : resolveInitReadinessPolicy(adapter, options);
+  const {
+    promptMaxWaitMs: maxWaitMs,
+    promptPollIntervalMs: pollIntervalMs,
+    promptSettleDelayMs: settleDelayMs,
+    promptMaxRounds: maxRounds,
+    promptFallbackAction,
+    promptHandlers
+  } = readinessPolicy;
 
-  // Loop to handle multi-step prompts (e.g., Codex: select Skip → Press Enter to continue)
-  const maxRounds = 3;
-  for (let round = 0; round < maxRounds; round++) {
+  const deadline = Date.now() + maxWaitMs;
+  let round = 0;
+
+  while (Date.now() < deadline && round < maxRounds) {
     const currentStatus = sessionManager.getStatus(terminalId);
+    if (
+      currentStatus === TerminalStatus.IDLE ||
+      currentStatus === TerminalStatus.PROCESSING ||
+      currentStatus === TerminalStatus.COMPLETED
+    ) {
+      return;
+    }
+
     if (currentStatus !== TerminalStatus.WAITING_USER_ANSWER) {
-      return; // No blocking prompt, we're good
+      await sleep(pollIntervalMs);
+      continue;
     }
 
     const output = sessionManager.getOutput(terminalId, 1000);
     let handled = false;
+    const matchedHandler = promptHandlers.find((handler) =>
+      handler.matchAny.some((pattern) => output.includes(pattern))
+    );
 
-    // Claude Code: Settings Error dialog
-    // Options: 1. Exit and fix manually  2. Continue without these settings
-    // Option 1 is pre-selected; navigate Down then Enter to select option 2
-    if (adapter === 'claude-code') {
-      if (output.includes('Settings Error') || output.includes('Continue without these settings')) {
-        console.log(`[handoff] Claude settings error detected (round ${round + 1}), auto-continuing...`);
-        sessionManager.sendSpecialKey(terminalId, 'Down');
-        await new Promise(resolve => setTimeout(resolve, 300));
-        sessionManager.sendSpecialKey(terminalId, 'Enter');
-        handled = true;
+    if (matchedHandler) {
+      console.log(`[handoff] ${adapter} init prompt matched '${matchedHandler.description || matchedHandler.matchAny[0]}' (round ${round + 1})`);
+      for (let index = 0; index < matchedHandler.actions.length; index += 1) {
+        sessionManager.sendSpecialKey(terminalId, matchedHandler.actions[index]);
+        if (index < matchedHandler.actions.length - 1) {
+          await sleep(300);
+        }
       }
+      handled = true;
     }
 
-    // Codex CLI: Update available prompt (two-step)
-    // Step 1: Arrow menu "Update now / Skip / Skip until next version" → Down+Enter for Skip
-    // Step 2: Info box "Press enter to continue" → Enter
-    if (adapter === 'codex-cli') {
-      if (output.includes('Update now') || output.includes('Skip until next version')) {
-        console.log(`[handoff] Codex update menu detected (round ${round + 1}), selecting Skip...`);
-        sessionManager.sendSpecialKey(terminalId, 'Down');
-        await new Promise(resolve => setTimeout(resolve, 300));
-        sessionManager.sendSpecialKey(terminalId, 'Enter');
-        handled = true;
-      } else if (output.includes('Press enter to continue') || output.includes('Update available')) {
-        console.log(`[handoff] Codex update info detected (round ${round + 1}), pressing Enter...`);
-        sessionManager.sendSpecialKey(terminalId, 'Enter');
-        handled = true;
-      }
+    if (!handled && promptFallbackAction) {
+      console.log(`[handoff] Unknown WAITING_USER_ANSWER prompt for ${adapter} (round ${round + 1}), pressing ${promptFallbackAction}...`);
+      sessionManager.sendSpecialKey(terminalId, promptFallbackAction);
     }
 
-    // Gemini CLI: Trust folder prompt
-    // ● 1. Trust folder (pre-selected) → just press Enter
-    if (adapter === 'gemini-cli') {
-      if (output.includes('Do you trust this folder') || output.includes('Trust folder')) {
-        console.log(`[handoff] Gemini trust prompt detected (round ${round + 1}), auto-trusting...`);
-        sessionManager.sendSpecialKey(terminalId, 'Enter');
-        handled = true;
-      }
-    }
-
-    if (!handled) {
-      console.log(`[handoff] Unknown WAITING_USER_ANSWER prompt for ${adapter} (round ${round + 1}), pressing Enter...`);
-      sessionManager.sendSpecialKey(terminalId, 'Enter');
-    }
-
-    // Wait for the CLI to process the input and potentially show next prompt
-    await new Promise(resolve => setTimeout(resolve, 3000));
+    round += 1;
+    await sleep(settleDelayMs);
   }
 }
 
@@ -393,25 +486,26 @@ async function executeHandoffAttempt(agentProfile, message, profile, options) {
     }
 
     // 2. Wait for worker to be ready (IDLE)
-    // Different CLIs have different initialization times
-    const initTimeouts = {
-      'codex-cli': 90000,    // Codex is slowest to initialize
-      'gemini-cli': 60000,   // Gemini needs time for auth + trust prompt
-      'claude-code': 60000,  // Claude may show settings error dialog
-      'amazon-q': 45000      // Amazon Q is moderate
-    };
-    const initTimeout = initTimeouts[profile.adapter] || 45000;
+    const runtimeAdapter = context.apiSessionManager?.getAdapter?.(profile.adapter) || null;
+    const readinessPolicy = resolveInitReadinessPolicy(profile.adapter, { runtimeAdapter });
+    const initTimeout = readinessPolicy.initTimeoutMs;
 
     // Auto-handle blocking interactive prompts that prevent IDLE
     // Each adapter may show prompts during initialization that need to be dismissed.
     // We poll the status and check output to detect and handle these prompts.
-    await handleInitPrompts(sessionManager, worker.terminalId, profile.adapter, traceId);
+    await handleInitPrompts(sessionManager, worker.terminalId, profile.adapter, traceId, {
+      runtimeAdapter,
+      readinessPolicy
+    });
 
     try {
       await sessionManager.waitForStatus(worker.terminalId, TerminalStatus.IDLE, initTimeout);
     } catch (error) {
       // Before giving up, try handling prompts one more time (they may appear late)
-      await handleInitPrompts(sessionManager, worker.terminalId, profile.adapter, traceId);
+      await handleInitPrompts(sessionManager, worker.terminalId, profile.adapter, traceId, {
+        runtimeAdapter,
+        readinessPolicy
+      });
       try {
         await sessionManager.waitForStatus(worker.terminalId, TerminalStatus.IDLE, 15000);
       } catch (retryError) {
@@ -527,6 +621,11 @@ async function executeHandoffAttempt(agentProfile, message, profile, options) {
     if (!output) {
       output = extractOutput(fullOutput, profile.adapter);
       outputSource = 'terminal';
+    }
+
+    const executionFailure = detectExecutionFailure(output, fullOutput);
+    if (executionFailure) {
+      throw new Error(executionFailure);
     }
 
     // Store assistant response in message history
@@ -777,6 +876,8 @@ module.exports = {
   generateTraceId,
   truncate,
   buildEnhancedMessage,
+  handleInitPrompts,
+  resolveInitReadinessPolicy,
   // Export for testing
   calculateBackoff,
   isRetryable,

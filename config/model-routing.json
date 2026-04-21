@@ -1,0 +1,78 @@
+{
+  "_meta": {
+    "description": "Broker-side model routing policy for adapters with multiple provider/model surfaces",
+    "version": "1.0"
+  },
+  "adapters": {
+    "opencode-cli": {
+      "description": "Prefer coding-oriented MiniMax lanes for implementation, with Qwen and GLM fallback lanes for reasoning and degraded-provider recovery.",
+      "taskFamilies": {
+        "default": ["minimax", "glm", "qwen"],
+        "plan": ["qwen", "glm", "minimax"],
+        "architect": ["qwen", "glm", "minimax"],
+        "research": ["qwen", "glm", "minimax"],
+        "document": ["qwen", "glm", "minimax"],
+        "review": ["qwen", "glm", "minimax"],
+        "review-security": ["qwen", "glm", "minimax"],
+        "review-performance": ["qwen", "glm", "minimax"],
+        "implement": ["minimax", "glm", "qwen"],
+        "fix": ["minimax", "glm", "qwen"],
+        "test": ["minimax", "glm", "qwen"]
+      },
+      "families": {
+        "minimax": {
+          "description": "Coding-first implementation lane",
+          "providers": {
+            "minimax-coding-plan": [
+              "minimax-coding-plan/MiniMax-M2.7",
+              "minimax-coding-plan/MiniMax-M2.7-highspeed",
+              "minimax-coding-plan/MiniMax-M2.5",
+              "minimax-coding-plan/MiniMax-M2.5-highspeed",
+              "minimax-coding-plan/MiniMax-M2.1"
+            ],
+            "opencode-go": [
+              "opencode-go/minimax-m2.7",
+              "opencode-go/minimax-m2.5"
+            ],
+            "openrouter": [
+              "openrouter/minimax/minimax-m2.7",
+              "openrouter/minimax/minimax-m2.5",
+              "openrouter/minimax/minimax-m2.1",
+              "openrouter/minimax/minimax-m2"
+            ]
+          }
+        },
+        "qwen": {
+          "description": "Reasoning and alternate-review lane, preferring OpenRouter-backed Qwen before subscription-backed fallback lanes.",
+          "providers": {
+            "openrouter": [
+              "openrouter/qwen/qwen3.6-plus",
+              "openrouter/qwen/qwen3.5-plus-02-15",
+              "openrouter/qwen/qwen3-max",
+              "openrouter/qwen/qwen3-coder",
+              "openrouter/qwen/qwen3-coder-flash"
+            ],
+            "opencode-go": [
+              "opencode-go/qwen3.6-plus",
+              "opencode-go/qwen3.5-plus"
+            ]
+          }
+        },
+        "glm": {
+          "description": "GLM reasoning lane (fallback when qwen unavailable or degraded)",
+          "providers": {
+            "opencode-go": [
+              "opencode-go/glm-5.1",
+              "opencode-go/glm-5"
+            ],
+            "openrouter": [
+              "openrouter/zhipuai/glm-4.0-flash",
+              "openrouter/zhipuai/glm-4.0",
+              "openrouter/zhipuai/glm-4-air"
+            ]
+          }
+        }
+      }
+    }
+  }
+}

@@ -6,12 +6,6 @@
   },
 
   "adapters": {
-    "claude-code": {
-      "capabilities": ["plan-mode", "file-edit", "structured-output", "tool-restriction", "mcp"],
-      "defaultAllowedTools": ["Read", "Write", "Edit", "Glob", "Grep", "Bash", "Task"],
-      "readOnlyTools": ["Read", "Glob", "Grep"],
-      "description": "Claude Code CLI - full coding agent with MCP support"
-    },
     "gemini-cli": {
       "capabilities": ["web-search", "large-context", "fast-response"],
       "description": "Gemini CLI - fast responses, web search, large context window"
@@ -20,13 +14,17 @@
       "capabilities": ["code-review", "sandbox-execution", "auto-apply"],
       "description": "OpenAI Codex CLI - code review and sandbox execution"
     },
-    "amazon-q": {
-      "capabilities": ["aws-integration", "code-suggestions"],
-      "description": "Amazon Q - AWS-integrated coding assistant"
+    "qwen-cli": {
+      "capabilities": ["code-review", "reasoning", "mcp"],
+      "description": "Qwen Code CLI - coding and reasoning assistant"
     },
-    "github-copilot": {
-      "capabilities": ["code-completion", "explain-code"],
-      "description": "GitHub Copilot CLI - code suggestions and explanations"
+    "opencode-cli": {
+      "capabilities": ["code-review", "file-edit", "multi-provider"],
+      "description": "OpenCode CLI - direct-session coding agent with multi-provider support"
+    },
+    "claude-code": {
+      "capabilities": ["code-review", "reasoning", "file-edit", "multi-turn"],
+      "description": "Claude Code - strong reasoning and code editing with resumable direct sessions"
     }
   },
 
@@ -34,34 +32,22 @@
     "plan": {
       "description": "Creates implementation plans without executing code",
       "systemPrompt": "You are a technical planner. Analyze requirements, break down tasks into clear steps, identify dependencies, and create actionable implementation plans. Do NOT write code - only plan. Output your plan in a structured format with numbered steps.",
-      "defaultAdapter": "claude-code",
-      "timeout": 300,
-      "claudeOptions": {
-        "permissionMode": "plan",
-        "allowedTools": ["Read", "Glob", "Grep"]
-      }
+      "defaultAdapter": "qwen-cli",
+      "timeout": 300
     },
 
     "implement": {
       "description": "Implements code changes based on plans or requirements",
       "systemPrompt": "You are an implementation specialist. Follow the provided plan exactly and implement each step. Write clean, tested code. Report any blockers or deviations from the plan.",
-      "defaultAdapter": "claude-code",
-      "timeout": 900,
-      "claudeOptions": {
-        "permissionMode": "interceptor",
-        "allowedTools": ["Read", "Write", "Edit", "Glob", "Grep", "Bash"],
-        "allowedPaths": ["${workDir}"]
-      }
+      "defaultAdapter": "codex-cli",
+      "timeout": 900
     },
 
     "review": {
       "description": "Reviews code for bugs, issues, and improvements",
       "systemPrompt": "You are a code reviewer. Review the code thoroughly for bugs, logic errors, edge cases, error handling, security issues, and performance problems. List findings with file:line references and severity (critical/high/medium/low).",
-      "defaultAdapter": "claude-code",
-      "timeout": 300,
-      "claudeOptions": {
-        "allowedTools": ["Read", "Glob", "Grep"]
-      }
+      "defaultAdapter": "qwen-cli",
+      "timeout": 300
     },
 
     "review-security": {
@@ -81,25 +67,15 @@
     "test": {
       "description": "Writes and runs tests for code changes",
       "systemPrompt": "You are a testing specialist. Write unit tests, integration tests, and edge case tests. Run tests and report results. Aim for high coverage of changed code. Use the project's existing test framework.",
-      "defaultAdapter": "claude-code",
-      "timeout": 600,
-      "claudeOptions": {
-        "permissionMode": "interceptor",
-        "allowedTools": ["Read", "Write", "Edit", "Glob", "Grep", "Bash"],
-        "allowedPaths": ["${workDir}"]
-      }
+      "defaultAdapter": "codex-cli",
+      "timeout": 600
     },
 
     "fix": {
       "description": "Fixes issues identified by reviewers or tests",
       "systemPrompt": "You are a code fixer. Apply fixes for the issues provided. Make minimal, focused changes. Verify fixes don't break existing functionality. Explain what you changed and why.",
-      "defaultAdapter": "claude-code",
-      "timeout": 600,
-      "claudeOptions": {
-        "permissionMode": "interceptor",
-        "allowedTools": ["Read", "Write", "Edit", "Glob", "Grep", "Bash"],
-        "allowedPaths": ["${workDir}"]
-      }
+      "defaultAdapter": "codex-cli",
+      "timeout": 600
     },
 
     "research": {
@@ -112,36 +88,29 @@
     "architect": {
       "description": "Analyzes architecture and suggests improvements",
       "systemPrompt": "You are a software architect. Analyze code structure, identify patterns and anti-patterns, and recommend improvements. Consider scalability, maintainability, testability, and security. Provide concrete refactoring suggestions.",
-      "defaultAdapter": "claude-code",
-      "timeout": 600,
-      "claudeOptions": {
-        "permissionMode": "plan",
-        "allowedTools": ["Read", "Glob", "Grep"]
-      }
+      "defaultAdapter": "qwen-cli",
+      "timeout": 600
     },
 
     "document": {
       "description": "Writes documentation for code",
       "systemPrompt": "You are a technical writer. Write clear README updates, API docs, and inline comments. Focus on 'why' not 'what'. Keep it concise and useful for developers.",
-      "defaultAdapter": "claude-code",
-      "timeout": 300,
-      "claudeOptions": {
-        "allowedTools": ["Read", "Write", "Edit", "Glob"]
-      }
+      "defaultAdapter": "qwen-cli",
+      "timeout": 300
     }
   },
 
   "legacyProfiles": {
     "_comment": "Backward compatibility mapping from old profile names to new role+adapter",
-    "planner": { "role": "plan", "adapter": "claude-code" },
-    "implementer": { "role": "implement", "adapter": "claude-code" },
-    "reviewer-bugs": { "role": "review", "adapter": "claude-code" },
+    "planner": { "role": "plan", "adapter": "qwen-cli" },
+    "implementer": { "role": "implement", "adapter": "codex-cli" },
+    "reviewer-bugs": { "role": "review", "adapter": "qwen-cli" },
     "reviewer-security": { "role": "review-security", "adapter": "gemini-cli" },
     "reviewer-performance": { "role": "review-performance", "adapter": "codex-cli" },
-    "tester": { "role": "test", "adapter": "claude-code" },
-    "fixer": { "role": "fix", "adapter": "claude-code" },
+    "tester": { "role": "test", "adapter": "codex-cli" },
+    "fixer": { "role": "fix", "adapter": "codex-cli" },
     "researcher": { "role": "research", "adapter": "gemini-cli" },
-    "architect": { "role": "architect", "adapter": "claude-code" },
-    "documenter": { "role": "document", "adapter": "claude-code" }
+    "architect": { "role": "architect", "adapter": "qwen-cli" },
+    "documenter": { "role": "document", "adapter": "qwen-cli" }
   }
 }

@@ -10,6 +10,7 @@ function makeTempDir(prefix) {
 async function startTestServer(options = {}) {
   const tempDataDir = options.orchestration?.dataDir || makeTempDir('cliagents-test-data-');
   const tempLogDir = options.orchestration?.logDir || makeTempDir('cliagents-test-logs-');
+  const tempTmuxSocketPath = options.orchestration?.tmuxSocketPath || path.join(makeTempDir('cliagents-test-tmux-'), 'broker.sock');
   const server = new AgentServer({
     ...options,
     host: '127.0.0.1',
@@ -19,6 +20,7 @@ async function startTestServer(options = {}) {
       ...(options.orchestration || {}),
       dataDir: tempDataDir,
       logDir: tempLogDir,
+      tmuxSocketPath: tempTmuxSocketPath,
       destroyTerminalsOnStop: options.orchestration?.destroyTerminalsOnStop ?? true
     }
   });
@@ -32,7 +34,8 @@ async function startTestServer(options = {}) {
     port,
     baseUrl: `http://127.0.0.1:${port}`,
     tempDataDir,
-    tempLogDir
+    tempLogDir,
+    tempTmuxSocketPath
   };
 }
 
@@ -43,7 +46,7 @@ async function stopTestServer(testServer) {
 
   await testServer.server.stop();
 
-  for (const dirPath of [testServer.tempDataDir, testServer.tempLogDir]) {
+  for (const dirPath of [testServer.tempDataDir, testServer.tempLogDir, testServer.tempTmuxSocketPath && path.dirname(testServer.tempTmuxSocketPath)]) {
     if (dirPath && fs.existsSync(dirPath)) {
       fs.rmSync(dirPath, { recursive: true, force: true });
     }

@@ -13,6 +13,8 @@
 
 'use strict';
 
+const { getActiveBrokerAdapters } = require('../adapters/active-surface');
+
 /**
  * Strip ANSI escape codes from text
  * Handles ESC sequences, CSI sequences, and other terminal control codes
@@ -28,6 +30,50 @@ function stripAnsiCodes(text) {
   return text.replace(/[\x1b\x9b][[()#;?]*(?:[0-9]{1,4}(?:;[0-9]{0,4})*)?[0-9A-ORZcf-nqry=><]/g, '');
 }
 
+function findTrackedRunStartMatches(text) {
+  const matches = [];
+  const pattern = /(?:^|\n)(__CLIAGENTS_RUN_START__([a-f0-9]+))(?=\n|$)/g;
+  let match;
+  while ((match = pattern.exec(text)) !== null) {
+    const fullMarker = match[1];
+    const runId = match[2];
+    const markerIndex = match.index + match[0].lastIndexOf(fullMarker);
+    matches.push({
+      runId,
+      marker: fullMarker,
+      markerIndex
+    });
+  }
+  return matches;
+}
+
+/**
+ * Isolate the latest tracked tmux one-shot run segment, if present.
+ * @param {string} text
+ * @returns {string}
+ */
+function isolateLatestTrackedRun(text) {
+  if (!text) return '';
+
+  const startMatches = findTrackedRunStartMatches(text);
+  if (startMatches.length === 0) {
+    return text;
+  }
+
+  const latest = startMatches[startMatches.length - 1];
+  const runId = latest.runId;
+  const startIndex = latest.markerIndex + latest.marker.length;
+  const afterStart = text.slice(startIndex);
+  const exitRegex = new RegExp(`(?:^|\\n)(__CLIAGENTS_RUN_EXIT__${runId}__\\d+)(?=\\n|$)`);
+  const exitMatch = afterStart.match(exitRegex);
+
+  if (!exitMatch || exitMatch.index == null) {
+    return afterStart;
+  }
+
+  return afterStart.slice(0, exitMatch.index);
+}
+
 /**
  * Adapter-specific output extraction strategies
  *
@@ -41,6 +87,70 @@ const ADAPTER_STRATEGIES = {
      * Claude uses markers for responses and separates tool calls
      */
     extract: (output) => {
+      if (output.includes('"type"')) {
+        const lines = output.split('\n').map((line) => line.trim()).filter(Boolean);
+        const assistantParts = [];
+        let finalResult = '';
+        let buffer = '';
+
+        for (const line of lines) {
+          if (line.startsWith('{') && line.includes('"type"')) {
+            buffer = line;
+          } else if (buffer) {
+            buffer += line;
+          } else {
+            continue;
+          }
+
+          try {
+            const event = JSON.parse(buffer);
+
+            if (event.type === 'assistant' && Array.isArray(event.message?.content)) {
+              const textParts = event.message.content
+                .filter((part) => part?.type === 'text' && part.text)
+                .map((part) => String(part.text));
+              if (textParts.length > 0) {
+                assistantParts.push(textParts.join('\n'));
+              }
+            }
+
+            if ((event.type === 'result' || event.result) && event.result) {
+              finalResult = typeof event.result === 'string'
+                ? event.result.trim()
+                : JSON.stringify(event.result);
+            }
+
+            if (event.type === 'error' && event.error?.message) {
+              finalResult = String(event.error.message).trim();
+            }
+
+            buffer = '';
+          } catch {
+            // Keep buffering until the JSON object is complete.
+          }
+        }
+
+        if (finalResult) {
+          return finalResult;
+        }
+
+        if (assistantParts.length > 0) {
+          const deduped = [];
+          for (const part of assistantParts) {
+            const normalized = part.trim();
+            if (!normalized) continue;
+            if (deduped.length > 0 && normalized === deduped[deduped.length - 1]) {
+              continue;
+            }
+            deduped.push(normalized);
+          }
+          const combined = deduped.join('\n').trim();
+          if (combined) {
+            return combined;
+          }
+        }
+      }
+
       // Claude uses ⏺ markers for responses and tool calls
       // If no markers found, return null to use defaultExtract fallback
       if (!output.includes('⏺')) {
@@ -91,8 +201,74 @@ const ADAPTER_STRATEGIES = {
     /**
      * Extract response from Gemini CLI output
      * Gemini shows responses after ✦ marker
+     * Orchestration mode: outputs JSON stream
      */
     extract: (output) => {
+      // Check for JSON stream output first (orchestration mode)
+      if (output.includes('{"type":')) {
+        const lines = output.split('\n');
+        let jsonContent = '';
+        let foundJson = false;
+        let buffer = '';
+
+        for (const line of lines) {
+          const trimmed = line.trim();
+
+          // Start of a new JSON object
+          if (trimmed.startsWith('{') && trimmed.includes('"type"')) {
+            // If we had a previous buffer that didn't parse, discard it (incomplete/broken)
+            buffer = trimmed;
+          } else if (buffer) {
+            // Append to existing buffer if we have one
+            // We strip leading whitespace from continuation lines usually caused by wrapping?
+            // Actually tmux soft wrap usually doesn't add whitespace, but let's just append.
+            buffer += trimmed;
+          } else {
+            continue;
+          }
+
+          // Try to parse the current buffer
+          try {
+            const msg = JSON.parse(buffer);
+            // If we get here, it's valid JSON
+            if (msg.type === 'message' && msg.role === 'assistant' && msg.content) {
+              jsonContent += msg.content;
+              foundJson = true;
+            } else if (msg.type === 'result' && msg.response) {
+              return msg.response;
+            }
+            // Reset buffer after successful parse
+            buffer = '';
+          } catch (e) {
+            // Not valid JSON yet, continue buffering
+          }
+        }
+
+        if (foundJson) {
+          return jsonContent;
+        }
+
+        const assistantMatches = [
+          ...output.matchAll(/"type":"message"[\s\S]*?"role":"assistant"[\s\S]*?"content":"((?:\\.|[^"\\])*)"/g)
+        ];
+        if (assistantMatches.length > 0) {
+          const decoded = assistantMatches
+            .map((match) => {
+              try {
+                return JSON.parse(`"${match[1]}"`);
+              } catch {
+                return match[1];
+              }
+            })
+            .join('')
+            .trim();
+
+          if (decoded) {
+            return decoded;
+          }
+        }
+      }
+
       // If no Gemini markers found, return null to use defaultExtract fallback
       if (!output.includes('✦')) {
         return null;
@@ -127,6 +303,36 @@ const ADAPTER_STRATEGIES = {
      * Codex uses • for responses but also for status indicators
      */
     extract: (output) => {
+      if (output.includes('"thread_id"') || output.includes('"item.completed"')) {
+        const lines = output.split('\n').map((line) => line.trim()).filter(Boolean);
+        const agentMessages = [];
+        let buffer = '';
+
+        for (const line of lines) {
+          if (line.startsWith('{') && line.includes('"type"')) {
+            buffer = line;
+          } else if (buffer) {
+            buffer += line;
+          } else {
+            continue;
+          }
+
+          try {
+            const event = JSON.parse(buffer);
+            if (event.type === 'item.completed' && event.item?.type === 'agent_message' && event.item?.text) {
+              agentMessages.push(event.item.text);
+            }
+            buffer = '';
+          } catch {
+            // Keep buffering until the JSON object is complete.
+          }
+        }
+
+        if (agentMessages.length > 0) {
+          return agentMessages.join('\n').trim();
+        }
+      }
+
       // If no Codex markers found, return null to use defaultExtract fallback
       if (!output.includes('•')) {
         return null;
@@ -169,6 +375,101 @@ const ADAPTER_STRATEGIES = {
     stableMarkers: [/^›/, /context left/],
     runningMarkers: [/^(Working|Explored|Reading|Searching|Thinking|Analyzing)/],
     errorMarkers: [/Error:/, /failed/i]
+  },
+
+  'qwen-cli': {
+    /**
+     * Extract response from Qwen stream-json output.
+     */
+    extract: (output) => {
+      const lines = output.split('\n').map((line) => line.trim()).filter(Boolean);
+      let assistantText = '';
+      let finalResult = '';
+      let buffer = '';
+
+      for (const line of lines) {
+        if (line.startsWith('{') && line.includes('"type"')) {
+          buffer = line;
+        } else if (buffer) {
+          // tmux wrapping can split JSON objects across lines
+          buffer += line;
+        } else {
+          continue;
+        }
+
+        try {
+          const event = JSON.parse(buffer);
+
+          if (event.type === 'assistant') {
+            const parts = event.message?.content || [];
+            const textParts = parts
+              .filter((part) => part?.type === 'text')
+              .map((part) => part.text)
+              .filter(Boolean);
+            if (textParts.length > 0) {
+              assistantText = textParts.join('\n');
+            }
+          }
+
+          if (event.type === 'result' && event.result) {
+            finalResult = String(event.result).trim();
+          }
+
+          // reset after successful parse
+          buffer = '';
+        } catch {
+          // keep buffering
+        }
+      }
+
+      if (finalResult) {
+        return finalResult;
+      }
+      if (assistantText) {
+        return assistantText;
+      }
+
+      return null;
+    },
+    stableMarkers: [/qwen>/i, /QWEN_READY_FOR_ORCHESTRATION/],
+    runningMarkers: [/thinking/i, /tool_use/i],
+    errorMarkers: [/Error:/, /failed/i]
+  },
+
+  'opencode-cli': {
+    extract: (output) => {
+      const lines = output.split('\n').map((line) => line.trim()).filter(Boolean);
+      let assistantText = '';
+      let buffer = '';
+
+      for (const line of lines) {
+        if (line.startsWith('{') && line.includes('"type"')) {
+          buffer = line;
+        } else if (buffer) {
+          buffer += line;
+        } else {
+          continue;
+        }
+
+        try {
+          const event = JSON.parse(buffer);
+          if (event.type === 'text') {
+            const text = event.part?.text || event.text || '';
+            if (text) {
+              assistantText += text;
+            }
+          }
+          buffer = '';
+        } catch {
+          // Keep buffering until the JSON object is complete.
+        }
+      }
+
+      return assistantText || null;
+    },
+    stableMarkers: [/opencode>/i, /OPENCODE_READY_FOR_ORCHESTRATION/],
+    runningMarkers: [/thinking/i, /"type":"(?:step_start|text|progress)"/i],
+    errorMarkers: [/Error:/, /"type":"error"/i]
   }
 };
 
@@ -209,7 +510,7 @@ function defaultExtract(output) {
  * It handles ANSI stripping and adapter-specific extraction.
  *
  * @param {string} rawOutput - Raw output from terminal/log
- * @param {string} adapter - Adapter name ('claude-code', 'gemini-cli', 'codex-cli')
+ * @param {string} adapter - Adapter name from the active broker surface
  * @param {Object} options - Optional extraction settings
  * @param {boolean} options.stripAnsi - Whether to strip ANSI codes (default: true)
  * @returns {string} - Extracted response content
@@ -221,6 +522,10 @@ function extractOutput(rawOutput, adapter, options = {}) {
 
   // Strip ANSI codes first (terminal output contains raw control sequences)
   let output = stripAnsi ? stripAnsiCodes(rawOutput) : rawOutput;
+  output = isolateLatestTrackedRun(output)
+    .replace(/__CLIAGENTS_RUN_START__[a-f0-9]+\n?/g, '')
+    .replace(/__CLIAGENTS_RUN_EXIT__[a-f0-9]+__\d+\n?/g, '')
+    .replace(/__CLIAGENTS_PROVIDER_SESSION__[^\n]+\n?/g, '');
 
   // Get adapter-specific strategy
   const strategy = ADAPTER_STRATEGIES[adapter];
@@ -262,7 +567,7 @@ function getStatusMarkers(adapter) {
  * @returns {string[]} - Array of adapter names
  */
 function getSupportedAdapters() {
-  return Object.keys(ADAPTER_STRATEGIES);
+  return getActiveBrokerAdapters();
 }
 
 module.exports = {

@@ -1,6 +1,6 @@
 # Adding a Custom Adapter
 
-This guide explains how to create and register a custom adapter for `cliagents`. Adapters integrate CLI-based LLM tools by implementing the shared interface in `src/core/base-llm-adapter.js`.
+This guide explains how to create and register a custom adapter for `cliagents`. Adapters integrate CLI-based LLM tools by implementing the shared interface in `src/core/base-llm-adapter.js` and publishing capability metadata through `src/adapters/contract.js`.
 
 **1) Overview of the Adapter Interface**
 
@@ -12,6 +12,8 @@ All adapters extend `BaseLLMAdapter`, which is an `EventEmitter` defining a cons
 - Terminate sessions and clean up processes.
 
 File reference: `src/core/base-llm-adapter.js`.
+
+The explicit capability/contract helpers live in `src/adapters/contract.js`. New first-party adapters should use them so the broker can reason about execution mode, multi-turn support, tool support, and failure semantics without guessing from implementation details.
 
 **2) Required Methods to Implement**
 
@@ -35,6 +37,8 @@ Common optional overrides:
 - `getAvailableModels()` if your CLI supports model selection.
 - `parseResponse(text)` for adapter-specific parsing.
 - `interrupt(sessionId)` for graceful interruption. The base class provides a default implementation if you track `activeProcesses`.
+- `getCapabilities()` to return broker-visible capability metadata created with `defineAdapterCapabilities(...)`.
+- `getContract()` to return the adapter's explicit contract descriptor created with `createAdapterContract(...)`.
 
 **3) Minimal Working Example**
 

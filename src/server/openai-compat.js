@@ -19,7 +19,7 @@ const fs = require('fs');
 const path = require('path');
 
 /**
- * Model mapping: OpenAI/Claude/Gemini model names → CLI adapters
+ * Model mapping: active broker model names → CLI adapters
  */
 const MODEL_MAP = {
   // OpenAI models → Codex CLI (use 'default' — Codex picks the best available model)
@@ -31,30 +31,15 @@ const MODEL_MAP = {
   'o3-mini': { adapter: 'codex-cli', model: 'default' },
   'o4-mini': { adapter: 'codex-cli', model: 'default' },
 
-  // Claude models → Claude Code
-  'claude-sonnet-4-20250514': { adapter: 'claude-code', model: 'claude-sonnet-4-20250514' },
-  'claude-opus-4-5-20250514': { adapter: 'claude-code', model: 'claude-opus-4-5-20250514' },
-  'claude-3-5-sonnet-20241022': { adapter: 'claude-code', model: 'claude-3-5-sonnet-20241022' },
-  'claude-3-5-haiku-20241022': { adapter: 'claude-code', model: 'claude-3-5-haiku-20241022' },
-  'claude-3-opus-20240229': { adapter: 'claude-code', model: 'claude-3-opus-20240229' },
-  'claude-3-sonnet-20240229': { adapter: 'claude-code', model: 'claude-3-sonnet-20240229' },
-
   // Gemini models → Gemini CLI (for agentic dev work with tool use)
   'gemini-2.5-flash': { adapter: 'gemini-cli', model: 'gemini-2.5-flash' },
   'gemini-2.5-pro': { adapter: 'gemini-cli', model: 'gemini-2.5-pro' },
   'gemini-3-pro-preview': { adapter: 'gemini-cli', model: 'gemini-3-pro-preview' },
   'gemini-pro': { adapter: 'gemini-cli', model: 'default' },
 
-  // Mistral models → Vibe CLI
-  'devstral': { adapter: 'mistral-vibe', model: 'devstral' },
-  'devstral-small': { adapter: 'mistral-vibe', model: 'devstral-small' },
-  'codestral': { adapter: 'mistral-vibe', model: 'codestral' },
-
-  // Amazon Q
-  'amazon-q': { adapter: 'amazon-q', model: 'default' },
-
-  // GitHub Copilot
-  'copilot': { adapter: 'github-copilot', model: 'default' }
+  // Qwen models → Qwen CLI
+  'qwen-max': { adapter: 'qwen-cli', model: 'qwen-max' },
+  'qwen-plus': { adapter: 'qwen-cli', model: 'qwen-plus' }
 };
 
 /**
@@ -269,7 +254,7 @@ function extractJsonFromResponse(text) {
 function detectRateLimitError(text) {
   if (!text || typeof text !== 'string') return false;
   return /rate.?limit\s*(exceeded|error|reached|hit)|overloaded.*try again|too many requests/i.test(text)
-    || /quota exceeded|ResourceExhausted|429.*too many/i.test(text);
+    || /quota exceeded|quota_exhausted|ResourceExhausted|exhausted your capacity|capacity on this model|429.*too many/i.test(text);
 }
 
 /**
@@ -284,7 +269,7 @@ function translateOpenAIRequest(body) {
 
   // Validate message format
   for (const msg of messages) {
-    if (!msg.role || (msg.content === undefined && msg.content === null)) {
+    if (!msg.role || msg.content === undefined || msg.content === null) {
       throw new Error('Each message must have role and content fields');
     }
     if (!['system', 'user', 'assistant'].includes(msg.role)) {
@@ -305,8 +290,10 @@ function translateOpenAIRequest(body) {
     throw new Error('No user message found in messages array');
   }
 
-  // Map model to adapter (default to claude-code if unknown)
-  const mapping = MODEL_MAP[model] || { adapter: 'claude-code', model: 'default' };
+  const mapping = MODEL_MAP[model];
+  if (!mapping) {
+    throw new Error(`Model '${model}' not found`);
+  }
 
   const options = {
     temperature,
@@ -467,11 +454,12 @@ function createOpenAIRouter(sessionManager) {
         adapter,
         model,
         systemPrompt,
+        workDir: process.cwd(),
         temperature: options.temperature,
         top_p: options.top_p,
         max_output_tokens: options.max_output_tokens,
         jsonSchema: options.jsonSchema,
-        jsonMode: options.jsonMode,
+        jsonMode: adapter === 'gemini-cli' ? true : options.jsonMode,
         images
       };
 
@@ -611,18 +599,33 @@ function createOpenAIRouter(sessionManager) {
       // Determine appropriate status code
       let status = 500;
       let errorType = 'internal_error';
+      let errorParam = null;
+      let errorCode = null;
 
       if (error.message.includes('required') || error.message.includes('invalid')) {
         status = 400;
         errorType = 'invalid_request_error';
       }
 
+      if (error.message.includes("Model '") && error.message.includes("' not found")) {
+        status = 400;
+        errorType = 'invalid_request_error';
+        errorParam = 'model';
+        errorCode = 'model_not_found';
+      }
+
+      if (detectRateLimitError(error.message)) {
+        status = 429;
+        errorType = 'rate_limit_error';
+        errorCode = 'rate_limit_exceeded';
+      }
+
       res.status(status).json({
         error: {
           message: error.message,
           type: errorType,
-          param: null,
-          code: null
+          param: errorParam,
+          code: errorCode
         }
       });
     } finally {

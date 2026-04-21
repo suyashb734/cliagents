@@ -2,7 +2,7 @@
  * Prompt Parsers - Extract tool/args from CLI permission prompts
  *
  * SECURITY: These parsers must be strict to avoid prompt spoofing.
- * See docs/IMPLEMENTATION_PLAN_INTERCEPTOR_DISCUSSION.md for security considerations.
+ * See docs/research/IMPLEMENTATION_PLAN_INTERCEPTOR_DISCUSSION.md for security considerations.
  *
  * Key security measures:
  * 1. Use start-of-line anchors (^) to avoid matching spoofed output

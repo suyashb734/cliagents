@@ -33,7 +33,7 @@ const CLAUDE_PATTERNS = {
    * However, "to cycle)" can appear during processing (in status bar like
    * "(+4 lines) ⌘⏎ to cycle)"), so we don't include that pattern.
    */
-  IDLE: /❯\s+(?:Try|$)|[>❯]\s*$|↵ send|bypass permissions on/,
+  IDLE: /❯\s+(?:Try|$)|[>❯]\s*$|↵ send|bypass permissions on|^CLAUDE_READY_FOR_ORCHESTRATION$/m,
 
   /**
    * PROCESSING: Agent is working
@@ -93,11 +93,47 @@ class ClaudeCodeDetector extends BaseStatusDetector {
     this.name = 'claude-code';
   }
 
+  hasTrailingIdlePrompt(output) {
+    const tailLines = String(output || '')
+      .split('\n')
+      .map((line) => line.trim())
+      .filter(Boolean)
+      .slice(-6);
+
+    return tailLines.some((line) => (
+      /^[>❯]\s*$/u.test(line)
+      || line.includes('↵ send')
+      || /bypass permissions on/i.test(line)
+    ));
+  }
+
   /**
    * Enhanced detection with Claude-specific logic
    */
   detectStatus(output) {
     const tail = this.getTail(output);
+
+    if (this.patterns.ERROR && this.patterns.ERROR.test(tail)) {
+      return TerminalStatus.ERROR;
+    }
+
+    if (this.patterns.WAITING_PERMISSION && this.patterns.WAITING_PERMISSION.test(tail)) {
+      return TerminalStatus.WAITING_PERMISSION;
+    }
+
+    if (this.patterns.WAITING_USER_ANSWER && this.patterns.WAITING_USER_ANSWER.test(tail)) {
+      return TerminalStatus.WAITING_USER_ANSWER;
+    }
+
+    if (this.patterns.PROCESSING && this.patterns.PROCESSING.test(tail)) {
+      return TerminalStatus.PROCESSING;
+    }
+
+    // Managed interactive roots stay at a prompt after a response. Prefer the
+    // visible prompt over older completion markers still present in the scrollback.
+    if (this.hasTrailingIdlePrompt(tail)) {
+      return TerminalStatus.IDLE;
+    }
 
     // Check for streaming JSON output format
     // Claude Code with --output-format stream-json outputs JSON objects
@@ -105,8 +141,15 @@ class ClaudeCodeDetector extends BaseStatusDetector {
       return this.detectFromStreamJson(tail);
     }
 
-    // Fall back to pattern-based detection
-    return super.detectStatus(output);
+    if (this.patterns.COMPLETED && this.patterns.COMPLETED.test(tail)) {
+      return TerminalStatus.COMPLETED;
+    }
+
+    if (this.patterns.IDLE && this.patterns.IDLE.test(tail)) {
+      return TerminalStatus.IDLE;
+    }
+
+    return TerminalStatus.IDLE;
   }
 
   /**

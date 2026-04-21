@@ -24,7 +24,8 @@ const {
   getAllAdapterStatuses,
   testAdapterAuth,
   setEnvVar,
-  getAuthConfig
+  getAuthConfig,
+  isAdapterAuthenticated
 } = require('../utils/adapter-auth');
 const { createOpenAIRouter } = require('./openai-compat');
 const { authenticateRequest, validateApiKey } = require('./auth');
@@ -75,7 +76,7 @@ class AgentServer {
       maxSessions: options.maxSessions || 10
     });
 
-    // Register the focused broker adapters
+    // Register the active broker adapters
     registerActiveAdapters(this.sessionManager, options);
 
     // Express app
@@ -138,7 +139,8 @@ class AgentServer {
       const persistentSessionManager = new PersistentSessionManager({
         db,
         logDir: options.orchestration?.logDir || path.join(process.cwd(), 'logs'),
-        workDir: options.orchestration?.workDir || process.cwd()
+        workDir: options.orchestration?.workDir || process.cwd(),
+        tmuxSocketPath: options.orchestration?.tmuxSocketPath || null
       });
 
       // Register status detectors
@@ -187,6 +189,9 @@ class AgentServer {
       console.log('[AgentServer] Orchestration enabled');
       console.log('[AgentServer]   - Database: data/cliagents.db');
       console.log('[AgentServer]   - Logs: logs/');
+      if (options.orchestration?.tmuxSocketPath) {
+        console.log(`[AgentServer]   - tmux socket: ${options.orchestration.tmuxSocketPath}`);
+      }
       console.log('[AgentServer]   - Endpoints: /orchestration/*');
 
     } catch (error) {
@@ -314,10 +319,13 @@ class AgentServer {
         for (const name of this.sessionManager.getAdapterNames()) {
           const adapter = this.sessionManager.getAdapter(name);
           const available = await adapter.isAvailable();
+          const auth = isAdapterAuthenticated(name);
           const adapterInfo = {
             name,
             ...adapter.getInfo(),
-            available
+            available,
+            authenticated: auth.authenticated,
+            authenticationReason: auth.reason
           };
           // Include available models if adapter supports them
           if (typeof adapter.getAvailableModels === 'function') {
@@ -772,6 +780,12 @@ class AgentServer {
             authType: status.authType,
             installed: status.installed,
             authStatus,
+            models: typeof adapter.getAvailableModels === 'function'
+              ? adapter.getAvailableModels()
+              : [],
+            runtimeProviders: typeof adapter.getProviderSummary === 'function'
+              ? adapter.getProviderSummary()
+              : [],
             envVarsSet: status.envVarsSet,
             configFileExists: status.configFileExists,
             configFilePath: status.configFilePath,

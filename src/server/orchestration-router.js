@@ -20,7 +20,8 @@ const { buildRootSessionSnapshot, listRootSessionSummaries } = require('../orche
 const {
   normalizeManagedRootAdapter,
   inferManagedRootOriginClient,
-  buildManagedRootExternalSessionRef
+  buildManagedRootExternalSessionRef,
+  composeManagedRootSystemPrompt
 } = require('../orchestration/managed-root-launch');
 const { sendMessage, broadcastMessage } = require('../orchestration/send-message');
 const { getAgentProfiles, resolveProfile } = require('../services/agent-profiles');
@@ -34,7 +35,7 @@ const { isAdapterAuthenticated } = require('../utils/adapter-auth');
  */
 function createOrchestrationRouter(context) {
   const router = express.Router();
-  const { sessionManager, apiSessionManager, db, inboxService } = context;
+  const { sessionManager, apiSessionManager, db, inboxService, adapterAuthInspector } = context;
   const sessionGraphWritesEnabled = process.env.SESSION_GRAPH_WRITES_ENABLED === '1';
   const sessionEventsEnabled = process.env.SESSION_EVENTS_ENABLED === '1';
   const runLedgerWritesEnabled = process.env.RUN_LEDGER_ENABLED === '1';
@@ -67,6 +68,148 @@ function createOrchestrationRouter(context) {
     return fallback;
   }
 
+  function parseSessionMetadataValue(value) {
+    if (!value) {
+      return null;
+    }
+    if (typeof value === 'object' && !Array.isArray(value)) {
+      return value;
+    }
+    if (typeof value !== 'string') {
+      return null;
+    }
+    try {
+      const parsed = JSON.parse(value);
+      return parsed && typeof parsed === 'object' && !Array.isArray(parsed) ? parsed : null;
+    } catch {
+      return null;
+    }
+  }
+
+  function parseUsageBreakdownList(value) {
+    if (!value) {
+      return [];
+    }
+    const allowed = new Set(['adapter', 'provider', 'model', 'sourceConfidence']);
+    return String(value)
+      .split(',')
+      .map((entry) => entry.trim())
+      .filter(Boolean)
+      .map((entry) => (entry === 'source_confidence' ? 'sourceConfidence' : entry))
+      .filter((entry) => allowed.has(entry));
+  }
+
+  function buildUsageResponse(scopeKey, scopeValue, options = {}) {
+    if (!db?.summarizeUsage || !db?.listUsageBreakdown) {
+      throw new Error('usage observability is not configured');
+    }
+
+    const filters = { [scopeKey]: scopeValue };
+    const summary = db.summarizeUsage(filters);
+    const breakdowns = {};
+    for (const breakdown of options.breakdowns || []) {
+      breakdowns[breakdown] = db.listUsageBreakdown({
+        ...filters,
+        groupBy: breakdown,
+        limit: options.breakdownLimit || 20
+      });
+    }
+
+    return {
+      scope: scopeKey,
+      summary,
+      breakdowns
+    };
+  }
+
+  function mapChildTerminalSummary(terminalRow, liveTerminal = null) {
+    const metadata = liveTerminal?.sessionMetadata
+      || parseSessionMetadataValue(terminalRow?.session_metadata || terminalRow?.sessionMetadata)
+      || {};
+    const providerThreadRef = liveTerminal?.providerThreadRef
+      || terminalRow?.provider_thread_ref
+      || terminalRow?.providerThreadRef
+      || null;
+
+    return {
+      terminalId: terminalRow?.terminal_id || terminalRow?.terminalId || null,
+      parentSessionId: terminalRow?.parent_session_id || terminalRow?.parentSessionId || null,
+      sessionKind: liveTerminal?.sessionKind || terminalRow?.session_kind || terminalRow?.sessionKind || null,
+      sessionLabel: metadata.sessionLabel || liveTerminal?.sessionLabel || null,
+      adapter: liveTerminal?.adapter || terminalRow?.adapter || null,
+      role: liveTerminal?.role || terminalRow?.role || null,
+      agentProfile: terminalRow?.agent_profile || terminalRow?.agentProfile || null,
+      status: liveTerminal?.taskState || liveTerminal?.status || terminalRow?.status || null,
+      lastActive: liveTerminal?.lastActive || terminalRow?.last_active || terminalRow?.lastActive || null,
+      providerThreadRefPresent: Boolean(providerThreadRef)
+    };
+  }
+
+  function isRootTerminalRecord(terminalRow, rootSessionId) {
+    const terminalId = terminalRow?.terminal_id || terminalRow?.terminalId || null;
+    const parentSessionId = terminalRow?.parent_session_id || terminalRow?.parentSessionId || null;
+    const sessionKind = String(terminalRow?.session_kind || terminalRow?.sessionKind || '').trim().toLowerCase();
+    return terminalId === rootSessionId || (!parentSessionId && sessionKind === 'main');
+  }
+
+  function getLiveTerminal(terminalId) {
+    if (!terminalId || typeof sessionManager?.getTerminal !== 'function') {
+      return null;
+    }
+    return sessionManager.getTerminal(terminalId);
+  }
+
+  function getLiveOutput(terminalId, options = {}) {
+    if (!terminalId || typeof sessionManager?.getOutput !== 'function') {
+      return '';
+    }
+    return sessionManager.getOutput(terminalId, options);
+  }
+
+  function getRootSessionSnapshot(rootSessionId, options = {}) {
+    if (!rootSessionId || !db?.listSessionEvents || !db?.listTerminals) {
+      return null;
+    }
+
+    return buildRootSessionSnapshot({
+      db,
+      rootSessionId,
+      eventLimit: options.eventLimit ?? 400,
+      terminalLimit: options.terminalLimit ?? 200,
+      liveTerminalResolver: getLiveTerminal,
+      liveOutputResolver: getLiveOutput
+    });
+  }
+
+  function resolveTerminalRootAccess(terminalId) {
+    if (!terminalId) {
+      return null;
+    }
+
+    const liveTerminal = getLiveTerminal(terminalId);
+    const terminalRow = liveTerminal || (typeof db?.getTerminal === 'function' ? db.getTerminal(terminalId) : null);
+    if (!terminalRow) {
+      return null;
+    }
+
+    const rootSessionId = liveTerminal?.rootSessionId
+      || terminalRow?.root_session_id
+      || terminalRow?.rootSessionId
+      || liveTerminal?.terminalId
+      || terminalRow?.terminal_id
+      || terminalRow?.terminalId
+      || null;
+
+    if (!rootSessionId) {
+      return null;
+    }
+
+    return getRootSessionSnapshot(rootSessionId, {
+      eventLimit: 120,
+      terminalLimit: 80
+    });
+  }
+
   function readHeaderValue(req, name) {
     const value = req.headers?.[name.toLowerCase()];
     if (typeof value !== 'string') {
@@ -83,9 +226,47 @@ function createOrchestrationRouter(context) {
     return { ...sessionMetadata };
   }
 
+  const ALLOWED_LAUNCH_ENVIRONMENT_KEYS = new Set([
+    'TERM_PROGRAM',
+    'TERM_PROGRAM_VERSION',
+    'COLORTERM',
+    'COLUMNS',
+    'LINES',
+    'LC_TERMINAL',
+    'LC_TERMINAL_VERSION',
+    'VTE_VERSION',
+    'KITTY_WINDOW_ID',
+    'KITTY_PUBLIC_KEY',
+    'KITTY_INSTALLATION_DIR',
+    'WT_SESSION',
+    'WT_PROFILE_ID',
+    'TERMUX_VERSION'
+  ]);
+
+  function normalizeLaunchEnvironment(input) {
+    if (!input || typeof input !== 'object' || Array.isArray(input)) {
+      return null;
+    }
+    const normalized = {};
+    for (const [key, value] of Object.entries(input)) {
+      if (!ALLOWED_LAUNCH_ENVIRONMENT_KEYS.has(key)) {
+        continue;
+      }
+      if (typeof value !== 'string') {
+        continue;
+      }
+      const trimmed = value.trim();
+      if (!trimmed) {
+        continue;
+      }
+      normalized[key] = trimmed;
+    }
+    return Object.keys(normalized).length > 0 ? normalized : null;
+  }
+
   function resolveRequestControlPlaneContext(req, provided = {}, options = {}) {
     const metadata = normalizeSessionMetadata(provided.sessionMetadata);
-    const allowImplicitRootCreate = options.allowImplicitRootCreate !== false;
+    const allowImplicitRootCreate = options.allowImplicitRootCreate === true;
     const originClient = provided.originClient
       || readHeaderValue(req, 'x-cliagents-origin-client')
       || null;
@@ -108,6 +289,24 @@ function createOrchestrationRouter(context) {
       || readHeaderValue(req, 'x-cliagents-session-kind')
       || options.defaultSessionKind
       || null;
+    const requestedBindingMetadata = Boolean(
+      metadata.clientName
+      || metadata.clientSessionRef
+      || metadata.externalSessionRef
+      || metadata.attachMode
+      || metadata.rootIdentitySource
+      || metadata.mcpSessionScope
+      || metadata.workspaceRoot
+    );
+    const requestedBinding = Boolean(
+      provided.rootSessionId
+      || provided.parentSessionId
+      || readHeaderValue(req, 'x-cliagents-root-session-id')
+      || readHeaderValue(req, 'x-cliagents-parent-session-id')
+      || originClient
+      || externalSessionRef
+      || requestedBindingMetadata
+    );
 
     if (clientName && !metadata.clientName) {
       metadata.clientName = clientName;
@@ -123,16 +322,21 @@ function createOrchestrationRouter(context) {
 
     let attachedRoot = false;
     let reusedAttachedRoot = false;
+    let conflictingRootSessionId = null;
 
-    if (!rootSessionId && db?.addSessionEvent && externalSessionRef) {
+    if (db?.addSessionEvent && externalSessionRef) {
       const existing = typeof db.findLatestRootSessionByClientRef === 'function'
         ? db.findLatestRootSessionByClientRef({ originClient, externalSessionRef, clientName })
         : null;
 
       if (existing?.root_session_id) {
-        rootSessionId = existing.root_session_id;
-        reusedAttachedRoot = true;
-      } else if (allowImplicitRootCreate) {
+        if (rootSessionId && existing.root_session_id !== rootSessionId) {
+          conflictingRootSessionId = existing.root_session_id;
+        } else if (!rootSessionId) {
+          rootSessionId = existing.root_session_id;
+          reusedAttachedRoot = true;
+        }
+      } else if (!rootSessionId && allowImplicitRootCreate) {
         rootSessionId = crypto.randomBytes(16).toString('hex');
         attachedRoot = true;
         db.addSessionEvent({
@@ -167,16 +371,42 @@ function createOrchestrationRouter(context) {
       lineageDepth: provided.lineageDepth,
       sessionMetadata: Object.keys(metadata).length > 0 ? metadata : null,
       clientName,
+      requestedBinding,
       attachedRoot,
-      reusedAttachedRoot
+      reusedAttachedRoot,
+      conflictingRootSessionId
     };
+  }
+
+  function buildRootBindingConflictError(endpoint, resolvedControlPlane) {
+    return {
+      error: {
+        code: 'root_session_binding_conflict',
+        message: `The provided rootSessionId does not match the root already bound to this externalSessionRef for ${endpoint}.`,
+        endpoint,
+        nextAction: 'reset the stale MCP root binding or reattach the correct root session before delegating again',
+        details: {
+          rootSessionId: resolvedControlPlane?.rootSessionId || null,
+          externalSessionRef: resolvedControlPlane?.externalSessionRef || null,
+          conflictingRootSessionId: resolvedControlPlane?.conflictingRootSessionId || null
+        }
+      }
+    };
+  }
+
+  function requireConsistentRootBinding(res, endpoint, resolvedControlPlane) {
+    if (!resolvedControlPlane?.conflictingRootSessionId) {
+      return false;
+    }
+    res.status(409).json(buildRootBindingConflictError(endpoint, resolvedControlPlane));
+    return true;
   }
 
   function buildRootAttachError(endpoint, resolvedControlPlane) {
     const attachMode = resolvedControlPlane?.sessionMetadata?.attachMode || null;
-    const implicitFirstUse = attachMode === 'implicit-first-use';
+    const implicitFirstUse = String(attachMode || '').trim().toLowerCase().startsWith('implicit');
     const message = implicitFirstUse
-      ? `A stable cliagents root session must be attached before calling ${endpoint}. Implicit first-use root creation is disabled in strict mode. Serena project activation or creating .cliagents config does not attach a cliagents root session.`
+      ? `A stable cliagents root session must be attached before calling ${endpoint}. Implicit first-use root creation is disabled for this endpoint. Serena project activation or creating .cliagents config does not attach a cliagents root session.`
       : `A cliagents root session is required before calling ${endpoint}.`;
 
     return {
@@ -184,7 +414,7 @@ function createOrchestrationRouter(context) {
         code: 'root_session_required',
         message,
         endpoint,
-        nextAction: 'call ensure_root_session or attach_root_session first, or provide a stable externalSessionRef/rootSessionId',
+        nextAction: 'call ensure_root_session or attach_root_session first, or provide an already-attached rootSessionId',
         details: {
           rootSessionId: resolvedControlPlane?.rootSessionId || null,
           externalSessionRef: resolvedControlPlane?.externalSessionRef || null,
@@ -195,16 +425,75 @@ function createOrchestrationRouter(context) {
   }
 
   function requireAttachedRoot(res, endpoint, resolvedControlPlane) {
-    if (!requireRootAttach) {
+    const attachMode = resolvedControlPlane?.sessionMetadata?.attachMode || null;
+    const implicitFirstUse = String(attachMode || '').trim().toLowerCase().startsWith('implicit');
+    if (resolvedControlPlane?.rootSessionId && !implicitFirstUse) {
       return false;
     }
-    const attachMode = resolvedControlPlane?.sessionMetadata?.attachMode || null;
-    const implicitFirstUse = attachMode === 'implicit-first-use';
-    if (resolvedControlPlane?.rootSessionId && !implicitFirstUse) {
+    if (!resolvedControlPlane?.rootSessionId && resolvedControlPlane?.requestedBinding) {
+      res.status(428).json(buildRootAttachError(endpoint, resolvedControlPlane));
+      return true;
+    }
+    if (!requireRootAttach) {
       return false;
     }
     res.status(428).json(buildRootAttachError(endpoint, resolvedControlPlane));
     return true;
+  }
+
+  function projectExecutionControlPlane(resolvedControlPlane) {
+    if (!resolvedControlPlane?.rootSessionId) {
+      return {
+        rootSessionId: null,
+        parentSessionId: null,
+        sessionKind: null,
+        originClient: null,
+        externalSessionRef: null,
+        lineageDepth: null,
+        sessionMetadata: null
+      };
+    }
+
+    return {
+      rootSessionId: resolvedControlPlane.rootSessionId,
+      parentSessionId: resolvedControlPlane.parentSessionId || null,
+      sessionKind: resolvedControlPlane.sessionKind || null,
+      originClient: resolvedControlPlane.originClient || null,
+      externalSessionRef: resolvedControlPlane.externalSessionRef || null,
+      lineageDepth: resolvedControlPlane.lineageDepth ?? null,
+      sessionMetadata: resolvedControlPlane.sessionMetadata || null
+    };
+  }
+
+  function ensureRootSessionStarted({
+    rootSessionId,
+    originClient,
+    externalSessionRef,
+    clientName,
+    sessionMetadata,
+    attachMode,
+    payloadSummary
+  }) {
+    if (!db?.addSessionEvent || !rootSessionId) {
+      return;
+    }
+
+    db.addSessionEvent({
+      rootSessionId,
+      sessionId: rootSessionId,
+      parentSessionId: null,
+      eventType: 'session_started',
+      originClient: originClient || 'system',
+      idempotencyKey: `${rootSessionId}:${rootSessionId}:session_started:${attachMode || 'explicit'}`,
+      payloadSummary: payloadSummary || `Root session started via ${attachMode || 'explicit'}`,
+      payloadJson: {
+        attachMode: attachMode || 'explicit',
+        sessionKind: 'attach',
+        externalSessionRef: externalSessionRef || null,
+        clientName: clientName || null
+      },
+      metadata: sessionMetadata && Object.keys(sessionMetadata).length > 0 ? sessionMetadata : null
+    });
   }
 
   // Mount shared memory routes at /orchestration/memory
@@ -278,7 +567,7 @@ function createOrchestrationRouter(context) {
         taskId,
         includeSharedContext,
         workDir: workingDirectory,
-        context: { sessionManager, db },
+        context: { sessionManager, apiSessionManager, db },
         // Pass resolved profile if we have one (for new API)
         resolvedProfile
       });
@@ -477,9 +766,13 @@ function createOrchestrationRouter(context) {
         defaultSessionKind: 'discussion'
       });
 
+      if (requireConsistentRootBinding(res, '/orchestration/discussion', resolvedControlPlane)) {
+        return;
+      }
       if (requireAttachedRoot(res, '/orchestration/discussion', resolvedControlPlane)) {
         return;
       }
+      const executionControlPlane = projectExecutionControlPlane(resolvedControlPlane);
 
       const result = await runDiscussion(apiSessionManager || sessionManager, message, {
         context: discussionContext,
@@ -491,11 +784,11 @@ function createOrchestrationRouter(context) {
         runLedger: runLedgerWritesEnabled ? runLedger : null,
         db,
         sessionEventsEnabled: sessionGraphWritesEnabled && sessionEventsEnabled,
-        rootSessionId: resolvedControlPlane.rootSessionId,
-        parentSessionId: resolvedControlPlane.parentSessionId,
-        originClient: resolvedControlPlane.originClient,
-        externalSessionRef: resolvedControlPlane.externalSessionRef,
-        sessionMetadata: resolvedControlPlane.sessionMetadata
+        rootSessionId: executionControlPlane.rootSessionId,
+        parentSessionId: executionControlPlane.parentSessionId,
+        originClient: executionControlPlane.originClient,
+        externalSessionRef: executionControlPlane.externalSessionRef,
+        sessionMetadata: executionControlPlane.sessionMetadata
       });
 
       res.json({
@@ -553,9 +846,13 @@ function createOrchestrationRouter(context) {
         defaultSessionKind: 'consensus'
       });
 
+      if (requireConsistentRootBinding(res, '/orchestration/consensus', resolvedControlPlane)) {
+        return;
+      }
       if (requireAttachedRoot(res, '/orchestration/consensus', resolvedControlPlane)) {
         return;
       }
+      const executionControlPlane = projectExecutionControlPlane(resolvedControlPlane);
 
       const result = await runConsensus(apiSessionManager || sessionManager, message, {
         participants,
@@ -565,11 +862,11 @@ function createOrchestrationRouter(context) {
         runLedger: runLedgerWritesEnabled ? runLedger : null,
         db,
         sessionEventsEnabled: sessionGraphWritesEnabled && sessionEventsEnabled,
-        rootSessionId: resolvedControlPlane.rootSessionId,
-        parentSessionId: resolvedControlPlane.parentSessionId,
-        originClient: resolvedControlPlane.originClient,
-        externalSessionRef: resolvedControlPlane.externalSessionRef,
-        sessionMetadata: resolvedControlPlane.sessionMetadata
+        rootSessionId: executionControlPlane.rootSessionId,
+        parentSessionId: executionControlPlane.parentSessionId,
+        originClient: executionControlPlane.originClient,
+        externalSessionRef: executionControlPlane.externalSessionRef,
+        sessionMetadata: executionControlPlane.sessionMetadata
       });
 
       res.json({
@@ -612,9 +909,13 @@ function createOrchestrationRouter(context) {
         defaultSessionKind: 'review'
       });
 
+      if (requireConsistentRootBinding(res, '/orchestration/plan-review', resolvedControlPlane)) {
+        return;
+      }
       if (requireAttachedRoot(res, '/orchestration/plan-review', resolvedControlPlane)) {
         return;
       }
+      const executionControlPlane = projectExecutionControlPlane(resolvedControlPlane);
 
       const result = await runPlanReview(apiSessionManager || sessionManager, req.body, {
         timeout,
@@ -622,11 +923,11 @@ function createOrchestrationRouter(context) {
         runLedger: runLedgerWritesEnabled ? runLedger : null,
         db,
         sessionEventsEnabled: sessionGraphWritesEnabled && sessionEventsEnabled,
-        rootSessionId: resolvedControlPlane.rootSessionId,
-        parentSessionId: resolvedControlPlane.parentSessionId,
-        originClient: resolvedControlPlane.originClient,
-        externalSessionRef: resolvedControlPlane.externalSessionRef,
-        sessionMetadata: resolvedControlPlane.sessionMetadata
+        rootSessionId: executionControlPlane.rootSessionId,
+        parentSessionId: executionControlPlane.parentSessionId,
+        originClient: executionControlPlane.originClient,
+        externalSessionRef: executionControlPlane.externalSessionRef,
+        sessionMetadata: executionControlPlane.sessionMetadata
       });
 
       res.json({
@@ -675,9 +976,13 @@ function createOrchestrationRouter(context) {
         defaultSessionKind: 'review'
       });
 
+      if (requireConsistentRootBinding(res, '/orchestration/pr-review', resolvedControlPlane)) {
+        return;
+      }
       if (requireAttachedRoot(res, '/orchestration/pr-review', resolvedControlPlane)) {
         return;
       }
+      const executionControlPlane = projectExecutionControlPlane(resolvedControlPlane);
 
       const result = await runPrReview(apiSessionManager || sessionManager, req.body, {
         timeout,
@@ -685,11 +990,11 @@ function createOrchestrationRouter(context) {
         runLedger: runLedgerWritesEnabled ? runLedger : null,
         db,
         sessionEventsEnabled: sessionGraphWritesEnabled && sessionEventsEnabled,
-        rootSessionId: resolvedControlPlane.rootSessionId,
-        parentSessionId: resolvedControlPlane.parentSessionId,
-        originClient: resolvedControlPlane.originClient,
-        externalSessionRef: resolvedControlPlane.externalSessionRef,
-        sessionMetadata: resolvedControlPlane.sessionMetadata
+        rootSessionId: executionControlPlane.rootSessionId,
+        parentSessionId: executionControlPlane.parentSessionId,
+        originClient: executionControlPlane.originClient,
+        externalSessionRef: executionControlPlane.externalSessionRef,
+        sessionMetadata: executionControlPlane.sessionMetadata
       });
 
       res.json({
@@ -830,6 +1135,8 @@ function createOrchestrationRouter(context) {
           agentProfile: t.agentProfile,
           role: t.role,
           status: t.status,
+          taskState: t.taskState || t.status,
+          processState: t.processState || null,
           createdAt: t.createdAt,
           lastActive: t.lastActive
         }))
@@ -874,12 +1181,24 @@ function createOrchestrationRouter(context) {
    */
   router.get('/terminals/:id/output', (req, res) => {
     try {
-      const lines = parseInt(req.query.lines) || 200;
-      const output = sessionManager.getOutput(req.params.id, lines);
+      const lines = parseQueryInteger(req.query.lines, 200);
+      const mode = String(req.query.mode || 'history').trim().toLowerCase() === 'visible'
+        ? 'visible'
+        : 'history';
+      const format = String(req.query.format || 'plain').trim().toLowerCase() === 'ansi'
+        ? 'ansi'
+        : 'plain';
+      const output = sessionManager.getOutput(req.params.id, {
+        lines,
+        mode,
+        format
+      });
 
       res.json({
         terminalId: req.params.id,
         lines,
+        mode,
+        format,
         output
       });
 
@@ -944,6 +1263,108 @@ function createOrchestrationRouter(context) {
   });
 
   /**
+   * GET /orchestration/usage/roots/:rootSessionId
+   * Aggregate usage for one root session.
+   */
+  router.get('/usage/roots/:rootSessionId', (req, res) => {
+    try {
+      const breakdowns = parseUsageBreakdownList(req.query.breakdown);
+      const payload = buildUsageResponse('rootSessionId', req.params.rootSessionId, {
+        breakdowns,
+        breakdownLimit: parseQueryInteger(req.query.breakdownLimit, 20)
+      });
+      res.json({
+        rootSessionId: req.params.rootSessionId,
+        ...payload
+      });
+    } catch (error) {
+      if (error.message.includes('not configured')) {
+        return res.status(503).json({
+          error: { code: 'unavailable', message: error.message }
+        });
+      }
+
+      res.status(500).json({
+        error: { code: 'internal_error', message: error.message }
+      });
+    }
+  });
+
+  /**
+   * GET /orchestration/usage/runs/:runId
+   * Aggregate usage for one orchestration run.
+   */
+  router.get('/usage/runs/:runId', (req, res) => {
+    try {
+      const breakdowns = parseUsageBreakdownList(req.query.breakdown);
+      const payload = buildUsageResponse('runId', req.params.runId, {
+        breakdowns,
+        breakdownLimit: parseQueryInteger(req.query.breakdownLimit, 20)
+      });
+      res.json({
+        runId: req.params.runId,
+        ...payload
+      });
+    } catch (error) {
+      if (error.message.includes('not configured')) {
+        return res.status(503).json({
+          error: { code: 'unavailable', message: error.message }
+        });
+      }
+
+      res.status(500).json({
+        error: { code: 'internal_error', message: error.message }
+      });
+    }
+  });
+
+  /**
+   * GET /orchestration/usage/terminals/:terminalId
+   * Aggregate usage and return usage-record history for one terminal.
+   */
+  router.get('/usage/terminals/:terminalId', (req, res) => {
+    try {
+      if (!db?.listUsageRecords) {
+        return res.status(503).json({
+          error: { code: 'unavailable', message: 'usage observability is not configured' }
+        });
+      }
+
+      const breakdowns = parseUsageBreakdownList(req.query.breakdown);
+      const payload = buildUsageResponse('terminalId', req.params.terminalId, {
+        breakdowns,
+        breakdownLimit: parseQueryInteger(req.query.breakdownLimit, 20)
+      });
+      const limit = parseQueryInteger(req.query.limit, 100);
+      const offset = parseQueryInteger(req.query.offset, 0);
+
+      res.json({
+        terminalId: req.params.terminalId,
+        ...payload,
+        records: db.listUsageRecords({
+          terminalId: req.params.terminalId,
+          limit,
+          offset
+        }),
+        pagination: {
+          limit,
+          offset
+        }
+      });
+    } catch (error) {
+      if (error.message.includes('not configured')) {
+        return res.status(503).json({
+          error: { code: 'unavailable', message: error.message }
+        });
+      }
+
+      res.status(500).json({
+        error: { code: 'internal_error', message: error.message }
+      });
+    }
+  });
+
+  /**
    * POST /orchestration/terminals/:id/input
    * Send input to terminal
    */
@@ -954,6 +1375,19 @@ function createOrchestrationRouter(context) {
       if (!message) {
         return res.status(400).json({
           error: { code: 'missing_parameter', message: 'message is required', param: 'message' }
+        });
+      }
+
+      const rootSnapshot = resolveTerminalRootAccess(req.params.id);
+      if (rootSnapshot?.rootMode === 'attached') {
+        return res.status(403).json({
+          error: {
+            code: 'root_read_only',
+            message: `Root session ${rootSnapshot.rootSessionId} is attached and read-only. Remote execution requires a managed or adopted root.`,
+            rootSessionId: rootSnapshot.rootSessionId,
+            rootMode: rootSnapshot.rootMode,
+            terminalId: req.params.id
+          }
         });
       }
 
@@ -972,6 +1406,19 @@ function createOrchestrationRouter(context) {
         });
       }
 
+      if (error.code === 'terminal_busy' || error.statusCode === 409) {
+        return res.status(409).json({
+          error: {
+            code: 'terminal_busy',
+            message: error.message,
+            terminalId: error.terminalId || req.params.id,
+            status: error.terminalStatus || null,
+            retryAfterMs: error.retryAfterMs || 1000,
+            nextAction: 'wait for the terminal to finish, then retry the same input'
+          }
+        });
+      }
+
       res.status(500).json({
         error: { code: 'internal_error', message: error.message }
       });
@@ -984,7 +1431,12 @@ function createOrchestrationRouter(context) {
    */
   router.delete('/terminals/:id', async (req, res) => {
     try {
-      await sessionManager.destroyTerminal(req.params.id);
+      const destroyed = await sessionManager.destroyTerminal(req.params.id);
+      if (!destroyed) {
+        return res.status(404).json({
+          error: { code: 'terminal_not_found', message: `Terminal ${req.params.id} not found` }
+        });
+      }
 
       res.json({
         success: true,
@@ -1012,6 +1464,7 @@ function createOrchestrationRouter(context) {
         systemPrompt,
         model,
         allowedTools,
+        permissionMode,
         rootSessionId,
         parentSessionId,
         sessionKind,
@@ -1023,15 +1476,6 @@ function createOrchestrationRouter(context) {
         forceFreshSession
       } = req.body;
 
-      if (adapter === 'claude-code' && role !== 'main' && sessionKind !== 'main') {
-        return res.status(400).json({
-          error: {
-            code: 'invalid_adapter',
-            message: 'claude-code is reserved for managed root launch. Use /orchestration/root-sessions/launch for interactive Claude roots.'
-          }
-        });
-      }
-
       const terminal = await sessionManager.createTerminal({
         adapter,
         agentProfile,
@@ -1040,6 +1484,7 @@ function createOrchestrationRouter(context) {
         systemPrompt,
         model,
         allowedTools,
+        permissionMode,
         rootSessionId,
         parentSessionId,
         sessionKind,
@@ -1228,6 +1673,12 @@ function createOrchestrationRouter(context) {
           available,
           authenticated: auth.authenticated,
           authenticationReason: auth.reason,
+          models: typeof runtimeAdapter?.getAvailableModels === 'function'
+            ? runtimeAdapter.getAvailableModels()
+            : [],
+          runtimeProviders: typeof runtimeAdapter?.getProviderSummary === 'function'
+            ? runtimeAdapter.getProviderSummary()
+            : [],
           configuredCapabilities: configuredAdapter?.capabilities || [],
           runtimeCapabilities: typeof runtimeAdapter?.getCapabilities === 'function'
             ? runtimeAdapter.getCapabilities()
@@ -1345,11 +1796,16 @@ function createOrchestrationRouter(context) {
 
       const { rootSessionId, sessionId, runId, discussionId } = req.query;
       const limit = req.query.limit ? parseInt(req.query.limit, 10) : 200;
+      const afterSequenceNo = parseQueryInteger(
+        req.query.after_sequence_no ?? req.query.afterSequenceNo,
+        undefined
+      );
       const events = db.listSessionEvents({
         rootSessionId,
         sessionId,
         runId,
         discussionId,
+        afterSequenceNo: Number.isInteger(afterSequenceNo) ? afterSequenceNo : undefined,
         limit: Number.isFinite(limit) ? limit : 200
       });
 
@@ -1379,6 +1835,7 @@ function createOrchestrationRouter(context) {
       const includeArchived = parseQueryBoolean(req.query.includeArchived, false);
       const archiveAfterMs = parseQueryInteger(req.query.archiveAfterMs, undefined);
       const scope = req.query.scope ? String(req.query.scope) : 'user';
+      const statusFilter = req.query.statusFilter ? String(req.query.statusFilter) : 'all';
       const result = listRootSessionSummaries({
         db,
         limit,
@@ -1386,7 +1843,10 @@ function createOrchestrationRouter(context) {
         terminalLimit,
         includeArchived,
         archiveAfterMs,
-        scope
+        scope,
+        statusFilter,
+        liveTerminalResolver: getLiveTerminal,
+        liveOutputResolver: getLiveOutput
       });
 
       res.json({
@@ -1395,7 +1855,8 @@ function createOrchestrationRouter(context) {
         hiddenDetachedCount: result.hiddenDetachedCount,
         hiddenNonUserCount: result.hiddenNonUserCount,
         includeArchived,
-        scope: result.scope
+        scope: result.scope,
+        statusFilter: result.statusFilter
       });
     } catch (error) {
       res.status(500).json({
@@ -1421,6 +1882,14 @@ function createOrchestrationRouter(context) {
       const originClient = inferManagedRootOriginClient(adapter);
       const externalSessionRef = buildManagedRootExternalSessionRef(originClient, req.body?.externalSessionRef || null);
       const sessionMetadata = normalizeSessionMetadata(req.body?.sessionMetadata);
+      const launchEnvironment = normalizeLaunchEnvironment(req.body?.launchEnvironment || sessionMetadata.launchEnvironment);
+      const deferProviderStartUntilAttached = req.body?.deferProviderStartUntilAttached === true;
+      if (!sessionMetadata.launchProfile) {
+        sessionMetadata.launchProfile = String(req.body?.profile || 'guarded-root').trim() || 'guarded-root';
+      }
+      const systemPrompt = composeManagedRootSystemPrompt(req.body?.systemPrompt || null, {
+        profile: sessionMetadata.launchProfile
+      });
 
       if (!sessionMetadata.clientName) {
         sessionMetadata.clientName = originClient;
@@ -1440,13 +1909,17 @@ function createOrchestrationRouter(context) {
         : 'managed-launch-generated';
       sessionMetadata.launchSource = 'http-root-launch';
       sessionMetadata.managedLaunch = true;
+      sessionMetadata.providerStartMode = deferProviderStartUntilAttached ? 'after-attach' : 'immediate';
+      if (launchEnvironment) {
+        sessionMetadata.launchEnvironment = launchEnvironment;
+      }
 
       const terminal = await sessionManager.createTerminal({
         adapter,
         agentProfile: null,
         role: 'main',
         workDir,
-        systemPrompt: req.body?.systemPrompt || null,
+        systemPrompt,
         model: req.body?.model || null,
         allowedTools: Array.isArray(req.body?.allowedTools) ? req.body.allowedTools : null,
         permissionMode: req.body?.permissionMode || 'default',
@@ -1457,6 +1930,8 @@ function createOrchestrationRouter(context) {
         externalSessionRef,
         lineageDepth: 0,
         sessionMetadata,
+        launchEnvironment,
+        deferProviderStartUntilAttached,
         preferReuse: false,
         forceFreshSession: true
       });
@@ -1465,6 +1940,7 @@ function createOrchestrationRouter(context) {
         ...terminal,
         attachCommand: sessionManager.getAttachCommand(terminal.terminalId),
         consoleUrl: '/console',
+        providerStartMode: deferProviderStartUntilAttached ? 'after-attach' : 'immediate',
         managedRoot: true
       });
     } catch (error) {
@@ -1475,6 +1951,172 @@ function createOrchestrationRouter(context) {
         });
       }
 
+      res.status(500).json({
+        error: { code: 'internal_error', message: error.message }
+      });
+    }
+  });
+
+  /**
+   * POST /orchestration/root-sessions/adopt
+   * Adopt an existing tmux-backed terminal into the broker as a managed root.
+   * First cut supports explicit tmux session/window targets.
+   */
+  router.post('/root-sessions/adopt', async (req, res) => {
+    try {
+      if (!sessionGraphWritesEnabled) {
+        return res.status(503).json({
+          error: { code: 'feature_disabled', message: 'Root adoption requires SESSION_GRAPH_WRITES_ENABLED=1' }
+        });
+      }
+
+      const adapter = normalizeManagedRootAdapter(req.body?.adapter || 'codex-cli');
+      const originClient = req.body?.originClient || inferManagedRootOriginClient(adapter);
+      const workDir = req.body?.workDir || req.body?.workingDirectory || null;
+      const tmuxTarget = String(req.body?.tmuxTarget || '').trim();
+      let sessionName = String(req.body?.sessionName || '').trim();
+      let windowName = String(req.body?.windowName || '').trim();
+
+      if (tmuxTarget) {
+        const separatorIndex = tmuxTarget.indexOf(':');
+        if (separatorIndex <= 0 || separatorIndex === tmuxTarget.length - 1) {
+          return res.status(400).json({
+            error: { code: 'invalid_tmux_target', message: 'tmuxTarget must be in the form session:window' }
+          });
+        }
+        sessionName = tmuxTarget.slice(0, separatorIndex).trim();
+        windowName = tmuxTarget.slice(separatorIndex + 1).trim();
+      }
+
+      if (!sessionName || !windowName) {
+        return res.status(400).json({
+          error: { code: 'missing_parameter', message: 'tmuxTarget or sessionName/windowName is required' }
+        });
+      }
+
+      const externalSessionRef = buildManagedRootExternalSessionRef(originClient, req.body?.externalSessionRef || null);
+      const sessionMetadata = normalizeSessionMetadata(req.body?.sessionMetadata);
+      if (!sessionMetadata.clientName) {
+        sessionMetadata.clientName = originClient;
+      }
+      if (!sessionMetadata.clientSessionRef) {
+        sessionMetadata.clientSessionRef = externalSessionRef;
+      }
+      if (!sessionMetadata.externalSessionRef) {
+        sessionMetadata.externalSessionRef = externalSessionRef;
+      }
+      if (workDir && !sessionMetadata.workspaceRoot) {
+        sessionMetadata.workspaceRoot = workDir;
+      }
+      sessionMetadata.attachMode = 'root-adopt';
+      sessionMetadata.rootIdentitySource = req.body?.externalSessionRef
+        ? 'explicit-external-session-ref'
+        : 'adopt-generated';
+      sessionMetadata.launchSource = 'http-root-adopt';
+      sessionMetadata.adoptedRoot = true;
+      sessionMetadata.tmuxTarget = `${sessionName}:${windowName}`;
+
+      const rootSessionId = req.body?.rootSessionId || crypto.randomBytes(16).toString('hex');
+      ensureRootSessionStarted({
+        rootSessionId,
+        originClient,
+        externalSessionRef,
+        clientName: sessionMetadata.clientName || originClient,
+        sessionMetadata,
+        attachMode: 'root-adopt',
+        payloadSummary: `Adopted root via ${originClient || 'system'}`
+      });
+
+      const terminal = await sessionManager.adoptTerminal({
+        sessionName,
+        windowName,
+        adapter,
+        role: 'main',
+        workDir,
+        model: req.body?.model || null,
+        rootSessionId,
+        parentSessionId: null,
+        sessionKind: 'main',
+        originClient,
+        externalSessionRef,
+        lineageDepth: 0,
+        sessionMetadata,
+        harnessSessionId: req.body?.harnessSessionId || null,
+        providerThreadRef: req.body?.providerThreadRef || null,
+        captureMode: req.body?.captureMode || 'raw-tty'
+      });
+
+      res.json({
+        ...terminal,
+        rootSessionId,
+        tmuxTarget: `${sessionName}:${windowName}`,
+        attachCommand: sessionManager.getAttachCommand(terminal.terminalId),
+        consoleUrl: '/console',
+        adoptedRoot: true
+      });
+    } catch (error) {
+      console.error('[orchestration/root-sessions/adopt] Error:', error.message);
+      if (
+        error.message.includes('Unsupported adapter')
+        || error.message.includes('Unknown adapter')
+        || error.message.includes('tmux session not found')
+        || error.message.includes('tmux window not found')
+        || error.message.includes('adopt mode')
+      ) {
+        return res.status(400).json({
+          error: { code: 'invalid_request', message: error.message }
+        });
+      }
+
+      res.status(500).json({
+        error: { code: 'internal_error', message: error.message }
+      });
+    }
+  });
+
+  /**
+   * GET /orchestration/root-sessions/:rootSessionId/children
+   * Return child terminals for one root session using DB-backed terminal records.
+   */
+  router.get('/root-sessions/:rootSessionId/children', (req, res) => {
+    try {
+      if (!db?.listTerminals || !db?.listSessionEvents) {
+        return res.status(503).json({
+          error: { code: 'unavailable', message: 'root session monitoring is not configured' }
+        });
+      }
+
+      const rootSessionId = req.params.rootSessionId;
+      const limit = parseQueryInteger(req.query.limit, 50);
+      const rootHasEvents = db.listSessionEvents({ rootSessionId, limit: 1 }).length > 0;
+      const terminalRows = db.listTerminals({
+        rootSessionId,
+        limit: Math.max(limit + 1, 1)
+      });
+
+      if (!rootHasEvents && terminalRows.length === 0) {
+        return res.status(404).json({
+          error: { code: 'root_session_not_found', message: `Root session ${rootSessionId} not found` }
+        });
+      }
+
+      const children = terminalRows
+        .filter((terminalRow) => !isRootTerminalRecord(terminalRow, rootSessionId))
+        .map((terminalRow) => {
+          const terminalId = terminalRow?.terminal_id || terminalRow?.terminalId || null;
+          const liveTerminal = terminalId && typeof sessionManager?.getTerminal === 'function'
+            ? sessionManager.getTerminal(terminalId)
+            : null;
+          return mapChildTerminalSummary(terminalRow, liveTerminal);
+        })
+        .slice(0, limit);
+
+      res.json({
+        rootSessionId,
+        children,
+        count: children.length
+      });
+    } catch (error) {
       res.status(500).json({
         error: { code: 'internal_error', message: error.message }
       });
@@ -1499,7 +2141,9 @@ function createOrchestrationRouter(context) {
         db,
         rootSessionId: req.params.rootSessionId,
         eventLimit,
-        terminalLimit
+        terminalLimit,
+        liveTerminalResolver: getLiveTerminal,
+        liveOutputResolver: getLiveOutput
       });
 
       if (!snapshot) {
@@ -1528,6 +2172,9 @@ function createOrchestrationRouter(context) {
         allowImplicitRootCreate: false
       });
 
+      if (requireConsistentRootBinding(res, '/orchestration/root-sessions/attach', resolved)) {
+        return;
+      }
       let createdRoot = false;
       if (!resolved.rootSessionId) {
         const rootSessionId = crypto.randomBytes(16).toString('hex');
@@ -1598,7 +2245,7 @@ function createOrchestrationRouter(context) {
   const getTaskRouter = () => {
     if (!taskRouter) {
       const { TaskRouter } = require('../orchestration/task-router');
-      taskRouter = new TaskRouter(sessionManager, { apiSessionManager });
+      taskRouter = new TaskRouter(sessionManager, { apiSessionManager, adapterAuthInspector });
     }
     return taskRouter;
   };
@@ -1622,6 +2269,7 @@ function createOrchestrationRouter(context) {
         forceRole,
         forceAdapter,
         model,
+        sessionLabel,
         systemPrompt,
         workingDirectory,
         rootSessionId,
@@ -1661,9 +2309,13 @@ function createOrchestrationRouter(context) {
         defaultParentToRoot: true
       });
 
+      if (requireConsistentRootBinding(res, '/orchestration/route', resolvedControlPlane)) {
+        return;
+      }
       if (requireAttachedRoot(res, '/orchestration/route', resolvedControlPlane)) {
         return;
       }
+      const executionControlPlane = projectExecutionControlPlane(resolvedControlPlane);
 
       const router = getTaskRouter();
       const result = await router.routeTask(message, {
@@ -1673,15 +2325,16 @@ function createOrchestrationRouter(context) {
         forceRole,
         forceAdapter,
         model,
+        sessionLabel,
         systemPrompt,
         workDir: workingDirectory,
-        rootSessionId: resolvedControlPlane.rootSessionId,
-        parentSessionId: resolvedControlPlane.parentSessionId,
-        sessionKind: resolvedControlPlane.sessionKind,
-        originClient: resolvedControlPlane.originClient,
-        externalSessionRef: resolvedControlPlane.externalSessionRef,
-        lineageDepth: resolvedControlPlane.lineageDepth,
-        sessionMetadata: resolvedControlPlane.sessionMetadata,
+        rootSessionId: executionControlPlane.rootSessionId,
+        parentSessionId: executionControlPlane.parentSessionId,
+        sessionKind: executionControlPlane.sessionKind,
+        originClient: executionControlPlane.originClient,
+        externalSessionRef: executionControlPlane.externalSessionRef,
+        lineageDepth: executionControlPlane.lineageDepth,
+        sessionMetadata: executionControlPlane.sessionMetadata,
         preferReuse,
         forceFreshSession
       });
@@ -1743,6 +2396,39 @@ function createOrchestrationRouter(context) {
   });
 
   /**
+   * POST /orchestration/model-routing/recommend
+   * Recommend a model for a given adapter/task combination using broker policy and live runtime catalogs.
+   */
+  router.post('/model-routing/recommend', async (req, res) => {
+    try {
+      const { adapter, role, taskType, message } = req.body || {};
+      if (!adapter) {
+        return res.status(400).json({
+          error: { code: 'missing_parameter', message: 'adapter is required' }
+        });
+      }
+
+      const router = getTaskRouter();
+      let inferredTaskType = taskType || null;
+      if (!inferredTaskType && !role && message) {
+        inferredTaskType = router.detectTaskType(message).type;
+      }
+
+      const recommendation = await router.recommendModel({
+        adapter,
+        role: role || null,
+        taskType: inferredTaskType
+      });
+
+      res.json(recommendation);
+    } catch (error) {
+      res.status(500).json({
+        error: { code: 'internal_error', message: error.message }
+      });
+    }
+  });
+
+  /**
    * POST /orchestration/workflows/:name
    * Execute a predefined workflow
    */
@@ -1784,22 +2470,26 @@ function createOrchestrationRouter(context) {
         defaultSessionKind: 'workflow'
       });
 
+      if (requireConsistentRootBinding(res, `/orchestration/workflows/${name}`, resolvedControlPlane)) {
+        return;
+      }
       if (requireAttachedRoot(res, `/orchestration/workflows/${name}`, resolvedControlPlane)) {
         return;
       }
+      const executionControlPlane = projectExecutionControlPlane(resolvedControlPlane);
 
       const router = getTaskRouter();
       const result = await router.executeWorkflow(name, message, {
         model,
         modelsByAdapter,
         workDir: workingDirectory,
-        rootSessionId: resolvedControlPlane.rootSessionId,
-        parentSessionId: resolvedControlPlane.parentSessionId,
-        sessionKind: resolvedControlPlane.sessionKind,
-        originClient: resolvedControlPlane.originClient,
-        externalSessionRef: resolvedControlPlane.externalSessionRef,
-        lineageDepth: resolvedControlPlane.lineageDepth,
-        sessionMetadata: resolvedControlPlane.sessionMetadata,
+        rootSessionId: executionControlPlane.rootSessionId,
+        parentSessionId: executionControlPlane.parentSessionId,
+        sessionKind: executionControlPlane.sessionKind,
+        originClient: executionControlPlane.originClient,
+        externalSessionRef: executionControlPlane.externalSessionRef,
+        lineageDepth: executionControlPlane.lineageDepth,
+        sessionMetadata: executionControlPlane.sessionMetadata,
         preferReuse,
         forceFreshSession
       });

@@ -39,9 +39,12 @@ async function waitFor(predicate, timeoutMs = 10000, pollMs = 100) {
   throw new Error(`Timed out waiting for condition after ${timeoutMs}ms`);
 }
 
-function tmuxSessionExists(sessionName) {
+function tmuxSessionExists(sessionName, tmuxSocketPath = null) {
   try {
-    const output = execSync('tmux ls', {
+    const tmuxArgs = tmuxSocketPath
+      ? `tmux -S ${JSON.stringify(tmuxSocketPath)} ls`
+      : 'tmux ls';
+    const output = execSync(tmuxArgs, {
       encoding: 'utf8',
       stdio: ['ignore', 'pipe', 'ignore']
     });
@@ -51,7 +54,7 @@ function tmuxSessionExists(sessionName) {
   }
 }
 
-async function startServer({ dataDir, logDir, destroyTerminalsOnStop }) {
+async function startServer({ dataDir, logDir, tmuxSocketPath, destroyTerminalsOnStop }) {
   const server = new AgentServer({
     host: '127.0.0.1',
     port: 0,
@@ -59,6 +62,7 @@ async function startServer({ dataDir, logDir, destroyTerminalsOnStop }) {
     orchestration: {
       dataDir,
       logDir,
+      tmuxSocketPath,
       workDir: '/Users/mojave/Documents/AI-projects/cliagents',
       destroyTerminalsOnStop
     }
@@ -77,6 +81,8 @@ async function run() {
 
   const dataDir = makeTempDir('cliagents-managed-root-data-');
   const logDir = makeTempDir('cliagents-managed-root-logs-');
+  const tmuxDir = makeTempDir('cliagents-managed-root-tmux-');
+  const tmuxSocketPath = path.join(tmuxDir, 'broker.sock');
   let serverOne = null;
   let serverTwo = null;
   let launchedTerminalId = null;
@@ -86,6 +92,7 @@ async function run() {
     serverOne = await startServer({
       dataDir,
       logDir,
+      tmuxSocketPath,
       destroyTerminalsOnStop: false
     });
 
@@ -106,16 +113,17 @@ async function run() {
       return terminal.status === 200 && terminal.data.status === 'idle';
     });
 
-    assert(tmuxSessionExists(sessionName), 'managed root tmux session should exist before restart');
+    assert(tmuxSessionExists(sessionName, tmuxSocketPath), 'managed root tmux session should exist before restart');
 
     await serverOne.server.stop();
     serverOne = null;
 
-    assert(tmuxSessionExists(sessionName), 'managed root tmux session should survive broker shutdown');
+    assert(tmuxSessionExists(sessionName, tmuxSocketPath), 'managed root tmux session should survive broker shutdown');
 
     serverTwo = await startServer({
       dataDir,
       logDir,
+      tmuxSocketPath,
       destroyTerminalsOnStop: true
     });
 
@@ -135,8 +143,8 @@ async function run() {
     assert.strictEqual(roots.status, 200);
     const recoveredRoot = (roots.data.roots || []).find((root) => root.rootSessionId === launchedTerminalId);
     assert(recoveredRoot, 'expected recovered root session to remain visible');
-    assert.strictEqual(recoveredRoot.status, 'running');
-    assert.strictEqual(recoveredRoot.counts.running, 1);
+    assert.strictEqual(recoveredRoot.status, 'idle');
+    assert.strictEqual(recoveredRoot.counts.idle, 1);
 
     await request(serverTwo.baseUrl, 'DELETE', `/orchestration/terminals/${launchedTerminalId}`);
   } finally {
@@ -147,11 +155,11 @@ async function run() {
       await serverTwo.server.stop();
     }
 
-    if (sessionName && tmuxSessionExists(sessionName)) {
-      execSync(`tmux kill-session -t ${JSON.stringify(sessionName)}`, { stdio: 'ignore' });
+    if (sessionName && tmuxSessionExists(sessionName, tmuxSocketPath)) {
+      execSync(`tmux -S ${JSON.stringify(tmuxSocketPath)} kill-session -t ${JSON.stringify(sessionName)}`, { stdio: 'ignore' });
     }
 
-    for (const dirPath of [dataDir, logDir]) {
+    for (const dirPath of [dataDir, logDir, tmuxDir]) {
       if (dirPath && fs.existsSync(dirPath)) {
         fs.rmSync(dirPath, { recursive: true, force: true });
       }

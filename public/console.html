@@ -94,6 +94,12 @@
       border-color: var(--text-secondary);
     }
 
+    .btn.active {
+      border-color: rgba(88, 166, 255, 0.55);
+      background: rgba(88, 166, 255, 0.18);
+      color: #d8e9ff;
+    }
+
     .btn-primary {
       background: var(--accent-blue);
       border-color: var(--accent-blue);
@@ -112,6 +118,71 @@
       grid-template-columns: repeat(auto-fit, minmax(180px, 1fr));
       gap: 16px;
       margin-bottom: 24px;
+    }
+
+    .mobile-root-shell {
+      display: none;
+      margin-bottom: 20px;
+    }
+
+    .mobile-root-toolbar {
+      display: grid;
+      gap: 12px;
+    }
+
+    .mobile-root-select {
+      width: 100%;
+    }
+
+    .mobile-root-view-tabs {
+      display: grid;
+      grid-template-columns: repeat(3, minmax(0, 1fr));
+      gap: 8px;
+    }
+
+    .mobile-tab-btn {
+      justify-content: center;
+      text-align: center;
+    }
+
+    .mobile-tab-btn.active {
+      background: rgba(88, 166, 255, 0.16);
+      border-color: rgba(88, 166, 255, 0.42);
+      color: #d8e9ff;
+    }
+
+    .mobile-root-panel {
+      display: grid;
+      gap: 16px;
+    }
+
+    .mobile-root-summary {
+      display: grid;
+      gap: 12px;
+      padding: 14px;
+      border-radius: 12px;
+      border: 1px solid var(--border-color);
+      background: var(--bg-primary);
+    }
+
+    .mobile-root-summary-head {
+      display: flex;
+      align-items: flex-start;
+      justify-content: space-between;
+      gap: 12px;
+      flex-wrap: wrap;
+    }
+
+    .mobile-root-summary-title {
+      font-size: 14px;
+      font-weight: 600;
+      word-break: break-word;
+    }
+
+    .mobile-root-summary-subtitle {
+      color: var(--text-secondary);
+      font-size: 12px;
+      word-break: break-all;
     }
 
     .stat-card {
@@ -308,6 +379,98 @@
       gap: 8px;
     }
 
+    .hierarchy-flow {
+      display: grid;
+      gap: 10px;
+    }
+
+    .hierarchy-root-wrap {
+      display: grid;
+      gap: 8px;
+    }
+
+    .hierarchy-connector {
+      width: 2px;
+      min-height: 18px;
+      margin-left: 18px;
+      background: linear-gradient(180deg, rgba(88, 166, 255, 0.45), rgba(88, 166, 255, 0.08));
+      border-radius: 999px;
+    }
+
+    .hierarchy-children {
+      display: grid;
+      gap: 8px;
+      padding-left: 18px;
+      border-left: 1px solid rgba(88, 166, 255, 0.16);
+    }
+
+    .hierarchy-node {
+      border: 1px solid rgba(48, 54, 61, 0.9);
+      border-radius: 12px;
+      padding: 12px 13px;
+      background: rgba(13, 17, 23, 0.88);
+      display: grid;
+      gap: 7px;
+    }
+
+    .hierarchy-node-root {
+      border-color: rgba(88, 166, 255, 0.34);
+      background:
+        linear-gradient(180deg, rgba(88, 166, 255, 0.14), rgba(13, 17, 23, 0.96) 55%),
+        rgba(13, 17, 23, 0.92);
+      box-shadow: inset 0 1px 0 rgba(255, 255, 255, 0.04);
+    }
+
+    .hierarchy-node-child {
+      border-color: rgba(48, 54, 61, 0.92);
+      background: rgba(13, 17, 23, 0.82);
+    }
+
+    .hierarchy-node-head {
+      display: flex;
+      justify-content: space-between;
+      align-items: flex-start;
+      gap: 10px;
+    }
+
+    .hierarchy-node-label {
+      display: inline-flex;
+      align-items: center;
+      padding: 4px 9px;
+      border-radius: 999px;
+      background: rgba(88, 166, 255, 0.12);
+      border: 1px solid rgba(88, 166, 255, 0.2);
+      color: #c6ddff;
+      font-size: 10px;
+      font-weight: 700;
+      letter-spacing: 0.08em;
+      text-transform: uppercase;
+      white-space: nowrap;
+    }
+
+    .hierarchy-node-title {
+      font-size: 13px;
+      font-weight: 600;
+      word-break: break-word;
+    }
+
+    .hierarchy-node-meta {
+      display: flex;
+      flex-wrap: wrap;
+      gap: 8px;
+      color: var(--text-secondary);
+      font-size: 12px;
+    }
+
+    .hierarchy-node-hint,
+    .hierarchy-node-summary {
+      color: var(--text-secondary);
+      font-size: 12px;
+      line-height: 1.45;
+      word-break: break-word;
+      white-space: pre-wrap;
+    }
+
     .child-session-item {
       border: 1px solid rgba(48, 54, 61, 0.9);
       border-radius: 10px;
@@ -346,6 +509,67 @@
       word-break: break-word;
     }
 
+    .terminal-workspace-switcher {
+      display: grid;
+      gap: 10px;
+    }
+
+    .terminal-workspace-option {
+      width: 100%;
+      text-align: left;
+      border: 1px solid rgba(48, 54, 61, 0.92);
+      border-radius: 12px;
+      padding: 12px 13px;
+      background: rgba(13, 17, 23, 0.88);
+      color: var(--text-primary);
+      display: grid;
+      gap: 8px;
+      cursor: pointer;
+      transition: border-color 120ms ease, background 120ms ease, transform 120ms ease;
+    }
+
+    .terminal-workspace-option:hover,
+    .terminal-workspace-option.active {
+      border-color: rgba(88, 166, 255, 0.46);
+      background: rgba(88, 166, 255, 0.08);
+      transform: translateY(-1px);
+    }
+
+    .terminal-workspace-option:disabled {
+      cursor: default;
+      opacity: 0.72;
+      transform: none;
+    }
+
+    .terminal-workspace-option-head {
+      display: flex;
+      justify-content: space-between;
+      align-items: flex-start;
+      gap: 10px;
+    }
+
+    .terminal-workspace-option-title {
+      font-size: 13px;
+      font-weight: 600;
+      word-break: break-word;
+    }
+
+    .terminal-workspace-option-meta {
+      display: flex;
+      flex-wrap: wrap;
+      gap: 8px;
+      color: var(--text-secondary);
+      font-size: 12px;
+    }
+
+    .terminal-workspace-option-summary {
+      font-size: 12px;
+      color: var(--text-secondary);
+      line-height: 1.45;
+      white-space: pre-wrap;
+      word-break: break-word;
+    }
+
     .row {
       padding: 14px 18px;
       border-bottom: 1px solid var(--border-color);
@@ -371,6 +595,16 @@
       align-items: center;
       gap: 10px;
       margin-bottom: 8px;
+    }
+
+    .row-badges,
+    .card-badges,
+    .hierarchy-node-status {
+      display: inline-flex;
+      align-items: center;
+      justify-content: flex-end;
+      flex-wrap: wrap;
+      gap: 8px;
     }
 
     .row-title {
@@ -400,6 +634,49 @@
       white-space: nowrap;
     }
 
+    .operator-state-pill {
+      display: inline-flex;
+      align-items: center;
+      padding: 4px 10px;
+      border-radius: 999px;
+      border: 1px solid var(--border-color);
+      font-size: 11px;
+      font-weight: 700;
+      letter-spacing: 0.04em;
+      white-space: nowrap;
+    }
+
+    .operator-state-working {
+      color: var(--accent-blue);
+      border-color: rgba(88, 166, 255, 0.35);
+      background: rgba(88, 166, 255, 0.08);
+    }
+
+    .operator-state-waiting,
+    .operator-state-stale {
+      color: var(--accent-yellow);
+      border-color: rgba(210, 153, 34, 0.35);
+      background: rgba(210, 153, 34, 0.08);
+    }
+
+    .operator-state-ready {
+      color: var(--accent-green);
+      border-color: rgba(63, 185, 80, 0.35);
+      background: rgba(63, 185, 80, 0.08);
+    }
+
+    .operator-state-attention {
+      color: var(--accent-red);
+      border-color: rgba(248, 81, 73, 0.35);
+      background: rgba(248, 81, 73, 0.08);
+    }
+
+    .operator-state-unknown {
+      color: var(--text-secondary);
+      border-color: rgba(139, 148, 158, 0.28);
+      background: rgba(139, 148, 158, 0.08);
+    }
+
     .status-completed,
     .status-idle { color: var(--accent-green); border-color: rgba(63, 185, 80, 0.35); }
     .status-processing,
@@ -426,6 +703,12 @@
       font-size: 13px;
     }
 
+    .detail-value-stack {
+      display: grid;
+      gap: 6px;
+      justify-items: start;
+    }
+
     .detail-label {
       color: var(--text-secondary);
       font-size: 12px;
@@ -439,16 +722,67 @@
       background: var(--bg-primary);
       border: 1px solid var(--border-color);
       border-radius: 10px;
-      padding: 14px;
       max-height: 320px;
       overflow: auto;
+      overscroll-behavior: contain;
+    }
+
+    .terminal-output {
+      padding: 0;
+    }
+
+    .message-list {
+      padding: 14px;
     }
 
     .terminal-output pre {
-      white-space: pre-wrap;
-      word-break: break-word;
+      white-space: pre;
+      word-break: normal;
+      overflow-wrap: normal;
       line-height: 1.45;
       font-size: 12px;
+    }
+
+    .terminal-output-controls {
+      display: flex;
+      justify-content: space-between;
+      gap: 12px;
+      align-items: center;
+      flex-wrap: wrap;
+      margin-bottom: 10px;
+    }
+
+    .terminal-output-toggle-group {
+      display: flex;
+      gap: 8px;
+      align-items: center;
+      flex-wrap: wrap;
+    }
+
+    .terminal-output-toggle-label {
+      color: var(--text-secondary);
+      font-size: 12px;
+      text-transform: uppercase;
+      letter-spacing: 0.04em;
+    }
+
+    .terminal-output-pre {
+      margin: 0;
+      display: inline-block;
+      width: max-content;
+      min-width: 100%;
+      padding: 14px;
+      white-space: pre;
+      word-break: normal;
+      overflow-wrap: normal;
+      line-height: 1.45;
+      font-size: 12px;
+      font-family: 'SFMono-Regular', ui-monospace, Menlo, Monaco, Consolas, 'Liberation Mono', monospace;
+      tab-size: 4;
+    }
+
+    .terminal-output-rich {
+      color: #d8dee9;
     }
 
     .message-item {
@@ -666,6 +1000,72 @@
         width: 100%;
       }
     }
+
+    @media (max-width: 820px) {
+      body {
+        padding: 12px;
+      }
+
+      header {
+        display: grid;
+        gap: 12px;
+        margin-bottom: 16px;
+        padding-bottom: 16px;
+      }
+
+      .subtitle {
+        font-size: 13px;
+      }
+
+      .stats-bar {
+        grid-template-columns: repeat(2, minmax(0, 1fr));
+        gap: 10px;
+        margin-bottom: 16px;
+      }
+
+      .stat-card {
+        padding: 12px 14px;
+      }
+
+      .stat-value {
+        font-size: 20px;
+      }
+
+      .mobile-root-shell {
+        display: block;
+        position: sticky;
+        top: 10px;
+        z-index: 15;
+      }
+
+      .layout {
+        display: none;
+      }
+
+      .detail-grid,
+      .row-meta,
+      .tree-meta,
+      .timeline-meta {
+        grid-template-columns: 1fr;
+      }
+
+      .panel-header,
+      .reply-actions,
+      .reply-box-header,
+      .mobile-root-summary-head {
+        display: grid;
+      }
+
+      .panel-actions,
+      .header-actions {
+        width: 100%;
+      }
+
+      .btn,
+      .compact-select {
+        width: 100%;
+      }
+    }
   </style>
 </head>
 <body>
@@ -710,13 +1110,38 @@
       </div>
     </div>
 
+    <section class="card mobile-root-shell">
+      <div class="panel-header">
+        <div>
+          <div class="panel-title">Current Root</div>
+          <div class="panel-subtitle">Phone-focused single-root workspace with fast switching at the top.</div>
+        </div>
+        <div class="panel-actions">
+          <span class="panel-subtitle" id="mobile-root-status">No root selected</span>
+        </div>
+      </div>
+      <div class="detail-body">
+        <div class="mobile-root-toolbar">
+          <select class="small-input mobile-root-select" id="mobile-root-select"></select>
+          <div class="mobile-root-view-tabs">
+            <button class="btn mobile-tab-btn" data-mobile-root-view="terminal" type="button">Terminal</button>
+            <button class="btn mobile-tab-btn" data-mobile-root-view="overview" type="button">Overview</button>
+            <button class="btn mobile-tab-btn" data-mobile-root-view="history" type="button">History</button>
+          </div>
+        </div>
+        <div class="mobile-root-panel" id="mobile-root-panel">
+          <div class="empty-state">Select a live root to open the mobile workspace.</div>
+        </div>
+      </div>
+    </section>
+
     <div class="layout">
       <div class="stack">
         <section class="card">
           <div class="panel-header">
             <div>
               <div class="panel-title">Active Terminals</div>
-              <div class="panel-subtitle">Uses <code>/orchestration/terminals</code> and WebSocket orchestration events.</div>
+              <div class="panel-subtitle">Secondary diagnostic view across every live terminal. Use the root session workspace below for the primary operator workflow.</div>
             </div>
             <div class="panel-actions">
               <button class="btn" id="reconcile-runs" type="button">Reconcile Stale Runs</button>
@@ -744,6 +1169,7 @@
                 <option value="legacy">Legacy only</option>
               </select>
               <select class="compact-select" id="session-root-filter">
+                <option value="live">Live roots</option>
                 <option value="all">All roots</option>
                 <option value="actionable">Needs attention</option>
                 <option value="active">Active only</option>
@@ -820,9 +1246,13 @@
 
   <script>
     const STALE_TERMINAL_MS = 10 * 60 * 1000;
-    const ROOT_FILTER_OPTIONS = new Set(['all', 'actionable', 'active', 'completed']);
+    const ROOT_FILTER_OPTIONS = new Set(['all', 'live', 'actionable', 'active', 'completed']);
     const ROOT_SCOPE_OPTIONS = new Set(['user', 'all', 'detached', 'legacy']);
     const ACTIVE_ROOT_STATUSES = new Set(['running', 'processing', 'pending', 'partial', 'blocked', 'needs_attention']);
+    const LIVE_ROOT_STATUSES = new Set(['running', 'processing', 'pending', 'partial', 'blocked', 'needs_attention', 'idle']);
+    const WORKING_TERMINAL_STATUSES = new Set(['processing', 'queued', 'running', 'pending', 'partial']);
+    const WAITING_TERMINAL_STATUSES = new Set(['waiting_permission', 'waiting_user_answer', 'blocked']);
+    const ATTENTION_TERMINAL_STATUSES = new Set(['error', 'failed', 'cancelled', 'abandoned', 'destroyed', 'needs_attention']);
     const urlState = new URLSearchParams(window.location.search);
 
     const state = {
@@ -835,7 +1265,13 @@
       sessionRootsHiddenNonUserCount: 0,
       includeArchivedRoots: urlState.get('archived') === '1',
       rootScope: ROOT_SCOPE_OPTIONS.has(urlState.get('scope')) ? urlState.get('scope') : 'user',
-      rootStatusFilter: ROOT_FILTER_OPTIONS.has(urlState.get('roots')) ? urlState.get('roots') : 'all',
+      rootStatusFilter: ROOT_FILTER_OPTIONS.has(urlState.get('roots')) ? urlState.get('roots') : 'live',
+      terminalOutputMode: coerceOutputMode(urlState.get('terminalMode'), 'history'),
+      terminalOutputFormat: coerceOutputFormat(urlState.get('terminalFormat'), 'plain'),
+      rootOutputMode: coerceOutputMode(urlState.get('rootModeView'), 'visible'),
+      rootOutputFormat: coerceOutputFormat(urlState.get('rootFormat'), 'ansi'),
+      mobileRootView: new Set(['terminal', 'overview', 'history']).has(urlState.get('mobileView')) ? urlState.get('mobileView') : 'terminal',
+      mobileFocusedTerminalId: urlState.get('mobileTerminal') || null,
       selectedRootSessionId: urlState.get('root') || null,
       selectedTerminalId: urlState.get('terminal') || null,
       selectedDiscussionId: urlState.get('discussion') || null,
@@ -843,7 +1279,10 @@
       socket: null,
       socketConnected: false,
       rootSnapshots: {},
-      refreshTimer: null
+      refreshTimer: null,
+      refreshInFlight: false,
+      refreshQueued: false,
+      scheduledRefreshHandle: null
     };
 
     const elements = {
@@ -862,6 +1301,9 @@
       sessionRootFilter: document.getElementById('session-root-filter'),
       sessionRootsSummary: document.getElementById('session-roots-summary'),
       sessionRootsList: document.getElementById('session-roots-list'),
+      mobileRootStatus: document.getElementById('mobile-root-status'),
+      mobileRootSelect: document.getElementById('mobile-root-select'),
+      mobileRootPanel: document.getElementById('mobile-root-panel'),
       discussionsSummary: document.getElementById('discussions-summary'),
       discussionsList: document.getElementById('discussions-list'),
       sessionTreeDetail: document.getElementById('session-tree-detail'),
@@ -926,6 +1368,83 @@
       return `status-pill status-${String(status || 'unknown').replace(/[^a-z0-9_]+/gi, '_').toLowerCase()}`;
     }
 
+    function getOperatorStateDescriptor(subject = {}, options = {}) {
+      const status = String(subject?.status || subject?.latestEventType || 'unknown').trim().toLowerCase();
+      const processState = String(subject?.processState || subject?.process_state || '').trim().toLowerCase();
+      const stale = options.stale === true;
+      const live = typeof options.live === 'boolean'
+        ? options.live
+        : (typeof subject?.live === 'boolean' ? subject.live : null);
+
+      if (stale || status === 'stale') {
+        return {
+          label: 'Stale',
+          tone: 'stale',
+          summary: 'Looks wedged or out of date.'
+        };
+      }
+
+      if (WAITING_TERMINAL_STATUSES.has(status)) {
+        return {
+          label: 'Waiting for input',
+          tone: 'waiting',
+          summary: 'Paused until you reply or approve.',
+          waiting: true
+        };
+      }
+
+      if (WORKING_TERMINAL_STATUSES.has(status)) {
+        return {
+          label: 'Working',
+          tone: 'working',
+          summary: 'Currently running a task.'
+        };
+      }
+
+      if (status === 'idle' && processState !== 'exited' && (live !== false || subject?.terminalId)) {
+        return {
+          label: 'At prompt',
+          tone: 'ready',
+          summary: 'Finished the last step and is ready for the next input.'
+        };
+      }
+
+      if (status === 'completed') {
+        return {
+          label: 'Finished',
+          tone: 'ready',
+          summary: 'Completed and no longer running.'
+        };
+      }
+
+      if (ATTENTION_TERMINAL_STATUSES.has(status)) {
+        return {
+          label: 'Needs attention',
+          tone: 'attention',
+          summary: subject?.attentionMessage || 'Finished with an interruption or error.'
+        };
+      }
+
+      if (live === true) {
+        return {
+          label: 'Live',
+          tone: 'working',
+          summary: 'Still attached and available.'
+        };
+      }
+
+      return {
+        label: 'Unknown',
+        tone: 'unknown',
+        summary: 'State could not be determined yet.'
+      };
+    }
+
+    function renderOperatorStatePill(descriptor) {
+      const safeDescriptor = descriptor || getOperatorStateDescriptor();
+      return `<span class="operator-state-pill operator-state-${escapeHtml(safeDescriptor.tone || 'unknown')}">${escapeHtml(safeDescriptor.label || 'Unknown')}</span>`;
+    }
+
     function escapeHtml(value) {
       return String(value || '')
         .replace(/&/g, '&amp;')
@@ -935,11 +1454,263 @@
         .replace(/'/g, '&#39;');
     }
 
+    function coerceOutputMode(value, fallback = 'history') {
+      return value === 'visible' ? 'visible' : fallback;
+    }
+
+    function coerceOutputFormat(value, fallback = 'plain') {
+      return value === 'ansi' ? 'ansi' : fallback;
+    }
+
+    function getPrefixOutputPreferences(prefix) {
+      if (prefix === 'root-terminal' || prefix === 'mobile-root-terminal') {
+        return {
+          mode: coerceOutputMode(state.rootOutputMode, 'visible'),
+          format: coerceOutputFormat(state.rootOutputFormat, 'ansi')
+        };
+      }
+      return {
+        mode: coerceOutputMode(state.terminalOutputMode, 'history'),
+        format: coerceOutputFormat(state.terminalOutputFormat, 'plain')
+      };
+    }
+
+    function setPrefixOutputPreferences(prefix, nextPreferences = {}) {
+      if (prefix === 'root-terminal' || prefix === 'mobile-root-terminal') {
+        if (nextPreferences.mode) {
+          state.rootOutputMode = coerceOutputMode(nextPreferences.mode, state.rootOutputMode || 'visible');
+        }
+        if (nextPreferences.format) {
+          state.rootOutputFormat = coerceOutputFormat(nextPreferences.format, state.rootOutputFormat || 'ansi');
+        }
+      } else {
+        if (nextPreferences.mode) {
+          state.terminalOutputMode = coerceOutputMode(nextPreferences.mode, state.terminalOutputMode || 'history');
+        }
+        if (nextPreferences.format) {
+          state.terminalOutputFormat = coerceOutputFormat(nextPreferences.format, state.terminalOutputFormat || 'plain');
+        }
+      }
+      syncUrlState();
+    }
+
+    function buildAnsiStyle(state) {
+      const styles = [];
+      const foreground = state.inverse ? state.bg : state.fg;
+      const background = state.inverse ? state.fg : state.bg;
+      if (foreground) styles.push(`color:${foreground}`);
+      if (background) styles.push(`background:${background}`);
+      if (state.bold) styles.push('font-weight:700');
+      if (state.dim) styles.push('opacity:0.72');
+      if (state.italic) styles.push('font-style:italic');
+      if (state.underline) styles.push('text-decoration:underline');
+      return styles.join(';');
+    }
+
+    function ansiIndexedColor(index) {
+      const basic = [
+        '#1f2328', '#cc6666', '#91b859', '#f0c674',
+        '#6699cc', '#b294bb', '#5fb3b3', '#c5c8c6',
+        '#666666', '#ff6b6b', '#b5d56a', '#ffe066',
+        '#7aa6ff', '#d39bff', '#76d9d9', '#ffffff'
+      ];
+      if (index >= 0 && index < basic.length) {
+        return basic[index];
+      }
+      if (index >= 16 && index <= 231) {
+        const value = index - 16;
+        const blue = value % 6;
+        const green = Math.floor(value / 6) % 6;
+        const red = Math.floor(value / 36) % 6;
+        const convert = (component) => (component === 0 ? 0 : 55 + (component * 40));
+        return `rgb(${convert(red)}, ${convert(green)}, ${convert(blue)})`;
+      }
+      if (index >= 232 && index <= 255) {
+        const shade = 8 + ((index - 232) * 10);
+        return `rgb(${shade}, ${shade}, ${shade})`;
+      }
+      return null;
+    }
+
+    function applyAnsiCode(code, codes, index, styleState) {
+      if (code === 0) {
+        styleState.fg = null;
+        styleState.bg = null;
+        styleState.bold = false;
+        styleState.dim = false;
+        styleState.italic = false;
+        styleState.underline = false;
+        styleState.inverse = false;
+        return index;
+      }
+      if (code === 1) {
+        styleState.bold = true;
+        return index;
+      }
+      if (code === 2) {
+        styleState.dim = true;
+        return index;
+      }
+      if (code === 3) {
+        styleState.italic = true;
+        return index;
+      }
+      if (code === 4) {
+        styleState.underline = true;
+        return index;
+      }
+      if (code === 7) {
+        styleState.inverse = true;
+        return index;
+      }
+      if (code === 22) {
+        styleState.bold = false;
+        styleState.dim = false;
+        return index;
+      }
+      if (code === 23) {
+        styleState.italic = false;
+        return index;
+      }
+      if (code === 24) {
+        styleState.underline = false;
+        return index;
+      }
+      if (code === 27) {
+        styleState.inverse = false;
+        return index;
+      }
+      if (code === 39) {
+        styleState.fg = null;
+        return index;
+      }
+      if (code === 49) {
+        styleState.bg = null;
+        return index;
+      }
+      if (code >= 30 && code <= 37) {
+        styleState.fg = ansiIndexedColor(code - 30);
+        return index;
+      }
+      if (code >= 90 && code <= 97) {
+        styleState.fg = ansiIndexedColor((code - 90) + 8);
+        return index;
+      }
+      if (code >= 40 && code <= 47) {
+        styleState.bg = ansiIndexedColor(code - 40);
+        return index;
+      }
+      if (code >= 100 && code <= 107) {
+        styleState.bg = ansiIndexedColor((code - 100) + 8);
+        return index;
+      }
+      if ((code === 38 || code === 48) && index + 1 < codes.length) {
+        const targetKey = code === 38 ? 'fg' : 'bg';
+        const mode = codes[index + 1];
+        if (mode === 5 && index + 2 < codes.length) {
+          styleState[targetKey] = ansiIndexedColor(codes[index + 2]);
+          return index + 2;
+        }
+        if (mode === 2 && index + 4 < codes.length) {
+          const [r, g, b] = [codes[index + 2], codes[index + 3], codes[index + 4]];
+          styleState[targetKey] = `rgb(${r}, ${g}, ${b})`;
+          return index + 4;
+        }
+      }
+      return index;
+    }
+
+    function renderAnsiToHtml(value) {
+      const input = String(value || '');
+      if (!input) {
+        return escapeHtml('No terminal output available.');
+      }
+
+      const styleState = {
+        fg: null,
+        bg: null,
+        bold: false,
+        dim: false,
+        italic: false,
+        underline: false,
+        inverse: false
+      };
+      const pattern = /\x1b\[([0-9;]*)m/g;
+      let cursor = 0;
+      let match;
+      let html = '';
+
+      while ((match = pattern.exec(input)) !== null) {
+        if (match.index > cursor) {
+          const chunk = input.slice(cursor, match.index);
+          const style = buildAnsiStyle(styleState);
+          const escapedChunk = escapeHtml(chunk);
+          html += style ? `<span style="${style}">${escapedChunk}</span>` : escapedChunk;
+        }
+        const codes = (match[1] || '0')
+          .split(';')
+          .map((value) => Number.parseInt(value, 10))
+          .filter((value) => Number.isInteger(value));
+        if (!codes.length) {
+          applyAnsiCode(0, [0], 0, styleState);
+        } else {
+          for (let index = 0; index < codes.length; index += 1) {
+            index = applyAnsiCode(codes[index], codes, index, styleState);
+          }
+        }
+        cursor = pattern.lastIndex;
+      }
+
+      if (cursor < input.length) {
+        const chunk = input.slice(cursor);
+        const style = buildAnsiStyle(styleState);
+        const escapedChunk = escapeHtml(chunk);
+        html += style ? `<span style="${style}">${escapedChunk}</span>` : escapedChunk;
+      }
+
+      return html || escapeHtml('No terminal output available.');
+    }
+
+    function renderTerminalOutputMarkup(outputText, preferences = {}) {
+      const format = coerceOutputFormat(preferences.format, 'plain');
+      const content = format === 'ansi'
+        ? renderAnsiToHtml(outputText)
+        : escapeHtml(outputText || 'No terminal output available.');
+      return `<pre class="terminal-output-pre ${format === 'ansi' ? 'terminal-output-rich' : ''}">${content}</pre>`;
+    }
+
+    function buildTerminalOutputControls(prefix, preferences = {}, options = {}) {
+      const mode = coerceOutputMode(preferences.mode, 'history');
+      const format = coerceOutputFormat(preferences.format, 'plain');
+      const visibleLabel = options.visibleLabel || 'Visible Screen';
+      const historyLabel = options.historyLabel || 'Scrollback';
+      return `
+        <div class="terminal-output-controls">
+          <div class="terminal-output-toggle-group">
+            <span class="terminal-output-toggle-label">View</span>
+            <button class="btn ${mode === 'visible' ? 'active' : ''}" type="button" data-output-mode-toggle="${escapeHtml(prefix)}" data-output-mode="visible">${escapeHtml(visibleLabel)}</button>
+            <button class="btn ${mode === 'history' ? 'active' : ''}" type="button" data-output-mode-toggle="${escapeHtml(prefix)}" data-output-mode="history">${escapeHtml(historyLabel)}</button>
+          </div>
+          <div class="terminal-output-toggle-group">
+            <span class="terminal-output-toggle-label">Format</span>
+            <button class="btn ${format === 'ansi' ? 'active' : ''}" type="button" data-output-format-toggle="${escapeHtml(prefix)}" data-output-format="ansi">Rich</button>
+            <button class="btn ${format === 'plain' ? 'active' : ''}" type="button" data-output-format-toggle="${escapeHtml(prefix)}" data-output-format="plain">Plain</button>
+          </div>
+        </div>
+      `;
+    }
+
     function syncUrlState() {
       const params = new URLSearchParams();
       if (state.includeArchivedRoots) params.set('archived', '1');
       if (state.rootScope && state.rootScope !== 'user') params.set('scope', state.rootScope);
       if (state.rootStatusFilter && state.rootStatusFilter !== 'all') params.set('roots', state.rootStatusFilter);
+      if (state.terminalOutputMode && state.terminalOutputMode !== 'history') params.set('terminalMode', state.terminalOutputMode);
+      if (state.terminalOutputFormat && state.terminalOutputFormat !== 'plain') params.set('terminalFormat', state.terminalOutputFormat);
+      if (state.rootOutputMode && state.rootOutputMode !== 'visible') params.set('rootModeView', state.rootOutputMode);
+      if (state.rootOutputFormat && state.rootOutputFormat !== 'ansi') params.set('rootFormat', state.rootOutputFormat);
+      if (state.mobileRootView && state.mobileRootView !== 'terminal') params.set('mobileView', state.mobileRootView);
+      if (state.mobileFocusedTerminalId) params.set('mobileTerminal', state.mobileFocusedTerminalId);
       if (state.selectedRootSessionId) params.set('root', state.selectedRootSessionId);
       if (state.selectedTerminalId) params.set('terminal', state.selectedTerminalId);
       if (state.selectedDiscussionId) params.set('discussion', state.selectedDiscussionId);
@@ -949,29 +1720,144 @@
       window.history.replaceState(null, '', nextUrl);
     }
 
+    function captureScrollState(element) {
+      if (!element) return null;
+      const maxScrollTop = Math.max(0, element.scrollHeight - element.clientHeight);
+      return {
+        scrollTop: element.scrollTop,
+        atBottom: maxScrollTop - element.scrollTop <= 8
+      };
+    }
+
+    function restoreScrollState(element, snapshot, options = {}) {
+      if (!element) return;
+      const maxScrollTop = Math.max(0, element.scrollHeight - element.clientHeight);
+      if (!snapshot) {
+        if (options.defaultToBottom) {
+          element.scrollTop = maxScrollTop;
+        }
+        return;
+      }
+      element.scrollTop = snapshot.atBottom ? maxScrollTop : Math.min(snapshot.scrollTop, maxScrollTop);
+    }
+
+    function captureReplyDraft(prefix) {
+      const textarea = document.getElementById(`${prefix}-reply-input`);
+      if (!textarea) {
+        return null;
+      }
+      return {
+        value: textarea.value,
+        wasFocused: document.activeElement === textarea,
+        selectionStart: textarea.selectionStart,
+        selectionEnd: textarea.selectionEnd
+      };
+    }
+
+    function restoreReplyDraft(prefix, snapshot) {
+      if (!snapshot) return;
+      const textarea = document.getElementById(`${prefix}-reply-input`);
+      if (!textarea) return;
+      if (snapshot.value && !textarea.value) {
+        textarea.value = snapshot.value;
+      }
+      if (snapshot.wasFocused) {
+        textarea.focus();
+        const start = Number.isInteger(snapshot.selectionStart) ? snapshot.selectionStart : textarea.value.length;
+        const end = Number.isInteger(snapshot.selectionEnd) ? snapshot.selectionEnd : start;
+        textarea.setSelectionRange(start, end);
+      }
+    }
+
+    function scheduleRefresh(delayMs = 150) {
+      if (state.scheduledRefreshHandle) {
+        return;
+      }
+      state.scheduledRefreshHandle = window.setTimeout(() => {
+        state.scheduledRefreshHandle = null;
+        refreshAll();
+      }, delayMs);
+    }
+
+    function getRootStatus(root) {
+      return String(root?.status || root?.latestEventType || '').trim().toLowerCase();
+    }
+
+    function isLiveSessionRoot(root) {
+      if (typeof root?.live === 'boolean') {
+        return root.live;
+      }
+      return LIVE_ROOT_STATUSES.has(getRootStatus(root));
+    }
+
+    function compareSessionRoots(left, right) {
+      const leftSelected = left?.rootSessionId === state.selectedRootSessionId;
+      const rightSelected = right?.rootSessionId === state.selectedRootSessionId;
+      if (leftSelected !== rightSelected) {
+        return rightSelected ? 1 : -1;
+      }
+
+      const leftLive = isLiveSessionRoot(left);
+      const rightLive = isLiveSessionRoot(right);
+      if (leftLive !== rightLive) {
+        return rightLive ? 1 : -1;
+      }
+
+      const leftAttention = Boolean(left?.attention?.requiresAttention);
+      const rightAttention = Boolean(right?.attention?.requiresAttention);
+      if (leftAttention !== rightAttention) {
+        return rightAttention ? 1 : -1;
+      }
+
+      const leftTime = Date.parse(left?.lastOccurredAt || left?.lastRecordedAt || '') || 0;
+      const rightTime = Date.parse(right?.lastOccurredAt || right?.lastRecordedAt || '') || 0;
+      if (rightTime !== leftTime) {
+        return rightTime - leftTime;
+      }
+
+      return String(left?.rootSessionId || '').localeCompare(String(right?.rootSessionId || ''));
+    }
+
     function getVisibleSessionRoots() {
       const filter = state.rootStatusFilter || 'all';
-      return state.sessionRoots.filter((root) => {
+      const filtered = state.sessionRoots.filter((root) => {
         if (filter === 'all') return true;
+        if (filter === 'live') {
+          return isLiveSessionRoot(root);
+        }
         if (filter === 'actionable') {
           return Boolean(root.attention?.requiresAttention);
         }
         if (filter === 'active') {
-          return ACTIVE_ROOT_STATUSES.has(String(root.status || root.latestEventType || '').toLowerCase());
+          return ACTIVE_ROOT_STATUSES.has(getRootStatus(root));
         }
         if (filter === 'completed') {
-          return String(root.status || root.latestEventType || '').toLowerCase() === 'completed';
+          return getRootStatus(root) === 'completed';
         }
         return true;
       });
+
+      const selectedRoot = state.selectedRootSessionId
+        ? state.sessionRoots.find((root) => root.rootSessionId === state.selectedRootSessionId)
+        : null;
+      if (selectedRoot && !filtered.some((root) => root.rootSessionId === selectedRoot.rootSessionId)) {
+        filtered.push(selectedRoot);
+      }
+
+      return filtered.sort(compareSessionRoots);
     }
 
     function updateStats() {
       const activeTerminals = state.terminals.filter((terminal) => !isTerminalSettled(terminal.status)).length;
+      const waitingTerminals = state.terminals.filter((terminal) => getOperatorStateDescriptor(terminal, {
+        stale: isTerminalStale(terminal)
+      }).waiting).length;
       const runningDiscussions = state.discussionRuns.filter((run) => ['running', 'pending', 'partial'].includes(run.status)).length;
       const selected = state.selectedRootSessionId || state.selectedTerminalId || state.selectedDiscussionId || 'none';
 
-      elements.statTerminals.textContent = String(activeTerminals);
+      elements.statTerminals.textContent = waitingTerminals > 0
+        ? `${activeTerminals} • ${waitingTerminals} waiting`
+        : String(activeTerminals);
       elements.statDiscussions.textContent = String(runningDiscussions);
       elements.statWs.textContent = state.socketConnected ? 'Live' : 'Polling';
       elements.statWs.className = `stat-value ${state.socketConnected ? 'connection-ok' : 'connection-warn'}`;
@@ -1026,9 +1912,25 @@
 
     function renderTerminals() {
       const staleCount = state.terminals.filter(isTerminalStale).length;
-      elements.terminalsSummary.textContent = staleCount
-        ? `${state.terminals.length} loaded • ${staleCount} stale`
-        : `${state.terminals.length} loaded`;
+      const waitingCount = state.terminals.filter((terminal) => getOperatorStateDescriptor(terminal, {
+        stale: isTerminalStale(terminal)
+      }).waiting).length;
+      const workingCount = state.terminals.filter((terminal) => (
+        getOperatorStateDescriptor(terminal, {
+          stale: isTerminalStale(terminal)
+        }).tone === 'working'
+      )).length;
+      const summaryParts = [`${state.terminals.length} loaded`];
+      if (workingCount > 0) {
+        summaryParts.push(`${workingCount} working`);
+      }
+      if (waitingCount > 0) {
+        summaryParts.push(`${waitingCount} waiting`);
+      }
+      if (staleCount > 0) {
+        summaryParts.push(`${staleCount} stale`);
+      }
+      elements.terminalsSummary.textContent = summaryParts.join(' • ');
       if (!state.terminals.length) {
         elements.terminalsList.innerHTML = '<div class="empty-state">No terminals are currently tracked.</div>';
         updateStats();
@@ -1039,9 +1941,13 @@
         <div class="row ${terminal.terminalId === state.selectedTerminalId ? 'active' : ''} ${isTerminalStale(terminal) ? 'stale' : ''}" data-terminal-id="${terminal.terminalId}">
           <div class="row-top">
             <div class="row-title">${escapeHtml(terminal.agentProfile || terminal.terminalId)}</div>
-            <span class="${statusClass(terminal.status)}">${escapeHtml(terminal.status)}</span>
+            <div class="row-badges">
+              ${renderOperatorStatePill(getOperatorStateDescriptor(terminal, { stale: isTerminalStale(terminal) }))}
+              <span class="${statusClass(terminal.status)}">${escapeHtml(terminal.status)}</span>
+            </div>
           </div>
           <div class="row-meta">
+            <div><strong>Operator:</strong> ${escapeHtml(getOperatorStateDescriptor(terminal, { stale: isTerminalStale(terminal) }).label)}</div>
             <div><strong>Adapter:</strong> ${escapeHtml(terminal.adapter)}</div>
             <div><strong>Role:</strong> ${escapeHtml(terminal.role || 'n/a')}</div>
             <div><strong>Created:</strong> ${escapeHtml(formatTimestamp(terminal.createdAt))}</div>
@@ -1158,13 +2064,17 @@
         rootSessionId: root.rootSessionId,
         originClient: root.originClient || 'unknown',
         rootType: root.rootType || 'workflow_root',
+        rootMode: root.rootMode || null,
+        interactiveTerminalId: root.interactiveTerminalId || null,
         userFacing: root.userFacing !== false,
         externalSessionRef: root.externalSessionRef || null,
         clientName: root.clientName || null,
         startedAt: root.startedAt || root.lastRecordedAt || root.lastOccurredAt || null,
         lastOccurredAt: root.lastOccurredAt || root.lastRecordedAt || null,
         latestEventType: root.status || 'unknown',
-        latestSummary: root.latestConclusion?.summary || '',
+        latestSummary: root.activitySummary || root.latestConclusion?.summary || '',
+        activityExcerpt: root.activityExcerpt || '',
+        activitySource: root.activitySource || 'fallback',
         eventCount: root.eventCount || counts.sessions || 0,
         runId: root.runId || null,
         discussionId: root.discussionId || null,
@@ -1173,7 +2083,8 @@
         status: root.status || 'unknown',
         attention,
         latestConclusion: root.latestConclusion || null,
-        archived: Boolean(root.archived)
+        archived: Boolean(root.archived),
+        live: typeof root.live === 'boolean' ? root.live : null
       };
     }
 
@@ -1199,11 +2110,338 @@
       return snapshot.sessions.filter((session) => session && session.sessionId !== snapshot.rootSessionId);
     }
 
+    function getRootControllerSession(snapshot) {
+      if (!snapshot) {
+        return null;
+      }
+      if (snapshot.rootSession && typeof snapshot.rootSession === 'object') {
+        return snapshot.rootSession;
+      }
+      if (Array.isArray(snapshot.sessions)) {
+        return snapshot.sessions.find((session) => session?.sessionId === snapshot.rootSessionId) || null;
+      }
+      return null;
+    }
+
+    function summarizeSessionNode(session) {
+      if (!session) {
+        return '';
+      }
+      return session.activitySummary
+        || session.latestConclusion?.summary
+        || session.latestSummary
+        || session.activityExcerpt
+        || session.lastReuseReason
+        || session.attentionMessage
+        || '';
+    }
+
+    function getTrackedTerminal(terminalId) {
+      if (!terminalId) {
+        return null;
+      }
+      return state.terminals.find((terminal) => terminal?.terminalId === terminalId) || null;
+    }
+
+    function getRootTerminalId(snapshot, rootTerminalBundle = null) {
+      return rootTerminalBundle?.terminal?.terminalId
+        || snapshot?.interactiveTerminalId
+        || snapshot?.rootSession?.terminalId
+        || null;
+    }
+
+    function getRootChildTerminalEntries(snapshot, rootTerminalBundle = null) {
+      const rootTerminalId = getRootTerminalId(snapshot, rootTerminalBundle);
+      const entriesByTerminalId = new Map();
+
+      getRootChildSessions(snapshot).forEach((session) => {
+        if (!session?.terminalId || session.terminalId === rootTerminalId) {
+          return;
+        }
+
+        const trackedTerminal = getTrackedTerminal(session.terminalId);
+        const status = trackedTerminal?.status
+          || session?.terminalStatus
+          || session?.status
+          || session?.lastEventType
+          || 'unknown';
+        const lastActive = trackedTerminal?.lastActive
+          || session?.lastActiveAt
+          || session?.lastEventAt
+          || null;
+
+        entriesByTerminalId.set(session.terminalId, {
+          sessionId: session?.sessionId || null,
+          terminalId: session?.terminalId || null,
+          title: session?.name || trackedTerminal?.agentProfile || session?.terminalId || session?.sessionId || 'Child terminal',
+          adapter: trackedTerminal?.adapter || session?.adapter || 'n/a',
+          role: trackedTerminal?.role || session?.role || 'n/a',
+          sessionKind: trackedTerminal?.sessionKind || session?.sessionKind || 'unknown',
+          status,
+          lastActive,
+          summary: summarizeSessionNode(session),
+          trackedTerminal,
+          session
+        });
+      });
+
+      return Array.from(entriesByTerminalId.values()).sort((left, right) => {
+        const rightTime = Date.parse(right?.lastActive || '') || 0;
+        const leftTime = Date.parse(left?.lastActive || '') || 0;
+        if (rightTime !== leftTime) {
+          return rightTime - leftTime;
+        }
+        return String(left?.title || '').localeCompare(String(right?.title || ''));
+      });
+    }
+
+    function renderTerminalWorkspaceOption(option, selected, options = {}) {
+      const prefix = options.prefix || 'root-terminal';
+      const rootTerminalId = options.rootTerminalId || '';
+      const source = option?.subject || option?.trackedTerminal || option?.session || option || {};
+      const stale = option?.trackedTerminal ? isTerminalStale(option.trackedTerminal) : false;
+      const operatorState = getOperatorStateDescriptor(source, { stale });
+      const rawStatus = option?.status || source?.status || source?.lastEventType || 'unknown';
+      const summary = option?.summary || operatorState.summary || 'No terminal summary recorded yet.';
+      return `
+        <button
+          class="terminal-workspace-option ${selected ? 'active' : ''}"
+          type="button"
+          data-terminal-workspace-prefix="${escapeHtml(prefix)}"
+          data-terminal-workspace-target="${escapeHtml(option?.terminalId || '')}"
+          data-root-terminal-id="${escapeHtml(rootTerminalId)}"
+        >
+          <div class="terminal-workspace-option-head">
+            <div class="terminal-workspace-option-title">${escapeHtml(option?.title || option?.terminalId || 'Terminal')}</div>
+            <div class="row-badges">
+              ${renderOperatorStatePill(operatorState)}
+              <span class="${statusClass(rawStatus)}">${escapeHtml(rawStatus)}</span>
+            </div>
+          </div>
+          <div class="terminal-workspace-option-meta">
+            <span><strong>Adapter:</strong> ${escapeHtml(option?.adapter || 'n/a')}</span>
+            <span><strong>Role:</strong> ${escapeHtml(option?.role || 'n/a')}</span>
+            <span><strong>Kind:</strong> ${escapeHtml(option?.sessionKind || 'unknown')}</span>
+            <span><strong>Last:</strong> ${escapeHtml(formatTimestamp(option?.lastActive))}</span>
+          </div>
+          <div class="terminal-workspace-option-summary">${escapeHtml(summary)}</div>
+        </button>
+      `;
+    }
+
+    function buildRootTerminalWorkspaceModel(snapshot, rootTerminalBundle, childTerminalBundles = {}, options = {}) {
+      const rootTerminalId = getRootTerminalId(snapshot, rootTerminalBundle);
+      const childEntries = getRootChildTerminalEntries(snapshot, rootTerminalBundle);
+      const recordedChildSessions = getRootChildSessions(snapshot);
+      const childSessionsWithoutTerminal = recordedChildSessions.filter((session) => !session?.terminalId).length;
+      const availableTerminalIds = new Set([
+        ...(rootTerminalId ? [rootTerminalId] : []),
+        ...childEntries.map((entry) => entry.terminalId).filter(Boolean)
+      ]);
+
+      let focusedTerminalId = options.focusedTerminalId || null;
+      if (!focusedTerminalId || !availableTerminalIds.has(focusedTerminalId)) {
+        focusedTerminalId = rootTerminalId || childEntries[0]?.terminalId || null;
+      }
+
+      const rootChoice = (rootTerminalBundle || rootTerminalId)
+        ? {
+            terminalId: rootTerminalId || rootTerminalBundle?.terminalId || '',
+            title: 'Root Terminal',
+            adapter: rootTerminalBundle?.terminal?.adapter || snapshot?.rootSession?.adapter || 'n/a',
+            role: rootTerminalBundle?.terminal?.role || snapshot?.rootSession?.role || 'main',
+            sessionKind: rootTerminalBundle?.terminal?.sessionKind || snapshot?.rootSession?.sessionKind || 'main',
+            status: rootTerminalBundle?.terminal?.status || snapshot?.rootSession?.status || 'unknown',
+            lastActive: rootTerminalBundle?.terminal?.lastActive || snapshot?.rootSession?.lastActiveAt || null,
+            summary: summarizeSessionNode(snapshot?.rootSession) || rootTerminalBundle?.terminal?.attention?.message || '',
+            subject: rootTerminalBundle?.terminal || snapshot?.rootSession || {},
+            trackedTerminal: rootTerminalBundle?.terminal || null
+          }
+        : null;
+
+      const childChoices = childEntries.map((entry) => ({
+        ...entry,
+        title: entry.title || 'Child Terminal',
+        subject: entry.trackedTerminal || entry.session || { status: entry.status },
+        trackedTerminal: entry.trackedTerminal || null
+      }));
+
+      let focusedBundle = null;
+      let focusedLabel = 'Terminal';
+      if (focusedTerminalId && rootChoice && focusedTerminalId === rootChoice.terminalId) {
+        focusedBundle = rootTerminalBundle;
+        focusedLabel = 'Root Terminal';
+      } else if (focusedTerminalId) {
+        focusedBundle = childTerminalBundles[focusedTerminalId] || null;
+        focusedLabel = 'Child Terminal';
+      }
+
+      return {
+        rootTerminalId,
+        rootChoice,
+        childChoices,
+        focusedTerminalId,
+        focusedBundle,
+        focusedLabel,
+        childSessionsWithoutTerminal
+      };
+    }
+
+    function renderRootScopedTerminalWorkspace(snapshot, rootTerminalBundle, childTerminalBundles = {}, options = {}) {
+      const prefix = options.prefix || 'root-terminal';
+      const outputPreferences = options.outputPreferences || getPrefixOutputPreferences(prefix);
+      const readOnlyRoot = options.readOnlyRoot === true;
+      const model = buildRootTerminalWorkspaceModel(snapshot, rootTerminalBundle, childTerminalBundles, options);
+      const choices = [
+        ...(model.rootChoice ? [model.rootChoice] : []),
+        ...model.childChoices
+      ];
+
+      if (!choices.length) {
+        return {
+          markup: '<div class="empty-state">No root or child terminal is attached to this root yet.</div>',
+          focusedBundle: null,
+          focusedTerminalId: null,
+          rootTerminalId: model.rootTerminalId || null
+        };
+      }
+
+      const switcherHint = model.childChoices.length
+        ? 'Child terminals are nested inside this root workspace. Open one here when you need the child detail, then switch back to the root terminal without leaving the root view.'
+        : 'This root currently exposes only its main terminal.';
+      const hiddenChildrenHint = model.childSessionsWithoutTerminal > 0
+        ? `<div class="hint">${escapeHtml(String(model.childSessionsWithoutTerminal))} recorded child session${model.childSessionsWithoutTerminal === 1 ? '' : 's'} ${model.childSessionsWithoutTerminal === 1 ? 'does' : 'do'} not currently expose a terminal. They still appear in the hierarchy and event timeline.</div>`
+        : '';
+      const focusedSection = model.focusedBundle?.error
+        ? `
+            <div>
+              <div class="detail-label">${escapeHtml(model.focusedLabel)}</div>
+              <div class="warning-banner">
+                Terminal ${escapeHtml(model.focusedBundle.terminalId || model.focusedTerminalId || 'unknown')} could not be loaded: ${escapeHtml(model.focusedBundle.error)}
+              </div>
+            </div>
+          `
+        : model.focusedBundle?.terminal
+          ? `
+              <div>
+                <div class="detail-label">${escapeHtml(model.focusedLabel)}</div>
+                ${buildTerminalDetailMarkup(
+                  model.focusedBundle.terminal,
+                  model.focusedBundle.outputText,
+                  model.focusedBundle.messages,
+                  {
+                    prefix,
+                    outputPreferences,
+                    readOnly: readOnlyRoot
+                  }
+                )}
+              </div>
+            `
+        : '<div class="empty-state">Select a terminal inside this root to inspect output and persisted messages.</div>';
+
+      return {
+        markup: `
+          <div>
+            <div class="detail-label">Root Terminal Workspace</div>
+            <div class="hint">${escapeHtml(switcherHint)}</div>
+          </div>
+          <div class="terminal-workspace-switcher">
+            ${choices.map((choice) => renderTerminalWorkspaceOption(choice, choice.terminalId === model.focusedTerminalId, {
+              prefix,
+              rootTerminalId: model.rootTerminalId || choice.terminalId || ''
+            })).join('')}
+          </div>
+          ${hiddenChildrenHint}
+          ${focusedSection}
+        `,
+        focusedBundle: model.focusedBundle,
+        focusedTerminalId: model.focusedTerminalId,
+        rootTerminalId: model.rootTerminalId || null
+      };
+    }
+
+    function bindTerminalWorkspaceSelection(prefix, refreshFn, options = {}) {
+      document.querySelectorAll(`[data-terminal-workspace-prefix="${prefix}"]`).forEach((button) => {
+        button.onclick = async () => {
+          const targetTerminalId = String(button.dataset.terminalWorkspaceTarget || '').trim() || null;
+          const rootTerminalId = String(button.dataset.rootTerminalId || '').trim() || null;
+          if (!targetTerminalId) {
+            return;
+          }
+
+          if (options.mobile) {
+            const nextFocusedTerminalId = targetTerminalId === rootTerminalId ? null : targetTerminalId;
+            if ((nextFocusedTerminalId || null) === (state.mobileFocusedTerminalId || null)) {
+              return;
+            }
+            state.mobileFocusedTerminalId = nextFocusedTerminalId;
+            syncUrlState();
+            await refreshFn();
+            return;
+          }
+
+          if (state.selectedTerminalId === targetTerminalId) {
+            return;
+          }
+          state.selectedTerminalId = targetTerminalId;
+          syncUrlState();
+          renderTerminals();
+          await Promise.allSettled([refreshFn(), refreshSelectedTerminal()]);
+          updateStats();
+        };
+      });
+    }
+
+    function renderHierarchyNode(session, options = {}) {
+      if (!session) {
+        return '';
+      }
+
+      const tone = options.tone === 'root' ? 'root' : 'child';
+      const label = options.label || (tone === 'root' ? 'Root Controller' : 'Child Session');
+      const title = options.title || session.name || session.sessionId || 'unknown';
+      const status = session.status || session.lastEventType || 'unknown';
+      const operatorState = getOperatorStateDescriptor(session, { live: options.live });
+      const summary = summarizeSessionNode(session);
+      const reference = session.terminalId
+        ? `Terminal ${session.terminalId}`
+        : `Session ${session.sessionId || 'unknown'}`;
+
+      return `
+        <div class="hierarchy-node hierarchy-node-${tone}">
+          <div class="hierarchy-node-head">
+            <span class="hierarchy-node-label">${escapeHtml(label)}</span>
+            <div class="hierarchy-node-status">
+              ${renderOperatorStatePill(operatorState)}
+              <span class="${statusClass(status)}">${escapeHtml(status)}</span>
+            </div>
+          </div>
+          <div class="hierarchy-node-title">${escapeHtml(title)}</div>
+          <div class="hierarchy-node-meta">
+            <span><strong>Operator:</strong> ${escapeHtml(operatorState.label)}</span>
+            <span><strong>Adapter:</strong> ${escapeHtml(session.adapter || 'n/a')}</span>
+            <span><strong>Role:</strong> ${escapeHtml(session.role || 'n/a')}</span>
+            <span><strong>Kind:</strong> ${escapeHtml(session.sessionKind || 'unknown')}</span>
+          </div>
+          <div class="hierarchy-node-hint">${escapeHtml(reference)}</div>
+          ${summary ? `<div class="hierarchy-node-summary">${escapeHtml(summary)}</div>` : ''}
+        </div>
+      `;
+    }
+
     function summarizeRootCard(root) {
-      const summary = root?.latestConclusion?.summary || root?.latestSummary || '';
+      const operatorState = getOperatorStateDescriptor(root, { live: root?.live });
+      const summary = root?.latestSummary || root?.latestConclusion?.summary || '';
       const attentionMessage = root?.attention?.reasons?.[0]?.message || '';
+      const excerpt = root?.activityExcerpt || '';
+      if (!summary && !attentionMessage && operatorState?.summary) {
+        return operatorState.summary;
+      }
       if (!summary && attentionMessage) {
         return attentionMessage.length > 180 ? `${attentionMessage.slice(0, 179).trimEnd()}…` : attentionMessage;
+      }
+      if (!summary && excerpt) {
+        return excerpt.length > 180 ? `${excerpt.slice(0, 179).trimEnd()}…` : excerpt;
       }
       if (!summary) {
         return 'No decision or summary recorded yet.';
@@ -1215,26 +2453,37 @@
       return root.externalSessionRef || root.clientName || root.rootSessionId;
     }
 
-    function renderRootChildSessions(snapshot) {
+    function renderRootHierarchy(snapshot, root = null) {
+      const rootController = getRootControllerSession(snapshot);
       const childSessions = getRootChildSessions(snapshot);
-      if (!childSessions.length) {
-        return '<div class="hint">No child sessions recorded for this root yet.</div>';
+      if (!rootController && !childSessions.length) {
+        return '<div class="hint">No root or child sessions recorded for this control-plane root yet.</div>';
       }
 
-      return childSessions.map((session) => `
-        <div class="child-session-item">
-          <div class="child-session-head">
-            <div class="child-session-title">${escapeHtml(session.name || session.sessionId)}</div>
-            <span class="${statusClass(session.status || session.lastEventType || 'unknown')}">${escapeHtml(session.status || session.lastEventType || 'unknown')}</span>
+      const rootNodeMarkup = rootController
+        ? renderHierarchyNode(rootController, {
+            tone: 'root',
+            label: rootController.terminalId ? 'Root Terminal' : 'Root Session',
+            title: root ? buildRootCardTitle(root) : (rootController.name || rootController.sessionId || 'Root Session')
+          })
+        : '<div class="hint">No root controller terminal recorded yet.</div>';
+
+      return `
+        <div class="hierarchy-flow">
+          <div class="hierarchy-root-wrap">
+            ${rootNodeMarkup}
+            ${childSessions.length ? '<div class="hierarchy-connector"></div>' : ''}
           </div>
-          <div class="child-session-meta">
-            <span><strong>Kind:</strong> ${escapeHtml(session.sessionKind || 'unknown')}</span>
-            <span><strong>Adapter:</strong> ${escapeHtml(session.adapter || 'n/a')}</span>
-            <span><strong>Role:</strong> ${escapeHtml(session.role || 'n/a')}</span>
-          </div>
-          <div class="child-session-summary">${escapeHtml(session.latestConclusion?.summary || session.lastReuseReason || session.latestSummary || 'No conclusion recorded yet.')}</div>
+          ${childSessions.length ? `
+            <div class="hierarchy-children">
+              ${childSessions.map((session) => renderHierarchyNode(session, {
+                tone: 'child',
+                label: session.sessionKind === 'subagent' ? 'Child Worker' : 'Child Session'
+              })).join('')}
+            </div>
+          ` : '<div class="hint">No child sessions recorded for this root yet.</div>'}
         </div>
-      `).join('');
+      `;
     }
 
     async function hydrateVisibleRootSnapshots(roots) {
@@ -1296,6 +2545,7 @@
           ${visibleRoots.map((root) => {
             const snapshot = getRootSnapshot(root.rootSessionId);
             const childSessions = getRootChildSessions(snapshot);
+            const operatorState = getOperatorStateDescriptor(root, { live: root.live });
             return `
               <div class="root-card ${root.rootSessionId === state.selectedRootSessionId ? 'active' : ''} ${root.attention?.requiresAttention ? 'attention' : ''}" data-root-session-id="${root.rootSessionId}">
                 <div class="root-card-head">
@@ -1303,23 +2553,29 @@
                     <div class="root-card-title">${escapeHtml(buildRootCardTitle(root))}</div>
                     <div class="root-card-subtitle">${escapeHtml(root.rootSessionId)}</div>
                   </div>
-                  <span class="${statusClass(root.status || root.latestEventType || 'unknown')}">${escapeHtml(root.status || root.latestEventType || 'unknown')}</span>
+                  <div class="card-badges">
+                    ${renderOperatorStatePill(operatorState)}
+                    <span class="${statusClass(root.status || root.latestEventType || 'unknown')}">${escapeHtml(root.status || root.latestEventType || 'unknown')}</span>
+                  </div>
                 </div>
                 <div class="root-card-meta">
+                  <div><strong>Operator:</strong> ${escapeHtml(operatorState.label)}</div>
                   <div><strong>Origin:</strong> ${escapeHtml(root.originClient || 'unknown')}</div>
+                  <div><strong>Mode:</strong> ${escapeHtml(root.rootMode || 'n/a')}</div>
                   <div><strong>Type:</strong> ${escapeHtml(root.rootType || 'workflow_root')}</div>
-                  <div><strong>Children:</strong> ${escapeHtml(String(childSessions.length))}</div>
+                  <div><strong>Main Terminal:</strong> ${escapeHtml(root.interactiveTerminalId || 'n/a')}</div>
+                  <div><strong>Topology:</strong> ${escapeHtml(`1 root + ${childSessions.length} child`)}</div>
                   <div><strong>Events:</strong> ${escapeHtml(String(root.eventCount || 0))}</div>
                   <div><strong>Started:</strong> ${escapeHtml(formatTimestamp(root.startedAt))}</div>
                   <div><strong>Last:</strong> ${escapeHtml(formatTimestamp(root.lastOccurredAt))}</div>
                 </div>
                 <div class="root-card-summary">${escapeHtml(summarizeRootCard(root))}</div>
                 <div>
-                  <div class="detail-label">Child Sessions</div>
+                  <div class="detail-label">Root / Child Hierarchy</div>
                   <div class="root-card-children">
                     ${snapshot?.error
                       ? `<div class="warning-banner">${escapeHtml(snapshot.error)}</div>`
-                      : renderRootChildSessions(snapshot)}
+                      : renderRootHierarchy(snapshot, root)}
                   </div>
                 </div>
               </div>
@@ -1331,6 +2587,7 @@
       elements.sessionRootsList.querySelectorAll('[data-root-session-id]').forEach((node) => {
         node.addEventListener('click', () => {
           state.selectedRootSessionId = node.dataset.rootSessionId;
+          state.mobileFocusedTerminalId = null;
           syncUrlState();
           renderSessionRoots();
           refreshSelectedSessionRoot();
@@ -1339,6 +2596,8 @@
       });
 
       updateStats();
+      renderMobileRootSelector(visibleRoots);
+      bindMobileRootControls();
     }
 
     async function refreshTerminals() {
@@ -1360,9 +2619,17 @@
 
     async function refreshSessionRoots() {
       try {
-        const query = state.includeArchivedRoots
-          ? `/orchestration/root-sessions?limit=80&scope=${encodeURIComponent(state.rootScope)}&includeArchived=1`
-          : `/orchestration/root-sessions?limit=80&scope=${encodeURIComponent(state.rootScope)}`;
+        const queryParams = new URLSearchParams({
+          limit: '80',
+          scope: state.rootScope
+        });
+        if (state.includeArchivedRoots) {
+          queryParams.set('includeArchived', '1');
+        }
+        if (state.rootStatusFilter && state.rootStatusFilter !== 'all') {
+          queryParams.set('statusFilter', state.rootStatusFilter);
+        }
+        const query = `/orchestration/root-sessions?${queryParams.toString()}`;
         const data = await fetchJson(query);
         state.sessionRoots = (data.roots || []).map(normalizeRootSummary);
         state.sessionRootsArchivedCount = Number(data.archivedCount || 0);
@@ -1383,15 +2650,26 @@
           elements.sessionRootsSummary.textContent = fallbackError.message;
         }
       }
-      await hydrateVisibleRootSnapshots(getVisibleSessionRoots());
+      const visibleRoots = getVisibleSessionRoots();
+      const selectedRootStillExists = state.selectedRootSessionId
+        && state.sessionRoots.some((root) => root.rootSessionId === state.selectedRootSessionId);
+      if (!selectedRootStillExists && visibleRoots.length > 0) {
+        state.selectedRootSessionId = visibleRoots[0].rootSessionId;
+        state.mobileFocusedTerminalId = null;
+        syncUrlState();
+      }
+      await hydrateVisibleRootSnapshots(visibleRoots);
       renderSessionRoots();
     }
 
     function buildTerminalDetailMarkup(terminal, outputText, messages, options = {}) {
       const prefix = options.prefix || 'terminal-detail';
+      const outputPreferences = options.outputPreferences || getPrefixOutputPreferences(prefix);
+      const readOnly = options.readOnly === true;
       const status = terminal?.status || 'unknown';
-      const blocked = ['waiting_permission', 'waiting_user_answer'].includes(status);
       const stale = isTerminalStale(terminal);
+      const operatorState = getOperatorStateDescriptor(terminal, { stale });
+      const blocked = operatorState.waiting === true;
       const attention = terminal?.attention || null;
       return `
         ${attention ? `
@@ -1422,8 +2700,27 @@
             <div>${escapeHtml(terminal.role || 'n/a')}</div>
           </div>
           <div>
-            <div class="detail-label">Status</div>
+            <div class="detail-label">Root Session</div>
+            <div>${escapeHtml(terminal.rootSessionId || 'n/a')}</div>
+          </div>
+          <div>
+            <div class="detail-label">Parent Session</div>
+            <div>${escapeHtml(terminal.parentSessionId || 'n/a')}</div>
+          </div>
+          <div>
+            <div class="detail-label">Operator State</div>
+            <div class="detail-value-stack">
+              ${renderOperatorStatePill(operatorState)}
+              <div class="hint">${escapeHtml(operatorState.summary)}</div>
+            </div>
+          </div>
+          <div>
+            <div class="detail-label">Raw Status</div>
             <div><span class="${statusClass(status)}">${escapeHtml(status)}</span></div>
+          </div>
+          <div>
+            <div class="detail-label">Kind</div>
+            <div>${escapeHtml(terminal.sessionKind || 'n/a')}</div>
           </div>
           <div>
             <div class="detail-label">Created</div>
@@ -1437,12 +2734,14 @@
 
         <div>
           <div class="detail-label">Live Output</div>
-          <div class="terminal-output"><pre>${escapeHtml(outputText || 'No terminal output available.')}</pre></div>
+          <div class="hint">This provider pane is a read-only snapshot. Copy from it if needed, then paste and send new input with the reply box below.</div>
+          ${buildTerminalOutputControls(prefix, outputPreferences)}
+          <div class="terminal-output" id="${prefix}-output">${renderTerminalOutputMarkup(outputText, outputPreferences)}</div>
         </div>
 
         <div>
           <div class="detail-label">Persisted Messages</div>
-          <div class="message-list">
+          <div class="message-list" id="${prefix}-messages">
             ${messages.length ? messages.map((message) => `
               <div class="message-item">
                 <div class="message-head">
@@ -1460,20 +2759,24 @@
             <div class="reply-box-title-wrap">
               <div class="reply-box-title">Reply to Terminal</div>
               <div class="reply-box-subtitle">
-                ${blocked
+                ${readOnly
+                  ? 'This root is attached in read-only mode. Monitor output here, but send new instructions through a managed or adopted root instead.'
+                  : blocked
                   ? 'This terminal is paused and waiting for human input. Send a reply to unblock it.'
-                  : 'Compose follow-up input, approvals, or steering prompts from the browser without losing the live terminal context.'}
+                  : operatorState.tone === 'ready'
+                    ? 'This terminal is back at a prompt. Send the next instruction to continue the session.'
+                    : 'Compose follow-up input, approvals, or steering prompts from the browser without losing the live terminal context.'}
               </div>
             </div>
-            <div class="reply-box-badge">${blocked ? 'Needs Reply' : 'Composer'}</div>
+            <div class="reply-box-badge">${readOnly ? 'Read Only' : (blocked ? 'Needs Reply' : 'Composer')}</div>
           </div>
           <div class="reply-input-shell">
             <div class="reply-input-gutter">›</div>
-            <textarea id="${prefix}-reply-input" rows="4" placeholder="Type the next instruction, approval, or follow-up message for this terminal."></textarea>
+            <textarea id="${prefix}-reply-input" rows="4" ${readOnly ? 'disabled' : ''} placeholder="${escapeHtml(readOnly ? 'This attached root is read-only.' : 'Type the next instruction, approval, or follow-up message for this terminal.')}"></textarea>
           </div>
           <div class="reply-actions">
-            <div class="hint">${blocked ? 'Waiting on human input.' : 'You can still send follow-up input while the terminal is processing.'} Use <code>Ctrl+Enter</code> or <code>Cmd+Enter</code> to send.</div>
-            <button class="btn btn-primary" id="${prefix}-reply-send" type="button">Send Reply</button>
+            <div class="hint">${readOnly ? 'Remote execution is disabled for attached roots.' : (blocked ? 'Waiting on human input.' : operatorState.summary)} ${readOnly ? '' : 'Use Ctrl+Enter or Cmd+Enter to send.'}</div>
+            <button class="btn btn-primary" id="${prefix}-reply-send" type="button" ${readOnly ? 'disabled' : ''}>Send Reply</button>
           </div>
         </div>
 
@@ -1485,11 +2788,79 @@
       `;
     }
 
-    function bindTerminalDetailActions(terminal, prefix, refreshFn) {
+    async function fetchTerminalBundleWithPreferences(terminalId, preferences = {}) {
+      const outputPreferences = {
+        mode: coerceOutputMode(preferences.mode, 'history'),
+        format: coerceOutputFormat(preferences.format, 'plain')
+      };
+      const outputParams = new URLSearchParams({
+        lines: '250',
+        mode: outputPreferences.mode,
+        format: outputPreferences.format
+      });
+      const [terminal, output, messages] = await Promise.all([
+        fetchJson(`/orchestration/terminals/${encodeURIComponent(terminalId)}`),
+        fetchJson(`/orchestration/terminals/${encodeURIComponent(terminalId)}/output?${outputParams.toString()}`),
+        fetchJson(`/orchestration/terminals/${encodeURIComponent(terminalId)}/messages?limit=200`)
+      ]);
+
+      return {
+        terminal,
+        outputText: output.output || '',
+        outputMode: output.mode || outputPreferences.mode,
+        outputFormat: output.format || outputPreferences.format,
+        messages: messages.messages || []
+      };
+    }
+
+    async function fetchTerminalBundle(terminalId) {
+      return fetchTerminalBundleWithPreferences(terminalId, getPrefixOutputPreferences('terminal-detail'));
+    }
+
+    async function fetchTerminalBundleSafe(terminalId, preferences = null) {
+      try {
+        if (preferences) {
+          return await fetchTerminalBundleWithPreferences(terminalId, preferences);
+        }
+        return await fetchTerminalBundle(terminalId);
+      } catch (error) {
+        return {
+          terminalId,
+          error: error.message || 'Failed to load terminal state.'
+        };
+      }
+    }
+
+    function bindOutputPreferenceControls(prefix, refreshFn) {
+      document.querySelectorAll(`[data-output-mode-toggle="${prefix}"]`).forEach((button) => {
+        button.onclick = async () => {
+          const nextMode = button.dataset.outputMode;
+          if (!nextMode || getPrefixOutputPreferences(prefix).mode === nextMode) {
+            return;
+          }
+          setPrefixOutputPreferences(prefix, { mode: nextMode });
+          await refreshFn();
+        };
+      });
+      document.querySelectorAll(`[data-output-format-toggle="${prefix}"]`).forEach((button) => {
+        button.onclick = async () => {
+          const nextFormat = button.dataset.outputFormat;
+          if (!nextFormat || getPrefixOutputPreferences(prefix).format === nextFormat) {
+            return;
+          }
+          setPrefixOutputPreferences(prefix, { format: nextFormat });
+          await refreshFn();
+        };
+      });
+    }
+
+    function bindTerminalDetailActions(terminal, prefix, refreshFn, options = {}) {
+      const readOnly = options.readOnly === true;
       const textarea = document.getElementById(`${prefix}-reply-input`);
       const sendButton = document.getElementById(`${prefix}-reply-send`);
       const sendReply = async () => {
         if (!textarea) return;
+        if (readOnly) return;
         const message = textarea.value.trim();
         if (!message) return;
         if (sendButton) {
@@ -1523,25 +2894,35 @@
         }
       };
 
-      sendButton?.addEventListener('click', sendReply);
-      textarea?.addEventListener('keydown', (event) => {
-        if ((event.metaKey || event.ctrlKey) && event.key === 'Enter') {
-          event.preventDefault();
-          sendReply();
-        }
-      });
+      if (!readOnly) {
+        sendButton?.addEventListener('click', sendReply);
+        textarea?.addEventListener('keydown', (event) => {
+          if ((event.metaKey || event.ctrlKey) && event.key === 'Enter') {
+            event.preventDefault();
+            sendReply();
+          }
+        });
+      }
 
+      bindOutputPreferenceControls(prefix, refreshFn);
       document.getElementById(`${prefix}-destroy`)?.addEventListener('click', () => destroySelectedTerminal(terminal.terminalId));
       document.getElementById(`${prefix}-reconcile-runs`)?.addEventListener('click', reconcileStaleRuns);
     }
 
     function renderTerminalDetailCard(terminal, outputText, messages) {
-      const status = terminal?.status || 'unknown';
-      elements.terminalDetailStatus.textContent = `${terminal.agentProfile || terminal.terminalId} • ${status}`;
+      const outputScroll = captureScrollState(document.getElementById('terminal-detail-output'));
+      const messageScroll = captureScrollState(document.getElementById('terminal-detail-messages'));
+      const replyDraft = captureReplyDraft('terminal-detail');
+      const operatorState = getOperatorStateDescriptor(terminal, { stale: isTerminalStale(terminal) });
+      elements.terminalDetailStatus.textContent = `${terminal.agentProfile || terminal.terminalId} • ${operatorState.label}`;
       elements.terminalDetail.innerHTML = buildTerminalDetailMarkup(terminal, outputText, messages, {
-        prefix: 'terminal-detail'
+        prefix: 'terminal-detail',
+        outputPreferences: getPrefixOutputPreferences('terminal-detail')
       });
       bindTerminalDetailActions(terminal, 'terminal-detail', refreshSelectedTerminal);
+      restoreScrollState(document.getElementById('terminal-detail-output'), outputScroll, { defaultToBottom: true });
+      restoreScrollState(document.getElementById('terminal-detail-messages'), messageScroll, { defaultToBottom: true });
+      restoreReplyDraft('terminal-detail', replyDraft);
     }
 
     async function refreshSelectedTerminal() {
@@ -1552,12 +2933,8 @@
       }
 
       try {
-        const [terminal, output, messages] = await Promise.all([
-          fetchJson(`/orchestration/terminals/${encodeURIComponent(state.selectedTerminalId)}`),
-          fetchJson(`/orchestration/terminals/${encodeURIComponent(state.selectedTerminalId)}/output?lines=250`),
-          fetchJson(`/orchestration/terminals/${encodeURIComponent(state.selectedTerminalId)}/messages?limit=200`)
-        ]);
-        renderTerminalDetailCard(terminal, output.output, messages.messages || []);
+        const bundle = await fetchTerminalBundle(state.selectedTerminalId);
+        renderTerminalDetailCard(bundle.terminal, bundle.outputText, bundle.messages || []);
       } catch (error) {
         elements.terminalDetailStatus.textContent = 'Terminal unavailable';
         elements.terminalDetail.innerHTML = `<div class="empty-state">${escapeHtml(error.message)}</div>`;
@@ -1635,37 +3012,198 @@
       return rows;
     }
 
-    function renderRootTerminalSection(rootTerminalBundle) {
-      if (!rootTerminalBundle) {
-        return '';
+    function renderMobileRootSelector(roots = []) {
+      if (!elements.mobileRootSelect) {
+        return;
       }
-      if (rootTerminalBundle.error) {
-        return `
-          <div>
-            <div class="detail-label">Root Terminal</div>
-            <div class="warning-banner">
-              Root terminal ${escapeHtml(rootTerminalBundle.terminalId || 'unknown')} could not be loaded: ${escapeHtml(rootTerminalBundle.error)}
+      const options = roots.length
+        ? roots.map((root) => {
+            const operatorState = getOperatorStateDescriptor(root, { live: root.live });
+            const selected = root.rootSessionId === state.selectedRootSessionId ? ' selected' : '';
+            return `<option value="${escapeHtml(root.rootSessionId)}"${selected}>${escapeHtml(`${buildRootCardTitle(root)} • ${operatorState.label}`)}</option>`;
+          }).join('')
+        : '<option value="">No roots available</option>';
+      elements.mobileRootSelect.innerHTML = options;
+      elements.mobileRootSelect.disabled = roots.length === 0;
+    }
+
+    function bindMobileRootControls() {
+      if (elements.mobileRootSelect) {
+        elements.mobileRootSelect.onchange = async (event) => {
+          const nextRootSessionId = String(event.target.value || '').trim();
+          if (!nextRootSessionId || nextRootSessionId === state.selectedRootSessionId) {
+            return;
+          }
+          state.selectedRootSessionId = nextRootSessionId;
+          state.mobileFocusedTerminalId = null;
+          syncUrlState();
+          renderSessionRoots();
+          await refreshSelectedSessionRoot();
+          updateStats();
+        };
+      }
+
+      document.querySelectorAll('[data-mobile-root-view]').forEach((button) => {
+        button.onclick = async () => {
+          const nextView = button.dataset.mobileRootView;
+          if (!nextView || nextView === state.mobileRootView) {
+            return;
+          }
+          state.mobileRootView = nextView;
+          syncUrlState();
+          await refreshSelectedSessionRoot();
+        };
+      });
+    }
+
+    function renderMobileRootWorkspace(events = [], snapshot = null, rootTerminalBundle = null, childTerminalBundles = {}) {
+      if (!elements.mobileRootPanel || !elements.mobileRootStatus) {
+        return;
+      }
+
+      const visibleRoots = getVisibleSessionRoots();
+      renderMobileRootSelector(visibleRoots);
+      document.querySelectorAll('[data-mobile-root-view]').forEach((button) => {
+        button.classList.toggle('active', button.dataset.mobileRootView === state.mobileRootView);
+      });
+
+      if (!state.selectedRootSessionId) {
+        elements.mobileRootStatus.textContent = 'No root selected';
+        elements.mobileRootPanel.innerHTML = '<div class="empty-state">Select a live root to open the mobile workspace.</div>';
+        bindMobileRootControls();
+        return;
+      }
+
+      const root = snapshot || state.sessionRoots.find((entry) => entry.rootSessionId === state.selectedRootSessionId) || null;
+      if (!root) {
+        elements.mobileRootStatus.textContent = 'Root unavailable';
+        elements.mobileRootPanel.innerHTML = '<div class="empty-state">The selected root is no longer available in the current filter scope.</div>';
+        bindMobileRootControls();
+        return;
+      }
+
+      const operatorState = getOperatorStateDescriptor(root, { live: root.live });
+      const childSessions = getRootChildSessions(snapshot);
+      const rootTitle = buildRootCardTitle(root);
+      elements.mobileRootStatus.textContent = `${rootTitle} • ${operatorState.label}`;
+
+      let panelMarkup = '';
+      let terminalWorkspace = null;
+      if (state.mobileRootView === 'overview') {
+        panelMarkup = `
+          <div class="mobile-root-summary">
+            <div class="mobile-root-summary-head">
+              <div>
+                <div class="mobile-root-summary-title">${escapeHtml(rootTitle)}</div>
+                <div class="mobile-root-summary-subtitle">${escapeHtml(root.rootSessionId || 'unknown')}</div>
+              </div>
+              ${renderOperatorStatePill(operatorState)}
+            </div>
+            <div class="detail-grid">
+              <div>
+                <div class="detail-label">Latest</div>
+                <div>${escapeHtml(root.latestSummary || operatorState.summary)}</div>
+              </div>
+              <div>
+                <div class="detail-label">Origin</div>
+                <div>${escapeHtml(root.originClient || 'unknown')}</div>
+              </div>
+              <div>
+                <div class="detail-label">Mode</div>
+                <div>${escapeHtml(root.rootMode || 'n/a')}</div>
+              </div>
+              <div>
+                <div class="detail-label">Last Event</div>
+                <div>${escapeHtml(formatTimestamp(root.lastOccurredAt))}</div>
+              </div>
+              <div>
+                <div class="detail-label">Children</div>
+                <div>${escapeHtml(String(childSessions.length))}</div>
+              </div>
+            </div>
+            <div>
+              <div class="detail-label">Managed Hierarchy</div>
+              ${snapshot?.error
+                ? `<div class="warning-banner">${escapeHtml(snapshot.error)}</div>`
+                : renderRootHierarchy(snapshot, root)}
             </div>
           </div>
         `;
+      } else if (state.mobileRootView === 'history') {
+        panelMarkup = `
+          <div class="mobile-root-summary">
+            <div class="mobile-root-summary-head">
+              <div>
+                <div class="mobile-root-summary-title">${escapeHtml(rootTitle)}</div>
+                <div class="mobile-root-summary-subtitle">Latest activity stays at the bottom. Scroll up for older history.</div>
+              </div>
+              ${renderOperatorStatePill(operatorState)}
+            </div>
+            <div class="timeline-list">
+              ${events.length ? events.map((event) => `
+                <div class="timeline-item">
+                  <div class="timeline-head">
+                    <div class="tree-title">${escapeHtml(event.event_type)}</div>
+                    <span class="panel-subtitle">${escapeHtml(formatTimestamp(event.occurred_at))}</span>
+                  </div>
+                  <div class="timeline-meta">
+                    <div><strong>Session:</strong> ${escapeHtml(event.session_id || 'n/a')}</div>
+                    <div><strong>Parent:</strong> ${escapeHtml(event.parent_session_id || 'n/a')}</div>
+                  </div>
+                  <div class="timeline-body">${escapeHtml(event.payload_summary || '')}</div>
+                </div>
+              `).join('') : '<div class="empty-state">No session events recorded for this root yet.</div>'}
+            </div>
+          </div>
+        `;
+      } else {
+        terminalWorkspace = renderRootScopedTerminalWorkspace(snapshot, rootTerminalBundle, childTerminalBundles, {
+          prefix: 'mobile-root-terminal',
+          focusedTerminalId: state.mobileFocusedTerminalId,
+          outputPreferences: getPrefixOutputPreferences('mobile-root-terminal'),
+          readOnlyRoot: snapshot?.rootMode === 'attached'
+        });
+        panelMarkup = `
+          <div class="mobile-root-summary">
+            <div class="mobile-root-summary-head">
+              <div>
+                <div class="mobile-root-summary-title">${escapeHtml(rootTitle)}</div>
+                <div class="mobile-root-summary-subtitle">${escapeHtml(operatorState.summary)}</div>
+              </div>
+              ${renderOperatorStatePill(operatorState)}
+            </div>
+          </div>
+          ${terminalWorkspace.markup}
+        `;
       }
-      return `
-        <div>
-          <div class="detail-label">Root Terminal</div>
-          ${buildTerminalDetailMarkup(
-            rootTerminalBundle.terminal,
-            rootTerminalBundle.outputText,
-            rootTerminalBundle.messages,
-            { prefix: 'root-terminal' }
-          )}
-        </div>
-      `;
+
+      const outputScroll = captureScrollState(document.getElementById('mobile-root-terminal-output'));
+      const messageScroll = captureScrollState(document.getElementById('mobile-root-terminal-messages'));
+      const replyDraft = captureReplyDraft('mobile-root-terminal');
+      elements.mobileRootPanel.innerHTML = panelMarkup;
+      if (state.mobileRootView === 'terminal') {
+        if (terminalWorkspace.focusedBundle?.terminal && !terminalWorkspace.focusedBundle.error) {
+          bindTerminalDetailActions(terminalWorkspace.focusedBundle.terminal, 'mobile-root-terminal', refreshSelectedSessionRoot, {
+            readOnly: snapshot?.rootMode === 'attached'
+          });
+        }
+        bindTerminalWorkspaceSelection('mobile-root-terminal', refreshSelectedSessionRoot, { mobile: true });
+      }
+      restoreScrollState(document.getElementById('mobile-root-terminal-output'), outputScroll, { defaultToBottom: true });
+      restoreScrollState(document.getElementById('mobile-root-terminal-messages'), messageScroll, { defaultToBottom: true });
+      restoreReplyDraft('mobile-root-terminal', replyDraft);
+      bindMobileRootControls();
     }
 
-    function renderSessionTreeDetail(events, snapshot = null, rootTerminalBundle = null) {
+    function renderSessionTreeDetail(events, snapshot = null, rootTerminalBundle = null, childTerminalBundles = {}) {
+      const detailScroll = captureScrollState(elements.sessionTreeDetail);
+      const rootOutputScroll = captureScrollState(document.getElementById('root-terminal-output'));
+      const rootMessageScroll = captureScrollState(document.getElementById('root-terminal-messages'));
+      const rootReplyDraft = captureReplyDraft('root-terminal');
       if (!state.selectedRootSessionId) {
         elements.sessionTreeStatus.textContent = 'No cliagents root session selected';
         elements.sessionTreeDetail.innerHTML = '<div class="empty-state">Select a cliagents root session to inspect worker lineage and ordered control-plane events.</div>';
+        renderMobileRootWorkspace([], null, null);
         return;
       }
 
@@ -1677,8 +3215,15 @@
       const reuseEvents = rows.reduce((total, node) => total + (node.resumeCount || 0), 0);
       const attentionCodes = roots?.attention?.reasons?.map((reason) => reason.code).join(', ') || 'none';
       const attentionReasons = roots?.attention?.reasons || [];
+      const operatorState = getOperatorStateDescriptor(roots, { live: roots?.live });
+      const terminalWorkspace = renderRootScopedTerminalWorkspace(snapshot, rootTerminalBundle, childTerminalBundles, {
+        prefix: 'root-terminal',
+        focusedTerminalId: state.selectedTerminalId,
+        outputPreferences: getPrefixOutputPreferences('root-terminal'),
+        readOnlyRoot: snapshot?.rootMode === 'attached'
+      });
 
-      elements.sessionTreeStatus.textContent = `${state.selectedRootSessionId} • ${events.length} event(s)`;
+      elements.sessionTreeStatus.textContent = `${state.selectedRootSessionId} • ${operatorState.label}`;
       elements.sessionTreeDetail.innerHTML = `
         ${attentionReasons.length ? `
           <div class="warning-banner">
@@ -1697,6 +3242,21 @@
           <div>
             <div class="detail-label">Origin</div>
             <div>${escapeHtml(roots?.originClient || 'unknown')}</div>
+          </div>
+          <div>
+            <div class="detail-label">Root Mode</div>
+            <div>${escapeHtml(roots?.rootMode || 'n/a')}</div>
+          </div>
+          <div>
+            <div class="detail-label">Operator State</div>
+            <div class="detail-value-stack">
+              ${renderOperatorStatePill(operatorState)}
+              <div class="hint">${escapeHtml(operatorState.summary)}</div>
+            </div>
+          </div>
+          <div>
+            <div class="detail-label">Interactive Terminal</div>
+            <div>${escapeHtml(roots?.interactiveTerminalId || 'n/a')}</div>
           </div>
           <div>
             <div class="detail-label">Run</div>
@@ -1727,15 +3287,26 @@
             <div>${escapeHtml(attentionCodes)}</div>
           </div>
           <div>
-            <div class="detail-label">Latest Conclusion</div>
-            <div>${escapeHtml(roots?.latestConclusion?.summary || roots?.latestSummary || 'n/a')}</div>
+            <div class="detail-label">Activity Summary</div>
+            <div>${escapeHtml(roots?.latestSummary || roots?.latestConclusion?.summary || 'n/a')}</div>
+          </div>
+          <div>
+            <div class="detail-label">Activity Excerpt</div>
+            <div>${escapeHtml(roots?.activityExcerpt || 'n/a')}</div>
           </div>
         </div>
 
-        ${renderRootTerminalSection(rootTerminalBundle)}
+        <div>
+          <div class="detail-label">Managed Hierarchy</div>
+          ${snapshot?.error
+            ? `<div class="warning-banner">${escapeHtml(snapshot.error)}</div>`
+            : renderRootHierarchy(snapshot, roots)}
+        </div>
+
+        ${terminalWorkspace.markup}
 
         <div>
-          <div class="detail-label">Child Sessions</div>
+          <div class="detail-label">Recorded Child Sessions</div>
           <div class="tree-list">
             ${childRows.length ? childRows.map((node) => `
               <div class="tree-item tree-depth-${Math.min(node.depth, 4)}">
@@ -1784,15 +3355,23 @@
         </div>
       `;
 
-      if (rootTerminalBundle && !rootTerminalBundle.error) {
-        bindTerminalDetailActions(rootTerminalBundle.terminal, 'root-terminal', refreshSelectedSessionRoot);
+      if (terminalWorkspace.focusedBundle?.terminal && !terminalWorkspace.focusedBundle.error) {
+        bindTerminalDetailActions(terminalWorkspace.focusedBundle.terminal, 'root-terminal', refreshSelectedSessionRoot, {
+          readOnly: snapshot?.rootMode === 'attached'
+        });
       }
+      bindTerminalWorkspaceSelection('root-terminal', refreshSelectedSessionRoot);
+      restoreScrollState(elements.sessionTreeDetail, detailScroll);
+      restoreScrollState(document.getElementById('root-terminal-output'), rootOutputScroll, { defaultToBottom: true });
+      restoreScrollState(document.getElementById('root-terminal-messages'), rootMessageScroll, { defaultToBottom: true });
+      restoreReplyDraft('root-terminal', rootReplyDraft);
     }
 
     async function refreshSelectedSessionRoot() {
       if (!state.selectedRootSessionId) {
         elements.sessionTreeStatus.textContent = 'No cliagents root session selected';
         elements.sessionTreeDetail.innerHTML = '<div class="empty-state">Select a cliagents root session to inspect worker lineage and ordered control-plane events.</div>';
+        renderMobileRootWorkspace([], null, null, {});
         return;
       }
 
@@ -1802,33 +3381,33 @@
           fetchJson(`/orchestration/root-sessions/${encodeURIComponent(state.selectedRootSessionId)}?eventLimit=400&terminalLimit=200`)
         ]);
         let rootTerminalBundle = null;
-        const rootTerminalId = rootData?.rootSession?.terminalId || null;
+        const rootTerminalId = rootData?.interactiveTerminalId || rootData?.rootSession?.terminalId || null;
         if (rootTerminalId) {
-          const [terminalResult, outputResult, messagesResult] = await Promise.allSettled([
-            fetchJson(`/orchestration/terminals/${encodeURIComponent(rootTerminalId)}`),
-            fetchJson(`/orchestration/terminals/${encodeURIComponent(rootTerminalId)}/output?lines=250`),
-            fetchJson(`/orchestration/terminals/${encodeURIComponent(rootTerminalId)}/messages?limit=200`)
-          ]);
-          if (
-            terminalResult.status === 'fulfilled'
-            && outputResult.status === 'fulfilled'
-            && messagesResult.status === 'fulfilled'
-          ) {
-            rootTerminalBundle = {
-              terminal: terminalResult.value,
-              outputText: outputResult.value.output || '',
-              messages: messagesResult.value.messages || []
-            };
-          } else {
-            const failedResult = [terminalResult, outputResult, messagesResult]
-              .find((result) => result.status === 'rejected');
-            rootTerminalBundle = {
-              terminalId: rootTerminalId,
-              error: failedResult?.reason?.message || 'Failed to load root terminal state.'
-            };
-          }
+          rootTerminalBundle = await fetchTerminalBundleSafe(rootTerminalId, getPrefixOutputPreferences('root-terminal'));
         }
-        renderSessionTreeDetail(eventsData.events || [], rootData || null, rootTerminalBundle);
+        const childTerminalEntries = getRootChildTerminalEntries(rootData || null, rootTerminalBundle);
+        const defaultChildTerminalId = (!rootTerminalId && childTerminalEntries.length)
+          ? childTerminalEntries[0].terminalId
+          : null;
+        const requestedChildTerminalIds = Array.from(new Set([
+          defaultChildTerminalId,
+          state.selectedTerminalId,
+          state.mobileFocusedTerminalId
+        ].filter((terminalId) => (
+          terminalId
+          && terminalId !== rootTerminalId
+          && childTerminalEntries.some((entry) => entry.terminalId === terminalId)
+        ))));
+        const childTerminalBundles = {};
+        const childBundleResults = await Promise.all(requestedChildTerminalIds.map((terminalId) => (
+          fetchTerminalBundleSafe(terminalId, getPrefixOutputPreferences('root-terminal'))
+        )));
+        childBundleResults.forEach((bundle, index) => {
+          childTerminalBundles[requestedChildTerminalIds[index]] = bundle;
+        });
+
+        renderSessionTreeDetail(eventsData.events || [], rootData || null, rootTerminalBundle, childTerminalBundles);
+        renderMobileRootWorkspace(eventsData.events || [], rootData || null, rootTerminalBundle, childTerminalBundles);
       } catch (error) {
         if (
           state.selectedTerminalId
@@ -1845,6 +3424,7 @@
         }
         elements.sessionTreeStatus.textContent = 'Session tree unavailable';
         elements.sessionTreeDetail.innerHTML = `<div class="empty-state">${escapeHtml(error.message)}</div>`;
+        renderMobileRootWorkspace([], null, null, {});
       }
     }
 
@@ -1972,18 +3552,7 @@
         socket.onmessage = (event) => {
           const message = JSON.parse(event.data);
           if (String(message.type || '').startsWith('orchestration:')) {
-            refreshTerminals();
-            refreshSessionRoots();
-            refreshDiscussionRuns();
-            if (state.selectedRootSessionId) {
-              refreshSelectedSessionRoot();
-            }
-            if (state.selectedTerminalId) {
-              refreshSelectedTerminal();
-            }
-            if (state.selectedRunId || state.selectedDiscussionId) {
-              refreshSelectedDiscussion();
-            }
+            scheduleRefresh(120);
           }
         };
       } catch {
@@ -1993,6 +3562,11 @@
     }
 
     async function refreshAll() {
+      if (state.refreshInFlight) {
+        state.refreshQueued = true;
+        return;
+      }
+      state.refreshInFlight = true;
       await Promise.allSettled([
         refreshTerminals(),
         refreshSessionRoots(),
@@ -2002,6 +3576,11 @@
         refreshSelectedDiscussion()
       ]);
       updateStats();
+      state.refreshInFlight = false;
+      if (state.refreshQueued) {
+        state.refreshQueued = false;
+        scheduleRefresh(50);
+      }
     }
 
     function startPolling() {
@@ -2009,7 +3588,7 @@
         window.clearInterval(state.refreshTimer);
       }
       state.refreshTimer = window.setInterval(() => {
-        refreshAll();
+        scheduleRefresh(0);
       }, 4000);
     }
 

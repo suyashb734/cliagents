@@ -4,12 +4,12 @@ const ACTIVE_BROKER_ADAPTERS = Object.freeze([
   'gemini-cli',
   'codex-cli',
   'qwen-cli',
-  'opencode-cli'
+  'opencode-cli',
+  'claude-code'
 ]);
 
 const MANAGED_ROOT_ADAPTERS = Object.freeze([
-  ...ACTIVE_BROKER_ADAPTERS,
-  'claude-code'
+  ...ACTIVE_BROKER_ADAPTERS
 ]);
 
 const DEFAULT_BROKER_ADAPTER = 'codex-cli';

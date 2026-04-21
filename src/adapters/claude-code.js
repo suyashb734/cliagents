@@ -5,11 +5,13 @@
  * Uses spawn-per-message with session resume for persistent sessions.
  */
 
-const { spawn, execFileSync, execSync } = require('child_process');
+const { spawn } = require('child_process');
 const fs = require('fs');
 const path = require('path');
 const BaseLLMAdapter = require('../core/base-llm-adapter');
+const { createAdapterContract, defineAdapterCapabilities, EXECUTION_MODES } = require('./contract');
 const { logConversation, logSessionStart } = require('../utils/conversation-logger');
+const { resolveClaudeCliPath } = require('../utils/claude-cli-path');
 
 class ClaudeCodeAdapter extends BaseLLMAdapter {
   constructor(config = {}) {
@@ -31,6 +33,40 @@ class ClaudeCodeAdapter extends BaseLLMAdapter {
     this.sessions = new Map(); // sessionId -> { claudeSessionId, ready, messageCount, model, jsonSchema, allowedTools, maxOutputTokens }
     this.activeProcesses = new Map(); // Track running CLI processes: sessionId -> process
     this._claudePathCache = null;  // Cache resolved claude path
+    this.capabilities = defineAdapterCapabilities({
+      usesOfficialCli: true,
+      executionMode: EXECUTION_MODES.DIRECT_SESSION,
+      supportsMultiTurn: true,
+      supportsResume: true,
+      supportsStreaming: true,
+      supportsInterrupt: true,
+      supportsSystemPrompt: true,
+      supportsAllowedTools: true,
+      supportsModelSelection: true,
+      supportsTools: true,
+      supportsFilesystemRead: true,
+      supportsFilesystemWrite: true,
+      supportsImages: true,
+      supportsJsonMode: true,
+      supportsJsonSchema: true
+    });
+    this.contract = createAdapterContract({
+      capabilities: this.capabilities,
+      readiness: {
+        initTimeoutMs: 45000,
+        promptHandlers: [
+          {
+            matchAny: ['Settings Error', 'Continue without these settings'],
+            actions: ['Down', 'Enter'],
+            description: 'continue-without-invalid-claude-settings'
+          }
+        ]
+      },
+      notes: [
+        'Spawn-per-message adapter that resumes the provider-native Claude session between sends.',
+        'No adapter-level poll primitive exists yet; long-running polling is handled at orchestration or tmux terminal layers.'
+      ]
+    });
 
     // Available models for Claude Code CLI
     this.availableModels = [
@@ -44,48 +80,17 @@ class ClaudeCodeAdapter extends BaseLLMAdapter {
 
   /**
    * Get the path to the claude CLI binary
-   * Checks: config override > cache > which command > common paths
+   * Checks: explicit config/env override > cache > PATH lookup > common paths
    */
   _getClaudePath() {
-    // Use config override if provided
-    if (this.config.claudePath) {
-      return this.config.claudePath;
-    }
-
-    // Return cached path if available
     if (this._claudePathCache) {
       return this._claudePathCache;
     }
 
-    // Try to find claude using 'which'
-    try {
-      const result = execSync('which claude', { encoding: 'utf8', timeout: 5000 }).trim();
-      if (result) {
-        this._claudePathCache = result;
-        return result;
-      }
-    } catch (e) {
-      // which failed, try common paths
-    }
-
-    // Check common installation paths
-    const commonPaths = [
-      '/opt/homebrew/bin/claude',      // macOS ARM (Homebrew)
-      '/usr/local/bin/claude',         // macOS Intel / Linux
-      '/usr/bin/claude',               // Linux system
-      path.join(process.env.HOME || '', '.npm-global/bin/claude'),  // npm global
-      path.join(process.env.HOME || '', 'node_modules/.bin/claude') // local node_modules
-    ];
-
-    for (const p of commonPaths) {
-      if (fs.existsSync(p)) {
-        this._claudePathCache = p;
-        return p;
-      }
-    }
-
-    // Default fallback (will fail if not found, but gives clear error)
-    return 'claude';
+    this._claudePathCache = resolveClaudeCliPath({
+      claudePath: this.config.claudePath
+    });
+    return this._claudePathCache;
   }
 
   /**
@@ -95,15 +100,22 @@ class ClaudeCodeAdapter extends BaseLLMAdapter {
     return this.availableModels;
   }
 
+  getCapabilities() {
+    return this.capabilities;
+  }
+
+  getContract() {
+    return this.contract;
+  }
+
   /**
    * Check if Claude Code CLI is available
    */
   async isAvailable() {
-    return new Promise((resolve) => {
-      const check = spawn('which', ['claude']);
-      check.on('close', (code) => resolve(code === 0));
-      check.on('error', () => resolve(false));
-    });
+    return Boolean(resolveClaudeCliPath({
+      claudePath: this.config.claudePath,
+      fallbackToBareCommand: false
+    }));
   }
 
   /**
@@ -690,6 +702,7 @@ class ClaudeCodeAdapter extends BaseLLMAdapter {
 
     // Remove from tracking
     this.sessions.delete(sessionId);
+    this._clearHeartbeat(sessionId);
     this.emit('terminated', { sessionId });
   }
 

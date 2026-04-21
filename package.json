@@ -43,7 +43,7 @@
   },
   "homepage": "https://github.com/suyashb734/cliagents#readme",
   "engines": {
-    "node": ">=20 <25"
+    "node": "22.12.0"
   },
   "files": [
     "bin",

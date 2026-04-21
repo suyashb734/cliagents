@@ -7,12 +7,73 @@
 
 const { spawn, execFileSync, execSync } = require('child_process');
 const fs = require('fs');
+const path = require('path');
 const BaseLLMAdapter = require('../core/base-llm-adapter');
+const { createAdapterContract, defineAdapterCapabilities, EXECUTION_MODES } = require('./contract');
 const { logConversation, logSessionStart } = require('../utils/conversation-logger');
 const { updateGenerationParams, getGenerationParams } = require('../utils/gemini-config');
 
+const DEFAULT_GEMINI_MODEL_FALLBACKS = [
+  'gemini-2.5-flash',
+  'gemini-2.5-pro',
+  'gemini-3-pro-preview'
+];
+
+function inferGeminiBrokerDefaultModel() {
+  if (process.env.CLIAGENTS_GEMINI_MODEL) {
+    return process.env.CLIAGENTS_GEMINI_MODEL;
+  }
+
+  try {
+    const settingsPath = path.join(process.env.HOME || '', '.gemini', 'settings.json');
+    if (!settingsPath || !fs.existsSync(settingsPath)) {
+      return null;
+    }
+
+    const settings = JSON.parse(fs.readFileSync(settingsPath, 'utf8'));
+    const configuredModel = settings?.model?.name;
+
+    if (!configuredModel || typeof configuredModel !== 'string') {
+      return null;
+    }
+
+    const knownModelMap = {
+      'auto-gemini-3': 'gemini-3-pro-preview',
+      'gemini-3-pro-preview': 'gemini-3-pro-preview',
+      'gemini-2.5-pro': 'gemini-2.5-pro',
+      'gemini-2.5-flash': 'gemini-2.5-flash'
+    };
+
+    return knownModelMap[configuredModel] || null;
+  } catch {
+    return null;
+  }
+}
+
+function parseGeminiFallbackModels() {
+  const configured = process.env.CLIAGENTS_GEMINI_FALLBACK_MODELS
+    ? process.env.CLIAGENTS_GEMINI_FALLBACK_MODELS.split(',')
+    : DEFAULT_GEMINI_MODEL_FALLBACKS;
+
+  return Array.from(new Set(
+    configured
+      .map((model) => String(model || '').trim())
+      .filter(Boolean)
+  ));
+}
+
+function isGeminiCapacityErrorMessage(message) {
+  const text = String(message || '');
+  return /terminalquotaerror|resourceexhausted|quota(?:_exhausted)?|exhausted your capacity|capacity on this model|quota will reset|rate.?limit/i.test(text);
+}
+
 class GeminiCliAdapter extends BaseLLMAdapter {
   constructor(config = {}) {
+    const resolvedConfig = { ...config };
+    if (!Object.prototype.hasOwnProperty.call(resolvedConfig, 'model')) {
+      resolvedConfig.model = inferGeminiBrokerDefaultModel();
+    }
+
     super({
       timeout: 180000,  // 3 minutes for image analysis tasks
       workDir: '/tmp/agent',
@@ -24,17 +85,51 @@ class GeminiCliAdapter extends BaseLLMAdapter {
       top_p: null,           // 0.0-1.0, null = use default
       top_k: null,           // integer, null = use default
       max_output_tokens: null, // integer, null = use default
-      ...config
+      ...resolvedConfig
     });
 
     this.name = 'gemini-cli';
     this.version = '1.0.0';
-    this.sessions = new Map(); // sessionId -> { geminiSessionIndex, ready, messageCount, model, generationParams }
+    this.sessions = new Map(); // sessionId -> { geminiSessionId, ready, messageCount, model, generationParams }
     this.activeProcesses = new Map(); // Track running CLI processes: sessionId -> process
+    this.modelFallbackOrder = parseGeminiFallbackModels();
+    this.capabilities = defineAdapterCapabilities({
+      usesOfficialCli: true,
+      executionMode: EXECUTION_MODES.DIRECT_SESSION,
+      supportsMultiTurn: true,
+      supportsResume: true,
+      supportsStreaming: true,
+      supportsInterrupt: true,
+      supportsSystemPrompt: true,
+      supportsAllowedTools: true,
+      supportsModelSelection: true,
+      supportsTools: true,
+      supportsFilesystemRead: true,
+      supportsFilesystemWrite: true,
+      supportsJsonMode: true
+    });
+    this.contract = createAdapterContract({
+      capabilities: this.capabilities,
+      readiness: {
+        initTimeoutMs: 60000,
+        promptHandlers: [
+          {
+            matchAny: ['Do you trust this folder', 'Trust folder'],
+            actions: ['Enter'],
+            description: 'accept-gemini-trust-folder'
+          }
+        ]
+      },
+      notes: [
+        'Spawn-per-message adapter that resolves Gemini session UUIDs back to resume indices before sending.',
+        'JSON mode is a constrained single-shot path with sandbox and extensions disabled to force structured output.'
+      ]
+    });
 
     // Available models for Gemini CLI
+    const brokerDefaultModel = this.config.model || 'Gemini CLI configured default';
     this.availableModels = [
-      { id: 'default', name: 'Default (2.5 Flash)', description: 'Uses gemini-2.5-flash and gemini-2.5-flash-lite' },
+      { id: 'default', name: 'Broker Default', description: `Uses ${brokerDefaultModel}` },
       { id: 'gemini-2.5-flash', name: 'Gemini 2.5 Flash', description: 'Fast and efficient model' },
       { id: 'gemini-2.5-pro', name: 'Gemini 2.5 Pro', description: 'Most capable 2.5 model' },
       { id: 'gemini-3-pro-preview', name: 'Gemini 3 Pro (Preview)', description: 'Latest and most intelligent model' }
@@ -62,6 +157,14 @@ class GeminiCliAdapter extends BaseLLMAdapter {
     // Return cached path if available
     if (this._geminiPathCache) {
       return this._geminiPathCache;
+    }
+
+    // Prefer the gemini binary installed alongside the current Node runtime.
+    // This keeps the adapter aligned with the version selected by nvm/wrappers.
+    const siblingGeminiPath = path.join(path.dirname(process.execPath), 'gemini');
+    if (fs.existsSync(siblingGeminiPath)) {
+      this._geminiPathCache = siblingGeminiPath;
+      return siblingGeminiPath;
     }
 
     // Try to find gemini using 'which'
@@ -135,6 +238,64 @@ class GeminiCliAdapter extends BaseLLMAdapter {
     return this.availableModels;
   }
 
+  getCapabilities() {
+    return this.capabilities;
+  }
+
+  getContract() {
+    return this.contract;
+  }
+
+  _normalizeModel(model) {
+    return model && model !== 'default' ? model : null;
+  }
+
+  _getModelAttempts(preferredModel) {
+    const primaryModel = this._normalizeModel(preferredModel) || this._normalizeModel(this.config.model);
+
+    if (process.env.CLIAGENTS_GEMINI_DISABLE_MODEL_FALLBACK === '1') {
+      return primaryModel ? [primaryModel] : [null];
+    }
+
+    const attempts = [];
+    if (primaryModel) {
+      attempts.push(primaryModel);
+    }
+
+    for (const candidate of this.modelFallbackOrder) {
+      if (candidate && !attempts.includes(candidate)) {
+        attempts.push(candidate);
+      }
+    }
+
+    return attempts.length > 0 ? attempts : [null];
+  }
+
+  _buildArgsWithModel(baseArgs, model) {
+    const args = [...baseArgs];
+    if (model && model !== 'default') {
+      args.unshift('-m', model);
+    }
+    return args;
+  }
+
+  _isRetryableModelFailure(errorOrMessage) {
+    if (process.env.CLIAGENTS_GEMINI_DISABLE_MODEL_FALLBACK === '1') {
+      return false;
+    }
+
+    const message = typeof errorOrMessage === 'string'
+      ? errorOrMessage
+      : errorOrMessage?.message || errorOrMessage?.content || '';
+    return isGeminiCapacityErrorMessage(message);
+  }
+
+  _logModelFallback(fromModel, toModel, context) {
+    console.warn(
+      `[GeminiAdapter] ${context}. Switching model from ${fromModel || 'default'} to ${toModel || 'default'}`
+    );
+  }
+
   /**
    * Check if Gemini CLI is available
    */
@@ -149,18 +310,90 @@ class GeminiCliAdapter extends BaseLLMAdapter {
   /**
    * Get list of Gemini sessions
    */
-  _listGeminiSessions() {
+  _listGeminiSessions(workDir = process.cwd()) {
     try {
       const geminiPath = this._getGeminiPath();
       const output = execFileSync(geminiPath, ['--list-sessions'], {
+        cwd: workDir,
+        env: {
+          ...process.env,
+          NO_COLOR: '1'
+        },
         encoding: 'utf-8',
-        timeout: 5000
+        timeout: 30000
       });
-      const lines = output.trim().split('\n').filter(l => l.trim());
-      return lines.length;
+      return output
+        .split('\n')
+        .map(line => line.match(/^\s*(\d+)\.\s+.+\[(.+)\]\s*$/))
+        .filter(Boolean)
+        .map((match) => ({
+          index: Number(match[1]),
+          sessionId: match[2]
+        }));
     } catch (e) {
-      return 0;
+      return [];
     }
+  }
+
+  /**
+   * Resolve a stored Gemini session UUID to the current project-local resume index.
+   */
+  async _resolveGeminiResumeRef(session, options = {}) {
+    const {
+      timeoutMs = 10000,
+      pollIntervalMs = 500
+    } = options;
+
+    if (!session.geminiSessionId) {
+      return null;
+    }
+
+    const deadline = Date.now() + timeoutMs;
+
+    while (Date.now() <= deadline) {
+      const sessions = this._listGeminiSessions(session.workDir);
+      const match = sessions.find((entry) => entry.sessionId === session.geminiSessionId);
+      if (match) {
+        return String(match.index);
+      }
+
+      await new Promise((resolve) => setTimeout(resolve, pollIntervalMs));
+    }
+
+    return null;
+  }
+
+  /**
+   * Detect a newly created Gemini session UUID by diffing --list-sessions output.
+   * Some Gemini CLI versions omit session_id in JSON output; this provides a robust fallback.
+   */
+  async _detectNewGeminiSessionId(workDir, sessionsBefore = [], options = {}) {
+    const {
+      timeoutMs = 12000,
+      pollIntervalMs = 500
+    } = options;
+
+    const beforeSet = new Set((sessionsBefore || []).map((entry) => entry.sessionId));
+    const deadline = Date.now() + timeoutMs;
+    let latestSessions = [];
+
+    while (Date.now() <= deadline) {
+      latestSessions = this._listGeminiSessions(workDir);
+
+      const created = latestSessions.find((entry) => !beforeSet.has(entry.sessionId));
+      if (created?.sessionId) {
+        return created.sessionId;
+      }
+
+      await new Promise((resolve) => setTimeout(resolve, pollIntervalMs));
+    }
+
+    // Conservative fallback: if a list exists, return top entry (newest in Gemini output order).
+    if (latestSessions.length > 0) {
+      return latestSessions[0].sessionId || null;
+    }
+
+    return null;
   }
 
   /**
@@ -171,7 +404,7 @@ class GeminiCliAdapter extends BaseLLMAdapter {
       throw new Error(`Session ${sessionId} already exists`);
     }
 
-    const workDir = options.workDir || this.config.workDir;
+    const workDir = options.workDir || path.join(this.config.workDir, sessionId);
     const model = options.model || this.config.model; // null = default
 
     // Apply generation parameters if provided (writes to ~/.gemini/config.yaml)
@@ -186,7 +419,7 @@ class GeminiCliAdapter extends BaseLLMAdapter {
     // JSON mode: lazy init (no API call until first message, like Codex)
     if (options.jsonMode) {
       const session = {
-        geminiSessionRef: null,
+        geminiSessionId: null,
         ready: true,
         messageCount: 0,
         systemPrompt: options.systemPrompt,
@@ -203,48 +436,84 @@ class GeminiCliAdapter extends BaseLLMAdapter {
         sessionId,
         status: 'ready',
         adapter: this.name,
-        geminiSessionRef: null,
+        geminiSessionId: null,
         model: model || 'default'
       };
     }
 
     // Non-JSON mode: normal init with session creation
+    const sessionsBeforeInit = this._listGeminiSessions(workDir);
+
     const initPrompt = options.systemPrompt
       ? `You are starting a new session. ${options.systemPrompt}. Acknowledge with "Ready."`
       : 'You are starting a new session. Acknowledge with "Ready."';
 
     // Use json for init (not stream-json since we're not streaming for spawn)
-    const args = [
+    const baseArgs = [
       '-p', initPrompt,
       '-o', 'json'
     ];
 
-    // Add model flag if specified and not 'default'
-    if (model && model !== 'default') {
-      args.unshift('-m', model);
-    }
-
     // Add allowed tools if specified (Gemini uses --allowed-tools flag)
     if (options.allowedTools && Array.isArray(options.allowedTools)) {
-      args.push('--allowed-tools', options.allowedTools.join(','));
+      baseArgs.push('--allowed-tools', options.allowedTools.join(','));
     }
 
     if (this.config.yoloMode) {
-      args.push('-y');
+      baseArgs.push('-y');
     }
 
-    // Run init message to create session
-    const initResult = await this._runGeminiCommand(args, { workDir });
+    let initResult = null;
+    let resolvedModel = model;
+    const modelAttempts = this._getModelAttempts(model);
 
-    // Use "latest" to refer to the most recently created session
-    // This is more reliable than trying to track indices
+    for (let attemptIndex = 0; attemptIndex < modelAttempts.length; attemptIndex++) {
+      const attemptModel = modelAttempts[attemptIndex];
+      const args = this._buildArgsWithModel(baseArgs, attemptModel);
+
+      try {
+        initResult = await this._runGeminiCommand(args, {
+          workDir,
+          timeout: this.config.timeout
+        });
+        resolvedModel = attemptModel;
+        break;
+      } catch (error) {
+        const nextModel = modelAttempts[attemptIndex + 1];
+        if (!nextModel || !this._isRetryableModelFailure(error)) {
+          throw error;
+        }
+        this._logModelFallback(attemptModel, nextModel, 'Session initialization hit Gemini capacity limits');
+      }
+    }
+
+    if (initResult.timedOut) {
+      throw new Error('Gemini CLI session initialization timed out');
+    }
+
+    let geminiSessionId =
+      initResult.raw?.session_id ||
+      initResult.raw?.sessionId ||
+      initResult.raw?.session?.id;
+
+    if (!geminiSessionId) {
+      geminiSessionId = await this._detectNewGeminiSessionId(workDir, sessionsBeforeInit, {
+        timeoutMs: 12000,
+        pollIntervalMs: 500
+      });
+    }
+
+    if (!geminiSessionId) {
+      throw new Error('Gemini CLI did not return a session_id for the new session');
+    }
+
     const session = {
-      geminiSessionRef: 'latest', // Will always use "latest" for resuming the most recent session
+      geminiSessionId,
       ready: true,
       messageCount: 1,
       systemPrompt: options.systemPrompt,
       workDir,
-      model, // Store the model for this session
+      model: resolvedModel, // Store the model for this session
       allowedTools: options.allowedTools, // Store allowed tools list
       generationParams // Store generation params for reference
     };
@@ -259,8 +528,8 @@ class GeminiCliAdapter extends BaseLLMAdapter {
       sessionId,
       status: 'ready',
       adapter: this.name,
-      geminiSessionRef: 'latest',
-      model: model || 'default'
+      geminiSessionId,
+      model: resolvedModel || 'default'
     };
   }
 
@@ -293,15 +562,60 @@ class GeminiCliAdapter extends BaseLLMAdapter {
       let stdout = '';
       let stderr = '';
       let timedOut = false;
+      let closed = false;
+      let forceKillTimer = null;
+      let settleTimer = null;
+      let earlyExitRequested = false;
+      let parsedResult = null;
+
+      const scheduleSettleExit = () => {
+        if (!parsedResult?.response || timedOut || closed) {
+          return;
+        }
+        if (settleTimer) {
+          clearTimeout(settleTimer);
+        }
+        settleTimer = setTimeout(() => {
+          if (closed) {
+            return;
+          }
+          earlyExitRequested = true;
+          proc.kill('SIGTERM');
+          forceKillTimer = setTimeout(() => {
+            if (!closed) {
+              proc.kill('SIGKILL');
+            }
+          }, 2000);
+        }, 1500);
+      };
 
       // Set timeout
       const timeoutId = setTimeout(() => {
         timedOut = true;
         proc.kill('SIGTERM');
+        forceKillTimer = setTimeout(() => {
+          if (!closed) {
+            proc.kill('SIGKILL');
+          }
+        }, 2000);
       }, timeout);
 
       proc.stdout.on('data', (data) => {
         stdout += data.toString();
+        if (settleTimer) {
+          clearTimeout(settleTimer);
+          settleTimer = null;
+        }
+
+        const jsonStart = stdout.indexOf('{');
+        if (jsonStart !== -1) {
+          try {
+            parsedResult = JSON.parse(stdout.substring(jsonStart));
+            scheduleSettleExit();
+          } catch {
+            // JSON output may still be incomplete while data is arriving.
+          }
+        }
       });
 
       proc.stderr.on('data', (data) => {
@@ -309,7 +623,14 @@ class GeminiCliAdapter extends BaseLLMAdapter {
       });
 
       proc.on('close', (code) => {
+        closed = true;
         clearTimeout(timeoutId);
+        if (settleTimer) {
+          clearTimeout(settleTimer);
+        }
+        if (forceKillTimer) {
+          clearTimeout(forceKillTimer);
+        }
 
         if (timedOut) {
           console.log('[GeminiAdapter] Timeout reached');
@@ -321,7 +642,7 @@ class GeminiCliAdapter extends BaseLLMAdapter {
           return;
         }
 
-        if (code !== 0) {
+        if (code !== 0 && !(earlyExitRequested && parsedResult?.response)) {
           console.log('[GeminiAdapter] Error exit code:', code);
           reject(new Error(`Gemini CLI exited with code ${code}: ${stderr}`));
           return;
@@ -330,19 +651,20 @@ class GeminiCliAdapter extends BaseLLMAdapter {
         console.log('[GeminiAdapter] Response received:', stdout.length, 'bytes');
 
         // Try to parse JSON response
-        let result = null;
-        const jsonStart = stdout.indexOf('{');
-        if (jsonStart !== -1) {
-          try {
-            const jsonStr = stdout.substring(jsonStart);
-            result = JSON.parse(jsonStr);
-          } catch (e) {
-            console.log('[GeminiAdapter] JSON parse error, using raw output');
+        if (!parsedResult) {
+          const jsonStart = stdout.indexOf('{');
+          if (jsonStart !== -1) {
+            try {
+              const jsonStr = stdout.substring(jsonStart);
+              parsedResult = JSON.parse(jsonStr);
+            } catch (e) {
+              console.log('[GeminiAdapter] JSON parse error, using raw output');
+            }
           }
         }
 
         // Extract stats from the nested stats object
-        const stats = result?.stats?.models;
+        const stats = parsedResult?.stats?.models;
         let totalTokens = 0;
         let promptTokens = 0;
         let candidateTokens = 0;
@@ -356,20 +678,27 @@ class GeminiCliAdapter extends BaseLLMAdapter {
         }
 
         resolve({
-          text: result?.response || stdout,
+          text: parsedResult?.response || stdout,
           stats: {
             inputTokens: promptTokens,
             outputTokens: candidateTokens,
             totalTokens: totalTokens,
-            toolCalls: result?.stats?.tools?.totalCalls || 0
+            toolCalls: parsedResult?.stats?.tools?.totalCalls || 0
           },
           exitCode: 0,
-          raw: result
+          raw: parsedResult
         });
       });
 
       proc.on('error', (err) => {
+        closed = true;
         clearTimeout(timeoutId);
+        if (settleTimer) {
+          clearTimeout(settleTimer);
+        }
+        if (forceKillTimer) {
+          clearTimeout(forceKillTimer);
+        }
         console.log('[GeminiAdapter] Process error:', err.message);
         reject(err);
       });
@@ -409,6 +738,30 @@ class GeminiCliAdapter extends BaseLLMAdapter {
     let timedOut = false;
     let exitCode = null;
     let processError = null;
+    let settleTimer = null;
+    let settleForceKillTimer = null;
+    let earlyExitRequested = false;
+
+    const scheduleSettleExit = () => {
+      if (!finalResult || timedOut) {
+        return;
+      }
+      if (settleTimer) {
+        clearTimeout(settleTimer);
+      }
+      settleTimer = setTimeout(() => {
+        if (exitCode !== null || processError) {
+          return;
+        }
+        earlyExitRequested = true;
+        proc.kill('SIGTERM');
+        settleForceKillTimer = setTimeout(() => {
+          if (exitCode === null && !processError) {
+            proc.kill('SIGKILL');
+          }
+        }, 2000);
+      }, 1500);
+    };
 
     // Set timeout with force kill fallback
     const timeoutId = setTimeout(() => {
@@ -426,6 +779,12 @@ class GeminiCliAdapter extends BaseLLMAdapter {
     const processComplete = new Promise((resolve) => {
       proc.on('close', (code) => {
         clearTimeout(timeoutId);
+        if (settleTimer) {
+          clearTimeout(settleTimer);
+        }
+        if (settleForceKillTimer) {
+          clearTimeout(settleForceKillTimer);
+        }
         exitCode = code;
         // Remove from active processes
         if (sessionId) {
@@ -435,6 +794,12 @@ class GeminiCliAdapter extends BaseLLMAdapter {
       });
       proc.on('error', (err) => {
         clearTimeout(timeoutId);
+        if (settleTimer) {
+          clearTimeout(settleTimer);
+        }
+        if (settleForceKillTimer) {
+          clearTimeout(settleForceKillTimer);
+        }
         processError = err;
         // Remove from active processes
         if (sessionId) {
@@ -453,6 +818,11 @@ class GeminiCliAdapter extends BaseLLMAdapter {
       for await (const chunk of proc.stdout) {
         const text = chunk.toString();
         buffer += text;
+        fullOutput += text;
+        if (settleTimer) {
+          clearTimeout(settleTimer);
+          settleTimer = null;
+        }
 
         // Process complete lines (newline-delimited JSON)
         const lines = buffer.split('\n');
@@ -463,10 +833,14 @@ class GeminiCliAdapter extends BaseLLMAdapter {
 
           try {
             const msg = JSON.parse(line);
+            const isThoughtChunk = msg?.thought === true || msg?.isThought === true || msg?.metadata?.thought === true;
 
             // Handle different message types for real-time progress
             // Gemini format: {"type":"message","role":"assistant","content":"..."}
             if (msg.type === 'message' && msg.role === 'assistant') {
+              if (isThoughtChunk) {
+                continue;
+              }
               // Assistant is speaking/thinking
               const content = msg.content;
               if (content) {
@@ -509,6 +883,7 @@ class GeminiCliAdapter extends BaseLLMAdapter {
             } else if (msg.type === 'result') {
               // Final result - Gemini format: {"type":"result","status":"success","stats":{...}}
               finalResult = msg;
+              scheduleSettleExit();
             }
           } catch (e) {
             // Not valid JSON, emit as raw chunk
@@ -525,11 +900,13 @@ class GeminiCliAdapter extends BaseLLMAdapter {
       if (buffer.trim()) {
         try {
           const msg = JSON.parse(buffer);
+          const isThoughtChunk = msg?.thought === true || msg?.isThought === true || msg?.metadata?.thought === true;
           if (msg.type === 'result') {
             finalResult = msg;
+            scheduleSettleExit();
           }
           // Also capture last assistant content from buffer
-          if (msg.type === 'message' && msg.role === 'assistant' && msg.content) {
+          if (!isThoughtChunk && msg.type === 'message' && msg.role === 'assistant' && msg.content) {
             lastAssistantContent += msg.content;  // Concatenate
           }
         } catch (e) {
@@ -549,7 +926,26 @@ class GeminiCliAdapter extends BaseLLMAdapter {
         yield { type: 'error', content: processError.message };
         return;
       }
-      if (exitCode !== 0) {
+
+      const structuredErrorMessage =
+        finalResult?.status === 'error'
+          ? (
+              finalResult?.error?.message
+              || finalResult?.error?.content
+              || finalResult?.error?.type
+              || null
+            )
+          : null;
+
+      if (structuredErrorMessage) {
+        yield {
+          type: 'error',
+          content: structuredErrorMessage
+        };
+        return;
+      }
+
+      if (exitCode !== 0 && !(earlyExitRequested && finalResult)) {
         yield { type: 'error', content: `Process exited with code ${exitCode}` };
         return;
       }
@@ -600,139 +996,164 @@ class GeminiCliAdapter extends BaseLLMAdapter {
       if (session.systemPrompt) {
         fullPrompt = `${session.systemPrompt}\n\n${fullPrompt}`;
       }
-      const args = [
+      const baseArgs = [
         '-p', fullPrompt,
         '-o', 'json', // JSON output format
         '-s', 'false', // No sandbox (disables file system tools)
         '-e', '',     // No extensions (disables MCP tools)
       ];
 
-      if (session.model && session.model !== 'default') {
-        args.unshift('-m', session.model);
-      }
-
       // No -y needed since tools are disabled, but add it for safety
-      args.push('-y');
+      baseArgs.push('-y');
 
       session.messageCount++;
 
-      try {
-        const result = await this._runGeminiCommand(args, {
-          timeout: options.timeout || this.config.timeout,
-          workDir: session.workDir
-        });
+      const modelAttempts = this._getModelAttempts(session.model);
 
-        let content = result.text || '';
-        // Strip markdown code blocks if model wraps JSON in ```json blocks
-        content = content.replace(/^```(?:json)?\s*\n?/i, '').replace(/\n?```\s*$/i, '').trim();
-        logConversation(sessionId, this.name, { prompt: message, response: content, stats: result.stats });
+      for (let attemptIndex = 0; attemptIndex < modelAttempts.length; attemptIndex++) {
+        const attemptModel = modelAttempts[attemptIndex];
+        const args = this._buildArgsWithModel(baseArgs, attemptModel);
 
-        yield {
-          type: 'result',
-          content: content,
-          metadata: {
-            inputTokens: result.stats?.inputTokens,
-            outputTokens: result.stats?.outputTokens,
-            totalTokens: result.stats?.totalTokens,
-            toolCalls: 0,
-            timedOut: result.timedOut || false
+        try {
+          const result = await this._runGeminiCommand(args, {
+            timeout: options.timeout || this.config.timeout,
+            workDir: session.workDir
+          });
+
+          session.model = attemptModel;
+
+          let content = result.text || '';
+          // Strip markdown code blocks if model wraps JSON in ```json blocks
+          content = content.replace(/^```(?:json)?\s*\n?/i, '').replace(/\n?```\s*$/i, '').trim();
+          logConversation(sessionId, this.name, { prompt: message, response: content, stats: result.stats });
+
+          yield {
+            type: 'result',
+            content: content,
+            metadata: {
+              inputTokens: result.stats?.inputTokens,
+              outputTokens: result.stats?.outputTokens,
+              totalTokens: result.stats?.totalTokens,
+              toolCalls: 0,
+              timedOut: result.timedOut || false
+            }
+          };
+          return;
+        } catch (error) {
+          const nextModel = modelAttempts[attemptIndex + 1];
+          if (nextModel && this._isRetryableModelFailure(error)) {
+            this._logModelFallback(attemptModel, nextModel, 'JSON-mode request hit Gemini capacity limits');
+            continue;
           }
-        };
-      } catch (error) {
-        logConversation(sessionId, this.name, { prompt: message, error: error.message });
-        yield { type: 'error', content: error.message };
+
+          logConversation(sessionId, this.name, { prompt: message, error: error.message });
+          yield { type: 'error', content: error.message };
+          return;
+        }
       }
       return;
     }
 
+    const resumeRef = await this._resolveGeminiResumeRef(session);
+    if (!resumeRef) {
+      throw new Error(
+        `Gemini session ${session.geminiSessionId || sessionId} could not be resolved for workDir ${session.workDir}`
+      );
+    }
+
     // Normal (non-JSON) mode: resume session, stream output
-    const args = [
-      '-r', session.geminiSessionRef, // Resume by "latest" or session reference
+    const baseArgs = [
+      '-r', resumeRef,
       '-p', message,
       '-o', 'stream-json'
     ];
 
-    // Add model flag if session has a specific model
-    if (session.model && session.model !== 'default') {
-      args.unshift('-m', session.model);
-    }
-
     // Add allowed tools if specified (per-message or session-level)
     const allowedTools = options.allowedTools || session.allowedTools;
     if (allowedTools && Array.isArray(allowedTools)) {
-      args.push('--allowed-tools', allowedTools.join(','));
+      baseArgs.push('--allowed-tools', allowedTools.join(','));
     }
 
     if (this.config.yoloMode) {
-      args.push('-y');
+      baseArgs.push('-y');
     }
 
     session.messageCount++;
+    const modelAttempts = this._getModelAttempts(session.model);
 
-    let finalContent = '';
-    let finalStats = null;
+    for (let attemptIndex = 0; attemptIndex < modelAttempts.length; attemptIndex++) {
+      const attemptModel = modelAttempts[attemptIndex];
+      const args = this._buildArgsWithModel(baseArgs, attemptModel);
+      let emittedProgress = false;
 
-    try {
-      // Use streaming version
-      for await (const chunk of this._runGeminiCommandStreaming(args, {
-        timeout: options.timeout || this.config.timeout,
-        sessionId,
-        workDir: session.workDir
-      })) {
-        if (chunk.type === 'chunk') {
-          // Yield chunk immediately for real-time display
-          yield chunk;
-        } else if (chunk.type === 'progress') {
-          // Real-time progress updates (tool calls, assistant messages)
-          yield chunk;
-        } else if (chunk.type === 'result') {
-          finalContent = chunk.content;
-          finalStats = chunk.stats;
+      try {
+        for await (const chunk of this._runGeminiCommandStreaming(args, {
+          timeout: options.timeout || this.config.timeout,
+          sessionId,
+          workDir: session.workDir
+        })) {
+          if (chunk.type === 'chunk' || chunk.type === 'progress') {
+            emittedProgress = true;
+            yield chunk;
+          } else if (chunk.type === 'result') {
+            session.model = attemptModel;
 
-          // Log the full conversation turn
-          logConversation(sessionId, this.name, {
-            prompt: message,
-            response: finalContent,
-            stats: finalStats
-          });
+            logConversation(sessionId, this.name, {
+              prompt: message,
+              response: chunk.content,
+              stats: chunk.stats
+            });
 
-          // Yield final result
-          yield {
-            type: 'result',
-            content: finalContent,
-            metadata: {
-              inputTokens: finalStats?.inputTokens,
-              outputTokens: finalStats?.outputTokens,
-              totalTokens: finalStats?.totalTokens,
-              toolCalls: finalStats?.toolCalls,
-              timedOut: false
+            yield {
+              type: 'result',
+              content: chunk.content,
+              metadata: {
+                inputTokens: chunk.stats?.inputTokens,
+                outputTokens: chunk.stats?.outputTokens,
+                totalTokens: chunk.stats?.totalTokens,
+                toolCalls: chunk.stats?.toolCalls,
+                timedOut: false
+              }
+            };
+            return;
+          } else if (chunk.type === 'error') {
+            const nextModel = modelAttempts[attemptIndex + 1];
+            if (!emittedProgress && nextModel && this._isRetryableModelFailure(chunk.content)) {
+              this._logModelFallback(attemptModel, nextModel, 'Streaming request hit Gemini capacity limits');
+              break;
             }
-          };
-        } else if (chunk.type === 'error') {
-          // Log error
-          logConversation(sessionId, this.name, {
-            prompt: message,
-            error: chunk.content
-          });
 
-          yield {
-            type: 'error',
-            content: chunk.content,
-            timedOut: chunk.timedOut
-          };
+            logConversation(sessionId, this.name, {
+              prompt: message,
+              error: chunk.content
+            });
+
+            yield {
+              type: 'error',
+              content: chunk.content,
+              timedOut: chunk.timedOut
+            };
+            return;
+          }
         }
-      }
-    } catch (error) {
-      // Log error
-      logConversation(sessionId, this.name, {
-        prompt: message,
-        error: error.message
-      });
+      } catch (error) {
+        const nextModel = modelAttempts[attemptIndex + 1];
+        if (nextModel && !emittedProgress && this._isRetryableModelFailure(error)) {
+          this._logModelFallback(attemptModel, nextModel, 'Streaming request threw a Gemini capacity error');
+          continue;
+        }
 
-      yield {
-        type: 'error',
-        content: error.message
-      };
+        logConversation(sessionId, this.name, {
+          prompt: message,
+          error: error.message
+        });
+
+        yield {
+          type: 'error',
+          content: error.message
+        };
+        return;
+      }
     }
   }
 
@@ -760,6 +1181,7 @@ class GeminiCliAdapter extends BaseLLMAdapter {
 
     // Remove from tracking
     this.sessions.delete(sessionId);
+    this._clearHeartbeat(sessionId);
     this.emit('terminated', { sessionId });
   }
 
@@ -838,3 +1260,6 @@ class GeminiCliAdapter extends BaseLLMAdapter {
 }
 
 module.exports = GeminiCliAdapter;
+module.exports.inferGeminiBrokerDefaultModel = inferGeminiBrokerDefaultModel;
+module.exports.parseGeminiFallbackModels = parseGeminiFallbackModels;
+module.exports.isGeminiCapacityErrorMessage = isGeminiCapacityErrorMessage;

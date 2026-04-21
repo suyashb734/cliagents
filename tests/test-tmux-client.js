@@ -85,36 +85,29 @@ async function testNameValidationSafe() {
   console.log('  ✅ All safe names accepted');
 }
 
-// Test: Key escaping
-// Note: _escapeKeys escapes for double-quoted shell strings passed to tmux send-keys -l.
-// It does NOT need to escape shell metacharacters like ; | & because:
-// 1. The text is wrapped in double quotes when passed to tmux
-// 2. send-keys -l sends text literally to the PTY (not to shell for execution)
-// 3. The text becomes input to the CLI application, not shell commands
-async function testKeyEscaping() {
-  console.log('\n📝 Test: Key escaping handles double-quote context');
+// Test: sendKeys writes literal newline-containing input through tmux
+async function testSendKeysLiteralMode() {
+  console.log('\n📝 Test: sendKeys uses tmux literal mode for newline-containing input');
 
-  const testCases = [
-    // Basic text passes through
-    { input: 'hello world', shouldContain: 'hello world' },
-    // Shell metacharacters pass through (safe with -l flag + double quotes)
-    { input: 'test; ls', shouldContain: 'test; ls' },
-    { input: 'test | cat', shouldContain: 'test | cat' },
-    // Characters that break double-quoted strings MUST be escaped
-    { input: 'test$(whoami)', shouldContain: '\\$' },
-    { input: 'test`id`', shouldContain: '\\`' },
-    { input: 'test"quote', shouldContain: '\\"' },
-    { input: 'test\\backslash', shouldContain: '\\\\' },
-    { input: 'test!history', shouldContain: '\\!' },
-  ];
+  const stubClient = Object.create(TmuxClient.prototype);
+  const calls = [];
+  stubClient.logDir = path.join(process.cwd(), 'logs', 'test');
+  stubClient._exec = (args) => {
+    calls.push(args);
+    return '';
+  };
 
-  for (const tc of testCases) {
-    const escaped = client._escapeKeys(tc.input);
-    assert(escaped.includes(tc.shouldContain),
-      `Escaping "${tc.input}" should contain "${tc.shouldContain}", got: "${escaped}"`);
-  }
+  stubClient.sendKeys('test-session', 'test-window', 'line1\nline2; $(whoami)', false);
 
-  console.log('  ✅ Key escaping works correctly');
+  assert.deepStrictEqual(calls, [[
+    'send-keys',
+    '-t',
+    'test-session:test-window',
+    '-l',
+    'line1\nline2; $(whoami)'
+  ]]);
+
+  console.log('  ✅ sendKeys writes newline-containing input via literal mode');
 }
 
 // Test: Shell escaping for single quotes
@@ -231,6 +224,70 @@ async function testPreferredServerOptionsBootstrap() {
   console.log('  ✅ tmux capability bootstrap requests RGB-friendly options');
 }
 
+async function testInlineBootstrapOnFirstSessionCreate() {
+  console.log('\n📝 Test: first session creation bootstraps tmux options inline');
+
+  const stubClient = Object.create(TmuxClient.prototype);
+  stubClient.socketPath = `/tmp/cliagents-inline-${Date.now()}.sock`;
+  stubClient.logDir = path.join(process.cwd(), 'logs', 'test');
+  stubClient._validateName = () => {};
+  stubClient.sessionExists = () => false;
+  stubClient._ensurePreferredServerOptions = () => false;
+
+  const executed = [];
+  stubClient._exec = (args) => {
+    executed.push(args);
+    return '';
+  };
+
+  stubClient.createSession('inline-session', 'main', 'term-inline', {
+    workingDir: process.cwd()
+  });
+
+  const initialCommand = executed[0].join(' ');
+  assert(initialCommand.includes('set-option -g default-terminal tmux-256color ;'),
+    'Expected inline default-terminal bootstrap before first new-session');
+  assert(initialCommand.includes('set-option -ag terminal-features'),
+    'Expected inline terminal-features bootstrap before first new-session');
+  assert(initialCommand.includes('set-option -ag terminal-overrides ,*:Tc'),
+    'Expected inline terminal-overrides bootstrap before first new-session');
+  assert(initialCommand.includes('set-option -g focus-events on ;'),
+    'Expected inline focus-events bootstrap before first new-session');
+  assert(initialCommand.includes('set-option -g extended-keys on ; new-session -d -s inline-session -n main'),
+    'Expected inline extended-keys bootstrap immediately before new-session');
+
+  console.log('  ✅ first-session bootstrap is applied inline');
+}
+
+async function testRespawnPaneCommand() {
+  console.log('\n📝 Test: respawnPane replaces pane process with the requested command');
+
+  const stubClient = Object.create(TmuxClient.prototype);
+  stubClient._validateName = () => {};
+
+  const executed = [];
+  stubClient._exec = (args) => {
+    executed.push(args);
+    return '';
+  };
+
+  stubClient.respawnPane('respawn-session', 'main', 'exec codex --dangerously-bypass-approvals-and-sandbox', {
+    workingDir: '/tmp/cliagents'
+  });
+
+  assert.deepStrictEqual(executed[0], [
+    'respawn-pane',
+    '-k',
+    '-t',
+    'respawn-session:main',
+    '-c',
+    '/tmp/cliagents',
+    'exec codex --dangerously-bypass-approvals-and-sandbox'
+  ]);
+
+  console.log('  ✅ respawnPane builds the expected tmux command');
+}
+
 // Test: Dangerous session name rejected at creation
 async function testDangerousSessionCreation() {
   console.log('\n📝 Test: Dangerous session name rejected at creation');
@@ -245,6 +302,146 @@ async function testDangerousSessionCreation() {
   console.log('  ✅ Dangerous session name rejected');
 }
 
+// ─── Regression tests: noisy missing-session error suppression ───────────────
+
+// Test: _isMissingTargetError correctly classifies tmux errors
+async function testIsMissingTargetError() {
+  console.log('\n📝 Test: _isMissingTargetError classifies missing-target errors');
+
+  const missingErrors = [
+    new Error("tmux command failed (exit code 1): can't find session: cliagents-abc123"),
+    new Error("tmux command failed (exit code 1): no such session"),
+    new Error("tmux command failed (exit code 1): can't find window: main"),
+    new Error("tmux command failed (exit code 1): no such window"),
+    new Error("tmux command failed (exit code 1): can't find target: session:window"),
+    new Error("tmux command failed (exit code 1): session not found"),
+    new Error("tmux command failed (exit code 1): window not found"),
+  ];
+
+  const unexpectedErrors = [
+    new Error('permission denied'),
+    new Error('tmux server not running'),
+    new Error('protocol error'),
+    new Error(''),
+  ];
+
+  for (const error of missingErrors) {
+    assert(
+      client._isMissingTargetError(error),
+      `Should classify as missing target: "${error.message}"`
+    );
+  }
+
+  for (const error of unexpectedErrors) {
+    assert(
+      !client._isMissingTargetError(error),
+      `Should NOT classify as missing target: "${error.message}"`
+    );
+  }
+
+  console.log('  ✅ _isMissingTargetError classifies errors correctly');
+}
+
+// Test: getHistory does NOT call console.error when the session/window is gone
+async function testGetHistoryNoSpamOnMissingSession() {
+  console.log('\n📝 Test: getHistory silences missing-session/window errors');
+
+  const stub = Object.create(TmuxClient.prototype);
+  stub.defaultHistoryLimit = 2000;
+  stub._exec = () => {
+    throw new Error("tmux command failed (exit code 1): can't find session: cliagents-gone");
+  };
+
+  const captured = [];
+  const origError = console.error;
+  console.error = (...args) => captured.push(args);
+  try {
+    const result = stub.getHistory('cliagents-gone', 'main');
+    assert.strictEqual(result, '', 'Should return empty string for missing session');
+    assert.strictEqual(captured.length, 0, 'Should NOT call console.error for missing session');
+  } finally {
+    console.error = origError;
+  }
+
+  console.log('  ✅ getHistory does not spam console.error for missing sessions');
+}
+
+// Test: getHistory DOES call console.error for unexpected tmux failures
+async function testGetHistoryLogsUnexpectedErrors() {
+  console.log('\n📝 Test: getHistory logs unexpected tmux errors');
+
+  const stub = Object.create(TmuxClient.prototype);
+  stub.defaultHistoryLimit = 2000;
+  stub._exec = () => {
+    throw new Error('protocol error');
+  };
+
+  const captured = [];
+  const origError = console.error;
+  console.error = (...args) => captured.push(args);
+  try {
+    const result = stub.getHistory('session', 'window');
+    assert.strictEqual(result, '', 'Should return empty string on unexpected error');
+    assert.strictEqual(captured.length, 1, 'Should call console.error exactly once for unexpected error');
+    const logLine = captured[0].join(' ');
+    assert(logLine.includes('protocol error'), `Error message should appear in log, got: ${logLine}`);
+  } finally {
+    console.error = origError;
+  }
+
+  console.log('  ✅ getHistory logs unexpected tmux errors');
+}
+
+// Test: getVisibleContent does NOT call console.error when the window is gone
+async function testGetVisibleContentNoSpamOnMissingSession() {
+  console.log('\n📝 Test: getVisibleContent silences missing-session/window errors');
+
+  const stub = Object.create(TmuxClient.prototype);
+  stub._exec = () => {
+    throw new Error("tmux command failed (exit code 1): can't find window: main");
+  };
+
+  const captured = [];
+  const origError = console.error;
+  console.error = (...args) => captured.push(args);
+  try {
+    const result = stub.getVisibleContent('cliagents-gone', 'main');
+    assert.strictEqual(result, '', 'Should return empty string for missing window');
+    assert.strictEqual(captured.length, 0, 'Should NOT call console.error for missing window');
+  } finally {
+    console.error = origError;
+  }
+
+  console.log('  ✅ getVisibleContent does not spam console.error for missing sessions');
+}
+
+// Test: getVisibleContent DOES call console.error for unexpected tmux failures
+async function testGetVisibleContentLogsUnexpectedErrors() {
+  console.log('\n📝 Test: getVisibleContent logs unexpected tmux errors');
+
+  const stub = Object.create(TmuxClient.prototype);
+  stub._exec = () => {
+    throw new Error('tmux server crashed');
+  };
+
+  const captured = [];
+  const origError = console.error;
+  console.error = (...args) => captured.push(args);
+  try {
+    const result = stub.getVisibleContent('session', 'window');
+    assert.strictEqual(result, '', 'Should return empty string on unexpected error');
+    assert.strictEqual(captured.length, 1, 'Should call console.error exactly once for unexpected error');
+    const logLine = captured[0].join(' ');
+    assert(logLine.includes('tmux server crashed'), `Error message should appear in log, got: ${logLine}`);
+  } finally {
+    console.error = origError;
+  }
+
+  console.log('  ✅ getVisibleContent logs unexpected tmux errors');
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+
 // Run all tests
 async function runTests() {
   console.log('═══════════════════════════════════════════');
@@ -257,12 +454,19 @@ async function runTests() {
   const tests = [
     testNameValidation,
     testNameValidationSafe,
-    testKeyEscaping,
+    testSendKeysLiteralMode,
     testShellEscaping,
     testSessionLifecycle,
     testSessionEnvironmentRemoval,
     testPreferredServerOptionsBootstrap,
+    testInlineBootstrapOnFirstSessionCreate,
+    testRespawnPaneCommand,
     testDangerousSessionCreation,
+    testIsMissingTargetError,
+    testGetHistoryNoSpamOnMissingSession,
+    testGetHistoryLogsUnexpectedErrors,
+    testGetVisibleContentNoSpamOnMissingSession,
+    testGetVisibleContentLogsUnexpectedErrors,
   ];
 
   await setup();

@@ -22,8 +22,9 @@ const GEMINI_PATTERNS = {
    * IDLE: Prompt waiting for input
    * Modern Gemini CLI shows input box with "Type your message" text
    * Also matches legacy `gemini>` prompt and status bar indicators
+   * Orchestration mode: matches shell prompts and explicit ready marker
    */
-  IDLE: /Type your message|gemini>|\*\s+Type your|^\s*>\s*$|\/model\s*$/m,
+  IDLE: /Type your message|gemini>|\*\s+Type your|^\s*>\s*$|\/model\s*$|^GEMINI_READY_FOR_ORCHESTRATION$|^[\w.-]+@[\w.-]+.*[#$%>]\s*$/m,
 
   /**
    * PROCESSING: Agent is working
@@ -31,14 +32,16 @@ const GEMINI_PATTERNS = {
    * Examples: "⠋ I'm Feeling Lucky", "⠧ Finishing the Kessel Run", "⠹ Formulating a Concise Summary"
    * The key indicator is: spinner + text + "(esc to cancel, Ns)" at line end
    * Also match common action verbs as backup
+   * Orchestration mode: matches JSON stream events
    */
-  PROCESSING: /[⠋⠙⠹⠸⠼⠴⠦⠧⠇⠏].*\(esc to cancel|[⠋⠙⠹⠸⠼⠴⠦⠧⠇⠏]\s+\S+.*\d+s\)|(?:Considering|Generating|Thinking|Loading|Formulating|Finishing)/,
+  PROCESSING: /[⠋⠙⠹⠸⠼⠴⠦⠧⠇⠏].*\(esc to cancel|[⠋⠙⠹⠸⠼⠴⠦⠧⠇⠏]\s+\S+.*\d+s\)|(?:Considering|Generating|Thinking|Loading|Formulating|Finishing)|^\{"type":"(?:message|progress|tool_use|tool_result|init)"/m,
 
   /**
    * COMPLETED: Response has been delivered
    * Look for end of response patterns
+   * Orchestration mode: matches JSON result/error events
    */
-  COMPLETED: /^---\s*$|Response complete|Done\s*$/m,
+  COMPLETED: /^---\s*$|Response complete|Done\s*$|^\{"type":"(?:result|error)"/m,
 
   /**
    * WAITING_PERMISSION: Needs user approval (sandbox mode bypasses this)
@@ -92,6 +95,26 @@ class GeminiCliDetector extends BaseStatusDetector {
     // Check for rate limiting
     if (this.isRateLimited(tail)) {
       return TerminalStatus.ERROR;
+    }
+
+    // ORCHESTRATION FIX:
+    // JSON processing messages persist in history, causing false PROCESSING detection.
+    // Check for explicit Shell Prompt or JSON Result at the very end of output.
+    // This takes precedence over persistent history patterns.
+    const lines = tail.trim().split('\n');
+    if (lines.length > 0) {
+      const lastLine = lines[lines.length - 1];
+
+      // Check for shell prompt at end (Orchestration Idle)
+      // Matches: user@host path %
+      if (/^[\w.-]+@[\w.-]+.*[#$%>]\s*$/.test(lastLine)) {
+        return TerminalStatus.IDLE;
+      }
+
+      // Check for JSON result/error at end (Orchestration Completed)
+      if (/^\{"type":"(?:result|error)"/.test(lastLine)) {
+        return TerminalStatus.COMPLETED;
+      }
     }
 
     // Fall back to pattern-based detection

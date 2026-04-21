@@ -13,10 +13,12 @@ const TEST_FILES = [
   'test-managed-root-launch.js',
   'test-managed-root-recovery.js',
   'test-gemini-model-fallback.js',
+  'test-qwen-cli.js',
   'test-opencode-cli.js',
   'test-status-detection.js',
   'test-handoff-init-prompts.js',
   'test-db-migrations.js',
+  'test-usage-ledger.js',
   'test-run-ledger-schema.js',
   'test-session-control-plane-schema.js',
   'test-session-control-plane-runtime.js',
@@ -35,12 +37,14 @@ const TEST_FILES = [
   'test-run-ledger-routes.js',
   'test-run-ledger-ui.js',
   'test-console-ui.js',
+  'test-openai-compat.js',
   'test-mcp-delegate-task.js',
   'test-mcp-batch-status.js',
   'test-mcp-run-ledger-tools.js',
   'test-mcp-root-session-tools.js',
   'test-orchestration-introspection-routes.js',
-  'test-runtime-consistency.js'
+  'test-runtime-consistency.js',
+  'test-tmux-client.js'
 ];
 
 async function runTest(testFile) {

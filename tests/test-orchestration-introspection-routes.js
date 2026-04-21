@@ -9,6 +9,7 @@ const path = require('path');
 const { createOrchestrationRouter } = require('../src/server/orchestration-router');
 const { OrchestrationDB } = require('../src/database/db');
 const { RunLedgerService } = require('../src/orchestration/run-ledger');
+const { getModelRoutingService } = require('../src/services/model-routing');
 const { startTestServer, stopTestServer } = require('./helpers/server-harness');
 
 process.chdir(path.resolve(__dirname, '..'));
@@ -20,7 +21,15 @@ function makeTempDir(prefix) {
 async function startApp(context) {
   const app = express();
   app.use(express.json());
-  app.use('/orchestration', createOrchestrationRouter(context));
+  app.use('/orchestration', createOrchestrationRouter({
+    adapterAuthInspector() {
+      return {
+        authenticated: true,
+        reason: 'test default override'
+      };
+    },
+    ...context
+  }));
 
   return new Promise((resolve) => {
     const server = app.listen(0, '127.0.0.1', () => {
@@ -90,6 +99,12 @@ function createRuntimeAdapter(overrides = {}) {
         executionMode: 'direct-session',
         capabilities: this.getCapabilities()
       };
+    },
+    getAvailableModels() {
+      return overrides.models || [];
+    },
+    getProviderSummary() {
+      return overrides.runtimeProviders || [];
     }
   };
 }
@@ -213,14 +228,21 @@ async function testRouteResponseIncludesRuntimeAdapterMetadata() {
   const { server, baseUrl } = await startApp({
     sessionManager,
     apiSessionManager,
-    db: { db: null }
+    db: { db: null },
+    adapterAuthInspector() {
+      return {
+        authenticated: true,
+        reason: 'test override'
+      };
+    }
   });
 
   try {
     const res = await request(baseUrl, 'POST', '/orchestration/route', {
       forceRole: 'plan',
       forceAdapter: 'qwen-cli',
-      message: 'Create a short implementation plan.'
+      message: 'Create a short implementation plan.',
+      rootSessionId: 'root-route-test-1'
     });
 
     assert.strictEqual(res.status, 200);
@@ -234,6 +256,54 @@ async function testRouteResponseIncludesRuntimeAdapterMetadata() {
     assert.strictEqual(createCalls.length, 1);
     assert.strictEqual(sendCalls.length, 1);
     assert.strictEqual(sendCalls[0].message, 'Create a short implementation plan.');
+  } finally {
+    await stopApp(server);
+  }
+}
+
+async function testRecommendModelRouteReturnsBrokerPolicyRecommendation() {
+  const opencodeRuntimeAdapter = createRuntimeAdapter({
+    name: 'opencode-cli',
+    models: [
+      { id: 'openrouter/qwen/qwen3.6-plus' },
+      { id: 'minimax-coding-plan/MiniMax-M2.7' }
+    ],
+    runtimeProviders: [
+      { name: 'OpenRouter' },
+      { name: 'MiniMax Coding Plan (minimax.io)' }
+    ]
+  });
+
+  const { server, baseUrl } = await startApp({
+    sessionManager: {
+      async createTerminal() {
+        throw new Error('createTerminal should not be called for model recommendation');
+      },
+      async sendInput() {
+        throw new Error('sendInput should not be called for model recommendation');
+      }
+    },
+    apiSessionManager: {
+      getAdapterNames() {
+        return ['opencode-cli'];
+      },
+      getAdapter(name) {
+        return name === 'opencode-cli' ? opencodeRuntimeAdapter : null;
+      }
+    },
+    db: { db: null }
+  });
+
+  try {
+    const res = await request(baseUrl, 'POST', '/orchestration/model-routing/recommend', {
+      adapter: 'opencode-cli',
+      role: 'implement'
+    });
+
+    assert.strictEqual(res.status, 200);
+    assert.strictEqual(res.data.selectedModel, 'minimax-coding-plan/MiniMax-M2.7');
+    assert.strictEqual(res.data.selectedProvider, 'minimax-coding-plan');
+    assert.strictEqual(res.data.selectedFamily, 'minimax');
   } finally {
     await stopApp(server);
   }
@@ -298,6 +368,357 @@ async function testRoutePropagatesSessionGraphMetadata() {
   }
 }
 
+async function testRouteAutoAppliesRecommendedOpencodeModel() {
+  const createCalls = [];
+  const sendCalls = [];
+
+  const sessionManager = {
+    async createTerminal(options) {
+      createCalls.push(options);
+      return { terminalId: 'term-opencode-route-1' };
+    },
+    async sendInput(terminalId, message) {
+      sendCalls.push({ terminalId, message });
+    }
+  };
+
+  const opencodeRuntimeAdapter = createRuntimeAdapter({
+    name: 'opencode-cli',
+    capabilities: {
+      usesOfficialCli: true,
+      executionMode: 'direct-session',
+      supportsMultiTurn: true,
+      supportsStreaming: true,
+      supportsSystemPrompt: true,
+      supportsFilesystemWrite: true
+    },
+    models: [
+      { id: 'openrouter/qwen/qwen3.6-plus' },
+      { id: 'minimax-coding-plan/MiniMax-M2.7' }
+    ],
+    runtimeProviders: [
+      { name: 'OpenRouter' },
+      { name: 'MiniMax Coding Plan (minimax.io)' }
+    ]
+  });
+
+  const { server, baseUrl } = await startApp({
+    sessionManager,
+    apiSessionManager: {
+      getAdapterNames() {
+        return ['opencode-cli'];
+      },
+      getAdapter(name) {
+        return name === 'opencode-cli' ? opencodeRuntimeAdapter : null;
+      }
+    },
+    db: { db: null }
+  });
+
+  try {
+    const res = await request(baseUrl, 'POST', '/orchestration/route', {
+      forceRole: 'implement',
+      forceAdapter: 'opencode-cli',
+      message: 'Implement the requested broker change.'
+    });
+
+    assert.strictEqual(res.status, 200);
+    assert.strictEqual(createCalls.length, 1);
+    assert.strictEqual(createCalls[0].adapter, 'opencode-cli');
+    assert.strictEqual(createCalls[0].model, 'minimax-coding-plan/MiniMax-M2.7');
+    assert.strictEqual(res.data.model, 'minimax-coding-plan/MiniMax-M2.7');
+    assert.strictEqual(res.data.modelRecommendation.selectedProvider, 'minimax-coding-plan');
+    assert.strictEqual(sendCalls.length, 1);
+  } finally {
+    await stopApp(server);
+  }
+}
+
+async function testRouteSkipsDegradedOpencodeModelLane() {
+  const createCalls = [];
+  const sendCalls = [];
+  const modelRoutingService = getModelRoutingService();
+  modelRoutingService.resetModelHealth({ adapter: 'opencode-cli' });
+  modelRoutingService.recordModelFailure({
+    adapter: 'opencode-cli',
+    model: 'opencode-go/qwen3.6-plus',
+    failureClass: 'timeout',
+    reason: 'Timed out waiting for completion.'
+  });
+
+  const sessionManager = {
+    async createTerminal(options) {
+      createCalls.push(options);
+      return { terminalId: 'term-opencode-route-health-1' };
+    },
+    async sendInput(terminalId, message) {
+      sendCalls.push({ terminalId, message });
+    }
+  };
+
+  const opencodeRuntimeAdapter = createRuntimeAdapter({
+    name: 'opencode-cli',
+    capabilities: {
+      usesOfficialCli: true,
+      executionMode: 'direct-session',
+      supportsMultiTurn: true,
+      supportsStreaming: true,
+      supportsSystemPrompt: true,
+      supportsFilesystemWrite: true
+    },
+    models: [
+      { id: 'opencode-go/qwen3.6-plus' },
+      { id: 'opencode-go/glm-5.1' }
+    ],
+    runtimeProviders: [
+      { name: 'OpenCode Go' }
+    ]
+  });
+
+  const { server, baseUrl } = await startApp({
+    sessionManager,
+    apiSessionManager: {
+      getAdapterNames() {
+        return ['opencode-cli'];
+      },
+      getAdapter(name) {
+        return name === 'opencode-cli' ? opencodeRuntimeAdapter : null;
+      }
+    },
+    db: { db: null }
+  });
+
+  try {
+    const res = await request(baseUrl, 'POST', '/orchestration/route', {
+      forceType: 'review-bugs',
+      forceRole: 'review',
+      forceAdapter: 'opencode-cli',
+      message: 'Review the requested broker change.'
+    });
+
+    assert.strictEqual(res.status, 200);
+    assert.strictEqual(createCalls.length, 1);
+    assert.strictEqual(createCalls[0].model, 'opencode-go/glm-5.1');
+    assert.strictEqual(res.data.model, 'opencode-go/glm-5.1');
+    assert.strictEqual(res.data.modelRecommendation.selectedFamily, 'glm');
+    assert.strictEqual(res.data.modelRecommendation.strategy, 'config-ranked-health-fallback');
+    assert.strictEqual(sendCalls.length, 1);
+  } finally {
+    modelRoutingService.resetModelHealth({ adapter: 'opencode-cli' });
+    await stopApp(server);
+  }
+}
+
+async function testDestroyTerminalRouteDistinguishesMissingTerminal() {
+  const destroyedTerminalIds = [];
+  const sessionManager = {
+    async destroyTerminal(terminalId) {
+      if (terminalId === 'missing-terminal') {
+        return false;
+      }
+      destroyedTerminalIds.push(terminalId);
+      return true;
+    }
+  };
+
+  const { server, baseUrl } = await startApp({
+    sessionManager,
+    apiSessionManager: {
+      getAdapterNames() {
+        return [];
+      },
+      getAdapter() {
+        return null;
+      }
+    },
+    db: { db: null }
+  });
+
+  try {
+    const okRes = await request(baseUrl, 'DELETE', '/orchestration/terminals/live-terminal');
+    assert.strictEqual(okRes.status, 200);
+    assert.strictEqual(okRes.data.success, true);
+    assert.deepStrictEqual(destroyedTerminalIds, ['live-terminal']);
+
+    const missingRes = await request(baseUrl, 'DELETE', '/orchestration/terminals/missing-terminal');
+    assert.strictEqual(missingRes.status, 404);
+    assert.strictEqual(missingRes.data.error.code, 'terminal_not_found');
+    assert(String(missingRes.data.error.message || '').includes('missing-terminal'));
+  } finally {
+    await stopApp(server);
+  }
+}
+
+async function testInputRouteReturnsTerminalBusyConflict() {
+  const sessionManager = {
+    async createTerminal() {
+      throw new Error('not used');
+    },
+    async sendInput() {
+      const error = new Error('Terminal child-1 is busy (processing). Wait for it to finish before sending more input.');
+      error.code = 'terminal_busy';
+      error.statusCode = 409;
+      error.terminalId = 'child-1';
+      error.terminalStatus = 'processing';
+      error.retryAfterMs = 1000;
+      throw error;
+    }
+  };
+
+  const { server, baseUrl } = await startApp({
+    sessionManager,
+    apiSessionManager: {
+      getAdapterNames() {
+        return [];
+      },
+      getAdapter() {
+        return null;
+      }
+    },
+    db: { db: null }
+  });
+
+  try {
+    const res = await request(baseUrl, 'POST', '/orchestration/terminals/child-1/input', {
+      message: 'Follow up while still running.'
+    });
+    assert.strictEqual(res.status, 409);
+    assert.strictEqual(res.data.error.code, 'terminal_busy');
+    assert.strictEqual(res.data.error.terminalId, 'child-1');
+    assert.strictEqual(res.data.error.status, 'processing');
+    assert.strictEqual(res.data.error.retryAfterMs, 1000);
+  } finally {
+    await stopApp(server);
+  }
+}
+
+async function testOutputRouteSupportsVisibleAnsiModes() {
+  const outputCalls = [];
+  const sessionManager = {
+    getOutput(terminalId, options) {
+      outputCalls.push({ terminalId, options });
+      return '\u001b[32mvisible pane\u001b[0m';
+    }
+  };
+
+  const { server, baseUrl } = await startApp({
+    sessionManager,
+    apiSessionManager: {
+      getAdapterNames() {
+        return [];
+      },
+      getAdapter() {
+        return null;
+      }
+    },
+    db: { db: null }
+  });
+
+  try {
+    const res = await request(baseUrl, 'GET', '/orchestration/terminals/output-term-1/output?lines=120&mode=visible&format=ansi');
+    assert.strictEqual(res.status, 200);
+    assert.strictEqual(res.data.mode, 'visible');
+    assert.strictEqual(res.data.format, 'ansi');
+    assert.strictEqual(res.data.output, '\u001b[32mvisible pane\u001b[0m');
+    assert.deepStrictEqual(outputCalls, [{
+      terminalId: 'output-term-1',
+      options: {
+        lines: 120,
+        mode: 'visible',
+        format: 'ansi'
+      }
+    }]);
+  } finally {
+    await stopApp(server);
+  }
+}
+
+async function testInputRouteRejectsAttachedRootsAsReadOnly() {
+  const rootDir = makeTempDir('cliagents-root-read-only-route-');
+  const db = new OrchestrationDB({
+    dbPath: path.join(rootDir, 'cliagents.db'),
+    dataDir: rootDir
+  });
+  const sendCalls = [];
+
+  db.registerTerminal(
+    'attached-root-terminal',
+    'cliagents-attached-root',
+    '0',
+    'codex-cli',
+    'main_codex-cli',
+    'main',
+    rootDir,
+    path.join(rootDir, 'attached-root.log'),
+    {
+      rootSessionId: 'attached-root-session',
+      sessionKind: 'attach',
+      originClient: 'codex',
+      externalSessionRef: 'codex:thread-attached'
+    }
+  );
+  db.addSessionEvent({
+    rootSessionId: 'attached-root-session',
+    sessionId: 'attached-root-session',
+    eventType: 'session_started',
+    originClient: 'codex',
+    idempotencyKey: 'attached-root-start',
+    payloadJson: {
+      sessionKind: 'attach',
+      adapter: 'codex-cli',
+      externalSessionRef: 'codex:thread-attached'
+    },
+    metadata: {
+      clientName: 'codex',
+      attachMode: 'explicit-http-attach'
+    }
+  });
+
+  const { server, baseUrl } = await startApp({
+    sessionManager: {
+      getTerminal(terminalId) {
+        return terminalId === 'attached-root-terminal'
+          ? {
+              terminalId: 'attached-root-terminal',
+              rootSessionId: 'attached-root-session',
+              sessionKind: 'attach',
+              originClient: 'codex'
+            }
+          : null;
+      },
+      getOutput() {
+        return '';
+      },
+      async sendInput(terminalId, message) {
+        sendCalls.push({ terminalId, message });
+      }
+    },
+    apiSessionManager: {
+      getAdapterNames() {
+        return [];
+      },
+      getAdapter() {
+        return null;
+      }
+    },
+    db
+  });
+
+  try {
+    const res = await request(baseUrl, 'POST', '/orchestration/terminals/attached-root-terminal/input', {
+      message: 'Continue.'
+    });
+    assert.strictEqual(res.status, 403);
+    assert.strictEqual(res.data.error.code, 'root_read_only');
+    assert.strictEqual(res.data.error.rootSessionId, 'attached-root-session');
+    assert.strictEqual(sendCalls.length, 0);
+  } finally {
+    await stopApp(server);
+    db.close();
+    fs.rmSync(rootDir, { recursive: true, force: true });
+  }
+}
+
 async function testRootSessionRoutesExposeAttentionSummary() {
   const rootDir = makeTempDir('cliagents-root-session-routes-');
   const db = new OrchestrationDB({
@@ -339,7 +760,9 @@ async function testRootSessionRoutesExposeAttentionSummary() {
         rootSessionId: 'root-route-1',
         parentSessionId: 'root-route-1',
         sessionKind: 'reviewer',
-        originClient: 'mcp'
+        originClient: 'mcp',
+        providerThreadRef: 'thread-child-1',
+        sessionMetadata: { sessionLabel: 'child-reviewer' }
       }
     );
     db.updateStatus('child-monitor-1', 'waiting_user_answer');
@@ -412,8 +835,18 @@ async function testRootSessionRoutesExposeAttentionSummary() {
     assert.strictEqual(listRes.data.roots.length, 1);
     assert.strictEqual(listRes.data.roots[0].rootSessionId, 'root-route-1');
     assert.strictEqual(listRes.data.roots[0].status, 'blocked');
+    assert.strictEqual(listRes.data.roots[0].rootMode, 'attached');
+    assert(listRes.data.roots[0].activitySummary, 'root summary should expose activity summary');
     assert.strictEqual(listRes.data.hiddenDetachedCount, 1);
     assert.strictEqual(listRes.data.hiddenNonUserCount, 0);
+    assert.strictEqual(listRes.data.statusFilter, 'all');
+    assert.strictEqual(listRes.data.roots[0].live, true);
+
+    const liveListRes = await request(baseUrl, 'GET', '/orchestration/root-sessions?limit=10&statusFilter=live');
+    assert.strictEqual(liveListRes.status, 200);
+    assert.strictEqual(liveListRes.data.statusFilter, 'live');
+    assert.strictEqual(liveListRes.data.roots.length, 1);
+    assert.strictEqual(liveListRes.data.roots[0].rootSessionId, 'root-route-1');
 
     const archivedListRes = await request(baseUrl, 'GET', '/orchestration/root-sessions?limit=10&includeArchived=1&scope=all');
     assert.strictEqual(archivedListRes.status, 200);
@@ -432,10 +865,49 @@ async function testRootSessionRoutesExposeAttentionSummary() {
     assert.strictEqual(detailRes.data.rootSessionId, 'root-route-1');
     assert.strictEqual(detailRes.data.status, 'blocked');
     assert.strictEqual(detailRes.data.rootType, 'attached_client_root');
+    assert.strictEqual(detailRes.data.rootMode, 'attached');
+    assert.strictEqual(detailRes.data.sessionKind, 'attached');
+    assert.strictEqual(detailRes.data.visibility, 'read-only');
+    assert.strictEqual(detailRes.data.replyCapability, 'partial');
+    assert(detailRes.data.activitySummary, 'detail snapshot should expose activity summary');
     assert(detailRes.data.attention.reasons.some((reason) => reason.code === 'user_input_required'));
+
+    db.registerTerminal(
+      'child-monitor-other-root',
+      'cliagents-root',
+      '1',
+      'gemini-cli',
+      'research_gemini-cli',
+      'worker',
+      '/tmp/project',
+      '/tmp/other-root.log',
+      {
+        rootSessionId: 'root-route-2',
+        parentSessionId: 'root-route-2',
+        sessionKind: 'subagent',
+        originClient: 'mcp',
+        sessionMetadata: { sessionLabel: 'other-root-child' }
+      }
+    );
+    db.updateStatus('child-monitor-other-root', 'completed');
+
+    const childrenRes = await request(baseUrl, 'GET', '/orchestration/root-sessions/root-route-1/children?limit=10');
+    assert.strictEqual(childrenRes.status, 200);
+    assert.strictEqual(childrenRes.data.rootSessionId, 'root-route-1');
+    assert.strictEqual(childrenRes.data.count, 1);
+    assert.strictEqual(childrenRes.data.children.length, 1);
+    assert.strictEqual(childrenRes.data.children[0].terminalId, 'child-monitor-1');
+    assert.strictEqual(childrenRes.data.children[0].sessionLabel, 'child-reviewer');
+    assert.strictEqual(childrenRes.data.children[0].sessionKind, 'reviewer');
+    assert.strictEqual(childrenRes.data.children[0].status, 'waiting_user_answer');
+    assert.strictEqual(childrenRes.data.children[0].providerThreadRefPresent, true);
+    assert(!childrenRes.data.children.some((child) => child.terminalId === 'child-monitor-other-root'));
 
     const missingRes = await request(baseUrl, 'GET', '/orchestration/root-sessions/does-not-exist');
     assert.strictEqual(missingRes.status, 404);
+    const missingChildrenRes = await request(baseUrl, 'GET', '/orchestration/root-sessions/does-not-exist/children');
+    assert.strictEqual(missingChildrenRes.status, 404);
+    assert.strictEqual(missingChildrenRes.data.error.code, 'root_session_not_found');
   } finally {
     await stopApp(server);
     db.close();
@@ -716,6 +1188,12 @@ async function testSessionEventsRouteReturnsReplayOrderedEvents() {
     assert.strictEqual(res.data.events[0].payload_summary, 'root attached');
     assert.strictEqual(res.data.events[1].sequence_no, 2);
     assert.strictEqual(res.data.events[1].payload_summary, 'child started');
+
+    const cursorRes = await request(baseUrl, 'GET', `/orchestration/session-events?rootSessionId=${rootSessionId}&after_sequence_no=1`);
+    assert.strictEqual(cursorRes.status, 200);
+    assert.strictEqual(cursorRes.data.events.length, 1);
+    assert.strictEqual(cursorRes.data.events[0].sequence_no, 2);
+    assert.strictEqual(cursorRes.data.events[0].payload_summary, 'child started');
   } finally {
     await stopApp(server);
     db.close();
@@ -1027,21 +1505,138 @@ async function testRouteImplicitlyAttachesAndReusesClientRoot() {
     };
 
     const first = await request(appHandle.baseUrl, 'POST', '/orchestration/route', body);
-    assert.strictEqual(first.status, 200);
-    assert(first.data.rootSessionId, 'route should resolve a rootSessionId');
-    assert.strictEqual(first.data.attachedRoot, true);
-    assert.strictEqual(first.data.reusedAttachedRoot, false);
-    assert.strictEqual(createCalls[0].rootSessionId, first.data.rootSessionId);
-    assert.strictEqual(createCalls[0].parentSessionId, first.data.rootSessionId);
+    assert.strictEqual(first.status, 428, 'Implicit attach should now be rejected with 428');
+    assert.strictEqual(first.data.error.code, 'root_session_required');
+    assert.strictEqual(createCalls.length, 0, 'No terminal should be created for rejected implicit attach');
+  } finally {
+    if (appHandle) {
+      await stopApp(appHandle.server);
+    }
+    db.close();
+  }
+}
 
-    const second = await request(appHandle.baseUrl, 'POST', '/orchestration/route', body);
-    assert.strictEqual(second.status, 200);
-    assert.strictEqual(second.data.rootSessionId, first.data.rootSessionId);
-    assert.strictEqual(second.data.attachedRoot, false);
-    assert.strictEqual(second.data.reusedAttachedRoot, true);
-    assert.strictEqual(createCalls[1].rootSessionId, first.data.rootSessionId);
-    assert.strictEqual(createCalls[1].parentSessionId, first.data.rootSessionId);
-    assert.strictEqual(sendCalls.length, 2);
+async function testRouteRejectsConflictingRootBinding() {
+  const rootDir = makeTempDir('cliagents-route-binding-conflict-');
+  const db = new OrchestrationDB({
+    dbPath: path.join(rootDir, 'cliagents.db'),
+    dataDir: rootDir
+  });
+  const createCalls = [];
+  const sendCalls = [];
+
+  let appHandle = null;
+  try {
+    appHandle = await startApp({
+      sessionManager: {
+        async createTerminal(options) {
+          createCalls.push(options);
+          return { terminalId: `term-${createCalls.length}`, reused: false, reuseReason: null };
+        },
+        async sendInput(terminalId, message) {
+          sendCalls.push({ terminalId, message });
+        }
+      },
+      apiSessionManager: {
+        getAdapterNames() {
+          return ['codex-cli'];
+        },
+        getAdapter(name) {
+          if (name !== 'codex-cli') {
+            return null;
+          }
+          return createRuntimeAdapter({
+            name,
+            capabilities: {
+              usesOfficialCli: true,
+              executionMode: 'direct-session',
+              supportsMultiTurn: true
+            }
+          });
+        }
+      },
+      db
+    });
+
+    const attach = await request(appHandle.baseUrl, 'POST', '/orchestration/root-sessions/attach', {
+      originClient: 'mcp',
+      externalSessionRef: 'opencode:thread-route-conflict-1',
+      sessionMetadata: {
+        clientName: 'opencode'
+      }
+    });
+    assert.strictEqual(attach.status, 200);
+    assert(attach.data.rootSessionId);
+
+    const conflict = await request(appHandle.baseUrl, 'POST', '/orchestration/route', {
+      message: 'Review this change',
+      forceRole: 'review',
+      forceAdapter: 'codex-cli',
+      rootSessionId: 'ffffffffffffffffffffffffffffffff',
+      originClient: 'mcp',
+      externalSessionRef: 'opencode:thread-route-conflict-1',
+      sessionMetadata: {
+        clientName: 'opencode'
+      }
+    });
+    assert.strictEqual(conflict.status, 409);
+    assert.strictEqual(conflict.data.error.code, 'root_session_binding_conflict');
+    assert.strictEqual(conflict.data.error.details.rootSessionId, 'ffffffffffffffffffffffffffffffff');
+    assert.strictEqual(conflict.data.error.details.conflictingRootSessionId, attach.data.rootSessionId);
+    assert.strictEqual(createCalls.length, 0, 'conflicting root binding should reject before terminal creation');
+    assert.strictEqual(sendCalls.length, 0, 'conflicting root binding should reject before sending input');
+  } finally {
+    if (appHandle) {
+      await stopApp(appHandle.server);
+    }
+    db.close();
+  }
+}
+
+async function testAttachRouteRejectsConflictingRootBinding() {
+  const rootDir = makeTempDir('cliagents-attach-binding-conflict-');
+  const db = new OrchestrationDB({
+    dbPath: path.join(rootDir, 'cliagents.db'),
+    dataDir: rootDir
+  });
+
+  let appHandle = null;
+  try {
+    appHandle = await startApp({
+      sessionManager: {
+        async createTerminal() {
+          throw new Error('not used');
+        },
+        async sendInput() {
+          throw new Error('not used');
+        }
+      },
+      apiSessionManager: null,
+      db
+    });
+
+    const first = await request(appHandle.baseUrl, 'POST', '/orchestration/root-sessions/attach', {
+      originClient: 'mcp',
+      externalSessionRef: 'opencode:thread-attach-conflict-1',
+      sessionMetadata: {
+        clientName: 'opencode'
+      }
+    });
+    assert.strictEqual(first.status, 200);
+    assert(first.data.rootSessionId);
+
+    const conflict = await request(appHandle.baseUrl, 'POST', '/orchestration/root-sessions/attach', {
+      rootSessionId: 'abababababababababababababababab',
+      originClient: 'mcp',
+      externalSessionRef: 'opencode:thread-attach-conflict-1',
+      sessionMetadata: {
+        clientName: 'opencode'
+      }
+    });
+    assert.strictEqual(conflict.status, 409);
+    assert.strictEqual(conflict.data.error.code, 'root_session_binding_conflict');
+    assert.strictEqual(conflict.data.error.details.rootSessionId, 'abababababababababababababababab');
+    assert.strictEqual(conflict.data.error.details.conflictingRootSessionId, first.data.rootSessionId);
   } finally {
     if (appHandle) {
       await stopApp(appHandle.server);
@@ -1119,9 +1714,35 @@ async function testStrictRootAttachRejectsDetachedRouteCalls() {
         clientName: 'opencode'
       }
     });
-    assert.strictEqual(attached.status, 200);
-    assert(attached.data.rootSessionId);
-    assert.strictEqual(attached.data.attachedRoot, true);
+    assert.strictEqual(attached.status, 428);
+    assert.strictEqual(attached.data.error.code, 'root_session_required');
+    assert.strictEqual(createCalls.length, 0);
+    assert.strictEqual(sendCalls.length, 0);
+
+    const explicitRoot = await request(appHandle.baseUrl, 'POST', '/orchestration/root-sessions/attach', {
+      originClient: 'mcp',
+      externalSessionRef: 'opencode:thread-route-strict-1',
+      sessionMetadata: {
+        clientName: 'opencode'
+      }
+    });
+    assert.strictEqual(explicitRoot.status, 200);
+    assert(explicitRoot.data.rootSessionId);
+
+    const attachedAfterEnsure = await request(appHandle.baseUrl, 'POST', '/orchestration/route', {
+      message: 'Review this change',
+      forceRole: 'review',
+      forceAdapter: 'codex-cli',
+      originClient: 'mcp',
+      externalSessionRef: 'opencode:thread-route-strict-1',
+      sessionMetadata: {
+        clientName: 'opencode'
+      }
+    });
+    assert.strictEqual(attachedAfterEnsure.status, 200);
+    assert.strictEqual(attachedAfterEnsure.data.rootSessionId, explicitRoot.data.rootSessionId);
+    assert.strictEqual(attachedAfterEnsure.data.attachedRoot, false);
+    assert.strictEqual(attachedAfterEnsure.data.reusedAttachedRoot, true);
     assert.strictEqual(createCalls.length, 1);
     assert.strictEqual(sendCalls.length, 1);
   } finally {
@@ -1234,7 +1855,16 @@ async function testManagedRootLaunchRouteCreatesInteractiveRootTerminal() {
     const response = await request(appHandle.baseUrl, 'POST', '/orchestration/root-sessions/launch', {
       adapter: 'claude',
       workingDirectory: '/tmp/cliagents-managed-root',
-      model: 'claude-sonnet-4-5-20250514'
+      model: 'claude-sonnet-4-5-20250514',
+      systemPrompt: 'Return concise answers.',
+      deferProviderStartUntilAttached: true,
+      launchEnvironment: {
+        TERM_PROGRAM: 'iTerm.app',
+        COLORTERM: 'truecolor',
+        COLUMNS: '180',
+        LINES: '48',
+        SSH_AUTH_SOCK: '/tmp/should-not-pass'
+      }
     });
 
     assert.strictEqual(response.status, 200);
@@ -1249,12 +1879,110 @@ async function testManagedRootLaunchRouteCreatesInteractiveRootTerminal() {
     assert.strictEqual(createCalls[0].workDir, '/tmp/cliagents-managed-root');
     assert.strictEqual(createCalls[0].sessionMetadata.attachMode, 'managed-root-launch');
     assert.strictEqual(createCalls[0].sessionMetadata.launchSource, 'http-root-launch');
+    assert.strictEqual(createCalls[0].sessionMetadata.launchProfile, 'guarded-root');
     assert.strictEqual(createCalls[0].sessionMetadata.clientName, 'claude');
     assert.strictEqual(createCalls[0].sessionMetadata.workspaceRoot, '/tmp/cliagents-managed-root');
+    assert.strictEqual(createCalls[0].sessionMetadata.providerStartMode, 'after-attach');
+    assert.strictEqual(createCalls[0].deferProviderStartUntilAttached, true);
+    assert(createCalls[0].systemPrompt.includes('broker-managed root agent inside cliagents'));
+    assert(createCalls[0].systemPrompt.includes('list_models'));
+    assert(createCalls[0].systemPrompt.includes('Return concise answers.'));
+    assert.deepStrictEqual(createCalls[0].launchEnvironment, {
+      TERM_PROGRAM: 'iTerm.app',
+      COLORTERM: 'truecolor',
+      COLUMNS: '180',
+      LINES: '48'
+    });
+    assert.deepStrictEqual(createCalls[0].sessionMetadata.launchEnvironment, {
+      TERM_PROGRAM: 'iTerm.app',
+      COLORTERM: 'truecolor',
+      COLUMNS: '180',
+      LINES: '48'
+    });
     assert(createCalls[0].externalSessionRef.startsWith('claude:managed:'));
     assert.strictEqual(response.data.attachCommand, 'tmux attach -t "cliagents-root-1"');
     assert.strictEqual(response.data.managedRoot, true);
+    assert.strictEqual(response.data.providerStartMode, 'after-attach');
     assert.strictEqual(response.data.rootSessionId, 'root-term-1');
+  } finally {
+    if (appHandle) {
+      await stopApp(appHandle.server);
+    }
+    if (previousGraphWrites === undefined) {
+      delete process.env.SESSION_GRAPH_WRITES_ENABLED;
+    } else {
+      process.env.SESSION_GRAPH_WRITES_ENABLED = previousGraphWrites;
+    }
+  }
+}
+
+async function testRootAdoptRouteCreatesManagedRootFromExistingTmuxTarget() {
+  const previousGraphWrites = process.env.SESSION_GRAPH_WRITES_ENABLED;
+  process.env.SESSION_GRAPH_WRITES_ENABLED = '1';
+
+  const adoptCalls = [];
+  const sessionEvents = [];
+  let appHandle = null;
+  try {
+    appHandle = await startApp({
+      sessionManager: {
+        async adoptTerminal(options) {
+          adoptCalls.push(options);
+          return {
+            terminalId: 'adopted-root-1',
+            sessionName: options.sessionName,
+            windowName: options.windowName,
+            adapter: options.adapter,
+            role: options.role,
+            rootSessionId: options.rootSessionId,
+            parentSessionId: null,
+            sessionKind: options.sessionKind,
+            originClient: options.originClient,
+            externalSessionRef: options.externalSessionRef,
+            status: 'idle',
+            taskState: 'idle',
+            processState: 'alive'
+          };
+        },
+        getAttachCommand(terminalId) {
+          assert.strictEqual(terminalId, 'adopted-root-1');
+          return 'tmux attach -t "workspace"';
+        }
+      },
+      apiSessionManager: null,
+      db: {
+        db: null,
+        addSessionEvent(event) {
+          sessionEvents.push(event);
+          return event;
+        }
+      }
+    });
+
+    const response = await request(appHandle.baseUrl, 'POST', '/orchestration/root-sessions/adopt', {
+      adapter: 'claude',
+      tmuxTarget: 'workspace:agent',
+      workingDirectory: '/tmp/cliagents-adopt-root',
+      model: 'claude-opus-4-6'
+    });
+
+    assert.strictEqual(response.status, 200);
+    assert.strictEqual(adoptCalls.length, 1);
+    assert.strictEqual(adoptCalls[0].adapter, 'claude-code');
+    assert.strictEqual(adoptCalls[0].sessionName, 'workspace');
+    assert.strictEqual(adoptCalls[0].windowName, 'agent');
+    assert.strictEqual(adoptCalls[0].role, 'main');
+    assert.strictEqual(adoptCalls[0].sessionKind, 'main');
+    assert.strictEqual(adoptCalls[0].originClient, 'claude');
+    assert.strictEqual(adoptCalls[0].workDir, '/tmp/cliagents-adopt-root');
+    assert.strictEqual(adoptCalls[0].sessionMetadata.attachMode, 'root-adopt');
+    assert.strictEqual(adoptCalls[0].sessionMetadata.launchSource, 'http-root-adopt');
+    assert.strictEqual(adoptCalls[0].sessionMetadata.clientName, 'claude');
+    assert.strictEqual(adoptCalls[0].sessionMetadata.tmuxTarget, 'workspace:agent');
+    assert.strictEqual(sessionEvents.length, 1);
+    assert.strictEqual(sessionEvents[0].eventType, 'session_started');
+    assert.strictEqual(response.data.adoptedRoot, true);
+    assert.strictEqual(response.data.tmuxTarget, 'workspace:agent');
   } finally {
     if (appHandle) {
       await stopApp(appHandle.server);
@@ -1329,57 +2057,97 @@ async function testPruneOrphanedTerminalsRoute() {
 }
 
 async function run() {
+  const previousRequireRootAttach = process.env.CLIAGENTS_REQUIRE_ROOT_ATTACH;
+  delete process.env.CLIAGENTS_REQUIRE_ROOT_ATTACH;
   console.log('Running orchestration introspection route tests...');
 
-  await testAdaptersRouteIncludesRuntimeMetadata();
-  console.log('  ✓ adapters route exposes configured and runtime metadata');
+  try {
+    await testAdaptersRouteIncludesRuntimeMetadata();
+    console.log('  ✓ adapters route exposes configured and runtime metadata');
 
-  await testRouteResponseIncludesRuntimeAdapterMetadata();
-  console.log('  ✓ route response includes runtime adapter capability data');
+    await testRouteResponseIncludesRuntimeAdapterMetadata();
+    console.log('  ✓ route response includes runtime adapter capability data');
 
-  await testRoutePropagatesSessionGraphMetadata();
-  console.log('  ✓ route path propagates session graph metadata into terminal creation');
+    await testRecommendModelRouteReturnsBrokerPolicyRecommendation();
+    console.log('  ✓ model-routing endpoint returns broker-ranked recommendations');
 
-  await testRootSessionRoutesExposeAttentionSummary();
-  console.log('  ✓ root-session routes expose attention summaries and detail snapshots');
+    await testRoutePropagatesSessionGraphMetadata();
+    console.log('  ✓ route path propagates session graph metadata into terminal creation');
 
-  await testRoleRoutingFallsBackWhenPreferredAdapterIsUnavailable();
-  console.log('  ✓ role-based routing falls back when the default adapter is unhealthy');
+    await testRouteAutoAppliesRecommendedOpencodeModel();
+    console.log('  ✓ route path auto-applies recommended opencode model when no override is provided');
 
-  await testAutoDetectedRoutingFallsBackUsingRuntimeMetadata();
-  console.log('  ✓ auto-detected routing falls back using runtime adapter metadata');
+    await testRouteSkipsDegradedOpencodeModelLane();
+    console.log('  ✓ route path skips degraded opencode model lanes and falls back by family order');
 
-  await testWorkflowRoutePropagatesModelOverrides();
-  console.log('  ✓ workflow route propagates model overrides and working directory');
+    await testDestroyTerminalRouteDistinguishesMissingTerminal();
+    console.log('  ✓ terminal destroy route returns 404 for missing terminals');
 
-  await testSessionEventsRouteReturnsReplayOrderedEvents();
-  console.log('  ✓ session-events route replays ordered control-plane events');
+    await testOutputRouteSupportsVisibleAnsiModes();
+    console.log('  ✓ terminal output route supports visible/ansi modes without breaking defaults');
 
-  await testReconcileRouteRecoversStaleRuns();
-  console.log('  ✓ stale-run reconciliation route recovers stuck runs');
+    await testInputRouteReturnsTerminalBusyConflict();
+    console.log('  ✓ terminal input route returns 409 for busy terminals');
 
-  await testAgentServerSweepAutoReconcilesStaleRuns();
-  console.log('  ✓ agent server sweep auto-reconciles stale runs');
+    await testInputRouteRejectsAttachedRootsAsReadOnly();
+    console.log('  ✓ terminal input route rejects attached roots as read-only');
 
-  await testRootSessionAttachRouteCreatesAndReusesClientRoot();
-  console.log('  ✓ explicit root attach route reuses the same client/session root');
+    await testRootSessionRoutesExposeAttentionSummary();
+    console.log('  ✓ root-session routes expose attention summaries and detail snapshots');
 
-  await testRouteImplicitlyAttachesAndReusesClientRoot();
-  console.log('  ✓ route path implicitly attaches and reuses a client root session');
+    await testRoleRoutingFallsBackWhenPreferredAdapterIsUnavailable();
+    console.log('  ✓ role-based routing falls back when the default adapter is unhealthy');
 
-  await testStrictRootAttachRejectsDetachedRouteCalls();
-  console.log('  ✓ strict root attach rejects detached route calls');
+    await testAutoDetectedRoutingFallsBackUsingRuntimeMetadata();
+    console.log('  ✓ auto-detected routing falls back using runtime adapter metadata');
 
-  await testStrictRootAttachRejectsDetachedWorkflowCalls();
-  console.log('  ✓ strict root attach rejects detached workflow calls');
+    await testWorkflowRoutePropagatesModelOverrides();
+    console.log('  ✓ workflow route propagates model overrides and working directory');
 
-  await testManagedRootLaunchRouteCreatesInteractiveRootTerminal();
-  console.log('  ✓ managed root launch creates an interactive broker-owned root terminal');
+    await testSessionEventsRouteReturnsReplayOrderedEvents();
+    console.log('  ✓ session-events route replays ordered control-plane events');
 
-  await testPruneOrphanedTerminalsRoute();
-  console.log('  ✓ orphaned-terminal prune route removes only historical orphan rows');
+    await testReconcileRouteRecoversStaleRuns();
+    console.log('  ✓ stale-run reconciliation route recovers stuck runs');
 
-  console.log('All orchestration introspection route tests passed.');
+    await testAgentServerSweepAutoReconcilesStaleRuns();
+    console.log('  ✓ agent server sweep auto-reconciles stale runs');
+
+    await testRootSessionAttachRouteCreatesAndReusesClientRoot();
+    console.log('  ✓ explicit root attach route reuses the same client/session root');
+
+    await testRouteImplicitlyAttachesAndReusesClientRoot();
+    console.log('  ✓ route path rejects implicit client-root creation');
+
+    await testRouteRejectsConflictingRootBinding();
+    console.log('  ✓ route path rejects conflicting rootSessionId/externalSessionRef bindings');
+
+    await testAttachRouteRejectsConflictingRootBinding();
+    console.log('  ✓ explicit attach rejects conflicting rootSessionId/externalSessionRef bindings');
+
+    await testStrictRootAttachRejectsDetachedRouteCalls();
+    console.log('  ✓ strict root attach rejects detached route calls');
+
+    await testStrictRootAttachRejectsDetachedWorkflowCalls();
+    console.log('  ✓ strict root attach rejects detached workflow calls');
+
+    await testManagedRootLaunchRouteCreatesInteractiveRootTerminal();
+    console.log('  ✓ managed root launch creates an interactive broker-owned root terminal');
+
+    await testRootAdoptRouteCreatesManagedRootFromExistingTmuxTarget();
+    console.log('  ✓ root adopt route registers an existing tmux target as a managed root');
+
+    await testPruneOrphanedTerminalsRoute();
+    console.log('  ✓ orphaned-terminal prune route removes only historical orphan rows');
+
+    console.log('All orchestration introspection route tests passed.');
+  } finally {
+    if (previousRequireRootAttach === undefined) {
+      delete process.env.CLIAGENTS_REQUIRE_ROOT_ATTACH;
+    } else {
+      process.env.CLIAGENTS_REQUIRE_ROOT_ATTACH = previousRequireRootAttach;
+    }
+  }
 }
 
 run().catch((error) => {

@@ -176,6 +176,7 @@ async function run() {
         sessionKind: 'main',
         originClient: 'claude',
         externalSessionRef: 'claude:thread-1',
+        providerThreadRef: '019d94a6-2cd8-7742-8e4e-123456789abc',
         lineageDepth: 0,
         sessionMetadata: {
           attachMode: 'managed-root-launch',
@@ -248,7 +249,13 @@ async function run() {
     assert.strictEqual(snapshot.counts.reuseEvents, 1);
     assert.strictEqual(snapshot.counts.reusedSessions, 1);
     assert.strictEqual(snapshot.rootType, 'attached_client_root');
+    assert.strictEqual(snapshot.rootMode, 'attached');
+    assert.strictEqual(snapshot.interactiveTerminalId, null);
+    assert.strictEqual(snapshot.sessionKind, 'attached');
+    assert.strictEqual(snapshot.visibility, 'read-only');
+    assert.strictEqual(snapshot.replyCapability, 'partial');
     assert.strictEqual(snapshot.userFacing, true);
+    assert.strictEqual(snapshot.activitySource, 'conclusion');
 
     const managedMainSnapshot = buildRootSessionSnapshot({
       db,
@@ -261,7 +268,90 @@ async function run() {
     assert.strictEqual(managedMainSnapshot.counts.running, 0);
     assert.strictEqual(managedMainSnapshot.counts.idle, 1);
     assert.strictEqual(managedMainSnapshot.rootType, 'attached_client_root');
+    assert.strictEqual(managedMainSnapshot.rootMode, 'managed');
+    assert.strictEqual(managedMainSnapshot.interactiveTerminalId, 'managed-main-root');
+    assert.strictEqual(managedMainSnapshot.sessionKind, 'managed');
+    assert.strictEqual(managedMainSnapshot.visibility, 'interactive');
+    assert.strictEqual(managedMainSnapshot.replyCapability, 'full');
     assert.strictEqual(managedMainSnapshot.userFacing, true);
+    assert.strictEqual(managedMainSnapshot.rootSession.providerThreadRef, '019d94a6-2cd8-7742-8e4e-123456789abc');
+    assert(managedMainSnapshot.activitySummary, 'managed main snapshot should expose an activity summary');
+
+    db.addSessionEvent({
+      rootSessionId: 'managed-main-root',
+      sessionId: 'managed-main-root',
+      eventType: 'message_received',
+      originClient: 'claude',
+      idempotencyKey: 'managed-main-message-received',
+      payloadSummary: 'assistant: UI root smoke. ────────────────────────────────────────────────',
+      payloadJson: {
+        role: 'assistant',
+        adapter: 'claude-code',
+        source: 'interactive-root-sync'
+      },
+      metadata: {
+        clientName: 'claude',
+        attachMode: 'managed-root-launch'
+      }
+    });
+    db.addSessionEvent({
+      rootSessionId: 'managed-main-root',
+      sessionId: 'managed-main-root',
+      eventType: 'session_terminated',
+      originClient: 'claude',
+      idempotencyKey: 'managed-main-terminated',
+      payloadSummary: 'claude-code session completed',
+      payloadJson: {
+        adapter: 'claude-code',
+        status: 'completed'
+      },
+      metadata: {
+        clientName: 'claude',
+        attachMode: 'managed-root-launch'
+      }
+    });
+
+    const managedMainLiveSummarySnapshot = buildRootSessionSnapshot({
+      db,
+      rootSessionId: 'managed-main-root',
+      eventLimit: 50,
+      terminalLimit: 20,
+      liveTerminalResolver: () => ({
+        terminalId: 'managed-main-root',
+        taskState: 'idle',
+        processState: 'alive',
+        sessionKind: 'main',
+        originClient: 'claude',
+        externalSessionRef: 'claude:thread-1',
+        providerThreadRef: '019d94a6-2cd8-7742-8e4e-123456789abc',
+        sessionMetadata: {
+          attachMode: 'managed-root-launch',
+          clientName: 'claude'
+        }
+      }),
+      liveOutputResolver: () => [
+        'java version "17.0.9" 2023-10-17 LTS',
+        'Java(TM) SE Runtime Environment (build 17.0.9+11-LTS-201)',
+        'mojave@host cliagents % exec /opt/homebrew/bin/claude --output-format stream-json',
+        '❯ Reply with exactly one short sentence: UI root smoke.',
+        '',
+        '⏺ UI root smoke.',
+        '',
+        '────────────────────────────────────────',
+        '❯',
+        '────────────────────────────────────────',
+        '  ⬆ /gsd:update │ Sonnet 4.6 │ cliagents ░░░░░░░░░░ 9%',
+        '  PR #2'
+      ].join('\n')
+    });
+    assert(managedMainLiveSummarySnapshot, 'managed main live summary snapshot should exist');
+    assert.strictEqual(managedMainLiveSummarySnapshot.status, 'idle');
+    assert.strictEqual(managedMainLiveSummarySnapshot.counts.live, 1);
+    assert.strictEqual(managedMainLiveSummarySnapshot.activitySource, 'output');
+    assert.strictEqual(managedMainLiveSummarySnapshot.activitySummary, '⏺ UI root smoke.');
+    assert(managedMainLiveSummarySnapshot.activityExcerpt.includes('UI root smoke.'));
+    assert(!managedMainLiveSummarySnapshot.activityExcerpt.startsWith('java version'),
+      'live activity excerpt should prefer recent pane content over startup banners');
 
     const recoveredMainSnapshot = buildRootSessionSnapshot({
       db,
@@ -275,6 +365,57 @@ async function run() {
     assert.strictEqual(recoveredMainSnapshot.counts.idle, 1);
     assert.strictEqual(recoveredMainSnapshot.rootType, 'attached_client_root');
     assert.strictEqual(recoveredMainSnapshot.userFacing, true);
+
+    db.registerTerminal(
+      'prompt-wait-root',
+      'cliagents-prompt-wait',
+      '0',
+      'codex-cli',
+      'main_codex-cli',
+      'main',
+      '/tmp/project',
+      '/tmp/prompt-wait.log',
+      {
+        rootSessionId: 'prompt-wait-root',
+        parentSessionId: null,
+        sessionKind: 'main',
+        originClient: 'codex',
+        externalSessionRef: 'codex:thread-prompt-wait',
+        lineageDepth: 0,
+        sessionMetadata: {
+          attachMode: 'managed-root-launch',
+          clientName: 'codex'
+        }
+      }
+    );
+    db.updateStatus('prompt-wait-root', 'waiting_user_answer');
+    db.addSessionEvent({
+      rootSessionId: 'prompt-wait-root',
+      sessionId: 'prompt-wait-root',
+      eventType: 'session_started',
+      originClient: 'codex',
+      idempotencyKey: 'prompt-wait-start',
+      payloadJson: {
+        sessionKind: 'main',
+        adapter: 'codex-cli',
+        externalSessionRef: 'codex:thread-prompt-wait'
+      },
+      metadata: {
+        clientName: 'codex',
+        attachMode: 'managed-root-launch'
+      }
+    });
+
+    const promptWaitSnapshot = buildRootSessionSnapshot({
+      db,
+      rootSessionId: 'prompt-wait-root',
+      eventLimit: 50,
+      terminalLimit: 20
+    });
+    assert(promptWaitSnapshot, 'prompt-wait snapshot should exist');
+    assert.strictEqual(promptWaitSnapshot.status, 'blocked');
+    assert.strictEqual(promptWaitSnapshot.counts.blocked, 1);
+    assert(promptWaitSnapshot.attention.reasons.some((reason) => reason.code === 'user_input_required'));
 
     db.registerTerminal(
       'live-refresh-root',
@@ -315,6 +456,14 @@ async function run() {
         attachMode: 'managed-root-launch'
       }
     });
+    db.addSessionEvent({
+      rootSessionId: 'live-refresh-root',
+      sessionId: 'live-refresh-root',
+      eventType: 'session_stale',
+      originClient: 'claude',
+      idempotencyKey: 'live-refresh-stale',
+      payloadJson: {}
+    });
 
     const liveRefreshSnapshot = buildRootSessionSnapshot({
       db,
@@ -328,6 +477,7 @@ async function run() {
         sessionKind: 'main',
         originClient: 'claude',
         externalSessionRef: 'claude:thread-live-refresh',
+        providerThreadRef: '019d94a6-2cd8-7742-8e4e-live-refresh',
         sessionMetadata: {
           attachMode: 'managed-root-launch',
           clientName: 'claude'
@@ -338,6 +488,7 @@ async function run() {
     assert.strictEqual(liveRefreshSnapshot.status, 'idle');
     assert.strictEqual(liveRefreshSnapshot.counts.running, 0);
     assert.strictEqual(liveRefreshSnapshot.counts.idle, 1);
+    assert.strictEqual(liveRefreshSnapshot.rootSession.providerThreadRef, '019d94a6-2cd8-7742-8e4e-live-refresh');
 
     db.addSessionEvent({
       rootSessionId: 'interrupted-root',
@@ -395,11 +546,15 @@ async function run() {
     });
 
     assert.strictEqual(summaries.archivedCount, 1);
-    assert.strictEqual(summaries.roots.length, 5);
+    assert.strictEqual(summaries.roots.length, 6);
     const blockedRootSummary = summaries.roots.find((root) => root.rootSessionId === 'root-123');
     assert(blockedRootSummary, 'Expected blocked attached root summary');
     assert.strictEqual(blockedRootSummary.status, 'blocked');
     assert.strictEqual(blockedRootSummary.rootType, 'attached_client_root');
+    assert.strictEqual(blockedRootSummary.rootMode, 'attached');
+    assert.strictEqual(blockedRootSummary.sessionKind, 'attached');
+    assert.strictEqual(blockedRootSummary.visibility, 'read-only');
+    assert.strictEqual(blockedRootSummary.replyCapability, 'partial');
     assert.strictEqual(blockedRootSummary.attention.requiresAttention, true);
     assert.strictEqual(blockedRootSummary.counts.reuseEvents, 1);
     assert.strictEqual(blockedRootSummary.counts.reusedSessions, 1);
@@ -407,24 +562,53 @@ async function run() {
     assert(managedMainSummary, 'Expected managed main root summary');
     assert.strictEqual(managedMainSummary.status, 'idle');
     assert.strictEqual(managedMainSummary.rootType, 'attached_client_root');
+    assert.strictEqual(managedMainSummary.rootMode, 'managed');
+    assert.strictEqual(managedMainSummary.interactiveTerminalId, 'managed-main-root');
+    assert.strictEqual(managedMainSummary.sessionKind, 'managed');
+    assert.strictEqual(managedMainSummary.visibility, 'interactive');
+    assert.strictEqual(managedMainSummary.replyCapability, 'full');
     assert.strictEqual(managedMainSummary.attention.requiresAttention, false);
+    assert.strictEqual(managedMainSummary.live, true);
     assert.strictEqual(managedMainSummary.counts.running, 0);
     assert.strictEqual(managedMainSummary.counts.idle, 1);
+    assert.strictEqual(managedMainSummary.counts.live, 1);
     const recoveredMainSummary = summaries.roots.find((root) => root.rootSessionId === 'recovered-main-root');
     assert(recoveredMainSummary, 'Expected recovered main root summary');
     assert.strictEqual(recoveredMainSummary.status, 'idle');
     assert.strictEqual(recoveredMainSummary.rootType, 'attached_client_root');
+    assert.strictEqual(recoveredMainSummary.live, true);
     assert.strictEqual(recoveredMainSummary.counts.running, 0);
     assert.strictEqual(recoveredMainSummary.counts.idle, 1);
+    const promptWaitSummary = summaries.roots.find((root) => root.rootSessionId === 'prompt-wait-root');
+    assert(promptWaitSummary, 'Expected prompt-wait root summary');
+    assert.strictEqual(promptWaitSummary.status, 'blocked');
+    assert.strictEqual(promptWaitSummary.live, true);
+    assert.strictEqual(promptWaitSummary.counts.blocked, 1);
     const liveRefreshSummary = summaries.roots.find((root) => root.rootSessionId === 'live-refresh-root');
     assert(liveRefreshSummary, 'Expected live-refresh root summary');
     assert.strictEqual(liveRefreshSummary.status, 'running');
+    assert.strictEqual(liveRefreshSummary.live, true);
     const interruptedSummary = summaries.roots.find((root) => root.rootSessionId === 'interrupted-root');
     assert(interruptedSummary, 'Expected interrupted root summary');
     assert.strictEqual(interruptedSummary.status, 'needs_attention');
+    assert.strictEqual(interruptedSummary.live, false);
     assert(interruptedSummary.attention.reasons.some((reason) => reason.resumeCommand), 'Expected interrupted summary to preserve resume command');
     assert.strictEqual(summaries.hiddenDetachedCount, 1);
     assert.strictEqual(summaries.hiddenNonUserCount, 0);
+
+    const liveOnly = listRootSessionSummaries({
+      db,
+      limit: 10,
+      eventLimit: 50,
+      terminalLimit: 20,
+      statusFilter: 'live'
+    });
+    assert.strictEqual(liveOnly.statusFilter, 'live');
+    assert(liveOnly.roots.some((root) => root.rootSessionId === 'managed-main-root'));
+    assert(liveOnly.roots.some((root) => root.rootSessionId === 'recovered-main-root'));
+    assert(liveOnly.roots.some((root) => root.rootSessionId === 'prompt-wait-root'));
+    assert(liveOnly.roots.some((root) => root.rootSessionId === 'live-refresh-root'));
+    assert(!liveOnly.roots.some((root) => root.rootSessionId === 'interrupted-root'));
 
     const withArchived = listRootSessionSummaries({
       db,
@@ -435,7 +619,7 @@ async function run() {
       scope: 'all'
     });
     assert.strictEqual(withArchived.archivedCount, 1);
-    assert.strictEqual(withArchived.roots.length, 7);
+    assert.strictEqual(withArchived.roots.length, 8);
     const archivedRoot = withArchived.roots.find((root) => root.rootSessionId === 'legacy-stale-root');
     assert(archivedRoot, 'Expected archived legacy root to be returned when requested');
     assert.strictEqual(archivedRoot.archived, true);

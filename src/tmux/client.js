@@ -14,6 +14,23 @@ const crypto = require('crypto');
 const SAFE_NAME_PATTERN = /^[a-zA-Z0-9_-]+$/;
 const TMUX_SERVER_BOOTSTRAP_STATE = new Set();
 
+// Patterns emitted by tmux when the target session or window no longer exists.
+// These are expected during normal cleanup (e.g. a session was killed between
+// the last poll and the current one) and should NOT be logged as errors.
+const MISSING_TARGET_PATTERNS = [
+  /can't find session/i,
+  /no such session/i,
+  /can't find window/i,
+  /no such window/i,
+  /can't find target/i,
+  /session not found/i,
+  /window not found/i,
+];
+
+const PREFERRED_DEFAULT_TERMINAL = 'tmux-256color';
+const PREFERRED_TERMINAL_FEATURES = ',xterm-256color:RGB,screen-256color:RGB,tmux-256color:RGB,wezterm:RGB,kitty:RGB,alacritty:RGB,foot:RGB,st-256color:RGB';
+const PREFERRED_TERMINAL_OVERRIDES = ',*:Tc';
+
 class TmuxClient {
   constructor(options = {}) {
     this.socketPath = options.socketPath || null;
@@ -44,15 +61,24 @@ class TmuxClient {
   _ensurePreferredServerOptions() {
     const bootstrapKey = this.socketPath || '__default__';
     if (TMUX_SERVER_BOOTSTRAP_STATE.has(bootstrapKey)) {
-      return;
+      return true;
     }
 
     const currentDefaultTerminal = this._exec(['show-options', '-gv', 'default-terminal'], {
       ignoreErrors: true,
       silent: true
-    }) || '';
-    if (!String(currentDefaultTerminal).trim()) {
-      this._exec(['set-option', '-g', 'default-terminal', 'tmux-256color'], {
+    });
+    if (currentDefaultTerminal === null) {
+      return false;
+    }
+
+    const normalizedDefaultTerminal = String(currentDefaultTerminal).trim().toLowerCase();
+    if (
+      !normalizedDefaultTerminal
+      || normalizedDefaultTerminal === 'screen'
+      || normalizedDefaultTerminal === 'screen-256color'
+    ) {
+      this._exec(['set-option', '-g', 'default-terminal', PREFERRED_DEFAULT_TERMINAL], {
         ignoreErrors: true,
         silent: true
       });
@@ -67,7 +93,7 @@ class TmuxClient {
         'set-option',
         '-ag',
         'terminal-features',
-        ',xterm-256color:RGB,screen-256color:RGB,tmux-256color:RGB,wezterm:RGB,kitty:RGB,alacritty:RGB,foot:RGB,st-256color:RGB'
+        PREFERRED_TERMINAL_FEATURES
       ], {
         ignoreErrors: true,
         silent: true
@@ -79,7 +105,7 @@ class TmuxClient {
       silent: true
     }) || '';
     if (!/(?:^|,)\*:Tc|(?:^|,)\*:RGB|(?:^|,)tmux-256color:Tc|(?:^|,)tmux-256color:RGB/.test(currentTerminalOverrides)) {
-      this._exec(['set-option', '-ag', 'terminal-overrides', ',*:Tc'], {
+      this._exec(['set-option', '-ag', 'terminal-overrides', PREFERRED_TERMINAL_OVERRIDES], {
         ignoreErrors: true,
         silent: true
       });
@@ -95,6 +121,17 @@ class TmuxClient {
     });
 
     TMUX_SERVER_BOOTSTRAP_STATE.add(bootstrapKey);
+    return true;
+  }
+
+  _buildPreferredServerBootstrapArgs() {
+    return [
+      'set-option', '-g', 'default-terminal', PREFERRED_DEFAULT_TERMINAL, ';',
+      'set-option', '-ag', 'terminal-features', PREFERRED_TERMINAL_FEATURES, ';',
+      'set-option', '-ag', 'terminal-overrides', PREFERRED_TERMINAL_OVERRIDES, ';',
+      'set-option', '-g', 'focus-events', 'on', ';',
+      'set-option', '-g', 'extended-keys', 'on'
+    ];
   }
 
   /**
@@ -176,23 +213,6 @@ class TmuxClient {
   }
 
   /**
-   * Escape keys for use in double-quoted shell string for send-keys
-   * @param {string} str - String to escape
-   * @returns {string} - Escaped string
-   */
-  _escapeKeys(str) {
-    if (typeof str !== 'string') {
-      return '';
-    }
-    return str
-      .replace(/\\/g, '\\\\')
-      .replace(/"/g, '\\"')
-      .replace(/\$/g, '\\$')
-      .replace(/`/g, '\\`')
-      .replace(/!/g, '\\!');
-  }
-
-  /**
    * Create a new tmux session with a window
    * @param {string} sessionName - Unique session name
    * @param {string} windowName - Window name within session
@@ -205,7 +225,7 @@ class TmuxClient {
     this._validateName(sessionName, 'session');
     this._validateName(windowName, 'window');
 
-    const { workingDir, env = {} } = options;
+    const { workingDir, env = {}, width = null, height = null } = options;
 
     // Check if session already exists
     if (this.sessionExists(sessionName)) {
@@ -228,15 +248,28 @@ class TmuxClient {
     }
 
     // Create detached session
-    const args = ['new-session', '-d', '-s', sessionName, '-n', windowName];
-    
-    if (workingDir) {
-      args.push('-c', workingDir);
+    const newSessionArgs = ['new-session', '-d', '-s', sessionName, '-n', windowName];
+    if (Number.isInteger(width) && width > 0) {
+      newSessionArgs.push('-x', String(width));
     }
-    
-    this._exec(args, {
+    if (Number.isInteger(height) && height > 0) {
+      newSessionArgs.push('-y', String(height));
+    }
+
+    if (workingDir) {
+      newSessionArgs.push('-c', workingDir);
+    }
+
+    const bootstrapKey = this.socketPath || '__default__';
+    const preferredOptionsApplied = this._ensurePreferredServerOptions();
+    const initialArgs = preferredOptionsApplied
+      ? newSessionArgs
+      : [...this._buildPreferredServerBootstrapArgs(), ';', ...newSessionArgs];
+
+    this._exec(initialArgs, {
       env: spawnEnv
     });
+    TMUX_SERVER_BOOTSTRAP_STATE.add(bootstrapKey);
 
     // Set environment variables in the session
     for (const [key, value] of Object.entries(envVars)) {
@@ -293,7 +326,8 @@ class TmuxClient {
         try { fs.unlinkSync(tmpFile); } catch (e) { /* ignore cleanup errors */ }
       }
     } else {
-      // Send text using -l (literal) flag which handles special characters safely
+      // Send text using -l (literal) so quotes, newlines, and shell metacharacters
+      // are inserted as PTY input without tmux key-name parsing.
       this._exec(['send-keys', '-t', target, '-l', keys]);
     }
 
@@ -321,22 +355,72 @@ class TmuxClient {
   }
 
   /**
+   * Replace the current pane process with a command.
+   * Useful for user-facing managed roots where we want the provider UI to own
+   * the pane immediately instead of echoing a shell command first.
+   * @param {string} sessionName - Session name
+   * @param {string} windowName - Window name
+   * @param {string} command - Shell command to execute in the pane
+   * @param {object} options - Additional options
+   * @param {string|null} options.workingDir - Optional working directory for the pane
+   */
+  respawnPane(sessionName, windowName, command, options = {}) {
+    this._validateName(sessionName, 'session');
+    this._validateName(windowName, 'window');
+
+    const normalizedCommand = String(command || '').trim();
+    if (!normalizedCommand) {
+      throw new Error('Pane command is required');
+    }
+
+    const target = `${sessionName}:${windowName}`;
+    const args = ['respawn-pane', '-k', '-t', target];
+    if (options.workingDir) {
+      args.push('-c', options.workingDir);
+    }
+    args.push(normalizedCommand);
+    this._exec(args);
+  }
+
+  /**
+   * Return true when a tmux error indicates the session or window simply no
+   * longer exists (expected after cleanup).  These errors must NOT be logged
+   * on every poll cycle; only unexpected failures should surface.
+   * @param {Error} error
+   * @returns {boolean}
+   */
+  _isMissingTargetError(error) {
+    const msg = (error && error.message) ? error.message : '';
+    return MISSING_TARGET_PATTERNS.some(pattern => pattern.test(msg));
+  }
+
+  /**
    * Get terminal history/output
    * @param {string} sessionName - Session name
    * @param {string} windowName - Window name
    * @param {number} lines - Number of lines to capture (from end)
    * @returns {string} - Captured output
    */
-  getHistory(sessionName, windowName, lines = this.defaultHistoryLimit) {
+  getHistory(sessionName, windowName, lines = this.defaultHistoryLimit, options = {}) {
     const target = `${sessionName}:${windowName}`;
     try {
       // capture-pane with -p prints to stdout, -S -N captures last N lines
-      const output = this._exec(['capture-pane', '-t', target, '-p', '-S', `-${lines}`], {
+      const args = ['capture-pane', '-t', target];
+      if (options.preserveAnsi) {
+        args.push('-e');
+      }
+      args.push('-p', '-S', `-${lines}`);
+      const output = this._exec(args, {
         silent: true
       });
       return output || '';
     } catch (error) {
-      console.error(`Failed to capture pane for ${sessionName}:${windowName}:`, error.message);
+      // Suppress well-known "session/window is gone" errors — these fire on
+      // every poll after cleanup and would spam the console.  Only log errors
+      // that indicate an unexpected tmux failure so they remain visible.
+      if (!this._isMissingTargetError(error)) {
+        console.error(`Failed to capture pane for ${sessionName}:${windowName}:`, error.message);
+      }
       return '';
     }
   }
@@ -347,11 +431,21 @@ class TmuxClient {
    * @param {string} windowName - Window name
    * @returns {string} - Visible content
    */
-  getVisibleContent(sessionName, windowName) {
+  getVisibleContent(sessionName, windowName, options = {}) {
     const target = `${sessionName}:${windowName}`;
     try {
-      return this._exec(['capture-pane', '-t', target, '-p'], { silent: true }) || '';
+      const args = ['capture-pane', '-t', target];
+      if (options.preserveAnsi) {
+        args.push('-e');
+      }
+      args.push('-p');
+      return this._exec(args, { silent: true }) || '';
     } catch (error) {
+      // Same policy as getHistory: expected missing-target errors are silent;
+      // unexpected failures are logged so they are not invisibly swallowed.
+      if (!this._isMissingTargetError(error)) {
+        console.error(`Failed to capture visible content for ${sessionName}:${windowName}:`, error.message);
+      }
       return '';
     }
   }
@@ -450,6 +544,25 @@ class TmuxClient {
         });
     } catch (error) {
       return [];
+    }
+  }
+
+  /**
+   * Return the number of attached clients for a tmux session.
+   * @param {string} sessionName - Session name
+   * @returns {number}
+   */
+  getSessionAttachedCount(sessionName) {
+    this._validateName(sessionName, 'session');
+
+    try {
+      const output = this._exec(['display-message', '-p', '-t', sessionName, '#{session_attached}'], {
+        silent: true
+      });
+      const parsed = Number.parseInt(String(output || '').trim(), 10);
+      return Number.isInteger(parsed) && parsed >= 0 ? parsed : 0;
+    } catch (error) {
+      return 0;
     }
   }
 

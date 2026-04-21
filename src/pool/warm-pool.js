@@ -6,7 +6,7 @@
  * pool instead of creating a new one.
  *
  * Architecture:
- * - Pool per adapter type (claude-code, gemini-cli, codex-cli)
+ * - Pool per supported adapter type (gemini-cli, codex-cli, qwen-cli, opencode-cli, claude-code)
  * - Background replenishment keeps pool at target size
  * - Terminals are "warmed" - started and ready at IDLE state
  * - Acquired terminals are removed from pool, returned or destroyed after use
@@ -19,10 +19,11 @@ const { TerminalStatus } = require('../models/terminal-status');
 const DEFAULT_CONFIG = {
   // Pool sizes per adapter (adjust based on expected workload)
   poolSizes: {
-    'claude-code': 2,
     'gemini-cli': 2,
     'codex-cli': 1,
-    'amazon-q': 1
+    'qwen-cli': 1,
+    'opencode-cli': 1,
+    'claude-code': 1
   },
   // How long to wait for terminal initialization
   initTimeout: 90000,

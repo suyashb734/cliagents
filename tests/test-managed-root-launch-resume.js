@@ -8,10 +8,15 @@
 
 const assert = require('assert');
 const {
+  parseAttachRootArgs,
   parseLaunchArgs,
+  parseListRootsArgs,
   buildManagedRootLaunchCandidate,
   normalizeManagedRootResumeCandidate,
   normalizeManagedRootRecoveryCandidate,
+  createManagedRootSelectionPrompt,
+  listOperatorRootSessions,
+  getOperatorRootSession,
   listManagedRootLaunchCandidates,
   listManagedRootResumeCandidates,
   listManagedRootRecoveryCandidates,
@@ -96,6 +101,30 @@ async function run() {
     assert.throws(
       () => parseLaunchArgs(['codex', '--external-session-ref', 'codex:managed:123', '--recover-latest']),
       /Cannot combine --external-session-ref with resume or recover flags/
+    );
+  });
+
+  await test('List-roots args default to live user roots', async () => {
+    const parsed = parseListRootsArgs(['codex']);
+    assert.strictEqual(parsed.adapter, 'codex-cli');
+    assert.strictEqual(parsed.scope, 'user');
+    assert.strictEqual(parsed.liveOnly, true);
+
+    const expanded = parseListRootsArgs(['--all', '--scope', 'all', '--json']);
+    assert.strictEqual(expanded.liveOnly, false);
+    assert.strictEqual(expanded.scope, 'all');
+    assert.strictEqual(expanded.json, true);
+  });
+
+  await test('Attach-root args support latest selection and print-only mode', async () => {
+    const parsed = parseAttachRootArgs(['--latest', '--adapter', 'codex', '--print-only']);
+    assert.strictEqual(parsed.latest, true);
+    assert.strictEqual(parsed.adapter, 'codex-cli');
+    assert.strictEqual(parsed.printOnly, true);
+
+    assert.throws(
+      () => parseAttachRootArgs(['root-1', '--latest']),
+      /Cannot combine an explicit root session id with --latest/
     );
   });
 
@@ -351,6 +380,41 @@ async function run() {
     assert.strictEqual(candidates.recoverCandidates[0].rootSessionId, 'root-2');
   });
 
+  await test('Managed root selection prompt includes workdir and summary context', async () => {
+    const prompt = createManagedRootSelectionPrompt({
+      resumeCandidates: [{
+        rootSessionId: 'root-live-1234567890',
+        status: 'idle',
+        workDir: '/tmp/project-alpha',
+        model: 'o4-mini',
+        launchProfile: 'guarded-root',
+        processState: 'alive',
+        currentCommand: 'codex',
+        latestSummary: 'Fixing the browser console so the current root view shows child terminals inline.'
+      }],
+      recoverCandidates: [{
+        rootSessionId: 'root-stale-abcdef1234',
+        status: 'needs_attention',
+        workDir: '/tmp/project-beta',
+        launchProfile: 'supervised-root',
+        processState: 'exited',
+        currentCommand: 'zsh',
+        recoveryReason: 'provider-exited',
+        latestSummary: 'Gemini exited after finishing the last task and can likely be recovered.'
+      }]
+    }, {
+      adapter: 'codex-cli',
+      workDir: '/tmp/project-alpha'
+    });
+
+    assert(prompt.text.includes('dir=project-alpha'));
+    assert(prompt.text.includes('workdir: /tmp/project-alpha'));
+    assert(prompt.text.includes('summary: Fixing the browser console so the current root view shows child terminals inline.'));
+    assert(prompt.text.includes('recover'));
+    assert(prompt.text.includes('workdir: /tmp/project-beta'));
+    assert(prompt.text.includes('summary: Gemini exited after finishing the last task and can likely be recovered.'));
+  });
+
   await test('List managed recovery candidates returns only recoverable roots', async () => {
     const candidates = await listManagedRootRecoveryCandidates({
       adapter: 'codex',
@@ -387,6 +451,129 @@ async function run() {
 
     assert.strictEqual(candidates.length, 1);
     assert.strictEqual(candidates[0].launchAction, 'recover');
+  });
+
+  await test('Operator root listing prefers live roots and can filter by adapter', async () => {
+    const roots = await listOperatorRootSessions({
+      adapter: 'codex',
+      limit: 4,
+      liveOnly: false
+    }, {
+      async callCliagentsJson(route) {
+        if (route.startsWith('/orchestration/root-sessions?')) {
+          return {
+            roots: [
+              {
+                rootSessionId: 'root-live',
+                originClient: 'codex',
+                status: 'idle',
+                lastOccurredAt: '2026-04-16T06:00:00.000Z',
+                externalSessionRef: 'codex:managed:live'
+              },
+              {
+                rootSessionId: 'root-old',
+                originClient: 'codex',
+                status: 'completed',
+                lastOccurredAt: '2026-04-16T05:00:00.000Z',
+                externalSessionRef: 'codex:managed:old'
+              },
+              {
+                rootSessionId: 'root-gemini',
+                originClient: 'gemini',
+                status: 'idle',
+                lastOccurredAt: '2026-04-16T06:05:00.000Z',
+                externalSessionRef: 'gemini:managed:live'
+              }
+            ]
+          };
+        }
+        if (route.includes('/root-live?')) {
+          return buildManagedSnapshot();
+        }
+        if (route.includes('/root-old?')) {
+          return buildManagedSnapshot({
+            rootSession: {
+              sessionId: 'root-old',
+              adapter: 'codex-cli',
+              originClient: 'codex',
+              status: 'completed',
+              processState: 'exited',
+              sessionMetadata: {
+                managedLaunch: true,
+                attachMode: 'managed-root-launch'
+              },
+              externalSessionRef: 'codex:managed:old'
+            },
+            terminals: [{
+              terminal_id: 'term-old',
+              session_name: 'cliagents-old',
+              window_name: 'codex-cli-old',
+              adapter: 'codex-cli',
+              role: 'main',
+              session_kind: 'main',
+              status: 'completed',
+              process_state: 'exited',
+              work_dir: '/tmp/project',
+              root_session_id: 'root-old',
+              external_session_ref: 'codex:managed:old'
+            }]
+          });
+        }
+        if (route.includes('/root-gemini?')) {
+          return buildManagedSnapshot({
+            rootSession: {
+              sessionId: 'root-gemini',
+              adapter: 'gemini-cli',
+              originClient: 'gemini',
+              status: 'idle',
+              processState: 'alive',
+              sessionMetadata: {
+                managedLaunch: true,
+                attachMode: 'managed-root-launch'
+              },
+              externalSessionRef: 'gemini:managed:live'
+            },
+            terminals: [{
+              terminal_id: 'term-gemini',
+              session_name: 'cliagents-gemini',
+              window_name: 'gemini-cli-root',
+              adapter: 'gemini-cli',
+              role: 'main',
+              session_kind: 'main',
+              status: 'idle',
+              process_state: 'alive',
+              work_dir: '/tmp/project',
+              root_session_id: 'root-gemini',
+              external_session_ref: 'gemini:managed:live'
+            }]
+          });
+        }
+        throw new Error(`Unexpected route: ${route}`);
+      }
+    });
+
+    assert.strictEqual(roots.length, 2);
+    assert.strictEqual(roots[0].rootSessionId, 'root-live');
+    assert.strictEqual(roots[0].live, true);
+    assert.strictEqual(roots[1].rootSessionId, 'root-old');
+    assert.strictEqual(roots[1].live, false);
+  });
+
+  await test('Operator root lookup builds an attachable record from a snapshot', async () => {
+    const root = await getOperatorRootSession('root-1', {}, {
+      async callCliagentsJson(route) {
+        if (route.includes('/root-1?')) {
+          return buildManagedSnapshot();
+        }
+        throw new Error(`Unexpected route: ${route}`);
+      }
+    });
+
+    assert(root, 'expected operator root record');
+    assert.strictEqual(root.rootSessionId, 'root-1');
+    assert.strictEqual(root.sessionName, 'cliagents-root1');
+    assert.strictEqual(root.attachCommand, 'tmux attach -t "cliagents-root1"');
+    assert.strictEqual(root.live, true);
   });
 
   await test('Resolve launch target can resume latest candidate', async () => {

@@ -102,7 +102,7 @@ class CodexCliDetector extends BaseStatusDetector {
     const lines = tail.trim().split('\n');
     if (lines.length > 0) {
       const lastLine = lines[lines.length - 1];
-      
+
       // Check for shell prompt at end (Orchestration Idle)
       if (/^[\w.-]+@[\w.-]+.*[#$%>]\s*$/.test(lastLine)) {
         return TerminalStatus.IDLE;

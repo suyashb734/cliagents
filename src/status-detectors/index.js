@@ -5,9 +5,11 @@
  */
 
 const BaseStatusDetector = require('./base');
-const ClaudeCodeDetector = require('./claude-code');
 const GeminiCliDetector = require('./gemini-cli');
 const CodexCliDetector = require('./codex-cli');
+const QwenCliDetector = require('./qwen-cli');
+const OpencodeCliDetector = require('./opencode-cli');
+const ClaudeCodeDetector = require('./claude-code');
 const {
   createDetector,
   getSupportedAdapters,
@@ -21,10 +23,12 @@ module.exports = {
   // Base class
   BaseStatusDetector,
 
-  // Specific detectors
-  ClaudeCodeDetector,
+  // Specific detectors for the active broker surface
   GeminiCliDetector,
   CodexCliDetector,
+  QwenCliDetector,
+  OpencodeCliDetector,
+  ClaudeCodeDetector,
 
   // Factory functions
   createDetector,

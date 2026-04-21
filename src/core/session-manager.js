@@ -7,24 +7,26 @@
 
 const { EventEmitter } = require('events');
 const crypto = require('crypto');
+const { DEFAULT_BROKER_ADAPTER } = require('../adapters/active-surface');
 
 class SessionManager extends EventEmitter {
   constructor(options = {}) {
     super();
     this.adapters = new Map();  // name -> adapter instance
     this.sessions = new Map();  // sessionId -> { adapter, createdAt, lastActivity }
-    this.defaultAdapter = options.defaultAdapter || 'claude-code';
+    this.defaultAdapter = options.defaultAdapter || DEFAULT_BROKER_ADAPTER;
     this.sessionTimeout = options.sessionTimeout || 30 * 60 * 1000; // 30 minutes
     this.maxSessions = options.maxSessions || 10;
     this._isShuttingDown = false;
 
     // Per-adapter concurrency control
-    // Some CLIs (like Claude Code) don't support multiple concurrent instances
+    // Some adapters only support a single active operation
     this.adapterLocks = new Map();  // adapter -> Promise (current operation)
     this.adapterConcurrencyLimits = {
-      'claude-code': 1,    // Claude CLI conflicts with concurrent instances
       'gemini-cli': 3,     // Gemini can handle some concurrency
       'codex-cli': 2,      // Codex handles moderate concurrency
+      'qwen-cli': 2,       // Qwen handles moderate concurrency
+      'opencode-cli': 2,   // OpenCode handles moderate concurrency
       'default': 2
     };
 
@@ -50,7 +52,7 @@ class SessionManager extends EventEmitter {
       return () => {};  // No-op release function
     }
 
-    // For single-instance adapters (claude-code), serialize requests
+    // For single-instance adapters, serialize requests
     while (this.adapterLocks.has(adapterName)) {
       const existingLock = this.adapterLocks.get(adapterName);
       try {
@@ -151,13 +153,15 @@ class SessionManager extends EventEmitter {
     }
 
     const sessionId = options.sessionId || this.generateSessionId();
+    const effectiveWorkDir = options.workDir || adapter.config?.workDir || null;
+    const effectiveModel = options.model ?? adapter.config?.model ?? null;
 
     // Spawn the session
     const result = await adapter.spawn(sessionId, {
       systemPrompt: options.systemPrompt,
       allowedTools: options.allowedTools,
-      workDir: options.workDir,
-      model: options.model,           // Model selection (adapter-specific)
+      workDir: effectiveWorkDir,
+      model: effectiveModel,          // Model selection (adapter-specific)
       jsonSchema: options.jsonSchema, // JSON Schema for structured output (Claude only)
       jsonMode: options.jsonMode,
       // Generation parameters (Gemini only - writes to ~/.gemini/config.yaml)
@@ -171,6 +175,8 @@ class SessionManager extends EventEmitter {
     this.sessions.set(sessionId, {
       sessionId,
       adapterName,
+      workDir: effectiveWorkDir,
+      model: result?.model ?? effectiveModel,
       createdAt: Date.now(),
       lastActivity: Date.now(),
       status: 'stable',         // 'stable' | 'running' | 'error'
@@ -182,7 +188,9 @@ class SessionManager extends EventEmitter {
     return {
       sessionId,
       adapter: adapterName,
-      status: 'ready'
+      status: 'ready',
+      workDir: effectiveWorkDir,
+      model: result?.model ?? effectiveModel
     };
   }
 
@@ -286,6 +294,8 @@ class SessionManager extends EventEmitter {
       lastActivity: session.lastActivity,
       messageCount: session.messageCount,
       adapterName: session.adapterName,
+      workDir: session.workDir,
+      model: session.model,
       hasActiveProcess,
       idleMs: Date.now() - session.lastActivity
     };
@@ -342,6 +352,8 @@ class SessionManager extends EventEmitter {
         sessionId,
         adapter: info.adapterName,
         active: adapter ? adapter.isSessionActive(sessionId) : false,
+        workDir: info.workDir,
+        model: info.model,
         createdAt: info.createdAt,
         lastActivity: info.lastActivity,
         ageMs: Date.now() - info.createdAt,

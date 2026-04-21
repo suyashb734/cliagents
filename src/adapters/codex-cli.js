@@ -11,6 +11,7 @@
 const { spawn } = require('child_process');
 const fs = require('fs');
 const BaseLLMAdapter = require('../core/base-llm-adapter');
+const { createAdapterContract, defineAdapterCapabilities, EXECUTION_MODES } = require('./contract');
 const { logConversation, logSessionStart } = require('../utils/conversation-logger');
 
 class CodexCliAdapter extends BaseLLMAdapter {
@@ -28,6 +29,42 @@ class CodexCliAdapter extends BaseLLMAdapter {
     this.version = '1.0.0';
     this.sessions = new Map(); // sessionId -> { codexSessionId, ready, messageCount, model }
     this.activeProcesses = new Map(); // Track running CLI processes
+    this.capabilities = defineAdapterCapabilities({
+      usesOfficialCli: true,
+      executionMode: EXECUTION_MODES.DIRECT_SESSION,
+      supportsMultiTurn: true,
+      supportsResume: true,
+      supportsStreaming: true,
+      supportsInterrupt: true,
+      supportsSystemPrompt: true,
+      supportsModelSelection: true,
+      supportsTools: true,
+      supportsFilesystemRead: true,
+      supportsFilesystemWrite: true,
+      supportsJsonMode: true
+    });
+    this.contract = createAdapterContract({
+      capabilities: this.capabilities,
+      readiness: {
+        initTimeoutMs: 90000,
+        promptHandlers: [
+          {
+            matchAny: ['Update now', 'Skip until next version'],
+            actions: ['Down', 'Enter'],
+            description: 'skip-codex-update-menu'
+          },
+          {
+            matchAny: ['Press enter to continue', 'Update available'],
+            actions: ['Enter'],
+            description: 'dismiss-codex-update-info'
+          }
+        ]
+      },
+      notes: [
+        'Spawn-per-message adapter that resumes provider-native Codex threads between sends.',
+        'JSON mode uses the Codex read-only sandbox path; full-auto mode enables tool and filesystem mutation.'
+      ]
+    });
 
     // Available models for Codex CLI
     this.availableModels = [
@@ -44,6 +81,14 @@ class CodexCliAdapter extends BaseLLMAdapter {
    */
   getAvailableModels() {
     return this.availableModels;
+  }
+
+  getCapabilities() {
+    return this.capabilities;
+  }
+
+  getContract() {
+    return this.contract;
   }
 
   /**
@@ -332,9 +377,8 @@ class CodexCliAdapter extends BaseLLMAdapter {
       fullPrompt = `${session.systemPrompt}\n\n${fullPrompt}`;
     }
 
-    // Build args for exec mode (non-interactive)
-    // Note: prompt comes after options
-    const args = ['exec'];
+    const isResume = Boolean(session.codexSessionId);
+    const args = isResume ? ['exec', 'resume'] : ['exec'];
 
     // Add model flag if specified
     if (session.model && session.model !== 'default') {
@@ -354,6 +398,10 @@ class CodexCliAdapter extends BaseLLMAdapter {
 
     // Skip git repo check for non-git directories (like /tmp/agent)
     args.push('--skip-git-repo-check');
+
+    if (isResume) {
+      args.push(session.codexSessionId);
+    }
 
     // Add prompt as the final argument
     args.push(fullPrompt);
@@ -447,6 +495,7 @@ class CodexCliAdapter extends BaseLLMAdapter {
     this.activeProcesses.delete(sessionId);
 
     this.sessions.delete(sessionId);
+    this._clearHeartbeat(sessionId);
     this.emit('terminated', { sessionId });
   }
 

@@ -6,7 +6,7 @@ CREATE TABLE IF NOT EXISTS terminals (
     terminal_id TEXT PRIMARY KEY,           -- 8-char hex ID
     session_name TEXT NOT NULL,             -- tmux session name
     window_name TEXT NOT NULL,              -- tmux window name
-    adapter TEXT NOT NULL,                  -- Adapter type (claude-code, gemini-cli, etc.)
+    adapter TEXT NOT NULL,                  -- Adapter type (codex-cli, gemini-cli, qwen-cli)
     agent_profile TEXT,                     -- Agent profile name (optional)
     role TEXT DEFAULT 'worker',             -- 'supervisor' or 'worker'
     status TEXT DEFAULT 'idle',             -- Current status
@@ -132,6 +132,37 @@ CREATE TABLE IF NOT EXISTS messages (
 -- Indexes for messages table
 CREATE INDEX IF NOT EXISTS idx_messages_terminal_created ON messages(terminal_id, created_at);
 CREATE INDEX IF NOT EXISTS idx_messages_trace ON messages(trace_id);
+
+-- ============================================================
+-- USAGE RECORDS TABLE (Token / cost observability)
+-- ============================================================
+-- Stores normalized usage records independently of terminal liveness so
+-- root, run, and terminal usage remains queryable after cleanup/pruning.
+
+CREATE TABLE IF NOT EXISTS usage_records (
+  id INTEGER PRIMARY KEY AUTOINCREMENT,
+  root_session_id TEXT,
+  terminal_id TEXT NOT NULL,
+  run_id TEXT,
+  participant_id TEXT,
+  adapter TEXT,
+  provider TEXT,
+  model TEXT,
+  input_tokens INTEGER NOT NULL DEFAULT 0,
+  output_tokens INTEGER NOT NULL DEFAULT 0,
+  reasoning_tokens INTEGER NOT NULL DEFAULT 0,
+  cached_input_tokens INTEGER NOT NULL DEFAULT 0,
+  total_tokens INTEGER NOT NULL DEFAULT 0,
+  cost_usd REAL,
+  duration_ms INTEGER,
+  source_confidence TEXT NOT NULL DEFAULT 'unknown',
+  metadata TEXT,
+  created_at INTEGER NOT NULL
+);
+
+CREATE INDEX IF NOT EXISTS idx_usage_records_root_created ON usage_records(root_session_id, created_at);
+CREATE INDEX IF NOT EXISTS idx_usage_records_run_created ON usage_records(run_id, created_at);
+CREATE INDEX IF NOT EXISTS idx_usage_records_terminal_created ON usage_records(terminal_id, created_at);
 
 -- ============================================================
 -- DISCUSSIONS TABLE (Agent-to-Agent Communication)

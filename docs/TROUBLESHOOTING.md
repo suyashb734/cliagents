@@ -4,16 +4,16 @@ This guide provides solutions for common issues encountered when using `cliagent
 
 ## 1. CLI Not Found Errors
 
-**Issue**: The server starts but fails to execute commands with errors like `command not found: claude` or `gemini: command not found`.
+**Issue**: The server starts but fails to execute commands with errors like `command not found: gemini`, `codex`, or `qwen`.
 
 **Solutions**:
 - **Verify Installation**: Ensure the CLI tools are installed globally.
-  - Claude Code: `npm i -g @anthropic-ai/claude-code`
   - Gemini CLI: `npm i -g @google/gemini-cli`
   - Codex CLI: `npm i -g @openai/codex`
+  - Qwen CLI: `npm install -g @qwen-code/qwen-code`
 - **Check PATH**: Ensure your global npm binaries directory is in your system's `PATH`.
   - On macOS/Linux: `export PATH=$PATH:$(npm config get prefix)/bin`
-- **Test Manually**: Try running the command (e.g., `claude --version`) directly in your terminal to confirm it works outside of `cliagents`.
+- **Test Manually**: Try running the command (e.g., `gemini --version`) directly in your terminal to confirm it works outside of `cliagents`.
 
 ## 2. Authentication Issues
 
@@ -33,9 +33,9 @@ This guide provides solutions for common issues encountered when using `cliagent
 
 **Solutions**:
 - **Check Model Mapping**: `cliagents` routes models based on prefixes:
-  - `claude-*` → Claude Code
   - `gemini-*` → Gemini CLI
   - `gpt-*`, `o3-*`, `o4-*` → Codex CLI
+  - `qwen-*` → Qwen CLI
 - **Supported Adapters**: Ensure the adapter corresponding to the model prefix is installed and configured.
 - **Custom Models**: If using a custom model name, ensure it maps correctly in `src/server/openai-compat.js`.
 

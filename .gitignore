@@ -22,10 +22,14 @@ Thumbs.db
 *.swo
 
 # AI coding assistants (personal config, but share agents)
+.cliagents/
 .claude/settings.json
 .claude/settings.local.json
 .claude/statsig/
 .serena/
+
+# Local MCP config (machine-specific absolute paths)
+.mcp.json
 
 # Test coverage
 coverage/
@@ -39,6 +43,9 @@ build/
 tmp/
 temp/
 *.tmp
+
+# Test temp output (moved outside repo, but guard against regressions)
+.tmp-tests/
 
 # Database
 data/

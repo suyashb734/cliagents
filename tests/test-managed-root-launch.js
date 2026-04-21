@@ -6,7 +6,9 @@ const assert = require('assert');
 const {
   normalizeManagedRootAdapter,
   inferManagedRootOriginClient,
-  buildManagedRootExternalSessionRef
+  buildManagedRootExternalSessionRef,
+  buildManagedRootBootstrapPrompt,
+  composeManagedRootSystemPrompt
 } = require('../src/orchestration/managed-root-launch');
 
 function run() {
@@ -28,6 +30,26 @@ function run() {
   );
   const generated = buildManagedRootExternalSessionRef('claude');
   assert(generated.startsWith('claude:managed:'), `Unexpected generated session ref: ${generated}`);
+
+  const bootstrap = buildManagedRootBootstrapPrompt();
+  assert(bootstrap.includes('list_agents'));
+  assert(bootstrap.includes('list_models'));
+  assert(bootstrap.includes('recommend_model'));
+  assert(bootstrap.includes('Do not launch another root'));
+  assert(bootstrap.includes('reply_to_terminal'));
+  assert(bootstrap.includes('list_child_sessions'));
+  assert(bootstrap.includes('get_root_session_status'));
+  assert(bootstrap.includes('delegate_task'));
+  assert(bootstrap.includes('terminalId'));
+  assert(bootstrap.includes('sessionLabel'));
+  assert(bootstrap.includes('reuse hint'));
+  assert(bootstrap.toLowerCase().includes('enumerat'));
+
+  const composed = composeManagedRootSystemPrompt('Return concise answers.', {
+    profile: 'planning-root'
+  });
+  assert(composed.includes('planning'));
+  assert(composed.includes('Return concise answers.'));
 
   console.log('✅ Managed root launch helpers normalize adapters and root identity correctly');
 }

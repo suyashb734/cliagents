@@ -13,10 +13,15 @@ const { EventEmitter } = require('events');
 const TmuxClient = require('./client');
 const { MANAGED_ROOT_ADAPTERS } = require('../adapters/active-surface');
 const GeminiCliAdapter = require('../adapters/gemini-cli');
+const { getModelRoutingService } = require('../services/model-routing');
 const { resolveClaudeCliPath } = require('../utils/claude-cli-path');
 const { extractOutput, stripAnsiCodes } = require('../utils/output-extractor');
 
 const inferGeminiBrokerDefaultModel = GeminiCliAdapter.inferGeminiBrokerDefaultModel;
+const TRACKED_RUN_INLINE_COMMAND_MAX_LENGTH = 400;
+const TRACKED_RUN_SCRIPT_ROOT = process.platform === 'win32'
+  ? path.join(os.tmpdir(), 'cliagents-tracked-run-scripts')
+  : '/tmp/cliagents-tracked-run-scripts';
 
 function parseSessionMetadata(rawValue) {
   if (!rawValue || typeof rawValue !== 'string') {
@@ -83,6 +88,14 @@ function generateRunId() {
 }
 
 const SAFE_TMUX_NAME_PATTERN = /^[a-zA-Z0-9_-]+$/;
+const MIN_ORPHANED_LOG_TAIL_BYTES = 5000;
+const MAX_ORPHANED_LOG_TAIL_BYTES = 50000;
+const DEFAULT_MANAGED_ROOT_STARTUP_DELAY_MS = 1500;
+const DEFAULT_WORKER_STARTUP_DELAY_MS = 250;
+const DEFAULT_DEFERRED_PROVIDER_ATTACH_TIMEOUT_MS = 20000;
+const DEFERRED_PROVIDER_ATTACH_POLL_INTERVAL_MS = 150;
+const DEFAULT_POST_ATTACH_PROVIDER_START_DELAY_MS = 120;
+const ENABLE_STATUS_DEBUG_LOGS = process.env.CLIAGENTS_STATUS_DEBUG === '1';
 
 function hashSessionShape(value) {
   return crypto.createHash('sha256').update(String(value || ''), 'utf8').digest('hex');
@@ -97,6 +110,54 @@ function summarizeMessage(content, maxLength = 120) {
     return normalized;
   }
   return `${normalized.slice(0, Math.max(0, maxLength - 1)).trimEnd()}…`;
+}
+
+function normalizeTerminalOutputOptions(linesOrOptions, maybeOptions = null) {
+  if (linesOrOptions && typeof linesOrOptions === 'object' && !Array.isArray(linesOrOptions)) {
+    return {
+      lines: Number.isFinite(linesOrOptions.lines) ? linesOrOptions.lines : 200,
+      mode: String(linesOrOptions.mode || 'history').trim().toLowerCase() === 'visible' ? 'visible' : 'history',
+      format: String(linesOrOptions.format || 'plain').trim().toLowerCase() === 'ansi' ? 'ansi' : 'plain'
+    };
+  }
+
+  const merged = maybeOptions && typeof maybeOptions === 'object'
+    ? maybeOptions
+    : {};
+  return {
+    lines: Number.isFinite(linesOrOptions) ? linesOrOptions : 200,
+    mode: String(merged.mode || 'history').trim().toLowerCase() === 'visible' ? 'visible' : 'history',
+    format: String(merged.format || 'plain').trim().toLowerCase() === 'ansi' ? 'ansi' : 'plain'
+  };
+}
+
+function summarizeTerminalActivity(content, maxLength = 240) {
+  const lines = String(content || '')
+    .split('\n')
+    .map((line) => line.replace(/\s+/g, ' ').trim())
+    .filter(Boolean);
+  if (lines.length === 0) {
+    return '';
+  }
+
+  const bestLine = lines[lines.length - 1];
+  if (bestLine.length <= maxLength) {
+    return bestLine;
+  }
+  return `${bestLine.slice(0, Math.max(0, maxLength - 1)).trimEnd()}…`;
+}
+
+function buildTerminalBusyError(terminalId, status) {
+  const currentStatus = String(status || TerminalStatus.PROCESSING);
+  const error = new Error(
+    `Terminal ${terminalId} is busy (${currentStatus}). Wait for it to finish before sending more input.`
+  );
+  error.code = 'terminal_busy';
+  error.statusCode = 409;
+  error.terminalId = terminalId;
+  error.terminalStatus = currentStatus;
+  error.retryAfterMs = 1000;
+  return error;
 }
 
 /**
@@ -132,6 +193,142 @@ function normalizeUuid(value) {
   }
 
   return null;
+}
+
+const SAFE_PROVIDER_THREAD_REF_PATTERN = /^[A-Za-z0-9._:-]{1,160}$/;
+
+function normalizeProviderThreadRef(adapter, value) {
+  const trimmed = String(value || '').trim();
+  if (!trimmed) {
+    return null;
+  }
+
+  if (adapter === 'claude-code' || adapter === 'gemini-cli') {
+    return normalizeUuid(trimmed);
+  }
+
+  if (SAFE_PROVIDER_THREAD_REF_PATTERN.test(trimmed)) {
+    return trimmed;
+  }
+
+  return null;
+}
+
+function getLastMatchValue(text, regex) {
+  const matches = [...String(text || '').matchAll(regex)];
+  if (matches.length === 0) {
+    return null;
+  }
+  return matches[matches.length - 1][1] || null;
+}
+
+function hasTrackedRunStartMarker(text, runId) {
+  if (!text || !runId) {
+    return false;
+  }
+
+  const pattern = new RegExp(`(?:^|\\n)__CLIAGENTS_RUN_START__${runId}(?=\\n|$)`);
+  return pattern.test(String(text));
+}
+
+function matchTrackedRunExitMarker(text, exitMarkerPrefix) {
+  if (!text || !exitMarkerPrefix) {
+    return null;
+  }
+
+  const pattern = new RegExp(`(?:^|\\n)${exitMarkerPrefix}(\\d+)(?=\\n|$)`);
+  return String(text).match(pattern);
+}
+
+function extractLatestTrackedRun(text) {
+  const source = String(text || '');
+  if (!source) {
+    return null;
+  }
+
+  const startMatches = [...source.matchAll(/__CLIAGENTS_RUN_START__([a-f0-9]{16})/g)];
+  if (startMatches.length === 0) {
+    return null;
+  }
+
+  const startMatch = startMatches[startMatches.length - 1];
+  const runId = startMatch[1];
+  const startMarker = `__CLIAGENTS_RUN_START__${runId}`;
+  const exitMarkerPrefix = `__CLIAGENTS_RUN_EXIT__${runId}__`;
+  const exitMatches = [...source.matchAll(new RegExp(`${exitMarkerPrefix}(\\d+)`, 'g'))];
+  const exitMatch = exitMatches.length > 0 ? exitMatches[exitMatches.length - 1] : null;
+
+  return {
+    runId,
+    startMarker,
+    exitMarkerPrefix,
+    startIndex: startMatch.index || 0,
+    exitCode: exitMatch ? Number.parseInt(exitMatch[1], 10) : null
+  };
+}
+
+function isShellContinuationPrompt(line) {
+  const normalized = String(line || '').trim().toLowerCase();
+  if (!normalized) {
+    return false;
+  }
+
+  return /^(?:dquote|quote|bquote|cmdsubst|heredoc|for|while|if|else|select|case|arith|subsh)>\s*$/.test(normalized);
+}
+
+function isShellProcessCommand(command) {
+  const normalized = String(command || '').trim().toLowerCase();
+  if (!normalized) {
+    return true;
+  }
+
+  return ['zsh', 'bash', 'sh', 'fish', 'login', 'tmux'].includes(normalized);
+}
+
+function extractProviderThreadRefFromOutput(adapter, output, detector = null) {
+  const text = String(output || '');
+  if (!text) {
+    return null;
+  }
+
+  const explicitMarker = getLastMatchValue(text, /__CLIAGENTS_PROVIDER_SESSION__([^\s]+)/g);
+  if (explicitMarker) {
+    return normalizeProviderThreadRef(adapter, explicitMarker);
+  }
+
+  switch (adapter) {
+    case 'claude-code': {
+      const fromDetector = typeof detector?.extractSessionId === 'function'
+        ? detector.extractSessionId(text)
+        : null;
+      const sessionId = fromDetector || getLastMatchValue(text, /"session[_-]?id"\s*:\s*"([^"]+)"/gi);
+      return normalizeProviderThreadRef(adapter, sessionId);
+    }
+    case 'codex-cli':
+      return normalizeProviderThreadRef(adapter, getLastMatchValue(text, /"thread_id"\s*:\s*"([^"]+)"/g));
+    case 'qwen-cli':
+      return normalizeProviderThreadRef(adapter, getLastMatchValue(text, /"session_id"\s*:\s*"([^"]+)"/g));
+    case 'opencode-cli':
+      return normalizeProviderThreadRef(adapter, getLastMatchValue(text, /"sessionID"\s*:\s*"([^"]+)"/g));
+    case 'gemini-cli': {
+      const sessionId = getLastMatchValue(text, /"session[_-]?id"\s*:\s*"([^"]+)"/gi);
+      return normalizeProviderThreadRef(adapter, sessionId);
+    }
+    default:
+      return null;
+  }
+}
+
+function escapeForSingleQuotes(str) {
+  return String(str || '').replace(/'/g, "'\\''");
+}
+
+function buildFirstTurnPrompt(message, terminal) {
+  const messageCount = Number.isInteger(terminal?.messageCount) ? terminal.messageCount : 0;
+  if (!messageCount && terminal?.systemPrompt) {
+    return `${terminal.systemPrompt}\n\n${message}`;
+  }
+  return message;
 }
 
 function supportsManagedRootSessionBinding(adapter) {
@@ -170,18 +367,24 @@ function buildGeminiOneShotRunnerCommand(message, terminal) {
   const runnerPath = path.join(__dirname, '../scripts/run-gemini-oneshot.js');
   const workDir = terminal.workDir || process.cwd();
   const resolvedModel = resolveGeminiCommandModel(terminal.model);
+  const providerThreadRef = normalizeProviderThreadRef('gemini-cli', terminal.providerThreadRef);
+  const prompt = buildFirstTurnPrompt(message, terminal);
 
   const args = [
     `"${escapeForDoubleQuotes(process.execPath)}"`,
     `"${escapeForDoubleQuotes(runnerPath)}"`,
     '--message',
-    `"${escapeForDoubleQuotes(message)}"`,
+    `"${escapeForDoubleQuotes(prompt)}"`,
     '--workdir',
     `"${escapeForDoubleQuotes(workDir)}"`
   ];
 
   if (resolvedModel) {
     args.push('--model', `"${escapeForDoubleQuotes(resolvedModel)}"`);
+  }
+
+  if (providerThreadRef) {
+    args.push('--session-id', `"${escapeForDoubleQuotes(providerThreadRef)}"`);
   }
 
   return args.join(' ');
@@ -247,6 +450,66 @@ function buildClaudeOneShotCommand(message, terminal) {
   };
 }
 
+function buildCodexOneShotCommand(message, terminal) {
+  const prompt = buildFirstTurnPrompt(message, terminal);
+  const escapedPrompt = escapeForSingleQuotes(prompt);
+  const args = ['CI=true', 'codex', 'exec'];
+
+  if (terminal.model && terminal.model !== 'default') {
+    args.push('-m', terminal.model);
+  }
+  args.push('--full-auto', '--json', '--skip-git-repo-check');
+  args.push(`'${escapedPrompt}'`);
+
+  return args.join(' ');
+}
+
+function buildQwenOneShotCommand(message, terminal) {
+  const prompt = buildFirstTurnPrompt(message, terminal);
+  const escapedPrompt = escapeForSingleQuotes(prompt);
+  const providerThreadRef = normalizeProviderThreadRef('qwen-cli', terminal.providerThreadRef);
+  const args = ['qwen'];
+
+  if (terminal.model && terminal.model !== 'default') {
+    args.push('-m', terminal.model);
+  }
+  if (providerThreadRef) {
+    args.push('-r', providerThreadRef);
+  }
+  args.push('-p', `'${escapedPrompt}'`, '-o', 'stream-json', '-y');
+
+  if (Array.isArray(terminal.allowedTools) && terminal.allowedTools.length > 0) {
+    for (const tool of terminal.allowedTools) {
+      args.push('--allowed-tools', `'${escapeForSingleQuotes(tool)}'`);
+    }
+  }
+
+  return args.join(' ');
+}
+
+function buildOpencodeOneShotCommand(message, terminal) {
+  const prompt = buildFirstTurnPrompt(message, terminal);
+  const escapedPrompt = escapeForSingleQuotes(prompt);
+  const providerThreadRef = normalizeProviderThreadRef('opencode-cli', terminal.providerThreadRef);
+  const args = ['opencode', 'run'];
+
+  if (terminal.model && terminal.model !== 'default') {
+    args.push('--model', terminal.model);
+  }
+  if (providerThreadRef) {
+    args.push('--session', providerThreadRef);
+  }
+  args.push(
+    '--print-logs',
+    '--log-level', 'ERROR',
+    '--format', 'json',
+    '--dangerously-skip-permissions'
+  );
+  args.push(`'${escapedPrompt}'`);
+
+  return args.join(' ');
+}
+
 function deriveControlPlaneSessionKind(options = {}) {
   const explicitSessionKind = String(options.sessionKind || '').trim();
   if (explicitSessionKind) {
@@ -274,7 +537,7 @@ function shouldResetProviderStateOnReuse(terminal) {
     return false;
   }
 
-  return terminal.adapter === 'claude-code' && terminal.role !== 'main' && terminal.sessionKind !== 'main';
+  return terminal.role !== 'main' && terminal.sessionKind !== 'main';
 }
 
 function shouldPreserveRichTerminalUi(options = {}) {
@@ -285,6 +548,92 @@ function shouldPreserveRichTerminalUi(options = {}) {
     : {};
 
   return role === 'main' || sessionKind === 'main' || metadata.managedLaunch === true;
+}
+
+function shouldStartRichProviderViaRespawn(terminal) {
+  if (!terminal) {
+    return false;
+  }
+
+  return shouldPreserveRichTerminalUi({
+    role: terminal.role,
+    sessionKind: terminal.sessionKind,
+    sessionMetadata: terminal.sessionMetadata || null
+  });
+}
+
+function shouldExitShellOnProviderExit(options = {}) {
+  const metadata = options.sessionMetadata && typeof options.sessionMetadata === 'object'
+    ? options.sessionMetadata
+    : {};
+
+  if (
+    options.keepShellOnProviderExit === true
+    || metadata.keepShellOnProviderExit === true
+    || process.env.CLIAGENTS_KEEP_SHELL_ON_PROVIDER_EXIT === '1'
+  ) {
+    return false;
+  }
+
+  return shouldPreserveRichTerminalUi(options);
+}
+
+function buildManagedRootProviderEnvironmentPrefix(options = {}) {
+  if (!shouldPreserveRichTerminalUi(options)) {
+    return '';
+  }
+
+  return [
+    'unset NO_COLOR CLICOLOR; ',
+    'TERM="${TERM:-tmux-256color}"',
+    'COLORTERM="${COLORTERM:-truecolor}"',
+    'FORCE_COLOR=1',
+    'CLICOLOR_FORCE=1'
+  ].join(' ');
+}
+
+function wrapManagedRootProviderCommand(command, options = {}) {
+  const normalizedCommand = String(command || '').trim();
+  if (!normalizedCommand) {
+    return normalizedCommand;
+  }
+
+  const commandWithExec = (!shouldExitShellOnProviderExit(options) || normalizedCommand.startsWith('exec '))
+    ? normalizedCommand
+    : `exec ${normalizedCommand}`;
+  const envPrefix = buildManagedRootProviderEnvironmentPrefix(options);
+
+  return envPrefix ? `${envPrefix} ${commandWithExec}` : commandWithExec;
+}
+
+function parseStartupDelayMs(value, fallback) {
+  const parsed = Number.parseInt(String(value || '').trim(), 10);
+  if (!Number.isInteger(parsed) || parsed < 0 || parsed > 30000) {
+    return fallback;
+  }
+  return parsed;
+}
+
+function resolveTerminalStartupDelayMs(options = {}) {
+  const userFacingTerminal = shouldPreserveRichTerminalUi(options);
+  if (userFacingTerminal) {
+    return parseStartupDelayMs(
+      process.env.CLIAGENTS_MANAGED_ROOT_STARTUP_DELAY_MS,
+      DEFAULT_MANAGED_ROOT_STARTUP_DELAY_MS
+    );
+  }
+
+  return parseStartupDelayMs(
+    process.env.CLIAGENTS_WORKER_STARTUP_DELAY_MS,
+    DEFAULT_WORKER_STARTUP_DELAY_MS
+  );
+}
+
+function resolveDeferredProviderAttachTimeoutMs() {
+  return parseStartupDelayMs(
+    process.env.CLIAGENTS_DEFERRED_PROVIDER_ATTACH_TIMEOUT_MS,
+    DEFAULT_DEFERRED_PROVIDER_ATTACH_TIMEOUT_MS
+  );
 }
 
 function normalizeLaunchEnvironment(env) {
@@ -304,6 +653,62 @@ function normalizeLaunchEnvironment(env) {
     normalized[key] = trimmed;
   }
   return normalized;
+}
+
+function buildManagedRootControlPlaneEnv(options = {}) {
+  const {
+    role = null,
+    sessionKind = null,
+    rootSessionId = null,
+    externalSessionRef = null,
+    clientName = null,
+    workspaceRoot = null,
+    sessionMetadata = null
+  } = options;
+
+  const normalizedSessionKind = String(sessionKind || '').trim().toLowerCase();
+  const metadata = sessionMetadata && typeof sessionMetadata === 'object'
+    ? sessionMetadata
+    : {};
+  const managedLaunch = metadata.managedLaunch === true || metadata.attachMode === 'managed-root-launch';
+  const isManagedRoot = normalizedSessionKind === 'main' && (role === 'main' || managedLaunch);
+  if (!isManagedRoot || !rootSessionId || !externalSessionRef) {
+    return {};
+  }
+
+  const resolvedClientName = String(clientName || metadata.clientName || '').trim();
+  const resolvedWorkspaceRoot = String(
+    workspaceRoot || metadata.workspaceRoot || ''
+  ).trim();
+
+  return {
+    CLIAGENTS_ROOT_SESSION_ID: String(rootSessionId),
+    CLIAGENTS_CLIENT_SESSION_REF: String(externalSessionRef),
+    CLIAGENTS_CLIENT_NAME: resolvedClientName || null,
+    CLIAGENTS_WORKSPACE_ROOT: resolvedWorkspaceRoot || null,
+    CLIAGENTS_MANAGED_ROOT: '1'
+  };
+}
+
+function parseLaunchDimension(value, { min = 10, max = 1000 } = {}) {
+  const parsed = Number.parseInt(String(value || '').trim(), 10);
+  if (!Number.isInteger(parsed) || parsed < min || parsed > max) {
+    return null;
+  }
+  return parsed;
+}
+
+function resolveLaunchGeometry(launchEnvironment) {
+  const normalized = normalizeLaunchEnvironment(launchEnvironment);
+  const width = parseLaunchDimension(normalized.COLUMNS, { min: 20, max: 1000 });
+  const height = parseLaunchDimension(normalized.LINES, { min: 10, max: 400 });
+  if (!width && !height) {
+    return null;
+  }
+  return {
+    width: width || 200,
+    height: height || 50
+  };
 }
 
 /**
@@ -363,7 +768,7 @@ const CLI_COMMANDS = {
       args.push('--allowedTools', options.allowedTools.join(','));
     }
 
-    return args.join(' ');
+    return wrapManagedRootProviderCommand(args.join(' '), options);
   },
 
   'gemini-cli': (options = {}) => {
@@ -408,7 +813,7 @@ const CLI_COMMANDS = {
       args.push('--resume', 'latest');
     }
 
-    return args.join(' ');
+    return wrapManagedRootProviderCommand(args.join(' '), options);
   },
 
   'codex-cli': (options = {}) => {
@@ -449,7 +854,7 @@ const CLI_COMMANDS = {
       args.push('--model', options.model);
     }
 
-    return args.join(' ');
+    return wrapManagedRootProviderCommand(args.join(' '), options);
   },
 
   'qwen-cli': (options = {}) => {
@@ -482,7 +887,7 @@ const CLI_COMMANDS = {
       args.push('--session-id', options.providerSessionId);
     }
 
-    return args.join(' ');
+    return wrapManagedRootProviderCommand(args.join(' '), options);
   },
 
   'opencode-cli': (options = {}) => {
@@ -501,7 +906,7 @@ const CLI_COMMANDS = {
     } else if (options.resumeLatest) {
       args.push('--continue');
     }
-    return args.join(' ');
+    return wrapManagedRootProviderCommand(args.join(' '), options);
   }
 };
 
@@ -510,6 +915,7 @@ class PersistentSessionManager extends EventEmitter {
    * @param {Object} options
    * @param {Object} options.db - Database instance (optional, for Phase 3)
    * @param {TmuxClient} options.tmuxClient - TmuxClient instance (optional)
+   * @param {string} options.tmuxSocketPath - Optional tmux socket path for broker isolation
    * @param {string} options.logDir - Directory for log files
    * @param {string} options.workDir - Default working directory
    */
@@ -518,7 +924,8 @@ class PersistentSessionManager extends EventEmitter {
 
     this.db = options.db || null;
     this.tmux = options.tmuxClient || new TmuxClient({
-      logDir: options.logDir || path.join(process.cwd(), 'logs')
+      logDir: options.logDir || path.join(process.cwd(), 'logs'),
+      socketPath: options.tmuxSocketPath || null
     });
     this.logDir = options.logDir || path.join(process.cwd(), 'logs');
     this.workDir = options.workDir || process.cwd();
@@ -532,6 +939,9 @@ class PersistentSessionManager extends EventEmitter {
     this.sessionEventsEnabled = options.sessionEventsEnabled ?? process.env.SESSION_EVENTS_ENABLED === '1';
     this.shellCommands = new Set(['bash', 'sh', 'zsh', 'fish']);
     this.reuseReservationTtlMs = Math.max(Number(options.reuseReservationTtlMs || 60000), 1000);
+    this.modelRoutingService = options.modelRoutingService || getModelRoutingService({
+      configPath: options.modelRoutingPath || path.join(process.cwd(), 'config', 'model-routing.json')
+    });
 
     // Ensure directories exist
     if (!fs.existsSync(this.logDir)) {
@@ -603,7 +1013,7 @@ class PersistentSessionManager extends EventEmitter {
             role,
             workDir,
             logPath: path.join(this.logDir, `${terminalId}.log`),
-            status: TerminalStatus.IDLE,
+            status: dbTerminal.status || TerminalStatus.IDLE,
             createdAt: new Date(createdAt),
             lastActive: new Date(lastActive),
             activeRun: null,
@@ -1108,6 +1518,74 @@ class PersistentSessionManager extends EventEmitter {
     });
   }
 
+  _shouldTrackModelHealth(terminal) {
+    const model = String(terminal?.model || '').trim();
+    if (!terminal || !model || model === 'default') {
+      return false;
+    }
+
+    if (terminal.sessionKind === 'main' || terminal.role === 'main') {
+      return false;
+    }
+
+    return Boolean(this.modelRoutingService?.getAdapterPolicy?.(terminal.adapter));
+  }
+
+  _classifyModelExecutionFailure(terminal, nextStatus, extra = {}) {
+    const attentionCode = String(extra.attention?.code || '').trim();
+    if (attentionCode) {
+      return {
+        failureClass: attentionCode,
+        reason: extra.attention?.message || `Terminal reported attention code '${attentionCode}'.`
+      };
+    }
+
+    if (nextStatus !== TerminalStatus.ERROR) {
+      return null;
+    }
+
+    const exitCode = Number.isInteger(extra.exitCode)
+      ? extra.exitCode
+      : (Number.isInteger(terminal?.activeRun?.exitCode) ? terminal.activeRun.exitCode : null);
+
+    if (Number.isInteger(exitCode)) {
+      return {
+        failureClass: 'exit_nonzero',
+        reason: `Process exited with code ${exitCode}.`
+      };
+    }
+
+    return {
+      failureClass: 'execution_error',
+      reason: 'Terminal entered an error state without a classified provider attention code.'
+    };
+  }
+
+  _recordModelExecutionOutcome(terminal, nextStatus, extra = {}) {
+    if (!this._shouldTrackModelHealth(terminal)) {
+      return null;
+    }
+
+    const failure = this._classifyModelExecutionFailure(terminal, nextStatus, extra);
+    if (failure) {
+      return this.modelRoutingService.recordModelFailure({
+        adapter: terminal.adapter,
+        model: terminal.model,
+        failureClass: failure.failureClass,
+        reason: failure.reason
+      });
+    }
+
+    if (nextStatus === TerminalStatus.COMPLETED) {
+      return this.modelRoutingService.recordModelSuccess({
+        adapter: terminal.adapter,
+        model: terminal.model
+      });
+    }
+
+    return null;
+  }
+
   _applyStatusUpdate(terminal, nextStatus, extra = {}) {
     if (!terminal || !nextStatus || terminal.status === nextStatus) {
       return nextStatus;
@@ -1120,6 +1598,8 @@ class PersistentSessionManager extends EventEmitter {
     if (this.db) {
       this.db.updateStatus(terminal.terminalId, nextStatus);
     }
+    this._interruptFatalTrackedRun(terminal, nextStatus);
+    this._recordModelExecutionOutcome(terminal, nextStatus, extra);
     this.emit('status-change', { terminalId: terminal.terminalId, status: nextStatus });
 
     if ([TerminalStatus.COMPLETED, TerminalStatus.ERROR].includes(nextStatus)) {
@@ -1131,6 +1611,29 @@ class PersistentSessionManager extends EventEmitter {
     return nextStatus;
   }
 
+  _interruptFatalTrackedRun(terminal, nextStatus) {
+    if (!terminal || nextStatus !== TerminalStatus.ERROR || !terminal.activeRun) {
+      return false;
+    }
+
+    if (terminal.adapter !== 'opencode-cli' || terminal.activeRun.interruptRequested) {
+      return false;
+    }
+
+    const currentCommand = this._getCurrentCommand(terminal);
+    if (isShellProcessCommand(currentCommand)) {
+      return false;
+    }
+
+    try {
+      this.tmux.sendSpecialKey(terminal.sessionName, terminal.windowName, 'C-c');
+      terminal.activeRun.interruptRequested = true;
+      return true;
+    } catch {
+      return false;
+    }
+  }
+
   _resolveMissingSessionStatus(terminal, detector) {
     const attention = this._getTerminalAttention(terminal);
     if (attention?.code === 'conversation_interrupted') {
@@ -1139,7 +1642,7 @@ class PersistentSessionManager extends EventEmitter {
 
     const dbTerminal = this.db?.getTerminal ? this.db.getTerminal(terminal.terminalId) : null;
     const dbStatus = dbTerminal?.status || null;
-    if (dbStatus && dbStatus !== TerminalStatus.PROCESSING) {
+    if ([TerminalStatus.COMPLETED, TerminalStatus.ERROR, 'orphaned'].includes(dbStatus)) {
       return dbStatus;
     }
 
@@ -1208,11 +1711,28 @@ class PersistentSessionManager extends EventEmitter {
       command
     };
 
-    return `printf '\\n${startMarker}\\n'; ${command}; __cliagents_status=$?; printf '\\n${exitMarkerPrefix}%s\\n' "$__cliagents_status"`;
+    const wrappedCommand = `printf '\\n${startMarker}\\n'; ${command}; __cliagents_status=$?; printf '\\n${exitMarkerPrefix}%s\\n' "$__cliagents_status"`;
+    if (wrappedCommand.length <= TRACKED_RUN_INLINE_COMMAND_MAX_LENGTH || !terminal.logPath) {
+      return wrappedCommand;
+    }
+
+    fs.mkdirSync(TRACKED_RUN_SCRIPT_ROOT, { recursive: true });
+
+    const scriptPath = path.join(TRACKED_RUN_SCRIPT_ROOT, `${terminal.terminalId}-${runId}.sh`);
+    const scriptBody = [
+      '#!/bin/sh',
+      `trap 'rm -f -- "$0"' EXIT`,
+      wrappedCommand,
+      ''
+    ].join('\n');
+
+    fs.writeFileSync(scriptPath, scriptBody, { mode: 0o700 });
+    terminal.activeRun.wrapperScriptPath = scriptPath;
+    return scriptPath;
   }
 
   _updateProviderThreadRef(terminal, providerThreadRef) {
-    const normalizedProviderThreadRef = normalizeUuid(providerThreadRef);
+    const normalizedProviderThreadRef = normalizeProviderThreadRef(terminal?.adapter, providerThreadRef);
     if (!terminal || !normalizedProviderThreadRef || terminal.providerThreadRef === normalizedProviderThreadRef) {
       return terminal?.providerThreadRef || null;
     }
@@ -1228,19 +1748,64 @@ class PersistentSessionManager extends EventEmitter {
   }
 
   _syncProviderThreadRefFromOutput(terminal, output, detector) {
-    if (!terminal || terminal.adapter !== 'claude-code' || !output) {
+    if (!terminal || !output) {
       return terminal?.providerThreadRef || null;
     }
 
-    const extractSessionId = typeof detector?.extractSessionId === 'function'
-      ? detector.extractSessionId.bind(detector)
-      : null;
-    const sessionId = extractSessionId ? extractSessionId(output) : null;
-    if (!sessionId) {
+    const providerThreadRef = extractProviderThreadRefFromOutput(terminal.adapter, output, detector);
+    if (!providerThreadRef) {
       return terminal.providerThreadRef || null;
     }
 
-    return this._updateProviderThreadRef(terminal, sessionId);
+    return this._updateProviderThreadRef(terminal, providerThreadRef);
+  }
+
+  _restoreTrackedRunFromPersistence(terminal, output, detector) {
+    if (!terminal || terminal.activeRun) {
+      return terminal?.activeRun || null;
+    }
+
+    const outputText = String(output || '');
+    let recoveredRun = extractLatestTrackedRun(outputText);
+    let source = 'output';
+    let logTail = '';
+
+    if (!recoveredRun && terminal.logPath) {
+      logTail = this.readLogTail(terminal.terminalId, 12000);
+      recoveredRun = extractLatestTrackedRun(logTail);
+      source = 'log';
+    }
+
+    if (!recoveredRun) {
+      return null;
+    }
+
+    const canRestoreFromPersistence = terminal.recovered === true
+      || [TerminalStatus.PROCESSING, TerminalStatus.COMPLETED, TerminalStatus.ERROR].includes(terminal.status);
+    if (!canRestoreFromPersistence) {
+      return null;
+    }
+
+    terminal.activeRun = {
+      runId: recoveredRun.runId,
+      startMarker: recoveredRun.startMarker,
+      exitMarkerPrefix: recoveredRun.exitMarkerPrefix,
+      baselineOutputLength: source === 'output' ? recoveredRun.startIndex : 0,
+      startedAt: terminal.lastActive || terminal.createdAt || new Date(),
+      command: null,
+      recovered: true
+    };
+
+    if (recoveredRun.exitCode != null) {
+      terminal.activeRun.exitCode = recoveredRun.exitCode;
+      terminal.activeRun.completedAt = new Date();
+    }
+
+    if (source === 'log') {
+      this._syncProviderThreadRefFromOutput(terminal, logTail, detector);
+    }
+
+    return terminal.activeRun;
   }
 
   /**
@@ -1258,8 +1823,8 @@ class PersistentSessionManager extends EventEmitter {
 
     const tail = String(output || '').slice(run.baselineOutputLength);
     this._syncProviderThreadRefFromOutput(terminal, tail, detector);
-    const exitPattern = new RegExp(`${run.exitMarkerPrefix}(\\d+)`);
-    const exitMatch = tail.match(exitPattern);
+    const sawStartMarkerInTail = hasTrackedRunStartMarker(tail, run.runId);
+    const exitMatch = matchTrackedRunExitMarker(tail, run.exitMarkerPrefix);
 
     if (exitMatch) {
       const exitCode = Number.parseInt(exitMatch[1], 10);
@@ -1270,7 +1835,8 @@ class PersistentSessionManager extends EventEmitter {
 
     const logTail = terminal.logPath ? this.readLogTail(terminal.terminalId, 12000) : '';
     this._syncProviderThreadRefFromOutput(terminal, logTail, detector);
-    const logExitMatch = logTail.match(exitPattern);
+    const sawStartMarkerInLog = hasTrackedRunStartMarker(logTail, run.runId);
+    const logExitMatch = matchTrackedRunExitMarker(logTail, run.exitMarkerPrefix);
     if (logExitMatch) {
       const exitCode = Number.parseInt(logExitMatch[1], 10);
       run.exitCode = exitCode;
@@ -1289,19 +1855,21 @@ class PersistentSessionManager extends EventEmitter {
     }
 
     const lastNonEmptyLine = this._getLastNonEmptyLine(tail);
-    if (lastNonEmptyLine && /^[\w.-]+@[\w.-]+.*[#$%>]\s*$/.test(lastNonEmptyLine)) {
-      return TerminalStatus.COMPLETED;
+    if (isShellContinuationPrompt(lastNonEmptyLine)) {
+      run.exitCode = 2;
+      run.completedAt = new Date();
+      return TerminalStatus.ERROR;
     }
 
-    const currentCommand = this.tmux.getPaneCurrentCommand?.(terminal.sessionName, terminal.windowName);
-    if (this._isShellLikeCommand(currentCommand) && logTail.includes(run.startMarker)) {
-      if (run.exitCode == null) {
-        run.exitCode = 0;
+    if (lastNonEmptyLine && /^[\w.-]+@[\w.-]+.*[#$%>]\s*$/.test(lastNonEmptyLine)) {
+      if (sawStartMarkerInTail || sawStartMarkerInLog) {
+        if (run.exitCode == null) {
+          run.exitCode = 1;
+        }
+        run.completedAt = new Date();
+        return run.exitCode !== 0 ? TerminalStatus.ERROR : TerminalStatus.COMPLETED;
       }
-      run.completedAt = new Date();
-      return run.exitCode != null && run.exitCode !== 0
-        ? TerminalStatus.ERROR
-        : TerminalStatus.COMPLETED;
+      return TerminalStatus.PROCESSING;
     }
 
     return TerminalStatus.PROCESSING;
@@ -1312,6 +1880,11 @@ class PersistentSessionManager extends EventEmitter {
     const normalizedAllowedTools = Array.isArray(options.allowedTools)
       ? [...options.allowedTools].map((tool) => String(tool || '').trim()).filter(Boolean).sort()
       : [];
+    const sessionLabel = String(
+      options.sessionLabel
+      || options.sessionMetadata?.sessionLabel
+      || ''
+    ).trim() || null;
 
     return {
       rootSessionId: options.rootSessionId || null,
@@ -1323,6 +1896,7 @@ class PersistentSessionManager extends EventEmitter {
       sessionKind: deriveControlPlaneSessionKind(options),
       permissionMode: options.permissionMode || 'auto',
       allowedTools: normalizedAllowedTools,
+      sessionLabel,
       systemPromptHash: hashSessionShape(options.systemPrompt || '')
     };
   }
@@ -1473,6 +2047,86 @@ class PersistentSessionManager extends EventEmitter {
     };
   }
 
+  _extractGeminiAttention(output) {
+    if (!output) {
+      return null;
+    }
+
+    if (/terminalquotaerror|resourceexhausted|quota(?:_exhausted)?|capacity on this model|quota will reset|rate.?limit/i.test(output)) {
+      return {
+        code: 'provider_capacity',
+        message: 'Gemini capacity exhausted or quota limited the request.'
+      };
+    }
+
+    if (/timed out waiting for terminal|request timed out|timed out/i.test(output)) {
+      return {
+        code: 'provider_timeout',
+        message: 'Gemini orchestration request timed out before the broker observed completion.'
+      };
+    }
+
+    return null;
+  }
+
+  _extractQwenAttention(output) {
+    if (!output) {
+      return null;
+    }
+
+    if (/401 invalid access token|token expired|invalid access token|authentication failed/i.test(output)) {
+      return {
+        code: 'auth_expired',
+        message: 'Qwen access token is invalid or expired.'
+      };
+    }
+
+    if (/quota|usage limit|rate.?limit/i.test(output)) {
+      return {
+        code: 'quota_exhausted',
+        message: 'Qwen quota or usage limit blocked the request.'
+      };
+    }
+
+    return null;
+  }
+
+  _extractOpencodeAttention(output) {
+    if (!output) {
+      return null;
+    }
+
+    if (/subscriptionusagelimiterror|quota exceeded|continue using free models|rate.?limit|capacity on this model/i.test(output)) {
+      return {
+        code: 'quota_exhausted',
+        message: 'OpenCode provider quota or subscription limits blocked the request.'
+      };
+    }
+
+    if (/unauthorized|forbidden|authentication failed|not authenticated|login required|invalid api key/i.test(output)) {
+      return {
+        code: 'auth_expired',
+        message: 'OpenCode provider credentials are invalid, expired, or unavailable.'
+      };
+    }
+
+    if (/timed out|deadline exceeded|request timeout/i.test(output)) {
+      return {
+        code: 'provider_timeout',
+        message: 'OpenCode request timed out before the broker observed completion.'
+      };
+    }
+
+    if (/no active provider|provider not found|not authenticated/i.test(output)) {
+      return {
+        code: 'provider_unavailable',
+        message: 'OpenCode has no active provider available for this request.'
+      };
+    }
+
+    return null;
+  }
+
   _getTerminalAttention(terminal, options = {}) {
     if (!terminal) {
       return null;
@@ -1505,9 +2159,24 @@ class PersistentSessionManager extends EventEmitter {
       return null;
     }
 
+    const lastNonEmptyLine = this._getLastNonEmptyLine(cleanedOutput);
+    if (terminal.activeRun && isShellContinuationPrompt(lastNonEmptyLine)) {
+      terminal.attention = {
+        code: 'shell_parse_blocked',
+        message: 'The shell is waiting for more input, likely because the brokered command has unmatched quoting.'
+      };
+      return terminal.attention;
+    }
+
     let attention = null;
     if (terminal.adapter === 'codex-cli') {
       attention = this._extractCodexAttention(cleanedOutput);
+    } else if (terminal.adapter === 'gemini-cli') {
+      attention = this._extractGeminiAttention(cleanedOutput);
+    } else if (terminal.adapter === 'qwen-cli') {
+      attention = this._extractQwenAttention(cleanedOutput);
+    } else if (terminal.adapter === 'opencode-cli') {
+      attention = this._extractOpencodeAttention(cleanedOutput);
     }
 
     terminal.attention = attention || null;
@@ -1537,7 +2206,10 @@ class PersistentSessionManager extends EventEmitter {
       captureMode: terminal.captureMode || 'raw-tty',
       workDir: terminal.workDir || null,
       model: terminal.model || null,
+      sessionLabel: terminal.sessionMetadata?.sessionLabel || terminal.sessionLabel || null,
       sessionMetadata: terminal.sessionMetadata || null,
+      deferredProviderStart: terminal.deferredProviderStart === true,
+      providerStartState: terminal.providerStartState || 'started',
       createdAt: terminal.createdAt || null,
       lastActive: terminal.lastActive || null,
       logPath: terminal.logPath,
@@ -1557,8 +2229,12 @@ class PersistentSessionManager extends EventEmitter {
 
     terminal.lastActive = new Date();
     terminal.status = TerminalStatus.IDLE;
+    terminal.recovered = false;
     terminal.attention = null;
     terminal.activeRun = null;
+    terminal.deferredProviderStart = false;
+    terminal.providerStartState = 'started';
+    terminal.pendingProviderCommand = null;
     if (resetProviderState) {
       terminal.providerThreadRef = null;
       terminal.messageCount = 0;
@@ -1591,16 +2267,146 @@ class PersistentSessionManager extends EventEmitter {
     });
   }
 
+  _getAttachedClientCount(sessionName) {
+    if (!sessionName) {
+      return 0;
+    }
+    if (typeof this.tmux.getSessionAttachedCount === 'function') {
+      return this.tmux.getSessionAttachedCount(sessionName);
+    }
+    if (typeof this.tmux.listSessions === 'function') {
+      const session = this.tmux.listSessions('')
+        .find((entry) => entry?.name === sessionName);
+      return session?.attached ? 1 : 0;
+    }
+    return 0;
+  }
+
+  async _waitForInteractiveCliReady(terminal) {
+    if (!terminal) {
+      return;
+    }
+
+    const { adapter, role, terminalId, sessionName, windowName } = terminal;
+
+    if (adapter === 'gemini-cli' && role !== 'worker') {
+      await new Promise((resolve) => setTimeout(resolve, 5000));
+      const earlyOutput = this.tmux.getHistory(sessionName, windowName, 1000);
+      if (earlyOutput && (earlyOutput.includes('Do you trust') || earlyOutput.includes('Trust folder'))) {
+        console.log(`[SessionManager] Gemini trust prompt detected for ${terminalId}, auto-trusting...`);
+        this.tmux.sendKeys(sessionName, windowName, '', true);
+      }
+    }
+
+    try {
+      await this.waitForStatus(terminalId, TerminalStatus.IDLE, 60000);
+    } catch (error) {
+      if (adapter === 'gemini-cli' && role !== 'worker') {
+        const output = this.tmux.getHistory(sessionName, windowName, 1000);
+        if (output && (output.includes('Do you trust') || output.includes('Trust folder'))) {
+          console.log(`[SessionManager] Retrying Gemini trust prompt dismiss for ${terminalId}`);
+          this.tmux.sendKeys(sessionName, windowName, '', true);
+          try {
+            await this.waitForStatus(terminalId, TerminalStatus.IDLE, 30000);
+            return;
+          } catch (retryError) {
+            console.warn(`Terminal ${terminalId} may not be fully ready:`, retryError.message);
+            return;
+          }
+        }
+      }
+
+      console.warn(`Terminal ${terminalId} may not be fully ready:`, error.message);
+    }
+  }
+
+  async _startProviderCommand(terminal, cliCommand, options = {}) {
+    if (!terminal || !cliCommand) {
+      return false;
+    }
+    if (!this.terminals.has(terminal.terminalId)) {
+      return false;
+    }
+    if (typeof this.tmux.sessionExists === 'function' && !this.tmux.sessionExists(terminal.sessionName)) {
+      return false;
+    }
+    if (terminal.providerStartState === 'started') {
+      return true;
+    }
+
+    const useRespawnStart = shouldStartRichProviderViaRespawn(terminal)
+      && typeof this.tmux.respawnPane === 'function';
+    const startupDelayMs = Number.isInteger(options.startupDelayMs) ? options.startupDelayMs : 0;
+    if (!useRespawnStart && startupDelayMs > 0) {
+      await new Promise((resolve) => setTimeout(resolve, startupDelayMs));
+    }
+
+    terminal.providerStartState = 'starting';
+    terminal.deferredProviderStart = false;
+    terminal.pendingProviderCommand = null;
+    if (useRespawnStart) {
+      this.tmux.respawnPane(terminal.sessionName, terminal.windowName, cliCommand, {
+        workingDir: terminal.workDir || null
+      });
+    } else {
+      this.tmux.sendKeys(terminal.sessionName, terminal.windowName, cliCommand, true);
+    }
+    await this._waitForInteractiveCliReady(terminal);
+    terminal.providerStartState = 'started';
+    return true;
+  }
+
+  async _awaitAttachedClientAndStartProvider(terminal, cliCommand, options = {}) {
+    if (!terminal || !cliCommand) {
+      return false;
+    }
+
+    const attachTimeoutMs = Number.isInteger(options.attachTimeoutMs)
+      ? options.attachTimeoutMs
+      : DEFAULT_DEFERRED_PROVIDER_ATTACH_TIMEOUT_MS;
+    const pollIntervalMs = Number.isInteger(options.pollIntervalMs)
+      ? options.pollIntervalMs
+      : DEFERRED_PROVIDER_ATTACH_POLL_INTERVAL_MS;
+    const postAttachDelayMs = Number.isInteger(options.postAttachDelayMs)
+      ? options.postAttachDelayMs
+      : DEFAULT_POST_ATTACH_PROVIDER_START_DELAY_MS;
+    const startedAt = Date.now();
+
+    while ((Date.now() - startedAt) <= attachTimeoutMs) {
+      if (!this.terminals.has(terminal.terminalId)) {
+        return false;
+      }
+      if (typeof this.tmux.sessionExists === 'function' && !this.tmux.sessionExists(terminal.sessionName)) {
+        return false;
+      }
+      if (this._getAttachedClientCount(terminal.sessionName) > 0) {
+        return this._startProviderCommand(terminal, cliCommand, {
+          startupDelayMs: postAttachDelayMs
+        });
+      }
+      await new Promise((resolve) => setTimeout(resolve, pollIntervalMs));
+    }
+
+    console.warn(
+      `[SessionManager] Managed root ${terminal.terminalId} was not attached within ${attachTimeoutMs}ms; starting provider anyway`
+    );
+    return this._startProviderCommand(terminal, cliCommand, {
+      startupDelayMs: postAttachDelayMs
+    });
+  }
+
   /**
    * Create a new persistent terminal
    * @param {Object} options
-   * @param {string} options.adapter - Adapter name (gemini-cli, codex-cli, qwen-cli)
+   * @param {string} options.adapter - Adapter name from the active broker surface (gemini-cli, codex-cli, qwen-cli, opencode-cli, claude-code)
    * @param {string} options.agentProfile - Agent profile name (optional)
    * @param {string} options.role - Role (supervisor, worker)
    * @param {string} options.workDir - Working directory
    * @param {string} options.systemPrompt - System prompt
    * @param {string} options.model - Model to use
    * @param {Array<string>} options.allowedTools - Allowed tools list
+   * @param {string} options.sessionLabel - Optional stable label for intentionally reusing a specific child session
+   * @param {boolean} options.deferProviderStartUntilAttached - Delay provider startup until a tmux client attaches
    * @param {string} options.permissionMode - Permission mode ('auto'|'plan'|'default'|'acceptEdits'|'bypassPermissions'|'delegate'|'dontAsk')
    *   - 'auto' (default): Skip permissions for automated orchestration
    *   - 'plan': Read-only mode, creates plans without executing
@@ -1618,6 +2424,7 @@ class PersistentSessionManager extends EventEmitter {
       systemPrompt = null,
       model = null,
       allowedTools = null,
+      sessionLabel = null,
       // Permission mode support (Gap #4 resolution)
       // Modes: 'plan', 'default', 'acceptEdits', 'bypassPermissions', 'delegate', 'dontAsk', 'auto'
       // 'auto' (default) = skip permissions for automated use
@@ -1631,19 +2438,25 @@ class PersistentSessionManager extends EventEmitter {
       lineageDepth = null,
       sessionMetadata = null,
       launchEnvironment = null,
+      deferProviderStartUntilAttached = false,
       preferReuse = undefined,
       forceFreshSession = false
     } = options;
+    const resolvedSessionLabel = String(sessionLabel || sessionMetadata?.sessionLabel || '').trim() || null;
+    const resolvedSessionMetadata = sessionMetadata && typeof sessionMetadata === 'object'
+      ? { ...sessionMetadata }
+      : {};
+    if (resolvedSessionLabel && !resolvedSessionMetadata.sessionLabel) {
+      resolvedSessionMetadata.sessionLabel = resolvedSessionLabel;
+    }
 
     const effectiveRootSessionId = rootSessionId || null;
 
     const controlPlaneEnabled = this.sessionGraphWritesEnabled && (
       !!rootSessionId ||
       !!parentSessionId ||
-      !!sessionKind ||
       !!originClient ||
-      !!externalSessionRef ||
-      sessionMetadata != null
+      !!externalSessionRef
     );
 
     // Validate adapter
@@ -1665,9 +2478,9 @@ class PersistentSessionManager extends EventEmitter {
 
     // SECURITY: Validate model name if provided (used as CLI argument)
     if (model) {
-      const SAFE_MODEL_PATTERN = /^[a-zA-Z0-9._-]+$/;
+      const SAFE_MODEL_PATTERN = /^[a-zA-Z0-9._:@/-]+$/;
       if (!SAFE_MODEL_PATTERN.test(model) || model.length > 100) {
-        throw new Error('Invalid model name: only alphanumeric, dot, dash, underscore allowed (max 100 chars)');
+        throw new Error('Invalid model name: only alphanumeric, dot, dash, underscore, slash, colon, and at-sign allowed (max 100 chars)');
       }
     }
 
@@ -1681,9 +2494,7 @@ class PersistentSessionManager extends EventEmitter {
       }
     }
 
-    const recoveryMetadata = sessionMetadata && typeof sessionMetadata === 'object'
-      ? sessionMetadata
-      : {};
+    const recoveryMetadata = resolvedSessionMetadata;
     const recoveredManagedRoot = recoveryMetadata.recoveredManagedRoot === true;
     const resolvedSessionKind = controlPlaneEnabled
       ? deriveControlPlaneSessionKind({
@@ -1693,7 +2504,17 @@ class PersistentSessionManager extends EventEmitter {
           sessionMetadata: recoveryMetadata
         })
       : 'legacy';
-    const shouldHonorProviderResumeSessionId = recoveredManagedRoot || resolvedSessionKind === 'main';
+    const shouldHonorProviderResumeSessionId = (
+      recoveredManagedRoot
+      || resolvedSessionKind === 'main'
+      || (
+        adapter === 'codex-cli'
+        && (
+          String(recoveryMetadata.providerResumeSessionId || '').trim()
+          || String(recoveryMetadata.providerResumeCommand || '').trim()
+        )
+      )
+    );
     const providerResumeSessionId = shouldHonorProviderResumeSessionId
       ? resolveProviderResumeSessionId(adapter, {
           resumeSessionId: recoveryMetadata.providerResumeSessionId,
@@ -1712,6 +2533,7 @@ class PersistentSessionManager extends EventEmitter {
       systemPrompt,
       model,
       allowedTools,
+      sessionLabel: resolvedSessionLabel,
       permissionMode,
       rootSessionId,
       parentSessionId,
@@ -1722,7 +2544,7 @@ class PersistentSessionManager extends EventEmitter {
     if (reusableTerminal) {
       return this._reuseTerminal(reusableTerminal, {
         reuseReason: 'matching-root-session-shape',
-        sessionMetadata,
+        sessionMetadata: Object.keys(resolvedSessionMetadata).length > 0 ? resolvedSessionMetadata : null,
         resetProviderState: resolvedSessionKind !== 'main'
       });
     }
@@ -1739,8 +2561,13 @@ class PersistentSessionManager extends EventEmitter {
     const derivedManagedRootProviderSessionId = shouldBindManagedRootProviderSessionId
       ? normalizeUuid(providerThreadRef || resolvedRootSessionId)
       : null;
-    const boundProviderSessionId = providerThreadRef || derivedManagedRootProviderSessionId || null;
-    const resolvedProviderThreadRef = boundProviderSessionId || providerResumeSessionId || null;
+    const boundProviderSessionId = normalizeProviderThreadRef(
+      adapter,
+      providerThreadRef || derivedManagedRootProviderSessionId || null
+    );
+    const resolvedProviderThreadRef = boundProviderSessionId
+      || normalizeProviderThreadRef(adapter, providerResumeSessionId || null)
+      || null;
     const shouldResumeLatestProviderSession = recoveredManagedRoot && !providerResumeSessionId;
     const sessionName = `cliagents-${terminalId.slice(0, 6)}`;
     // Truncate prefix to ensure window name stays under 50-char tmux limit
@@ -1781,18 +2608,49 @@ class PersistentSessionManager extends EventEmitter {
 
     // Preserve richer native UI for user-facing managed roots; keep worker/orchestration
     // sessions plain for easier capture, parsing, and browser replay.
-    const sessionEnv = shouldPreserveRichTerminalUi({ role, sessionKind: resolvedSessionKind, sessionMetadata })
+    const preserveRichTerminalUi = shouldPreserveRichTerminalUi({
+      role,
+      sessionKind: resolvedSessionKind,
+      sessionMetadata: Object.keys(resolvedSessionMetadata).length > 0 ? resolvedSessionMetadata : null
+    });
+    const shouldDeferProviderStart = Boolean(
+      deferProviderStartUntilAttached
+      && preserveRichTerminalUi
+      && resolvedSessionKind === 'main'
+    );
+    const managedRootControlPlaneEnv = buildManagedRootControlPlaneEnv({
+      role,
+      sessionKind: resolvedSessionKind,
+      rootSessionId: resolvedRootSessionId,
+      externalSessionRef,
+      clientName: originClient || resolvedSessionMetadata?.clientName || null,
+      workspaceRoot: workDir,
+      sessionMetadata: Object.keys(resolvedSessionMetadata).length > 0 ? resolvedSessionMetadata : null
+    });
+    const sessionEnv = preserveRichTerminalUi
       ? {
           NO_COLOR: null,
           CI: null,
-          ...normalizeLaunchEnvironment(launchEnvironment || sessionMetadata?.launchEnvironment)
+          ...normalizeLaunchEnvironment(launchEnvironment || resolvedSessionMetadata?.launchEnvironment),
+          ...managedRootControlPlaneEnv
         }
-      : { NO_COLOR: '1' };
+      : {
+          NO_COLOR: '1',
+          ...managedRootControlPlaneEnv
+        };
+    const launchGeometry = preserveRichTerminalUi
+      ? resolveLaunchGeometry(launchEnvironment || resolvedSessionMetadata?.launchEnvironment)
+      : null;
 
     this.tmux.createSession(sessionName, windowName, terminalId, {
       workingDir: workDir,
-      env: sessionEnv
+      env: sessionEnv,
+      width: launchGeometry?.width || null,
+      height: launchGeometry?.height || null
     });
+    if (launchGeometry && typeof this.tmux.resizePane === 'function') {
+      this.tmux.resizePane(sessionName, windowName, launchGeometry.width, launchGeometry.height);
+    }
 
     // Set up logging
     const logPath = path.join(this.logDir, `${terminalId}.log`);
@@ -1819,17 +2677,6 @@ class PersistentSessionManager extends EventEmitter {
       yoloMode: true,
       autoApprove: true
     });
-
-    // Wait for shell initialization before sending command
-    // Some shells (like zsh) take time to initialize, source config files, and set up prompts
-    // 8000ms is needed for zsh with oh-my-zsh plugins, Java version check, and other init scripts
-    // (6000ms was still too short - tested empirically that 8s is reliable)
-    await new Promise(resolve => setTimeout(resolve, 8000));
-
-    // Start CLI directly (working directory already set via -c in createSession)
-    // NOTE: Using "cd && command" causes some CLIs (like gemini) to exit immediately
-    // because they don't work well as part of a shell command chain
-    this.tmux.sendKeys(sessionName, windowName, cliCommand, true);
 
     // Store terminal info
     const terminal = {
@@ -1858,11 +2705,15 @@ class PersistentSessionManager extends EventEmitter {
       lineageDepth: Number.isInteger(lineageDepth)
         ? lineageDepth
         : (controlPlaneEnabled && parentSessionId ? 1 : 0),
-      sessionMetadata: sessionMetadata || null,
+      sessionMetadata: Object.keys(resolvedSessionMetadata).length > 0 ? resolvedSessionMetadata : null,
+      sessionLabel: resolvedSessionLabel,
       harnessSessionId: terminalId,
       providerThreadRef: resolvedProviderThreadRef,
       adoptedAt: null,
-      captureMode: 'raw-tty'
+      captureMode: 'raw-tty',
+      deferredProviderStart: shouldDeferProviderStart,
+      providerStartState: shouldDeferProviderStart ? 'pending_attach' : 'immediate',
+      pendingProviderCommand: shouldDeferProviderStart ? cliCommand : null
     };
 
     this._attachReuseInternals(terminal, this._buildReuseContext({
@@ -1873,11 +2724,12 @@ class PersistentSessionManager extends EventEmitter {
       systemPrompt,
       model,
       allowedTools,
+      sessionLabel: resolvedSessionLabel,
       permissionMode: effectivePermissionMode,
       rootSessionId: terminal.rootSessionId,
       parentSessionId: terminal.parentSessionId,
       sessionKind: terminal.sessionKind,
-      sessionMetadata: sessionMetadata || null
+      sessionMetadata: terminal.sessionMetadata || null
     }));
     this._reserveTerminal(terminal);
 
@@ -1915,42 +2767,30 @@ class PersistentSessionManager extends EventEmitter {
     // Emit creation event
     this.emit('terminal-created', { terminalId, adapter, role });
 
-    // Auto-dismiss Gemini's trust prompts if they appear (user-facing sessions only)
-    // For orchestration terminals, we use -p mode which bypasses these prompts entirely
-    // Old format: "Do you trust this folder? [1] Yes [2] No" (Enter accepts pre-selected option 1)
-    if (adapter === 'gemini-cli' && role !== 'worker') {
-      // Give Gemini a moment to show the trust prompt (appears within first few seconds)
-      await new Promise(resolve => setTimeout(resolve, 5000));
-      const earlyOutput = this.tmux.getHistory(sessionName, windowName, 1000);
-      if (earlyOutput && (earlyOutput.includes('Do you trust') || earlyOutput.includes('Trust folder'))) {
-        console.log(`[SessionManager] Gemini trust prompt detected for ${terminalId}, auto-trusting...`);
-        this.tmux.sendKeys(sessionName, windowName, '', true); // Press Enter to accept pre-selected option
-      }
-    }
+    // Give the pane a brief warm-up window before sending the first command.
+    // User-facing managed roots get a slightly longer delay to avoid racing slow
+    // shell init, while worker/subagent terminals stay fast by default.
+    const startupDelayMs = resolveTerminalStartupDelayMs({
+      role,
+      sessionKind: resolvedSessionKind,
+      sessionMetadata: Object.keys(resolvedSessionMetadata).length > 0 ? resolvedSessionMetadata : null
+    });
 
-    // Wait for CLI to become ready
-    // Use 60s timeout since CLIs can take a while to initialize (loading plugins, MCP servers, etc.)
-    // For orchestration terminals using echo markers, this should be instant
-    try {
-      await this.waitForStatus(terminalId, TerminalStatus.IDLE, 60000);
-    } catch (error) {
-      // If user-facing Gemini still stuck on trust prompt, try dismissing again
-      if (adapter === 'gemini-cli' && role !== 'worker') {
-        const output = this.tmux.getHistory(sessionName, windowName, 1000);
-        if (output && (output.includes('Do you trust') || output.includes('Trust folder'))) {
-          console.log(`[SessionManager] Retrying Gemini trust prompt dismiss for ${terminalId}`);
-          this.tmux.sendKeys(sessionName, windowName, '', true);
-          try {
-            await this.waitForStatus(terminalId, TerminalStatus.IDLE, 30000);
-          } catch (retryError) {
-            console.warn(`Terminal ${terminalId} may not be fully ready:`, retryError.message);
-          }
-        } else {
-          console.warn(`Terminal ${terminalId} may not be fully ready:`, error.message);
-        }
-      } else {
-        console.warn(`Terminal ${terminalId} may not be fully ready:`, error.message);
-      }
+    if (shouldDeferProviderStart) {
+      const attachTimeoutMs = resolveDeferredProviderAttachTimeoutMs();
+      void this._awaitAttachedClientAndStartProvider(terminal, cliCommand, {
+        attachTimeoutMs,
+        pollIntervalMs: DEFERRED_PROVIDER_ATTACH_POLL_INTERVAL_MS,
+        postAttachDelayMs: Math.min(startupDelayMs || DEFAULT_POST_ATTACH_PROVIDER_START_DELAY_MS, 500)
+      }).catch((error) => {
+        terminal.providerStartState = 'failed';
+        terminal.deferredProviderStart = false;
+        console.warn(`Terminal ${terminalId} deferred provider start failed:`, error.message);
+      });
+    } else {
+      await this._startProviderCommand(terminal, cliCommand, {
+        startupDelayMs
+      });
     }
 
     return this._buildTerminalResponse(terminal);
@@ -2283,6 +3123,15 @@ class PersistentSessionManager extends EventEmitter {
       throw new Error(`Terminal not found: ${terminalId}`);
     }
 
+    const currentStatus = this.getStatus(terminalId);
+    if (
+      currentStatus === TerminalStatus.PROCESSING
+      || currentStatus === TerminalStatus.WAITING_PERMISSION
+      || currentStatus === TerminalStatus.WAITING_USER_ANSWER
+    ) {
+      throw buildTerminalBusyError(terminalId, currentStatus);
+    }
+
     this._releaseTerminalReservation(terminal);
 
     // For orchestration terminals, use non-interactive mode to avoid blocking prompts
@@ -2296,6 +3145,7 @@ class PersistentSessionManager extends EventEmitter {
       // Run Gemini one-shot work through the helper so tmux workers get the same
       // model fallback behavior as the direct-session adapter path.
       const geminiCommand = buildGeminiOneShotRunnerCommand(message, terminal);
+      terminal.messageCount = Number.isInteger(terminal.messageCount) ? terminal.messageCount + 1 : 1;
 
       // Send the tracked one-shot command
       this.tmux.sendKeys(
@@ -2327,10 +3177,8 @@ class PersistentSessionManager extends EventEmitter {
         true
       );
     } else if (isCodexOrchestration) {
-      // Build codex exec command with proper escaping
-      // Use CI=true to skip update prompts even in non-interactive mode
-      const escapedMessage = message.replace(/'/g, "'\\''"); // Escape single quotes for shell
-      const codexCommand = `CI=true codex exec --dangerously-bypass-approvals-and-sandbox '${escapedMessage}'`;
+      const codexCommand = buildCodexOneShotCommand(message, terminal);
+      terminal.messageCount = Number.isInteger(terminal.messageCount) ? terminal.messageCount + 1 : 1;
 
       // Send the tracked one-shot command
       this.tmux.sendKeys(
@@ -2340,9 +3188,8 @@ class PersistentSessionManager extends EventEmitter {
         true
       );
     } else if (isQwenOrchestration) {
-      // Build qwen one-shot command with proper escaping
-      const escapedMessage = message.replace(/'/g, "'\\''");
-      const qwenCommand = `qwen -p '${escapedMessage}' -o stream-json -y`;
+      const qwenCommand = buildQwenOneShotCommand(message, terminal);
+      terminal.messageCount = Number.isInteger(terminal.messageCount) ? terminal.messageCount + 1 : 1;
 
       this.tmux.sendKeys(
         terminal.sessionName,
@@ -2351,9 +3198,8 @@ class PersistentSessionManager extends EventEmitter {
         true
       );
     } else if (isOpencodeOrchestration) {
-      const escapedMessage = message.replace(/'/g, "'\\''");
-      const modelArg = terminal.model ? ` --model ${terminal.model}` : '';
-      const opencodeCommand = `opencode run '${escapedMessage}' --format json --dangerously-skip-permissions${modelArg}`;
+      const opencodeCommand = buildOpencodeOneShotCommand(message, terminal);
+      terminal.messageCount = Number.isInteger(terminal.messageCount) ? terminal.messageCount + 1 : 1;
 
       this.tmux.sendKeys(
         terminal.sessionName,
@@ -2417,13 +3263,37 @@ class PersistentSessionManager extends EventEmitter {
    * @param {number} lines - Number of lines to retrieve
    * @returns {string} - Terminal output
    */
-  getOutput(terminalId, lines = 200) {
+  getOutput(terminalId, lines = 200, options = null) {
+    const outputOptions = normalizeTerminalOutputOptions(lines, options);
     const terminal = this.terminals.get(terminalId);
     if (!terminal) {
       throw new Error(`Terminal not found: ${terminalId}`);
     }
+    const reconciledTerminal = this._reconcileTerminalBacking(terminal);
+    if (!reconciledTerminal) {
+      throw new Error(`Terminal not found: ${terminalId}`);
+    }
+    if (reconciledTerminal.status === 'orphaned') {
+      const requestedBytes = Math.max(Number(outputOptions.lines) * 200, MIN_ORPHANED_LOG_TAIL_BYTES);
+      const output = this.readLogTail(terminalId, Math.min(requestedBytes, MAX_ORPHANED_LOG_TAIL_BYTES));
+      return outputOptions.format === 'ansi' ? output : stripAnsiCodes(output);
+    }
 
-    return this.tmux.getHistory(terminal.sessionName, terminal.windowName, lines);
+    const preserveAnsi = outputOptions.format === 'ansi';
+    if (outputOptions.mode === 'visible') {
+      return this.tmux.getVisibleContent(
+        reconciledTerminal.sessionName,
+        reconciledTerminal.windowName,
+        { preserveAnsi }
+      );
+    }
+
+    return this.tmux.getHistory(
+      reconciledTerminal.sessionName,
+      reconciledTerminal.windowName,
+      outputOptions.lines,
+      { preserveAnsi }
+    );
   }
 
   /**
@@ -2441,10 +3311,14 @@ class PersistentSessionManager extends EventEmitter {
     if (!reconciledTerminal) {
       throw new Error(`Terminal not found: ${terminalId}`);
     }
+    if (reconciledTerminal.status === 'orphaned') {
+      return 'orphaned';
+    }
 
     const output = this.getOutput(terminalId);
     // Use status detector if available
     const detector = this.statusDetectors.get(reconciledTerminal.adapter);
+    this._restoreTrackedRunFromPersistence(reconciledTerminal, output, detector);
     const trackedRunStatus = this._detectTrackedRunStatus(reconciledTerminal, output, detector);
     const attention = this._getTerminalAttention(reconciledTerminal, { output });
     if (trackedRunStatus) {
@@ -2493,7 +3367,10 @@ class PersistentSessionManager extends EventEmitter {
         try {
           const elapsed = Date.now() - startTime;
           if (elapsed > timeoutMs) {
-            reject(new Error(`Timeout waiting for status '${targetStatus}' after ${timeoutMs}ms`));
+            const error = new Error(`Timeout waiting for status '${targetStatus}' after ${timeoutMs}ms`);
+            error.code = 'terminal_timeout';
+            error.terminalId = terminalId;
+            reject(error);
             return;
           }
 
@@ -2529,7 +3406,7 @@ class PersistentSessionManager extends EventEmitter {
             consecutiveErrors++;
             // Log what the detector is seeing for debugging
             const termInfo = this.terminals.get(terminalId);
-            if (termInfo) {
+            if (termInfo && ENABLE_STATUS_DEBUG_LOGS) {
               const output = this.tmux.getHistory(termInfo.sessionName, termInfo.windowName, 500);
               console.log(`[DEBUG] Terminal ${terminalId} (${termInfo.adapter}) ERROR detected (${consecutiveErrors}/${errorThreshold}), waiting for ${targetStatus}`);
 
@@ -2547,7 +3424,7 @@ class PersistentSessionManager extends EventEmitter {
               return;
             }
           } else {
-            if (consecutiveErrors > 0) {
+            if (consecutiveErrors > 0 && ENABLE_STATUS_DEBUG_LOGS) {
               console.log(`[DEBUG] Terminal ${terminalId} status=${currentStatus}, resetting error count from ${consecutiveErrors}`);
             }
             consecutiveErrors = 0; // Reset on non-error status
@@ -2587,7 +3464,19 @@ class PersistentSessionManager extends EventEmitter {
     await new Promise(resolve => setTimeout(resolve, processingDelay));
 
     // Wait for idle or completed status
-    await this.waitForStatus(terminalId, TerminalStatus.COMPLETED, timeoutMs);
+    try {
+      await this.waitForStatus(terminalId, TerminalStatus.COMPLETED, timeoutMs);
+    } catch (error) {
+      if (error?.code === 'terminal_timeout' && this._shouldTrackModelHealth(terminal)) {
+        this.modelRoutingService.recordModelFailure({
+          adapter: terminal.adapter,
+          model: terminal.model,
+          failureClass: 'timeout',
+          reason: error.message
+        });
+      }
+      throw error;
+    }
 
     // Capture and return output
     const output = this.tmux.getHistory(terminal.sessionName, terminal.windowName, 500);
@@ -2762,8 +3651,28 @@ class PersistentSessionManager extends EventEmitter {
   async destroyTerminal(terminalId) {
     const terminal = this.terminals.get(terminalId);
     if (!terminal) {
-      return;
+      return false;
     }
+
+    const currentStatus = this.getStatus(terminalId);
+    const visibleOutput = this.getOutput(terminalId, {
+      mode: 'visible',
+      format: 'plain',
+      lines: 120
+    });
+    const historyOutput = visibleOutput || this.getOutput(terminalId, {
+      mode: 'history',
+      format: 'plain',
+      lines: 120
+    });
+    const activityExcerpt = summarizeMessage(stripAnsiCodes(historyOutput || ''), 320) || null;
+    const currentCommand = this._getCurrentCommand(terminal);
+    const attention = this._getTerminalAttention(terminal, { output: historyOutput });
+    const activitySummary = attention?.message
+      || summarizeTerminalActivity(historyOutput, 240)
+      || (currentCommand
+        ? `${String(currentStatus || 'unknown')} at ${currentCommand}`
+        : `${String(currentStatus || 'unknown')} terminal destroyed`);
 
     this._recordSessionEvent({
       rootSessionId: terminal.rootSessionId || terminal.terminalId,
@@ -2780,7 +3689,12 @@ class PersistentSessionManager extends EventEmitter {
       payloadSummary: `${terminal.adapter} session destroyed`,
       payloadJson: {
         adapter: terminal.adapter,
-        status: terminal.status
+        status: currentStatus,
+        activitySummary,
+        activityExcerpt,
+        activitySource: historyOutput ? 'output' : 'fallback',
+        resumeCommand: attention?.resumeCommand || null,
+        providerThreadRef: terminal.providerThreadRef || null
       },
       metadata: terminal.sessionMetadata || null
     });
@@ -2797,6 +3711,7 @@ class PersistentSessionManager extends EventEmitter {
     }
 
     this.emit('terminal-destroyed', { terminalId });
+    return true;
   }
 
   _shouldPreserveTerminalOnStop(terminal) {
@@ -2909,7 +3824,11 @@ class PersistentSessionManager extends EventEmitter {
       throw new Error(`Terminal not found: ${terminalId}`);
     }
 
-    return `tmux attach -t "${terminal.sessionName}"`;
+    const tmuxPrefix = this.tmux?.socketPath
+      ? `tmux -S ${JSON.stringify(this.tmux.socketPath)}`
+      : 'tmux';
+
+    return `${tmuxPrefix} attach -t ${JSON.stringify(terminal.sessionName)}`;
   }
 }
 
@@ -2917,6 +3836,14 @@ module.exports = {
   PersistentSessionManager,
   TerminalStatus,
   generateTerminalId,
+  resolveTerminalStartupDelayMs,
+  extractProviderThreadRefFromOutput,
+  normalizeProviderThreadRef,
+  buildGeminiOneShotRunnerCommand,
+  buildClaudeOneShotCommand,
+  buildCodexOneShotCommand,
+  buildQwenOneShotCommand,
+  buildOpencodeOneShotCommand,
   // Export for testing
   CLI_COMMANDS
 };

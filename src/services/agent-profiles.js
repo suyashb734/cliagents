@@ -135,7 +135,7 @@ class AgentProfilesService {
    * Get a profile by combining a role with a specific adapter
    * This is the new API for the role+adapter model
    * @param {string} roleName - Role name (e.g., 'implement', 'review')
-   * @param {string} adapterName - Adapter name (e.g., 'gemini-cli', 'claude-code')
+   * @param {string} adapterName - Adapter name (e.g., 'gemini-cli', 'codex-cli')
    * @returns {Object|null} - Profile or null if role/adapter not found
    */
   getProfileByRoleAndAdapter(roleName, adapterName) {
@@ -281,7 +281,7 @@ class AgentProfilesService {
     if (!profile) return null;
 
     return {
-      adapter: 'claude-code',
+      adapter: 'codex-cli',
       timeout: 300,
       allowedTools: null,
       systemPrompt: null,

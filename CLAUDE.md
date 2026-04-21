@@ -2,6 +2,8 @@
 
 A Node.js server that wraps CLI-based AI agents (Claude Code, Gemini CLI, Codex, etc.) and exposes them via HTTP REST API and WebSocket.
 
+For repo-local coding policy and stable agent guidance, start with [`AGENTS.md`](./AGENTS.md). Keep architecture notes, API details, and broader project documentation here and under `docs/`.
+
 ## Quick Start
 
 ```bash

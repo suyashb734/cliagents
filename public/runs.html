@@ -1,0 +1,1345 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>cliagents - Run Inspector</title>
+  <style>
+    :root {
+      --bg-primary: #0d1117;
+      --bg-secondary: #161b22;
+      --bg-tertiary: #21262d;
+      --border-color: #30363d;
+      --text-primary: #e6edf3;
+      --text-secondary: #8b949e;
+      --accent-blue: #58a6ff;
+      --accent-green: #3fb950;
+      --accent-yellow: #d29922;
+      --accent-red: #f85149;
+      --accent-purple: #a371f7;
+    }
+
+    * {
+      box-sizing: border-box;
+      margin: 0;
+      padding: 0;
+    }
+
+    body {
+      font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, Oxygen, Ubuntu, sans-serif;
+      background: var(--bg-primary);
+      color: var(--text-primary);
+      min-height: 100vh;
+      padding: 20px;
+    }
+
+    a {
+      color: inherit;
+      text-decoration: none;
+    }
+
+    .container {
+      max-width: 1600px;
+      margin: 0 auto;
+    }
+
+    header {
+      display: flex;
+      justify-content: space-between;
+      align-items: flex-start;
+      gap: 16px;
+      margin-bottom: 24px;
+      padding-bottom: 20px;
+      border-bottom: 1px solid var(--border-color);
+    }
+
+    h1 {
+      font-size: 1.8rem;
+      font-weight: 600;
+      display: flex;
+      align-items: center;
+      gap: 12px;
+      margin-bottom: 8px;
+    }
+
+    .subtitle {
+      color: var(--text-secondary);
+      max-width: 880px;
+      line-height: 1.5;
+    }
+
+    .header-actions {
+      display: flex;
+      gap: 12px;
+      flex-wrap: wrap;
+    }
+
+    .btn {
+      padding: 8px 16px;
+      border-radius: 6px;
+      border: 1px solid var(--border-color);
+      background: var(--bg-secondary);
+      color: var(--text-primary);
+      font-size: 14px;
+      cursor: pointer;
+      display: inline-flex;
+      align-items: center;
+      gap: 6px;
+      transition: all 0.2s;
+    }
+
+    .btn:hover {
+      background: var(--bg-tertiary);
+      border-color: var(--text-secondary);
+    }
+
+    .btn-primary {
+      background: var(--accent-blue);
+      border-color: var(--accent-blue);
+      color: white;
+    }
+
+    .btn-primary:hover {
+      background: #4c9aed;
+    }
+
+    .stats-bar {
+      display: grid;
+      grid-template-columns: repeat(auto-fit, minmax(180px, 1fr));
+      gap: 16px;
+      margin-bottom: 24px;
+    }
+
+    .card,
+    .stat-card {
+      background: var(--bg-secondary);
+      border: 1px solid var(--border-color);
+      border-radius: 12px;
+    }
+
+    .stat-card {
+      padding: 16px 18px;
+    }
+
+    .stat-label {
+      font-size: 12px;
+      color: var(--text-secondary);
+      text-transform: uppercase;
+      letter-spacing: 0.5px;
+      margin-bottom: 8px;
+    }
+
+    .stat-value {
+      font-size: 28px;
+      font-weight: 600;
+    }
+
+    .filters {
+      display: grid;
+      grid-template-columns: repeat(auto-fit, minmax(180px, 1fr));
+      gap: 12px;
+      padding: 16px;
+      margin-bottom: 24px;
+    }
+
+    .field {
+      display: flex;
+      flex-direction: column;
+      gap: 6px;
+    }
+
+    .field label {
+      font-size: 12px;
+      color: var(--text-secondary);
+      text-transform: uppercase;
+      letter-spacing: 0.5px;
+    }
+
+    .field input,
+    .field select {
+      width: 100%;
+      padding: 10px 12px;
+      border-radius: 8px;
+      border: 1px solid var(--border-color);
+      background: var(--bg-tertiary);
+      color: var(--text-primary);
+      font-size: 14px;
+    }
+
+    .filters-actions {
+      display: flex;
+      align-items: flex-end;
+      gap: 12px;
+      flex-wrap: wrap;
+    }
+
+    .layout {
+      display: grid;
+      grid-template-columns: minmax(360px, 440px) minmax(0, 1fr);
+      gap: 20px;
+      align-items: start;
+    }
+
+    .panel-header {
+      display: flex;
+      justify-content: space-between;
+      align-items: center;
+      gap: 12px;
+      padding: 16px 18px;
+      border-bottom: 1px solid var(--border-color);
+    }
+
+    .panel-title {
+      font-size: 15px;
+      font-weight: 600;
+    }
+
+    .panel-actions {
+      display: flex;
+      gap: 8px;
+      flex-wrap: wrap;
+      align-items: center;
+    }
+
+    .panel-subtitle {
+      font-size: 12px;
+      color: var(--text-secondary);
+    }
+
+    .runs-list {
+      max-height: calc(100vh - 320px);
+      overflow: auto;
+    }
+
+    .run-row {
+      border-bottom: 1px solid var(--border-color);
+      padding: 14px 18px;
+      cursor: pointer;
+      transition: background 0.2s, border-color 0.2s;
+    }
+
+    .run-row:hover,
+    .run-row.active {
+      background: rgba(88, 166, 255, 0.08);
+    }
+
+    .run-row:last-child {
+      border-bottom: 0;
+    }
+
+    .pagination-bar {
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      gap: 12px;
+      padding: 12px 18px;
+      border-top: 1px solid var(--border-color);
+    }
+
+    .pagination-summary {
+      font-size: 12px;
+      color: var(--text-secondary);
+    }
+
+    .run-row-header,
+    .detail-grid {
+      display: grid;
+      grid-template-columns: repeat(2, minmax(0, 1fr));
+      gap: 8px 14px;
+    }
+
+    .run-kind {
+      display: inline-flex;
+      align-items: center;
+      gap: 8px;
+      font-weight: 600;
+      font-size: 14px;
+    }
+
+    .status-pill {
+      display: inline-flex;
+      align-items: center;
+      justify-content: center;
+      min-width: 84px;
+      padding: 4px 10px;
+      border-radius: 999px;
+      font-size: 11px;
+      font-weight: 600;
+      text-transform: uppercase;
+      letter-spacing: 0.4px;
+    }
+
+    .status-completed { background: rgba(63, 185, 80, 0.15); color: var(--accent-green); }
+    .status-running,
+    .status-in_progress { background: rgba(88, 166, 255, 0.15); color: var(--accent-blue); }
+    .status-failed { background: rgba(248, 81, 73, 0.15); color: var(--accent-red); }
+    .status-partial { background: rgba(210, 153, 34, 0.15); color: var(--accent-yellow); }
+    .status-pending,
+    .status-queued { background: rgba(210, 153, 34, 0.15); color: var(--accent-yellow); }
+    .status-cancelled { background: rgba(139, 148, 158, 0.15); color: var(--text-secondary); }
+
+    .muted {
+      color: var(--text-secondary);
+      font-size: 12px;
+    }
+
+    .section {
+      padding: 18px;
+      border-bottom: 1px solid var(--border-color);
+    }
+
+    .section:last-child {
+      border-bottom: 0;
+    }
+
+    .section h2 {
+      font-size: 14px;
+      margin-bottom: 12px;
+    }
+
+    .kv {
+      display: flex;
+      flex-direction: column;
+      gap: 4px;
+    }
+
+    .kv-label {
+      font-size: 11px;
+      color: var(--text-secondary);
+      text-transform: uppercase;
+      letter-spacing: 0.4px;
+    }
+
+    .kv-value {
+      font-size: 14px;
+      line-height: 1.4;
+      word-break: break-word;
+    }
+
+    .participants-grid,
+    .comparison-grid,
+    .outputs-grid,
+    .steps-grid,
+    .tools-grid {
+      display: grid;
+      gap: 12px;
+    }
+
+    .comparison-grid {
+      grid-template-columns: repeat(auto-fit, minmax(280px, 1fr));
+    }
+
+    .tile {
+      background: var(--bg-tertiary);
+      border: 1px solid var(--border-color);
+      border-radius: 10px;
+      padding: 14px;
+    }
+
+    .tile-header {
+      display: flex;
+      justify-content: space-between;
+      align-items: flex-start;
+      gap: 12px;
+      margin-bottom: 10px;
+    }
+
+    .tile-title {
+      font-size: 14px;
+      font-weight: 600;
+      margin-bottom: 4px;
+    }
+
+    .code-block {
+      white-space: pre-wrap;
+      overflow-wrap: anywhere;
+      font-family: ui-monospace, SFMono-Regular, Menlo, Monaco, monospace;
+      font-size: 12px;
+      line-height: 1.5;
+      color: var(--text-primary);
+      background: rgba(13, 17, 23, 0.8);
+      border: 1px solid var(--border-color);
+      border-radius: 8px;
+      padding: 12px;
+      max-height: 320px;
+      overflow: auto;
+    }
+
+    .empty-state,
+    .error-state {
+      padding: 32px 20px;
+      text-align: center;
+      color: var(--text-secondary);
+    }
+
+    .error-state {
+      color: var(--accent-red);
+    }
+
+    .badge-row {
+      display: flex;
+      gap: 8px;
+      flex-wrap: wrap;
+      margin-top: 8px;
+    }
+
+    .badge {
+      display: inline-flex;
+      align-items: center;
+      padding: 4px 8px;
+      border-radius: 999px;
+      font-size: 11px;
+      background: rgba(163, 113, 247, 0.14);
+      color: var(--accent-purple);
+    }
+
+    .structured-group {
+      margin-top: 14px;
+    }
+
+    .structured-list {
+      margin: 8px 0 0 18px;
+      display: grid;
+      gap: 8px;
+    }
+
+    .structured-list li {
+      color: var(--text-primary);
+      line-height: 1.5;
+    }
+
+    .structured-blocker {
+      background: rgba(13, 17, 23, 0.55);
+      border: 1px solid var(--border-color);
+      border-radius: 8px;
+      padding: 10px 12px;
+    }
+
+    .structured-blocker-title {
+      font-size: 13px;
+      font-weight: 600;
+      margin-bottom: 6px;
+    }
+
+    .inline-code {
+      font-family: ui-monospace, SFMono-Regular, Menlo, Monaco, monospace;
+      font-size: 12px;
+    }
+
+    @media (max-width: 1100px) {
+      .layout {
+        grid-template-columns: 1fr;
+      }
+
+      .runs-list {
+        max-height: none;
+      }
+    }
+
+    @media (max-width: 640px) {
+      body {
+        padding: 14px;
+      }
+
+      header {
+        flex-direction: column;
+      }
+
+      .header-actions,
+      .filters-actions {
+        width: 100%;
+      }
+
+      .header-actions .btn,
+      .filters-actions .btn {
+        flex: 1;
+        justify-content: center;
+      }
+
+      .run-row-header,
+      .detail-grid {
+        grid-template-columns: 1fr;
+      }
+    }
+  </style>
+</head>
+<body>
+  <div class="container">
+    <header>
+      <div>
+        <h1><span>Run Inspector</span></h1>
+        <div class="subtitle">
+          Inspect persisted consensus, discussion, plan-review, and PR-review runs. This page reads from
+          <code>/orchestration/runs</code> and <code>/orchestration/runs/:id</code>, so it only works when
+          <code>RUN_LEDGER_READS_ENABLED=1</code>.
+        </div>
+      </div>
+      <div class="header-actions">
+        <a href="/" class="btn">Chat UI</a>
+        <a href="/console" class="btn">Live Console</a>
+        <a href="/dashboard" class="btn">Dashboard</a>
+        <button class="btn btn-primary" id="refresh-button" type="button">Refresh</button>
+      </div>
+    </header>
+
+    <div class="stats-bar">
+      <div class="stat-card">
+        <div class="stat-label">Loaded Runs</div>
+        <div class="stat-value" id="stat-loaded">-</div>
+      </div>
+      <div class="stat-card">
+        <div class="stat-label">Completed</div>
+        <div class="stat-value" id="stat-completed">-</div>
+      </div>
+      <div class="stat-card">
+        <div class="stat-label">Running</div>
+        <div class="stat-value" id="stat-running">-</div>
+      </div>
+      <div class="stat-card">
+        <div class="stat-label">Failed</div>
+        <div class="stat-value" id="stat-failed">-</div>
+      </div>
+      <div class="stat-card">
+        <div class="stat-label">Pagination</div>
+        <div class="stat-value" id="stat-pagination">-</div>
+      </div>
+    </div>
+
+    <div class="card filters">
+      <div class="field">
+        <label for="kind-filter">Kind</label>
+        <select id="kind-filter">
+          <option value="">All kinds</option>
+          <option value="consensus">consensus</option>
+          <option value="plan-review">plan-review</option>
+          <option value="pr-review">pr-review</option>
+          <option value="discussion">discussion</option>
+        </select>
+      </div>
+      <div class="field">
+        <label for="status-filter">Status</label>
+        <select id="status-filter">
+          <option value="">All statuses</option>
+          <option value="pending">pending</option>
+          <option value="running">running</option>
+          <option value="completed">completed</option>
+          <option value="partial">partial</option>
+          <option value="failed">failed</option>
+          <option value="cancelled">cancelled</option>
+          <option value="abandoned">abandoned</option>
+        </select>
+      </div>
+      <div class="field">
+        <label for="adapter-filter">Adapter</label>
+        <input id="adapter-filter" type="text" placeholder="codex-cli">
+      </div>
+      <div class="field">
+        <label for="limit-filter">Limit</label>
+        <select id="limit-filter">
+          <option value="25">25</option>
+          <option value="50" selected>50</option>
+          <option value="100">100</option>
+          <option value="200">200</option>
+        </select>
+      </div>
+      <div class="filters-actions">
+        <button class="btn btn-primary" id="apply-filters" type="button">Apply Filters</button>
+        <button class="btn" id="clear-filters" type="button">Clear</button>
+      </div>
+    </div>
+
+    <div class="layout">
+      <section class="card">
+        <div class="panel-header">
+          <div>
+            <div class="panel-title">Runs</div>
+            <div class="panel-subtitle" id="runs-summary">No data loaded</div>
+          </div>
+        </div>
+        <div class="runs-list" id="runs-list">
+          <div class="empty-state">Loading runs...</div>
+        </div>
+        <div class="pagination-bar">
+          <div class="pagination-summary" id="pagination-summary">No pagination data</div>
+          <div class="panel-actions">
+            <button class="btn" id="prev-page" type="button">Previous</button>
+            <button class="btn" id="next-page" type="button">Next</button>
+          </div>
+        </div>
+      </section>
+
+      <section class="card" id="detail-panel">
+        <div class="panel-header">
+          <div>
+            <div class="panel-title">Run Detail</div>
+            <div class="panel-subtitle" id="detail-summary">Select a run to inspect persisted participants, steps, outputs, and tool events.</div>
+          </div>
+        </div>
+        <div id="detail-body">
+          <div class="empty-state">No run selected.</div>
+        </div>
+      </section>
+    </div>
+  </div>
+
+  <script>
+    const API_BASE = window.location.origin;
+    const DEFAULT_LIMIT = 50;
+    const state = {
+      runs: [],
+      pagination: null,
+      selectedRunId: null,
+      filters: {
+        kind: '',
+        status: '',
+        adapter: '',
+        limit: DEFAULT_LIMIT,
+        offset: 0
+      }
+    };
+
+    function formatTimestamp(value) {
+      if (!value) return 'n/a';
+      return new Date(value).toLocaleString();
+    }
+
+    function formatDuration(ms) {
+      if (ms === null || ms === undefined) return 'n/a';
+      if (ms < 1000) return `${ms} ms`;
+      const seconds = Math.round(ms / 100) / 10;
+      if (seconds < 60) return `${seconds}s`;
+      const minutes = Math.floor(seconds / 60);
+      const rem = Math.round((seconds % 60) * 10) / 10;
+      return `${minutes}m ${rem}s`;
+    }
+
+    function escapeHtml(value) {
+      return String(value ?? '')
+        .replace(/&/g, '&amp;')
+        .replace(/</g, '&lt;')
+        .replace(/>/g, '&gt;')
+        .replace(/"/g, '&quot;')
+        .replace(/'/g, '&#39;');
+    }
+
+    function jsonBlock(value) {
+      if (value === null || value === undefined) {
+        return '<div class="muted">n/a</div>';
+      }
+      return `<div class="code-block">${escapeHtml(typeof value === 'string' ? value : JSON.stringify(value, null, 2))}</div>`;
+    }
+
+    function statusPill(status, fallback = 'pending') {
+      const value = status || fallback;
+      return `<div class="status-pill status-${escapeHtml(value)}">${escapeHtml(value)}</div>`;
+    }
+
+    function readFiltersFromForm() {
+      state.filters.kind = document.getElementById('kind-filter').value.trim();
+      state.filters.status = document.getElementById('status-filter').value.trim();
+      state.filters.adapter = document.getElementById('adapter-filter').value.trim();
+      state.filters.limit = Number.parseInt(document.getElementById('limit-filter').value, 10) || DEFAULT_LIMIT;
+    }
+
+    function writeFiltersToForm() {
+      document.getElementById('kind-filter').value = state.filters.kind || '';
+      document.getElementById('status-filter').value = state.filters.status || '';
+      document.getElementById('adapter-filter').value = state.filters.adapter || '';
+      document.getElementById('limit-filter').value = String(state.filters.limit || DEFAULT_LIMIT);
+    }
+
+    function hydrateStateFromUrl() {
+      const params = new URLSearchParams(window.location.search);
+      state.filters.kind = params.get('kind') || '';
+      state.filters.status = params.get('status') || '';
+      state.filters.adapter = params.get('adapter') || '';
+      state.filters.limit = Number.parseInt(params.get('limit'), 10) || DEFAULT_LIMIT;
+      state.filters.offset = Number.parseInt(params.get('offset'), 10) || 0;
+      state.selectedRunId = params.get('run') || null;
+    }
+
+    function syncUrlState() {
+      const params = new URLSearchParams();
+      if (state.filters.kind) params.set('kind', state.filters.kind);
+      if (state.filters.status) params.set('status', state.filters.status);
+      if (state.filters.adapter) params.set('adapter', state.filters.adapter);
+      if (state.filters.limit && state.filters.limit !== DEFAULT_LIMIT) {
+        params.set('limit', String(state.filters.limit));
+      }
+      if (state.filters.offset) {
+        params.set('offset', String(state.filters.offset));
+      }
+      if (state.selectedRunId) {
+        params.set('run', state.selectedRunId);
+      }
+
+      const query = params.toString();
+      const nextUrl = query ? `${window.location.pathname}?${query}` : window.location.pathname;
+      window.history.replaceState(null, '', nextUrl);
+    }
+
+    function renderPagination() {
+      const summary = document.getElementById('pagination-summary');
+      const prevButton = document.getElementById('prev-page');
+      const nextButton = document.getElementById('next-page');
+
+      if (!state.pagination) {
+        summary.textContent = 'No pagination data';
+        prevButton.disabled = true;
+        nextButton.disabled = true;
+        return;
+      }
+
+      const start = state.pagination.total === 0 ? 0 : state.pagination.offset + 1;
+      const end = state.pagination.offset + state.pagination.returned;
+      summary.textContent = `Showing ${start}-${end} of ${state.pagination.total}`;
+      prevButton.disabled = state.pagination.offset <= 0;
+      nextButton.disabled = !state.pagination.hasMore;
+    }
+
+    function renderStructuredList(title, values) {
+      if (!Array.isArray(values) || values.length === 0) {
+        return '';
+      }
+
+      return `
+        <div class="structured-group">
+          <div class="kv-label">${escapeHtml(title)}</div>
+          <ul class="structured-list">
+            ${values.map((value) => `<li>${escapeHtml(value)}</li>`).join('')}
+          </ul>
+        </div>
+      `;
+    }
+
+    function renderBlockers(blockers) {
+      if (!Array.isArray(blockers) || blockers.length === 0) {
+        return '';
+      }
+
+      return `
+        <div class="structured-group">
+          <div class="kv-label">Blockers</div>
+          <div class="structured-list">
+            ${blockers.map((blocker) => `
+              <div class="structured-blocker">
+                <div class="structured-blocker-title">${escapeHtml(blocker.id || 'B?')} • ${escapeHtml(blocker.severity || 'medium')}</div>
+                <div><strong>Issue:</strong> ${escapeHtml(blocker.issue || 'n/a')}</div>
+                <div style="margin-top: 6px;"><strong>Evidence:</strong> ${escapeHtml(blocker.evidence || 'n/a')}</div>
+                <div style="margin-top: 6px;"><strong>Fix:</strong> ${escapeHtml(blocker.fix || 'n/a')}</div>
+              </div>
+            `).join('')}
+          </div>
+        </div>
+      `;
+    }
+
+    function renderStructuredReview(structured) {
+      if (!structured) {
+        return '';
+      }
+
+      return `
+        <div class="structured-group">
+          <div class="badge-row">
+            <span class="badge">parser: ${escapeHtml(structured.parser || 'unknown')}</span>
+            <span class="badge">verdict: ${escapeHtml(structured.verdict || 'n/a')}</span>
+          </div>
+          <div style="margin-top: 12px;">
+            <div class="kv-label">Summary</div>
+            <div class="kv-value">${escapeHtml(structured.summary || 'n/a')}</div>
+          </div>
+          ${renderBlockers(structured.blockers)}
+          ${renderStructuredList('Risks', structured.risks)}
+          ${renderStructuredList('Test Gaps', structured.testGaps)}
+        </div>
+      `;
+    }
+
+    function groupByParticipant(items) {
+      const grouped = new Map();
+      for (const item of items) {
+        const key = item.participantId || '__run__';
+        if (!grouped.has(key)) {
+          grouped.set(key, []);
+        }
+        grouped.get(key).push(item);
+      }
+      return grouped;
+    }
+
+    function pickLatestEntry(entries, preferredKinds, kindKey) {
+      const source = Array.isArray(entries) ? entries : [];
+      for (let index = source.length - 1; index >= 0; index -= 1) {
+        const entry = source[index];
+        if (preferredKinds.includes(entry?.[kindKey])) {
+          return entry;
+        }
+      }
+      return source.length ? source[source.length - 1] : null;
+    }
+
+    function buildDiscussionRounds(detail) {
+      const rounds = new Map();
+      const participantsById = new Map((detail.participants || []).map((participant) => [participant.id, participant]));
+
+      function ensureRound(roundIndex, roundName) {
+        const numericIndex = Number(roundIndex);
+        if (!Number.isFinite(numericIndex)) {
+          return null;
+        }
+
+        if (!rounds.has(numericIndex)) {
+          rounds.set(numericIndex, {
+            roundIndex: numericIndex,
+            roundName: roundName || `round-${numericIndex + 1}`,
+            promptsByParticipant: new Map(),
+            outputsByParticipant: new Map(),
+            summary: null
+          });
+        }
+
+        const round = rounds.get(numericIndex);
+        if (roundName && !round.roundName) {
+          round.roundName = roundName;
+        }
+        return round;
+      }
+
+      for (const input of detail.inputs || []) {
+        const metadata = input.metadata || {};
+        if (input.inputKind !== 'participant_prompt' || !input.participantId) {
+          continue;
+        }
+        const round = ensureRound(metadata.roundIndex, metadata.roundName);
+        if (!round) {
+          continue;
+        }
+        round.promptsByParticipant.set(input.participantId, input);
+      }
+
+      for (const output of detail.outputs || []) {
+        const metadata = output.metadata || {};
+        if (!['participant_final', 'participant_error'].includes(output.outputKind)) {
+          continue;
+        }
+        const round = ensureRound(metadata.roundIndex, metadata.roundName);
+        if (!round) {
+          continue;
+        }
+        if (output.participantId) {
+          round.outputsByParticipant.set(output.participantId, output);
+        } else if (output.outputKind === 'participant_final') {
+          round.summary = output;
+        }
+      }
+
+      return Array.from(rounds.values())
+        .sort((left, right) => left.roundIndex - right.roundIndex)
+        .map((round) => {
+          const participantIds = new Set([
+            ...round.promptsByParticipant.keys(),
+            ...round.outputsByParticipant.keys()
+          ]);
+
+          return {
+            roundIndex: round.roundIndex,
+            roundName: round.roundName,
+            summary: round.summary,
+            entries: Array.from(participantIds).map((participantId) => ({
+              participant: participantsById.get(participantId) || null,
+              prompt: round.promptsByParticipant.get(participantId) || null,
+              output: round.outputsByParticipant.get(participantId) || null
+            }))
+          };
+        });
+    }
+
+    function buildParticipantViews(detail) {
+      const inputsByParticipant = groupByParticipant(detail.inputs || []);
+      const outputsByParticipant = groupByParticipant(detail.outputs || []);
+      const stepsByParticipant = groupByParticipant(detail.steps || []);
+      const toolEventsByParticipant = groupByParticipant(detail.toolEvents || []);
+
+      return (detail.participants || []).map((participant) => {
+        const inputs = inputsByParticipant.get(participant.id) || [];
+        const outputs = outputsByParticipant.get(participant.id) || [];
+        const primaryInput = pickLatestEntry(inputs, ['judge_prompt', 'participant_prompt'], 'inputKind');
+        const primaryOutput = pickLatestEntry(outputs, ['judge_final', 'participant_final', 'participant_error'], 'outputKind');
+
+        return {
+          participant,
+          inputs,
+          outputs,
+          steps: stepsByParticipant.get(participant.id) || [],
+          toolEvents: toolEventsByParticipant.get(participant.id) || [],
+          primaryInput,
+          primaryOutput,
+          structured: primaryOutput?.metadata?.structured || null,
+          responseMetadata: primaryOutput?.metadata?.responseMetadata || null
+        };
+      });
+    }
+
+    function storedContent(entry) {
+      return entry?.fullText || entry?.previewText || '';
+    }
+
+    function inputBlock(input) {
+      const content = storedContent(input);
+      return `
+        <div class="tile">
+          <div class="tile-header">
+            <div>
+              <div class="tile-title">${escapeHtml(input.inputKind || 'input')}</div>
+              <div class="muted">${escapeHtml(input.participantId || 'run-level')}</div>
+            </div>
+            ${statusPill(input.storageMode || 'stored', 'stored')}
+          </div>
+          <div class="badge-row">
+            <span class="badge">${escapeHtml(String(input.originalBytes || 0))} bytes</span>
+            <span class="badge">${escapeHtml(input.compression || 'none')}</span>
+            ${input.isTruncated ? '<span class="badge">truncated</span>' : ''}
+          </div>
+          <div class="code-block">${escapeHtml(content)}</div>
+          ${input.metadata ? jsonBlock(input.metadata) : ''}
+        </div>
+      `;
+    }
+
+    function outputBlock(output) {
+      const content = storedContent(output);
+      return `
+        <div class="tile">
+          <div class="tile-header">
+            <div>
+              <div class="tile-title">${escapeHtml(output.outputKind || 'output')}</div>
+              <div class="muted">${escapeHtml(output.participantId || 'run-level')}</div>
+            </div>
+            ${statusPill(output.storageMode || 'stored', 'stored')}
+          </div>
+          <div class="badge-row">
+            <span class="badge">${escapeHtml(String(output.originalBytes || 0))} bytes</span>
+            <span class="badge">${escapeHtml(output.compression || 'none')}</span>
+            ${output.isTruncated ? '<span class="badge">truncated</span>' : ''}
+          </div>
+          <div class="code-block">${escapeHtml(content)}</div>
+        </div>
+      `;
+    }
+
+    function toolEventBlock(event) {
+      const content = storedContent(event);
+      return `
+        <div class="tile">
+          <div class="tile-header">
+            <div>
+              <div class="tile-title">${escapeHtml(event.toolName || event.toolClass || 'tool')}</div>
+              <div class="muted">${escapeHtml(event.toolClass || 'tool')} • ${escapeHtml(event.participantId || 'run-level')}</div>
+            </div>
+            ${statusPill(event.status || 'completed', 'completed')}
+          </div>
+          <div class="badge-row">
+            <span class="badge">${escapeHtml(event.idempotency || 'unknown')}</span>
+            <span class="badge">${escapeHtml(event.storageMode || 'inline_text')}</span>
+          </div>
+          <div class="code-block">${escapeHtml(content)}</div>
+          ${event.metadata ? jsonBlock(event.metadata) : ''}
+        </div>
+      `;
+    }
+
+    function participantComparisonBlock(view) {
+      const { participant, inputs, outputs, steps, toolEvents, primaryInput, primaryOutput, structured, responseMetadata } = view;
+      const inputContent = primaryInput ? storedContent(primaryInput) : '';
+      const outputContent = primaryOutput ? storedContent(primaryOutput) : '';
+      const participantDuration = participant.startedAt && participant.endedAt
+        ? Math.max(0, participant.endedAt - participant.startedAt)
+        : null;
+
+      return `
+        <div class="tile">
+          <div class="tile-header">
+            <div>
+              <div class="tile-title">${escapeHtml(participant.participantName || participant.participantRole)}</div>
+              <div class="muted">${escapeHtml(participant.adapter)} • ${escapeHtml(participant.participantRole)}</div>
+            </div>
+            ${statusPill(participant.status || 'queued', 'queued')}
+          </div>
+          <div class="badge-row">
+            <span class="badge">${escapeHtml(String(inputs.length))} inputs</span>
+            <span class="badge">${escapeHtml(primaryOutput?.outputKind || 'no-output')}</span>
+            <span class="badge">${escapeHtml(formatDuration(participantDuration))}</span>
+            <span class="badge">${escapeHtml(String(outputs.length))} outputs</span>
+            <span class="badge">${escapeHtml(String(steps.length))} steps</span>
+            <span class="badge">${escapeHtml(String(toolEvents.length))} tools</span>
+          </div>
+          <div class="detail-grid" style="margin-top: 12px;">
+            <div class="kv"><div class="kv-label">Current Step</div><div class="kv-value">${escapeHtml(participant.currentStep || 'n/a')}</div></div>
+            <div class="kv"><div class="kv-label">Failure Class</div><div class="kv-value">${escapeHtml(participant.failureClass || 'n/a')}</div></div>
+            <div class="kv"><div class="kv-label">Started</div><div class="kv-value">${escapeHtml(formatTimestamp(participant.startedAt))}</div></div>
+            <div class="kv"><div class="kv-label">Ended</div><div class="kv-value">${escapeHtml(formatTimestamp(participant.endedAt))}</div></div>
+          </div>
+          ${primaryInput ? `
+            <div class="structured-group">
+              <div class="kv-label">What This Participant Saw</div>
+              <div class="badge-row">
+                <span class="badge">${escapeHtml(primaryInput.inputKind)}</span>
+                <span class="badge">${escapeHtml(primaryInput.storageMode || 'inline_text')}</span>
+              </div>
+              <div class="code-block">${escapeHtml(inputContent)}</div>
+            </div>
+          ` : ''}
+          ${structured ? renderStructuredReview(structured) : `
+            <div class="structured-group">
+              <div class="kv-label">Primary Output</div>
+              <div class="code-block">${escapeHtml(outputContent || 'No output recorded.')}</div>
+            </div>
+          `}
+          ${responseMetadata ? `<div class="structured-group"><div class="kv-label">Response Metadata</div>${jsonBlock(responseMetadata)}</div>` : ''}
+          ${participant.metadata ? `<div class="structured-group"><div class="kv-label">Participant Metadata</div>${jsonBlock(participant.metadata)}</div>` : ''}
+        </div>
+      `;
+    }
+
+    function discussionRoundEntryBlock(entry) {
+      const participant = entry.participant || {};
+      const outputKind = entry.output?.outputKind || 'participant_final';
+      const status = outputKind === 'participant_error'
+        ? 'failed'
+        : (participant.status || 'completed');
+
+      return `
+        <div class="tile">
+          <div class="tile-header">
+            <div>
+              <div class="tile-title">${escapeHtml(participant.participantName || participant.participantRole || entry.output?.participantId || 'participant')}</div>
+              <div class="muted">${escapeHtml(participant.adapter || 'unknown-adapter')} • ${escapeHtml(participant.participantRole || 'participant')}</div>
+            </div>
+            ${statusPill(status, 'completed')}
+          </div>
+          ${entry.prompt ? `
+            <div class="structured-group">
+              <div class="kv-label">Prompt</div>
+              <div class="code-block">${escapeHtml(storedContent(entry.prompt) || 'No prompt recorded.')}</div>
+            </div>
+          ` : ''}
+          <div class="structured-group">
+            <div class="kv-label">Response</div>
+            <div class="badge-row">
+              <span class="badge">${escapeHtml(outputKind)}</span>
+            </div>
+            <div class="code-block">${escapeHtml(storedContent(entry.output) || 'No response recorded.')}</div>
+          </div>
+        </div>
+      `;
+    }
+
+    function discussionRoundBlock(round) {
+      const summaryContent = storedContent(round.summary);
+      const summaryMetadata = round.summary?.metadata || {};
+      return `
+        <div class="tile">
+          <div class="tile-header">
+            <div>
+              <div class="tile-title">Round ${escapeHtml(String(round.roundIndex + 1))}: ${escapeHtml(round.roundName || `round-${round.roundIndex + 1}`)}</div>
+              <div class="muted">${escapeHtml(String(round.entries.length))} participant responses</div>
+            </div>
+            ${statusPill('completed', 'completed')}
+          </div>
+          ${round.summary ? `
+            <div class="structured-group">
+              <div class="kv-label">Round Transcript</div>
+              <div class="badge-row">
+                <span class="badge">${escapeHtml(String(summaryMetadata.successCount || 0))}/${escapeHtml(String(summaryMetadata.responseCount || round.entries.length))} succeeded</span>
+              </div>
+              <div class="code-block">${escapeHtml(summaryContent || 'No transcript stored.')}</div>
+            </div>
+          ` : ''}
+          <div class="structured-group">
+            <div class="kv-label">Responses</div>
+            <div class="comparison-grid">
+              ${round.entries.length ? round.entries.map(discussionRoundEntryBlock).join('') : '<div class="empty-state">No participant responses recorded.</div>'}
+            </div>
+          </div>
+        </div>
+      `;
+    }
+
+    function renderStats() {
+      const completed = state.runs.filter((run) => run.status === 'completed').length;
+      const running = state.runs.filter((run) => run.status === 'running').length;
+      const failed = state.runs.filter((run) => run.status === 'failed').length;
+
+      document.getElementById('stat-loaded').textContent = state.runs.length;
+      document.getElementById('stat-completed').textContent = completed;
+      document.getElementById('stat-running').textContent = running;
+      document.getElementById('stat-failed').textContent = failed;
+
+      if (!state.pagination) {
+        document.getElementById('stat-pagination').textContent = '-';
+        renderPagination();
+        return;
+      }
+
+      document.getElementById('stat-pagination').textContent = `${state.pagination.returned}/${state.pagination.total}`;
+      renderPagination();
+    }
+
+    function renderRuns() {
+      const list = document.getElementById('runs-list');
+      const summary = document.getElementById('runs-summary');
+
+      if (!state.runs.length) {
+        list.innerHTML = '<div class="empty-state">No runs matched the current filters.</div>';
+        summary.textContent = 'No runs found';
+        renderStats();
+        return;
+      }
+
+      summary.textContent = `Showing ${state.pagination.returned} of ${state.pagination.total} persisted runs`;
+
+      list.innerHTML = state.runs.map((run) => `
+        <div class="run-row ${run.id === state.selectedRunId ? 'active' : ''}" data-run-id="${escapeHtml(run.id)}">
+          <div class="run-row-header">
+            <div>
+              <div class="run-kind">${escapeHtml(run.kind)}</div>
+              <div class="muted">${escapeHtml(run.id)}</div>
+            </div>
+            ${statusPill(run.status || 'pending', 'pending')}
+          </div>
+          <div class="badge-row">
+            ${run.decisionSource ? `<span class="badge">${escapeHtml(run.decisionSource)}</span>` : ''}
+            ${run.failureClass ? `<span class="badge">${escapeHtml(run.failureClass)}</span>` : ''}
+            <span class="badge">${escapeHtml(formatDuration(run.durationMs))}</span>
+          </div>
+          <div class="muted" style="margin-top: 10px;">${escapeHtml(run.inputSummary || 'No input summary recorded')}</div>
+          <div class="muted" style="margin-top: 8px;">Started ${escapeHtml(formatTimestamp(run.startedAt))}</div>
+        </div>
+      `).join('');
+
+      renderStats();
+
+      for (const row of list.querySelectorAll('.run-row')) {
+        row.addEventListener('click', () => {
+          loadRunDetail(row.dataset.runId);
+        });
+      }
+
+      renderPagination();
+    }
+
+    function renderDetail(detail) {
+      const body = document.getElementById('detail-body');
+      const summary = document.getElementById('detail-summary');
+      const { run, participants, steps, inputs, outputs, toolEvents } = detail;
+      const participantViews = buildParticipantViews(detail);
+      const discussionRounds = run.kind === 'discussion' ? buildDiscussionRounds(detail) : [];
+      const runLevelInputs = (inputs || []).filter((input) => !input.participantId);
+
+      summary.textContent = `${run.kind} • ${run.id} • ${run.status}`;
+
+      body.innerHTML = `
+        <div class="section">
+          <h2>Run</h2>
+          <div class="detail-grid">
+            <div class="kv"><div class="kv-label">Status</div><div class="kv-value">${escapeHtml(run.status)}</div></div>
+            <div class="kv"><div class="kv-label">Kind</div><div class="kv-value">${escapeHtml(run.kind)}</div></div>
+            <div class="kv"><div class="kv-label">Current Step</div><div class="kv-value">${escapeHtml(run.currentStep || 'n/a')}</div></div>
+            <div class="kv"><div class="kv-label">Active Participants</div><div class="kv-value">${escapeHtml(String(run.activeParticipantCount || 0))}</div></div>
+            <div class="kv"><div class="kv-label">Started</div><div class="kv-value">${escapeHtml(formatTimestamp(run.startedAt))}</div></div>
+            <div class="kv"><div class="kv-label">Completed</div><div class="kv-value">${escapeHtml(formatTimestamp(run.completedAt))}</div></div>
+            <div class="kv"><div class="kv-label">Duration</div><div class="kv-value">${escapeHtml(formatDuration(run.durationMs))}</div></div>
+            <div class="kv"><div class="kv-label">Decision Source</div><div class="kv-value">${escapeHtml(run.decisionSource || 'n/a')}</div></div>
+            <div class="kv"><div class="kv-label">Failure Class</div><div class="kv-value">${escapeHtml(run.failureClass || 'n/a')}</div></div>
+            <div class="kv"><div class="kv-label">Working Directory</div><div class="kv-value">${escapeHtml(run.workingDirectory || 'n/a')}</div></div>
+            <div class="kv"><div class="kv-label">Message Hash</div><div class="kv-value inline-code">${escapeHtml(run.messageHash || 'n/a')}</div></div>
+            <div class="kv"><div class="kv-label">Retry Count</div><div class="kv-value">${escapeHtml(String(run.retryCount || 0))}</div></div>
+          </div>
+          <div style="margin-top: 16px;">
+            <div class="kv-label">Input Summary</div>
+            <div class="kv-value">${escapeHtml(run.inputSummary || 'n/a')}</div>
+          </div>
+          <div style="margin-top: 16px;">
+            <div class="kv-label">Decision Summary</div>
+            <div class="kv-value">${escapeHtml(run.decisionSummary || 'n/a')}</div>
+          </div>
+          ${run.metadata ? `<div style="margin-top: 16px;"><div class="kv-label">Metadata</div>${jsonBlock(run.metadata)}</div>` : ''}
+        </div>
+
+        <div class="section">
+          <h2>Run Inputs</h2>
+          <div class="outputs-grid">
+            ${runLevelInputs.length ? runLevelInputs.map(inputBlock).join('') : '<div class="empty-state">No run-level inputs recorded.</div>'}
+          </div>
+        </div>
+
+        <div class="section">
+          <h2>Participant Comparison</h2>
+          <div class="comparison-grid">
+            ${participantViews.length ? participantViews.map(participantComparisonBlock).join('') : '<div class="empty-state">No participant records.</div>'}
+          </div>
+        </div>
+
+        ${run.kind === 'discussion' ? `
+          <div class="section">
+            <h2>Discussion Rounds</h2>
+            <div class="outputs-grid">
+              ${discussionRounds.length ? discussionRounds.map(discussionRoundBlock).join('') : '<div class="empty-state">No discussion rounds recorded.</div>'}
+            </div>
+          </div>
+        ` : ''}
+
+        <div class="section">
+          <h2>Steps</h2>
+          <div class="steps-grid">
+            ${steps.length ? steps.map((step) => `
+              <div class="tile">
+                <div class="tile-header">
+                  <div>
+                    <div class="tile-title">${escapeHtml(step.stepName)}</div>
+                    <div class="muted">${escapeHtml(step.stepKey)} • ${escapeHtml(step.participantId || 'run-level')}</div>
+                  </div>
+                  ${statusPill(step.status || 'pending', 'pending')}
+                </div>
+                <div class="detail-grid">
+                  <div class="kv"><div class="kv-label">Started</div><div class="kv-value">${escapeHtml(formatTimestamp(step.startedAt))}</div></div>
+                  <div class="kv"><div class="kv-label">Completed</div><div class="kv-value">${escapeHtml(formatTimestamp(step.completedAt))}</div></div>
+                  <div class="kv"><div class="kv-label">Failure Class</div><div class="kv-value">${escapeHtml(step.failureClass || 'n/a')}</div></div>
+                  <div class="kv"><div class="kv-label">Retry Safe</div><div class="kv-value">${escapeHtml(step.retrySafe ? 'yes' : 'no')}</div></div>
+                </div>
+              </div>
+            `).join('') : '<div class="empty-state">No step records.</div>'}
+          </div>
+        </div>
+
+        <div class="section">
+          <h2>Inputs</h2>
+          <div class="outputs-grid">
+            ${inputs.length ? inputs.map(inputBlock).join('') : '<div class="empty-state">No inputs recorded.</div>'}
+          </div>
+        </div>
+
+        <div class="section">
+          <h2>Outputs</h2>
+          <div class="outputs-grid">
+            ${outputs.length ? outputs.map(outputBlock).join('') : '<div class="empty-state">No outputs recorded.</div>'}
+          </div>
+        </div>
+
+        <div class="section">
+          <h2>Tool Events</h2>
+          <div class="tools-grid">
+            ${toolEvents.length ? toolEvents.map(toolEventBlock).join('') : '<div class="empty-state">No tool events recorded.</div>'}
+          </div>
+        </div>
+      `;
+    }
+
+    function renderDetailError(message) {
+      document.getElementById('detail-summary').textContent = 'Run detail unavailable';
+      document.getElementById('detail-body').innerHTML = `<div class="error-state">${escapeHtml(message)}</div>`;
+    }
+
+    async function loadRuns() {
+      readFiltersFromForm();
+      const query = new URLSearchParams();
+      if (state.filters.kind) query.set('kind', state.filters.kind);
+      if (state.filters.status) query.set('status', state.filters.status);
+      if (state.filters.adapter) query.set('adapter', state.filters.adapter);
+      query.set('limit', String(state.filters.limit));
+      query.set('offset', String(state.filters.offset || 0));
+
+      const list = document.getElementById('runs-list');
+      list.innerHTML = '<div class="empty-state">Loading runs...</div>';
+
+      try {
+        const response = await fetch(`${API_BASE}/orchestration/runs?${query.toString()}`);
+        const data = await response.json();
+
+        if (!response.ok) {
+          throw new Error(data?.error?.message || 'Failed to load runs');
+        }
+
+        state.runs = data.runs || [];
+        state.pagination = data.pagination || null;
+        syncUrlState();
+        renderRuns();
+
+        if (state.selectedRunId && state.runs.some((run) => run.id === state.selectedRunId)) {
+          await loadRunDetail(state.selectedRunId);
+        } else if (state.selectedRunId) {
+          await loadRunDetail(state.selectedRunId);
+        } else if (state.runs[0]) {
+          await loadRunDetail(state.runs[0].id);
+        } else {
+          state.selectedRunId = null;
+          syncUrlState();
+          document.getElementById('detail-summary').textContent = 'No run selected';
+          document.getElementById('detail-body').innerHTML = '<div class="empty-state">No run selected.</div>';
+        }
+      } catch (error) {
+        state.runs = [];
+        state.pagination = null;
+        renderStats();
+        renderPagination();
+        list.innerHTML = `<div class="error-state">${escapeHtml(error.message)}</div>`;
+        renderDetailError(error.message);
+      }
+    }
+
+    async function loadRunDetail(runId) {
+      state.selectedRunId = runId;
+      syncUrlState();
+      renderRuns();
+      document.getElementById('detail-body').innerHTML = '<div class="empty-state">Loading run detail...</div>';
+
+      try {
+        const response = await fetch(`${API_BASE}/orchestration/runs/${encodeURIComponent(runId)}`);
+        const data = await response.json();
+        if (!response.ok) {
+          throw new Error(data?.error?.message || 'Failed to load run detail');
+        }
+        renderDetail(data);
+      } catch (error) {
+        renderDetailError(error.message);
+      }
+    }
+
+    function clearFilters() {
+      state.filters = {
+        kind: '',
+        status: '',
+        adapter: '',
+        limit: DEFAULT_LIMIT,
+        offset: 0
+      };
+      writeFiltersToForm();
+      loadRuns();
+    }
+
+    function changePage(direction) {
+      const step = state.filters.limit || DEFAULT_LIMIT;
+      const nextOffset = direction === 'next'
+        ? (state.filters.offset || 0) + step
+        : Math.max(0, (state.filters.offset || 0) - step);
+      state.filters.offset = nextOffset;
+      writeFiltersToForm();
+      loadRuns();
+    }
+
+    document.getElementById('refresh-button').addEventListener('click', loadRuns);
+    document.getElementById('apply-filters').addEventListener('click', () => {
+      state.filters.offset = 0;
+      loadRuns();
+    });
+    document.getElementById('clear-filters').addEventListener('click', clearFilters);
+    document.getElementById('prev-page').addEventListener('click', () => changePage('prev'));
+    document.getElementById('next-page').addEventListener('click', () => changePage('next'));
+
+    hydrateStateFromUrl();
+    writeFiltersToForm();
+    loadRuns();
+  </script>
+</body>
+</html>

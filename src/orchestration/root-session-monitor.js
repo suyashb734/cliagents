@@ -1,8 +1,10 @@
 'use strict';
 
 const BUSY_TERMINAL_STATUSES = new Set(['processing', 'queued', 'running']);
+const ACTIVE_ROOT_STATUSES = new Set(['running', 'processing', 'pending', 'partial', 'blocked', 'needs_attention']);
 const DEFAULT_ARCHIVE_LEGACY_AFTER_MS = 30 * 60 * 1000;
 const ROOT_SCOPE_VALUES = new Set(['user', 'all', 'detached', 'legacy']);
+const ROOT_STATUS_FILTER_VALUES = new Set(['all', 'live', 'actionable', 'active', 'completed']);
 const USER_FACING_ORIGIN_CLIENTS = new Set([
   'codex',
   'qwen',
@@ -13,6 +15,16 @@ const USER_FACING_ORIGIN_CLIENTS = new Set([
   'openclaw'
 ]);
 const USER_FACING_SESSION_KINDS = new Set(['attach', 'main']);
+const BLOCKED_SESSION_STATUSES = new Set(['blocked', 'waiting_permission', 'waiting_user_answer']);
+const OUTPUT_PREFERRED_EVENT_TYPES = new Set([
+  'message_received',
+  'message_sent',
+  'session_started',
+  'session_resumed',
+  'session_terminated',
+  'session_stale',
+  'session_destroyed'
+]);
 
 function parseMetadataField(value) {
   if (!value || typeof value !== 'string') {
@@ -44,6 +56,91 @@ function summarizeConclusionEvent(event) {
     runId: event.run_id || null,
     discussionId: event.discussion_id || null
   };
+}
+
+function truncateActivityText(value, maxLength = 240) {
+  const normalized = String(value || '').replace(/\s+/g, ' ').trim();
+  if (!normalized) {
+    return '';
+  }
+  if (normalized.length <= maxLength) {
+    return normalized;
+  }
+  return `${normalized.slice(0, Math.max(0, maxLength - 1)).trimEnd()}…`;
+}
+
+function truncateActivityTailText(value, maxLength = 320) {
+  const normalized = String(value || '')
+    .replace(/\r\n/g, '\n')
+    .replace(/\r/g, '\n')
+    .split('\n')
+    .map((line) => line.replace(/\s+/g, ' ').trim())
+    .filter((line, index, lines) => (
+      line.length > 0 || (index > 0 && index < lines.length - 1)
+    ))
+    .join('\n')
+    .trim();
+  if (!normalized) {
+    return '';
+  }
+  if (normalized.length <= maxLength) {
+    return normalized;
+  }
+  return `…${normalized.slice(-(Math.max(0, maxLength - 1))).trimStart()}`;
+}
+
+function normalizeActivityLines(value) {
+  return String(value || '')
+    .split('\n')
+    .map((line) => line.replace(/\s+/g, ' ').trim())
+    .filter(Boolean);
+}
+
+function isLowSignalActivityLine(line) {
+  const normalized = String(line || '').replace(/\s+/g, ' ').trim();
+  if (!normalized) {
+    return true;
+  }
+
+  return (
+    /^[─━-]{4,}$/.test(normalized)
+    || /^[❯>›]\s*$/u.test(normalized)
+    || /^[\w.-]+@[\w.-]+.*[#$%>]\s*$/.test(normalized)
+    || /^(?:java version|Java\(TM\)|Java HotSpot)/i.test(normalized)
+    || /^⬆\s+\/\S+/u.test(normalized)
+    || /^PR\s+#\d+/i.test(normalized)
+    || /Update available!/i.test(normalized)
+  );
+}
+
+function summarizeOutputExcerpt(value, maxLength = 240) {
+  const lines = normalizeActivityLines(value);
+  if (lines.length === 0) {
+    return '';
+  }
+
+  const prioritizedMatchers = [
+    (line) => /^assistant:\s+/i.test(line),
+    (line) => /^[⏺✦✓•]\s+/u.test(line),
+    (line) => /^[❯>›]\s+\S/u.test(line)
+  ];
+
+  for (const matcher of prioritizedMatchers) {
+    for (let index = lines.length - 1; index >= 0; index -= 1) {
+      if (!matcher(lines[index])) {
+        continue;
+      }
+      return truncateActivityText(lines[index].replace(/^assistant:\s+/i, ''), maxLength);
+    }
+  }
+
+  for (let index = lines.length - 1; index >= 0; index -= 1) {
+    if (!isLowSignalActivityLine(lines[index])) {
+      return truncateActivityText(lines[index], maxLength);
+    }
+  }
+
+  return truncateActivityText(lines[lines.length - 1], maxLength);
 }
 
 function inferSessionStatus(node) {
@@ -106,6 +203,7 @@ function buildSessionMap(events, terminals, rootSessionId) {
         terminalStatus: null,
         taskState: null,
         processState: null,
+        currentCommand: null,
         lastActiveAt: null,
         lastEventType: null,
         lastEventAt: null,
@@ -119,6 +217,7 @@ function buildSessionMap(events, terminals, rootSessionId) {
         attentionCode: null,
         attentionMessage: null,
         resumeCommand: null,
+        providerThreadRef: null,
         latestConclusion: null,
         resumeCount: 0,
         wasReused: false,
@@ -199,11 +298,23 @@ function buildSessionMap(events, terminals, rootSessionId) {
     node.terminalStatus = terminal.status || node.terminalStatus;
     node.taskState = terminal.task_state || terminal.taskState || terminal.status || node.taskState;
     node.processState = terminal.process_state || terminal.processState || node.processState;
+    node.currentCommand = terminal.current_command || terminal.currentCommand || node.currentCommand;
     node.attentionCode = terminal.attention_code || node.attentionCode;
     node.attentionMessage = terminal.attention_message || node.attentionMessage;
     node.resumeCommand = terminal.resume_command || node.resumeCommand;
+    node.providerThreadRef = terminal.provider_thread_ref || terminal.providerThreadRef || node.providerThreadRef;
     node.createdAt = terminal.created_at || node.createdAt;
     node.lastActiveAt = terminal.last_active || node.lastActiveAt;
+
+    const liveTaskState = String(terminal.task_state || terminal.taskState || terminal.status || '').trim().toLowerCase();
+    const liveProcessState = String(terminal.process_state || terminal.processState || '').trim().toLowerCase();
+    const liveTerminalPresent = Boolean(liveTaskState || liveProcessState);
+    const liveTerminalRecovered = liveTerminalPresent
+      && liveTaskState !== 'orphaned'
+      && liveProcessState !== 'exited';
+    if (liveTerminalRecovered) {
+      node.stale = false;
+    }
   }
 
   const rootNode = ensureSession(rootSessionId);
@@ -214,7 +325,7 @@ function buildSessionMap(events, terminals, rootSessionId) {
 
 function buildAttentionSummary(sessionList) {
   const reasons = [];
-  const blockedSessions = sessionList.filter((session) => session.status === 'blocked');
+  const blockedSessions = sessionList.filter((session) => BLOCKED_SESSION_STATUSES.has(session.status));
   const staleSessions = sessionList.filter((session) => session.status === 'stale');
   const failedSessions = sessionList.filter((session) => session.status === 'error' || (session.exitCode && session.exitCode !== 0));
 
@@ -265,6 +376,17 @@ function isPromptIdleRootSession(session) {
   );
 }
 
+function isLiveOperatorSession(session) {
+  return Boolean(
+    session
+    && session.terminalId
+    && session.processState !== 'exited'
+    && session.status !== 'stale'
+    && session.status !== 'destroyed'
+    && session.status !== 'completed'
+  );
+}
+
 function deriveRootStatus(sessionList, attention) {
   if (attention.blockedSessionIds.length > 0) {
     return 'blocked';
@@ -301,6 +423,11 @@ function normalizeRootScope(value) {
   return ROOT_SCOPE_VALUES.has(normalized) ? normalized : 'user';
 }
 
+function normalizeRootStatusFilter(value) {
+  const normalized = String(value || 'all').trim().toLowerCase();
+  return ROOT_STATUS_FILTER_VALUES.has(normalized) ? normalized : 'all';
+}
+
 function classifyRootSession(snapshot) {
   const rootSession = snapshot?.rootSession || {};
   const originClient = String(rootSession.originClient || '').trim().toLowerCase();
@@ -314,7 +441,7 @@ function classifyRootSession(snapshot) {
     || sessionMetadata.clientSessionRef
     || null;
   const clientName = String(sessionMetadata.clientName || '').trim().toLowerCase() || null;
-  const implicitFirstUse = attachMode === 'implicit-first-use';
+  const implicitFirstUse = attachMode.startsWith('implicit');
   const explicitAttach = attachMode.startsWith('explicit-');
   const originClientUserFacing = Boolean(originClient) && originClient !== 'system' && USER_FACING_ORIGIN_CLIENTS.has(originClient);
   const clientNameUserFacing = Boolean(clientName) && originClient !== 'system' && USER_FACING_ORIGIN_CLIENTS.has(clientName);
@@ -358,6 +485,280 @@ function classifyRootSession(snapshot) {
     userFacing: false,
     externalSessionRef: externalSessionRef || null,
     clientName
+  };
+}
+
+function deriveRootCapabilities(classification, rootSession) {
+  const rootType = classification?.rootType || 'workflow_root';
+  const sessionKind = String(rootSession?.sessionKind || '').trim().toLowerCase();
+
+  if (rootType === 'attached_client_root') {
+    if (sessionKind === 'main') {
+      return {
+        sessionKind: 'managed',
+        visibility: 'interactive',
+        replyCapability: 'full'
+      };
+    }
+
+    return {
+      sessionKind: 'attached',
+      visibility: 'read-only',
+      replyCapability: 'partial'
+    };
+  }
+
+  if (rootType === 'detached_worker_root') {
+    return {
+      sessionKind: 'detached',
+      visibility: 'internal',
+      replyCapability: 'none'
+    };
+  }
+
+  if (rootType === 'legacy_root') {
+    return {
+      sessionKind: 'legacy',
+      visibility: 'historical',
+      replyCapability: 'none'
+    };
+  }
+
+  return {
+    sessionKind: 'workflow',
+    visibility: 'internal',
+    replyCapability: 'none'
+  };
+}
+
+function deriveRootMode(classification, rootSession) {
+  const rootType = classification?.rootType || 'workflow_root';
+  if (rootType !== 'attached_client_root') {
+    return null;
+  }
+
+  const metadata = rootSession?.sessionMetadata && typeof rootSession.sessionMetadata === 'object'
+    ? rootSession.sessionMetadata
+    : {};
+  const attachMode = String(metadata.attachMode || '').trim().toLowerCase();
+  if (attachMode === 'root-adopt' || metadata.adoptedRoot === true) {
+    return 'adopted';
+  }
+
+  const sessionKind = String(rootSession?.sessionKind || '').trim().toLowerCase();
+  if (sessionKind === 'main') {
+    return 'managed';
+  }
+
+  return 'attached';
+}
+
+function resolveInteractiveTerminalId(rootSessionId, sessionList, rootMode) {
+  if (rootMode !== 'managed' && rootMode !== 'adopted') {
+    return null;
+  }
+
+  const rootSession = sessionList.find((session) => session.sessionId === rootSessionId);
+  if (rootSession?.terminalId) {
+    return rootSession.terminalId;
+  }
+
+  const mainSession = sessionList.find((session) => (
+    session.terminalId
+    && String(session.sessionKind || '').trim().toLowerCase() === 'main'
+    && !session.parentSessionId
+  ));
+  return mainSession?.terminalId || null;
+}
+
+function findLatestMeaningfulEvent(events) {
+  const ignoredEventTypes = new Set([
+    'session_started',
+    'session_resumed'
+  ]);
+
+  for (let index = events.length - 1; index >= 0; index -= 1) {
+    const event = events[index];
+    if (!event) {
+      continue;
+    }
+    const payload = event.payload_json || {};
+    if (truncateActivityText(payload.activitySummary)) {
+      return event;
+    }
+    if (truncateActivityText(payload.activityExcerpt)) {
+      return event;
+    }
+    if (ignoredEventTypes.has(String(event.event_type || '').trim().toLowerCase())) {
+      continue;
+    }
+    if (truncateActivityText(event.payload_summary)) {
+      return event;
+    }
+  }
+
+  return null;
+}
+
+function readLiveActivityExcerpt(liveOutputResolver, terminalId) {
+  if (typeof liveOutputResolver !== 'function' || !terminalId) {
+    return '';
+  }
+
+  const extractRecentExcerpt = (output) => {
+    const lines = normalizeActivityLines(output);
+    if (lines.length === 0) {
+      return '';
+    }
+
+    let startIndex = Math.max(0, lines.length - 8);
+    for (let index = lines.length - 1; index >= 0; index -= 1) {
+      if (!isLowSignalActivityLine(lines[index])) {
+        startIndex = Math.max(0, index - 2);
+        break;
+      }
+    }
+
+    return truncateActivityTailText(lines.slice(startIndex).join('\n'), 320);
+  };
+
+  try {
+    const visibleOutput = liveOutputResolver(terminalId, {
+      mode: 'visible',
+      format: 'plain',
+      lines: 120
+    });
+    const visibleExcerpt = extractRecentExcerpt(visibleOutput);
+    if (visibleExcerpt) {
+      return visibleExcerpt;
+    }
+  } catch {
+    // Ignore live output resolution failures and continue to history fallback.
+  }
+
+  try {
+    const historyOutput = liveOutputResolver(terminalId, {
+      mode: 'history',
+      format: 'plain',
+      lines: 120
+    });
+    return extractRecentExcerpt(historyOutput);
+  } catch {
+    return '';
+  }
+}
+
+function buildRootFallbackSummary(rootStatus, rootSession) {
+  const normalizedStatus = String(rootStatus || 'unknown').trim().toLowerCase();
+  const adapter = truncateActivityText(rootSession?.adapter || '');
+  const currentCommand = truncateActivityText(rootSession?.currentCommand || '');
+
+  if (normalizedStatus === 'blocked') {
+    return currentCommand
+      ? `Waiting for input while ${currentCommand} is active.`
+      : 'Waiting for input or permission.';
+  }
+  if (normalizedStatus === 'running') {
+    if (currentCommand) {
+      return `Running ${currentCommand}.`;
+    }
+    if (adapter) {
+      return `${adapter} is actively working.`;
+    }
+    return 'Root is actively working.';
+  }
+  if (normalizedStatus === 'idle') {
+    if (currentCommand) {
+      return `Idle at ${currentCommand}.`;
+    }
+    if (adapter) {
+      return `${adapter} is idle at a prompt.`;
+    }
+    return 'Idle at a prompt.';
+  }
+  if (normalizedStatus === 'needs_attention') {
+    return 'Needs operator attention.';
+  }
+  if (normalizedStatus === 'completed') {
+    return 'Completed and no longer running.';
+  }
+  return 'State could not be determined yet.';
+}
+
+function deriveRootActivityDetails({
+  rootStatus,
+  rootSession,
+  latestConclusion,
+  attention,
+  events,
+  liveOutputResolver,
+  interactiveTerminalId
+}) {
+  const conclusionSummary = truncateActivityText(latestConclusion?.summary || '');
+  const outputExcerpt = readLiveActivityExcerpt(liveOutputResolver, interactiveTerminalId);
+  const outputSummary = summarizeOutputExcerpt(outputExcerpt);
+
+  if (conclusionSummary) {
+    return {
+      activitySummary: conclusionSummary,
+      activityExcerpt: outputExcerpt || null,
+      activitySource: 'conclusion'
+    };
+  }
+
+  const attentionReason = Array.isArray(attention?.reasons) ? attention.reasons[0] : null;
+  const attentionSummary = truncateActivityText(attentionReason?.message || '');
+  if (attentionSummary) {
+    return {
+      activitySummary: attentionSummary,
+      activityExcerpt: outputExcerpt || null,
+      activitySource: 'attention'
+    };
+  }
+
+  const meaningfulEvent = findLatestMeaningfulEvent(Array.isArray(events) ? events : []);
+  if (meaningfulEvent) {
+    const payload = meaningfulEvent.payload_json || {};
+    const eventSummary = truncateActivityText(payload.activitySummary || meaningfulEvent.payload_summary || '');
+    const eventExcerpt = truncateActivityText(payload.activityExcerpt || '') || null;
+    const eventType = String(meaningfulEvent.event_type || '').trim().toLowerCase();
+    const preferLiveOutputSummary = outputSummary && OUTPUT_PREFERRED_EVENT_TYPES.has(eventType);
+    if (eventSummary || eventExcerpt) {
+      if (!preferLiveOutputSummary) {
+        return {
+          activitySummary: eventSummary || summarizeOutputExcerpt(eventExcerpt),
+          activityExcerpt: eventExcerpt || outputExcerpt || null,
+          activitySource: 'event'
+        };
+      }
+    }
+  }
+
+  if (outputSummary) {
+    return {
+      activitySummary: outputSummary,
+      activityExcerpt: outputExcerpt || null,
+      activitySource: 'output'
+    };
+  }
+
+  if (meaningfulEvent) {
+    const payload = meaningfulEvent.payload_json || {};
+    const eventSummary = truncateActivityText(payload.activitySummary || meaningfulEvent.payload_summary || '');
+    const eventExcerpt = truncateActivityText(payload.activityExcerpt || '') || null;
+    if (eventSummary || eventExcerpt) {
+      return {
+        activitySummary: eventSummary || summarizeOutputExcerpt(eventExcerpt),
+        activityExcerpt: eventExcerpt || outputExcerpt || null,
+        activitySource: 'event'
+      };
+    }
+  }
+
+  return {
+    activitySummary: buildRootFallbackSummary(rootStatus, rootSession),
+    activityExcerpt: null,
+    activitySource: 'fallback'
   };
 }
 
@@ -411,7 +812,8 @@ function buildRootSessionSnapshot({
   rootSessionId,
   eventLimit = 400,
   terminalLimit = 200,
-  liveTerminalResolver = null
+  liveTerminalResolver = null,
+  liveOutputResolver = null
 }) {
   if (!db?.listSessionEvents || !db?.listTerminals) {
     throw new Error('root session monitoring requires orchestration DB support');
@@ -443,6 +845,7 @@ function buildRootSessionSnapshot({
         attention_code: liveTerminal.attention?.code || null,
         attention_message: liveTerminal.attention?.message || null,
         resume_command: liveTerminal.attention?.resumeCommand || null,
+        provider_thread_ref: liveTerminal.providerThreadRef || terminal.provider_thread_ref || null,
         last_active: liveTerminal.lastActive || terminal.last_active,
         work_dir: liveTerminal.workDir || terminal.work_dir,
         adapter: liveTerminal.adapter || terminal.adapter,
@@ -488,6 +891,7 @@ function buildRootSessionSnapshot({
   const counts = {
     sessions: sessionList.length,
     terminals: terminals.length,
+    live: sessionList.filter(isLiveOperatorSession).length,
     running: sessionList.filter(isBusyRootSession).length,
     idle: sessionList.filter(isPromptIdleRootSession).length,
     blocked: attention.blockedSessionIds.length,
@@ -503,12 +907,33 @@ function buildRootSessionSnapshot({
     counts,
     attention
   });
+  const capabilities = deriveRootCapabilities(classification, rootSession);
+  const rootMode = deriveRootMode(classification, rootSession);
+  const interactiveTerminalId = resolveInteractiveTerminalId(rootSessionId, sessionList, rootMode);
+  const rootStatus = deriveRootStatus(sessionList, attention);
+  const activity = deriveRootActivityDetails({
+    rootStatus,
+    rootSession,
+    latestConclusion: summarizeConclusionEvent(latestConclusionEvent),
+    attention,
+    events,
+    liveOutputResolver,
+    interactiveTerminalId
+  });
 
   return {
     rootSessionId,
-    status: deriveRootStatus(sessionList, attention),
+    status: rootStatus,
     rootSession,
     rootType: classification.rootType,
+    rootMode,
+    sessionKind: capabilities.sessionKind,
+    visibility: capabilities.visibility,
+    replyCapability: capabilities.replyCapability,
+    interactiveTerminalId,
+    activitySummary: activity.activitySummary,
+    activityExcerpt: activity.activityExcerpt,
+    activitySource: activity.activitySource,
     userFacing: classification.userFacing,
     externalSessionRef: classification.externalSessionRef,
     clientName: classification.clientName,
@@ -530,13 +955,16 @@ function listRootSessionSummaries({
   archiveAfterMs,
   nowMs,
   scope = 'user',
-  liveTerminalResolver = null
+  statusFilter = 'all',
+  liveTerminalResolver = null,
+  liveOutputResolver = null
 } = {}) {
   if (!db?.listRootSessions) {
     throw new Error('root session listing requires orchestration DB support');
   }
 
   const normalizedScope = normalizeRootScope(scope);
+  const normalizedStatusFilter = normalizeRootStatusFilter(statusFilter);
   const scanLimit = includeArchived ? limit : Math.max(limit * 5, limit + 50);
   const rootRows = new Map();
   for (const row of db.listRootSessions({ limit: scanLimit })) {
@@ -566,7 +994,8 @@ function listRootSessionSummaries({
       rootSessionId: row.root_session_id,
       eventLimit,
       terminalLimit,
-      liveTerminalResolver
+      liveTerminalResolver,
+      liveOutputResolver
     });
 
     return {
@@ -577,12 +1006,21 @@ function listRootSessionSummaries({
       status: snapshot?.status || 'unknown',
       originClient: snapshot?.rootSession?.originClient || null,
       rootType: snapshot?.rootType || 'workflow_root',
+      rootMode: snapshot?.rootMode || null,
+      sessionKind: snapshot?.sessionKind || 'workflow',
+      visibility: snapshot?.visibility || 'internal',
+      replyCapability: snapshot?.replyCapability || 'none',
+      interactiveTerminalId: snapshot?.interactiveTerminalId || null,
+      activitySummary: snapshot?.activitySummary || null,
+      activityExcerpt: snapshot?.activityExcerpt || null,
+      activitySource: snapshot?.activitySource || 'fallback',
       userFacing: snapshot?.userFacing !== false,
       externalSessionRef: snapshot?.externalSessionRef || null,
       clientName: snapshot?.clientName || null,
       latestConclusion: snapshot?.latestConclusion || null,
       attention: snapshot?.attention || { requiresAttention: false, reasons: [] },
-      counts: snapshot?.counts || null
+      counts: snapshot?.counts || null,
+      live: Boolean(snapshot?.counts?.live)
     };
   }).sort((left, right) => {
     const leftTime = normalizeTimestamp(left.lastOccurredAt || left.lastRecordedAt) || 0;
@@ -624,12 +1062,32 @@ function listRootSessionSummaries({
     });
   }
 
+  const filteredRoots = visibleRoots.filter((summary) => {
+    if (normalizedStatusFilter === 'all') {
+      return true;
+    }
+    if (normalizedStatusFilter === 'live') {
+      return Boolean(summary.live);
+    }
+    if (normalizedStatusFilter === 'actionable') {
+      return Boolean(summary.attention?.requiresAttention);
+    }
+    if (normalizedStatusFilter === 'active') {
+      return ACTIVE_ROOT_STATUSES.has(String(summary.status || '').trim().toLowerCase());
+    }
+    if (normalizedStatusFilter === 'completed') {
+      return String(summary.status || '').trim().toLowerCase() === 'completed';
+    }
+    return true;
+  });
+
   return {
-    roots: visibleRoots.slice(0, limit),
+    roots: filteredRoots.slice(0, limit),
     archivedCount,
     hiddenDetachedCount,
     hiddenNonUserCount,
-    scope: normalizedScope
+    scope: normalizedScope,
+    statusFilter: normalizedStatusFilter
   };
 }
 
@@ -638,5 +1096,6 @@ module.exports = {
   listRootSessionSummaries,
   shouldArchiveRootSummary,
   classifyRootSession,
-  normalizeRootScope
+  normalizeRootScope,
+  normalizeRootStatusFilter
 };
