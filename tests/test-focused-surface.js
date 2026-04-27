@@ -33,6 +33,7 @@ const TEST_FILES = [
   'test-discussion-replay-routes.js',
   'test-discussion-runner.js',
   'test-provider-sessions-and-rooms.js',
+  'test-room-continuity.js',
   'test-review-protocols.js',
   'test-workflow-time-budgets.js',
   'test-persistence-v1-slice-b.js',

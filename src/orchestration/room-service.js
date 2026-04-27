@@ -123,6 +123,9 @@ class RoomService {
     this.sessionManager = options.sessionManager;
     this.runLedger = options.runLedger || null;
     this.sessionEventsEnabled = options.sessionEventsEnabled === true;
+    this.runDiscussion = typeof options.runDiscussion === 'function'
+      ? options.runDiscussion
+      : runDiscussion;
   }
 
   createRoom(input = {}) {
@@ -503,7 +506,7 @@ class RoomService {
         console.debug(`[RoomService] No root memory bundle available yet for room discussion ${roomId} (${room.rootSessionId})`);
       }
       const recentMessages = this.db.getRecentRoomMessages(roomId, 12);
-      result = await runDiscussion(this.sessionManager, input.message, {
+      result = await this.runDiscussion(this.sessionManager, input.message, {
         participants: participants.map((participant) => ({
           participantRef: participant.id,
           name: formatParticipantLabel(participant),

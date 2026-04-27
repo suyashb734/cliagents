@@ -50,7 +50,10 @@ function createOrchestrationRouter(context) {
         db,
         sessionManager: apiSessionManager || sessionManager,
         runLedger,
-        sessionEventsEnabled
+        sessionEventsEnabled,
+        ...(typeof context.roomDiscussionRunner === 'function'
+          ? { runDiscussion: context.roomDiscussionRunner }
+          : {})
       })
     : null;
 

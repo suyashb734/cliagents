@@ -14,7 +14,8 @@
     "test": "node scripts/run-with-supported-node.js tests/test-focused-surface.js",
     "test:focused": "node scripts/run-with-supported-node.js tests/test-focused-surface.js",
     "test:runtime": "node scripts/run-with-supported-node.js tests/test-runtime-consistency.js",
-    "test:broad": "node scripts/run-with-supported-node.js tests/test-broad-api-surface.js"
+    "test:broad": "node scripts/run-with-supported-node.js tests/test-broad-api-surface.js",
+    "test:rooms:live": "node scripts/run-with-supported-node.js tests/test-room-continuity-live.js"
   },
   "keywords": [
     "ai",
