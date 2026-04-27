@@ -167,6 +167,58 @@ function buildUsageWhereClause(options = {}) {
   };
 }
 
+const MEMORY_SNAPSHOT_SCOPES = new Set(['run', 'root']);
+const MEMORY_SNAPSHOT_GENERATION_TRIGGERS = new Set(['run_completed', 'root_refresh', 'repair', 'manual']);
+const MEMORY_SNAPSHOT_GENERATION_STRATEGIES = new Set(['rule_based']);
+const ROOM_TURN_ACTIVE_STATUSES = new Set(['pending', 'running']);
+const ROOM_TURN_TERMINAL_STATUSES = new Set(['completed', 'partial', 'failed']);
+const DEFAULT_ROOM_TURN_STALE_MS = 30 * 60 * 1000;
+function clampLimit(value, fallback = 100, max = 500) {
+  const parsed = Number.parseInt(value, 10);
+  if (!Number.isFinite(parsed) || parsed <= 0) {
+    return fallback;
+  }
+  return Math.min(parsed, max);
+}
+
+function truncateText(value, maxLength = 1500) {
+  const text = String(value || '').trim();
+  if (!text) {
+    return null;
+  }
+  if (text.length <= maxLength) {
+    return text;
+  }
+  return `${text.slice(0, Math.max(0, maxLength - 16)).trimEnd()}... [truncated]`;
+}
+
+function dedupeStrings(values = [], maxItems = Infinity) {
+  const seen = new Set();
+  const result = [];
+  for (const value of Array.isArray(values) ? values : []) {
+    const normalized = String(value || '').trim();
+    if (!normalized || seen.has(normalized)) {
+      continue;
+    }
+    seen.add(normalized);
+    result.push(normalized);
+    if (result.length >= maxItems) {
+      break;
+    }
+  }
+  return result;
+}
+
+function inferAdapterFromOriginClient(originClient, fallbackAdapter = null) {
+  const normalizedOriginClient = String(originClient || '').trim().toLowerCase();
+  if (normalizedOriginClient === 'codex') return 'codex-cli';
+  if (normalizedOriginClient === 'claude') return 'claude-code';
+  if (normalizedOriginClient === 'gemini') return 'gemini-cli';
+  if (normalizedOriginClient === 'qwen') return 'qwen-cli';
+  if (normalizedOriginClient === 'opencode') return 'opencode-cli';
+  return fallbackAdapter || null;
+}
+
 function wrapDatabase(db) {
   return {
     exec(sql) {
@@ -351,6 +403,7 @@ class OrchestrationDB {
     try {
       // Check if messages table has FK constraint by examining table schema
       const tableInfo = this.db.get("SELECT sql FROM sqlite_master WHERE type='table' AND name='messages'");
+      const columns = this.db.prepare('PRAGMA table_info(messages)').all();
 
       if (!tableInfo || !tableInfo.sql) {
         return; // Table doesn't exist yet, schema.sql will create it correctly
@@ -360,39 +413,75 @@ class OrchestrationDB {
       if (tableInfo.sql.includes('FOREIGN KEY')) {
         console.log('[db] Migrating messages table to remove FK constraint...');
 
-        this.db.exec(`
-          -- Create new table without FK
-          CREATE TABLE IF NOT EXISTS messages_new (
-            id INTEGER PRIMARY KEY AUTOINCREMENT,
-            terminal_id TEXT NOT NULL,
-            trace_id TEXT,
-            role TEXT NOT NULL,
-            content TEXT NOT NULL,
-            metadata TEXT,
-            created_at INTEGER NOT NULL
-          );
+        const hasRootSessionId = columns.some((column) => column.name === 'root_session_id');
+        const columnList = [
+          'id',
+          'terminal_id',
+          'trace_id',
+          ...(hasRootSessionId ? ['root_session_id'] : []),
+          'role',
+          'content',
+          'metadata',
+          'created_at'
+        ];
+        const rootSessionIdColumnSql = hasRootSessionId ? 'root_session_id TEXT,\n            ' : '';
+        const rootSessionIdIndexSql = hasRootSessionId
+          ? 'CREATE INDEX IF NOT EXISTS idx_messages_root_session_created ON messages(root_session_id, created_at);'
+          : '';
 
-          -- Copy data
-          INSERT INTO messages_new SELECT * FROM messages;
+        this.db.exec('SAVEPOINT migrate_messages_remove_fk');
+        try {
+          this.db.exec(`
+            -- Remove any stale temp table from a previously interrupted migration.
+            DROP TABLE IF EXISTS messages_new;
 
-          -- Drop old table
-          DROP TABLE messages;
+            -- Create new table without FK
+            CREATE TABLE messages_new (
+              id INTEGER PRIMARY KEY AUTOINCREMENT,
+              terminal_id TEXT NOT NULL,
+              trace_id TEXT,
+              ${rootSessionIdColumnSql}role TEXT NOT NULL,
+              content TEXT NOT NULL,
+              metadata TEXT,
+              created_at INTEGER NOT NULL
+            );
 
-          -- Rename new table
-          ALTER TABLE messages_new RENAME TO messages;
+            -- Copy data
+            INSERT INTO messages_new (${columnList.join(', ')})
+            SELECT ${columnList.join(', ')} FROM messages;
 
-          -- Recreate indexes
-          CREATE INDEX IF NOT EXISTS idx_messages_terminal_created ON messages(terminal_id, created_at);
-          CREATE INDEX IF NOT EXISTS idx_messages_trace ON messages(trace_id);
-        `);
+            -- Drop old table
+            DROP TABLE messages;
+
+            -- Rename new table
+            ALTER TABLE messages_new RENAME TO messages;
+
+            -- Recreate indexes
+            CREATE INDEX IF NOT EXISTS idx_messages_terminal_created ON messages(terminal_id, created_at);
+            CREATE INDEX IF NOT EXISTS idx_messages_trace ON messages(trace_id);
+            ${rootSessionIdIndexSql}
+          `);
+          this.db.exec('RELEASE SAVEPOINT migrate_messages_remove_fk');
+        } catch (migrationError) {
+          try {
+            this.db.exec('ROLLBACK TO SAVEPOINT migrate_messages_remove_fk');
+            this.db.exec('RELEASE SAVEPOINT migrate_messages_remove_fk');
+          } catch {}
+          throw migrationError;
+        }
 
         console.log('[db] Messages table migrated successfully');
       }
     } catch (error) {
-      // Migration may have already been applied or table doesn't exist
-      if (!error.message.includes('no such table') && !error.message.includes('already exists')) {
-        console.error('[db] Migration error:', error.message);
+      if (error.message.includes('no such table')) {
+        return;
       }
+      if (error.code === 'SQLITE_BUSY' || error.code === 'SQLITE_LOCKED') {
+        console.warn('[db] Skipping messages table FK migration due to transient SQLite lock:', error.message);
+        return;
+      }
+      console.error('[db] Migration error:', error.message);
+      throw error;
     }
   }
 
@@ -422,6 +511,8 @@ class OrchestrationDB {
     const providerThreadRef = terminalOptions.providerThreadRef || null;
     const adoptedAt = terminalOptions.adoptedAt || null;
     const captureMode = terminalOptions.captureMode || 'raw-tty';
+    const model = terminalOptions.model || null;
+    const lastMessageAt = Number.isFinite(terminalOptions.lastMessageAt) ? terminalOptions.lastMessageAt : null;
 
     this.db.run(`
       INSERT INTO terminals (
@@ -443,9 +534,11 @@ class OrchestrationDB {
         harness_session_id,
         provider_thread_ref,
         adopted_at,
-        capture_mode
+        capture_mode,
+        model,
+        last_message_at
       )
-      VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+      VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
     `,
     terminalId,
     sessionName,
@@ -465,7 +558,9 @@ class OrchestrationDB {
     harnessSessionId,
     providerThreadRef,
     adoptedAt,
-    captureMode);
+    captureMode,
+    model,
+    lastMessageAt);
 
     return terminalId;
   }
@@ -529,6 +624,8 @@ class OrchestrationDB {
         provider_thread_ref = ?,
         adopted_at = COALESCE(?, adopted_at),
         capture_mode = COALESCE(?, capture_mode),
+        model = COALESCE(?, model),
+        last_message_at = COALESCE(?, last_message_at),
         status = COALESCE(?, status),
         last_active = CURRENT_TIMESTAMP
       WHERE terminal_id = ?
@@ -548,6 +645,8 @@ class OrchestrationDB {
     terminalOptions.providerThreadRef === undefined ? null : terminalOptions.providerThreadRef,
     terminalOptions.adoptedAt || null,
     terminalOptions.captureMode || null,
+    terminalOptions.model || null,
+    Number.isFinite(terminalOptions.lastMessageAt) ? terminalOptions.lastMessageAt : null,
     terminalOptions.status || null,
     terminalId);
   }
@@ -584,7 +683,9 @@ class OrchestrationDB {
       params.push(options.sessionKind);
     }
 
-    sql += ' ORDER BY created_at DESC';
+    sql += ` ORDER BY
+      COALESCE(last_message_at, CAST(strftime('%s', last_active) AS INTEGER) * 1000, CAST(strftime('%s', created_at) AS INTEGER) * 1000) DESC,
+      created_at DESC`;
 
     if (options.limit) {
       sql += ' LIMIT ?';
@@ -690,23 +791,82 @@ class OrchestrationDB {
   listRootSessions(options = {}) {
     const sessionOptions = options && typeof options === 'object' ? options : {};
     const params = [];
+    const clauses = [];
     let sql = `
+      WITH roots AS (
+        SELECT DISTINCT root_session_id
+        FROM session_events
+        WHERE root_session_id IS NOT NULL AND TRIM(root_session_id) <> ''
+        UNION
+        SELECT DISTINCT root_session_id
+        FROM terminals
+        WHERE root_session_id IS NOT NULL AND TRIM(root_session_id) <> ''
+        UNION
+        SELECT DISTINCT root_session_id
+        FROM messages
+        WHERE root_session_id IS NOT NULL AND TRIM(root_session_id) <> ''
+      )
       SELECT
-        root_session_id,
-        MAX(recorded_at) AS last_recorded_at,
-        MAX(occurred_at) AS last_occurred_at,
-        COUNT(*) AS event_count
-      FROM session_events
+        roots.root_session_id,
+        (
+          SELECT MAX(recorded_at)
+          FROM session_events se
+          WHERE se.root_session_id = roots.root_session_id
+        ) AS last_recorded_at,
+        (
+          SELECT MAX(occurred_at)
+          FROM session_events se
+          WHERE se.root_session_id = roots.root_session_id
+        ) AS last_occurred_at,
+        (
+          SELECT COUNT(*)
+          FROM session_events se
+          WHERE se.root_session_id = roots.root_session_id
+        ) AS event_count,
+        COALESCE(
+          (
+            SELECT MAX(created_at)
+            FROM messages m
+            WHERE m.root_session_id = roots.root_session_id
+          ),
+          (
+            SELECT MAX(last_message_at)
+            FROM terminals t
+            WHERE t.root_session_id = roots.root_session_id
+          )
+        ) AS last_message_at,
+        (
+          SELECT COUNT(*)
+          FROM messages m
+          WHERE m.root_session_id = roots.root_session_id
+        ) AS message_count
+      FROM roots
     `;
 
     if (sessionOptions.originClient) {
-      sql += ' WHERE origin_client = ?';
-      params.push(sessionOptions.originClient);
+      clauses.push(`(
+        EXISTS (
+          SELECT 1
+          FROM terminals t
+          WHERE t.root_session_id = roots.root_session_id
+            AND t.origin_client = ?
+        )
+        OR EXISTS (
+          SELECT 1
+          FROM session_events se
+          WHERE se.root_session_id = roots.root_session_id
+            AND se.origin_client = ?
+        )
+      )`);
+      params.push(sessionOptions.originClient, sessionOptions.originClient);
+    }
+
+    if (clauses.length) {
+      sql += ` WHERE ${clauses.join(' AND ')}`;
     }
 
     sql += `
-      GROUP BY root_session_id
-      ORDER BY last_recorded_at DESC, last_occurred_at DESC, root_session_id DESC
+      ORDER BY COALESCE(last_message_at, last_occurred_at, last_recorded_at) DESC, root_session_id DESC
     `;
 
     if (sessionOptions.limit) {
@@ -728,6 +888,52 @@ class OrchestrationDB {
 
     if (!originClient && !externalSessionRef && !clientName) {
       return null;
+    }
+
+    if (externalSessionRef) {
+      const terminalClauses = [
+        'external_session_ref = ?',
+        'root_session_id IS NOT NULL',
+        "TRIM(root_session_id) <> ''",
+        '(parent_session_id IS NULL OR terminal_id = root_session_id)'
+      ];
+      const terminalParams = [externalSessionRef];
+
+      if (originClient) {
+        terminalClauses.push('origin_client = ?');
+        terminalParams.push(originClient);
+      }
+
+      const terminalRows = this.db.all(`
+        SELECT *
+        FROM terminals
+        WHERE ${terminalClauses.join(' AND ')}
+        ORDER BY
+          CASE
+            WHEN session_kind = 'main' THEN 0
+            WHEN session_kind = 'attach' THEN 1
+            ELSE 2
+          END ASC,
+          COALESCE(last_message_at, CAST(strftime('%s', last_active) AS INTEGER) * 1000, CAST(strftime('%s', created_at) AS INTEGER) * 1000) DESC,
+          created_at DESC,
+          terminal_id DESC
+        LIMIT 50
+      `, ...terminalParams);
+
+      for (const row of terminalRows) {
+        const metadata = parseJsonField(row.session_metadata) || {};
+        const rowClientName = metadata.clientName || null;
+        if (clientName && rowClientName && rowClientName !== clientName) {
+          continue;
+        }
+
+        return {
+          ...row,
+          metadata,
+          payload_json: null,
+          root_session_id: row.root_session_id
+        };
+      }
     }
 
     const clauses = [
@@ -785,6 +991,59 @@ class OrchestrationDB {
     }
 
     return null;
+  }
+
+  findRootTerminalByProviderThreadRef(adapter, providerThreadRef) {
+    const normalizedProviderThreadRef = String(providerThreadRef || '').trim();
+    if (!normalizedProviderThreadRef) {
+      return null;
+    }
+
+    const clauses = [
+      'provider_thread_ref = ?',
+      'root_session_id IS NOT NULL',
+      "TRIM(root_session_id) <> ''",
+      '(parent_session_id IS NULL OR terminal_id = root_session_id)'
+    ];
+    const params = [normalizedProviderThreadRef];
+
+    if (adapter) {
+      clauses.push('adapter = ?');
+      params.push(adapter);
+    }
+
+    return this.db.get(`
+      SELECT *
+      FROM terminals
+      WHERE ${clauses.join(' AND ')}
+      ORDER BY
+        CASE
+          WHEN session_kind = 'main' THEN 0
+          WHEN session_kind = 'attach' THEN 1
+          ELSE 2
+        END ASC,
+        COALESCE(last_message_at, CAST(strftime('%s', last_active) AS INTEGER) * 1000, CAST(strftime('%s', created_at) AS INTEGER) * 1000) DESC,
+        created_at DESC,
+        terminal_id DESC
+      LIMIT 1
+    `, ...params) || null;
+  }
+
+  touchTerminalMessage(terminalId, options = {}) {
+    const timestamp = Number.isFinite(options.timestamp) ? options.timestamp : Date.now();
+    const model = String(options.model || '').trim() || null;
+    const result = this.db.run(`
+      UPDATE terminals
+      SET
+        model = COALESCE(?, model),
+        last_message_at = CASE
+          WHEN last_message_at IS NULL OR last_message_at < ? THEN ?
+          ELSE last_message_at
+        END,
+        last_active = CURRENT_TIMESTAMP
+      WHERE terminal_id = ?
+    `, model, timestamp, timestamp, terminalId);
+    return result.changes > 0;
   }
 
   /**
@@ -1388,23 +1647,30 @@ class OrchestrationDB {
    * @returns {number} - Message ID
    */
   addMessage(terminalId, role, content, options = {}) {
-    const { traceId = null, metadata = {} } = options;
+    const { traceId = null, metadata = {}, rootSessionId: explicitRootSessionId = null } = options;
+    const terminalRow = this.getTerminal(terminalId);
 
     const stmt = this.db.prepare(`
-      INSERT INTO messages (terminal_id, trace_id, role, content, metadata, created_at)
-      VALUES (?, ?, ?, ?, ?, ?)
+      INSERT INTO messages (terminal_id, trace_id, root_session_id, role, content, metadata, created_at)
+      VALUES (?, ?, ?, ?, ?, ?, ?)
     `);
 
+    const createdAt = Date.now(); // Milliseconds for proper ordering during fast tool loops
     const result = stmt.run(
       terminalId,
       traceId,
+      explicitRootSessionId || terminalRow?.root_session_id || null,
       role,
       content,
       JSON.stringify(metadata),
-      Date.now() // Milliseconds for proper ordering during fast tool loops
+      createdAt
     );
 
-    const terminalRow = this.getTerminal(terminalId);
+    this.touchTerminalMessage(terminalId, {
+      timestamp: createdAt,
+      model: metadata?.model || null
+    });
+
     const usageRecord = buildUsageRecordFromMessage(terminalRow, terminalId, role, metadata, {
       traceId
     });
@@ -1948,6 +2214,1370 @@ class OrchestrationDB {
     }));
   }
 
+  // =====================
+  // Persistent Room State
+  // =====================
+
+  _parseRoomRow(row) {
+    if (!row) {
+      return null;
+    }
+
+    return {
+      id: row.id,
+      rootSessionId: row.root_session_id,
+      title: row.title || null,
+      status: row.status || 'active',
+      metadata: parseJsonField(row.metadata) || {},
+      createdAt: row.created_at,
+      updatedAt: row.updated_at
+    };
+  }
+
+  _parseRoomParticipantRow(row) {
+    if (!row) {
+      return null;
+    }
+
+    return {
+      id: row.id,
+      roomId: row.room_id,
+      adapter: row.adapter,
+      displayName: row.display_name || null,
+      model: row.model || null,
+      systemPrompt: row.system_prompt || null,
+      workDir: row.work_dir || null,
+      providerSessionId: row.provider_session_id || null,
+      status: row.status || 'active',
+      lastMessageAt: row.last_message_at || null,
+      importedFromProviderSessionId: row.imported_from_provider_session_id || null,
+      metadata: parseJsonField(row.metadata) || {},
+      createdAt: row.created_at,
+      updatedAt: row.updated_at
+    };
+  }
+
+  _parseRoomTurnRow(row) {
+    if (!row) {
+      return null;
+    }
+
+    return {
+      id: row.id,
+      roomId: row.room_id,
+      sequenceNo: row.sequence_no,
+      requestId: row.request_id || null,
+      initiatorRole: row.initiator_role,
+      initiatorName: row.initiator_name || null,
+      content: row.content,
+      mentions: parseJsonField(row.mentions_json) || [],
+      status: row.status,
+      error: row.error || null,
+      metadata: parseJsonField(row.metadata) || {},
+      createdAt: row.created_at,
+      startedAt: row.started_at || null,
+      completedAt: row.completed_at || null,
+      updatedAt: row.updated_at
+    };
+  }
+
+  _parseRoomMessageRow(row) {
+    if (!row) {
+      return null;
+    }
+
+    return {
+      id: row.id,
+      roomId: row.room_id,
+      turnId: row.turn_id || null,
+      sequenceNo: row.sequence_no,
+      participantId: row.participant_id || null,
+      role: row.role,
+      content: row.content,
+      metadata: parseJsonField(row.metadata) || {},
+      createdAt: row.created_at
+    };
+  }
+
+  createRoom(input = {}) {
+    const id = String(input.id || `room_${generateId()}`).trim();
+    const rootSessionId = String(input.rootSessionId || '').trim();
+    const title = String(input.title || '').trim() || null;
+    const status = String(input.status || 'active').trim().toLowerCase() || 'active';
+    const metadata = input.metadata && typeof input.metadata === 'object' && !Array.isArray(input.metadata)
+      ? input.metadata
+      : {};
+    const now = Number.isFinite(input.createdAt) ? input.createdAt : Date.now();
+
+    if (!id) {
+      throw new Error('room id is required');
+    }
+    if (!rootSessionId) {
+      throw new Error('rootSessionId is required');
+    }
+
+    this.db.prepare(`
+      INSERT INTO rooms (id, root_session_id, title, status, metadata, created_at, updated_at)
+      VALUES (?, ?, ?, ?, ?, ?, ?)
+    `).run(
+      id,
+      rootSessionId,
+      title,
+      status,
+      JSON.stringify(metadata),
+      now,
+      now
+    );
+
+    return this.getRoom(id);
+  }
+
+  getRoom(roomId) {
+    const row = this.db.prepare('SELECT * FROM rooms WHERE id = ?').get(roomId);
+    return this._parseRoomRow(row);
+  }
+
+  getRoomByRootSessionId(rootSessionId) {
+    const row = this.db.prepare('SELECT * FROM rooms WHERE root_session_id = ?').get(rootSessionId);
+    return this._parseRoomRow(row);
+  }
+
+  updateRoom(roomId, patch = {}) {
+    const updates = [];
+    const params = [];
+    if (patch.title !== undefined) {
+      updates.push('title = ?');
+      params.push(String(patch.title || '').trim() || null);
+    }
+    if (patch.status !== undefined) {
+      updates.push('status = ?');
+      params.push(String(patch.status || '').trim().toLowerCase() || 'active');
+    }
+    if (patch.metadata !== undefined) {
+      const metadata = patch.metadata && typeof patch.metadata === 'object' && !Array.isArray(patch.metadata)
+        ? patch.metadata
+        : {};
+      updates.push('metadata = ?');
+      params.push(JSON.stringify(metadata));
+    }
+
+    const updatedAt = Number.isFinite(patch.updatedAt) ? patch.updatedAt : Date.now();
+    updates.push('updated_at = ?');
+    params.push(updatedAt);
+    params.push(roomId);
+
+    this.db.prepare(`
+      UPDATE rooms
+      SET ${updates.join(', ')}
+      WHERE id = ?
+    `).run(...params);
+    return this.getRoom(roomId);
+  }
+
+  listRooms(options = {}) {
+    const clauses = [];
+    const params = [];
+    if (options.status) {
+      clauses.push('status = ?');
+      params.push(options.status);
+    }
+    const whereSql = clauses.length ? `WHERE ${clauses.join(' AND ')}` : '';
+    const limit = clampLimit(options.limit, 20, 100);
+    return this.db.prepare(`
+      SELECT *
+      FROM rooms
+      ${whereSql}
+      ORDER BY updated_at DESC, created_at DESC, id DESC
+      LIMIT ?
+    `).all(...params, limit).map((row) => this._parseRoomRow(row));
+  }
+
+  addRoomParticipant(input = {}) {
+    const id = String(input.id || `participant_${generateId()}`).trim();
+    const roomId = String(input.roomId || '').trim();
+    const adapter = String(input.adapter || '').trim();
+    const displayName = String(input.displayName || '').trim() || null;
+    const model = String(input.model || '').trim() || null;
+    const systemPrompt = typeof input.systemPrompt === 'string' ? input.systemPrompt : null;
+    const workDir = String(input.workDir || '').trim() || null;
+    const providerSessionId = String(input.providerSessionId || '').trim() || null;
+    const status = String(input.status || 'active').trim().toLowerCase() || 'active';
+    const importedFromProviderSessionId = String(input.importedFromProviderSessionId || '').trim() || null;
+    const metadata = input.metadata && typeof input.metadata === 'object' && !Array.isArray(input.metadata)
+      ? input.metadata
+      : {};
+    const now = Number.isFinite(input.createdAt) ? input.createdAt : Date.now();
+    const lastMessageAt = Number.isFinite(input.lastMessageAt) ? input.lastMessageAt : null;
+
+    if (!roomId) {
+      throw new Error('roomId is required');
+    }
+    if (!adapter) {
+      throw new Error('adapter is required');
+    }
+
+    this.db.prepare(`
+      INSERT INTO room_participants (
+        id, room_id, adapter, display_name, model, system_prompt, work_dir,
+        provider_session_id, status, last_message_at, imported_from_provider_session_id,
+        metadata, created_at, updated_at
+      ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+    `).run(
+      id,
+      roomId,
+      adapter,
+      displayName,
+      model,
+      systemPrompt,
+      workDir,
+      providerSessionId,
+      status,
+      lastMessageAt,
+      importedFromProviderSessionId,
+      JSON.stringify(metadata),
+      now,
+      now
+    );
+
+    this.updateRoom(roomId, { updatedAt: now });
+    return this.getRoomParticipant(id);
+  }
+
+  getRoomParticipant(participantId) {
+    const row = this.db.prepare('SELECT * FROM room_participants WHERE id = ?').get(participantId);
+    return this._parseRoomParticipantRow(row);
+  }
+
+  listRoomParticipants(roomId, options = {}) {
+    const clauses = ['room_id = ?'];
+    const params = [roomId];
+    if (options.status) {
+      clauses.push('status = ?');
+      params.push(options.status);
+    }
+    const sql = `
+      SELECT *
+      FROM room_participants
+      WHERE ${clauses.join(' AND ')}
+      ORDER BY
+        COALESCE(last_message_at, updated_at, created_at) DESC,
+        created_at ASC,
+        id ASC
+    `;
+    return this.db.prepare(sql).all(...params).map((row) => this._parseRoomParticipantRow(row));
+  }
+
+  getRoomParticipantsByIds(roomId, participantIds = []) {
+    const ids = Array.from(new Set((Array.isArray(participantIds) ? participantIds : []).map((value) => String(value || '').trim()).filter(Boolean)));
+    if (ids.length === 0) {
+      return [];
+    }
+
+    const placeholders = ids.map(() => '?').join(', ');
+    return this.db.prepare(`
+      SELECT *
+      FROM room_participants
+      WHERE room_id = ? AND id IN (${placeholders})
+      ORDER BY created_at ASC, id ASC
+    `).all(roomId, ...ids).map((row) => this._parseRoomParticipantRow(row));
+  }
+
+  updateRoomParticipant(participantId, patch = {}) {
+    const updates = [];
+    const params = [];
+    if (patch.displayName !== undefined) {
+      updates.push('display_name = ?');
+      params.push(String(patch.displayName || '').trim() || null);
+    }
+    if (patch.model !== undefined) {
+      updates.push('model = ?');
+      params.push(String(patch.model || '').trim() || null);
+    }
+    if (patch.systemPrompt !== undefined) {
+      updates.push('system_prompt = ?');
+      params.push(typeof patch.systemPrompt === 'string' ? patch.systemPrompt : null);
+    }
+    if (patch.workDir !== undefined) {
+      updates.push('work_dir = ?');
+      params.push(String(patch.workDir || '').trim() || null);
+    }
+    if (patch.providerSessionId !== undefined) {
+      updates.push('provider_session_id = ?');
+      params.push(String(patch.providerSessionId || '').trim() || null);
+    }
+    if (patch.status !== undefined) {
+      updates.push('status = ?');
+      params.push(String(patch.status || '').trim().toLowerCase() || 'active');
+    }
+    if (patch.lastMessageAt !== undefined) {
+      updates.push('last_message_at = ?');
+      params.push(Number.isFinite(patch.lastMessageAt) ? patch.lastMessageAt : null);
+    }
+    if (patch.importedFromProviderSessionId !== undefined) {
+      updates.push('imported_from_provider_session_id = ?');
+      params.push(String(patch.importedFromProviderSessionId || '').trim() || null);
+    }
+    if (patch.metadata !== undefined) {
+      const metadata = patch.metadata && typeof patch.metadata === 'object' && !Array.isArray(patch.metadata)
+        ? patch.metadata
+        : {};
+      updates.push('metadata = ?');
+      params.push(JSON.stringify(metadata));
+    }
+
+    const updatedAt = Number.isFinite(patch.updatedAt) ? patch.updatedAt : Date.now();
+    updates.push('updated_at = ?');
+    params.push(updatedAt);
+    params.push(participantId);
+
+    this.db.prepare(`
+      UPDATE room_participants
+      SET ${updates.join(', ')}
+      WHERE id = ?
+    `).run(...params);
+
+    const participant = this.getRoomParticipant(participantId);
+    if (participant?.roomId) {
+      this.updateRoom(participant.roomId, { updatedAt });
+    }
+    return participant;
+  }
+
+  getNextRoomTurnSequence(roomId) {
+    const row = this.db.prepare(`
+      SELECT COALESCE(MAX(sequence_no), 0) + 1 AS next_sequence
+      FROM room_turns
+      WHERE room_id = ?
+    `).get(roomId);
+    return row?.next_sequence || 1;
+  }
+
+  getNextRoomMessageSequence(roomId) {
+    const row = this.db.prepare(`
+      SELECT COALESCE(MAX(sequence_no), 0) + 1 AS next_sequence
+      FROM room_messages
+      WHERE room_id = ?
+    `).get(roomId);
+    return row?.next_sequence || 1;
+  }
+
+  getRoomTurn(turnId) {
+    const row = this.db.prepare('SELECT * FROM room_turns WHERE id = ?').get(turnId);
+    return this._parseRoomTurnRow(row);
+  }
+
+  getRoomTurnByRequestId(roomId, requestId) {
+    const normalizedRequestId = String(requestId || '').trim();
+    if (!normalizedRequestId) {
+      return null;
+    }
+    const row = this.db.prepare(`
+      SELECT *
+      FROM room_turns
+      WHERE room_id = ? AND request_id = ?
+      LIMIT 1
+    `).get(roomId, normalizedRequestId);
+    return this._parseRoomTurnRow(row);
+  }
+
+  getLatestActiveRoomTurn(roomId) {
+    const placeholders = Array.from(ROOM_TURN_ACTIVE_STATUSES).map(() => '?').join(', ');
+    const row = this.db.prepare(`
+      SELECT *
+      FROM room_turns
+      WHERE room_id = ? AND status IN (${placeholders})
+      ORDER BY sequence_no DESC, updated_at DESC, created_at DESC, id DESC
+      LIMIT 1
+    `).get(roomId, ...Array.from(ROOM_TURN_ACTIVE_STATUSES));
+    return this._parseRoomTurnRow(row);
+  }
+
+  expireStaleRoomTurns(roomId, options = {}) {
+    const normalizedRoomId = String(roomId || '').trim();
+    if (!normalizedRoomId) {
+      return 0;
+    }
+
+    const now = Number.isFinite(options.now) ? options.now : Date.now();
+    const staleMs = Number.isFinite(options.staleMs)
+      ? options.staleMs
+      : DEFAULT_ROOM_TURN_STALE_MS;
+    if (staleMs <= 0) {
+      return 0;
+    }
+
+    const cutoff = now - staleMs;
+    const placeholders = Array.from(ROOM_TURN_ACTIVE_STATUSES).map(() => '?').join(', ');
+    const result = this.db.prepare(`
+      UPDATE room_turns
+      SET
+        status = 'failed',
+        error = COALESCE(error, 'Room turn expired after broker restart or timeout'),
+        completed_at = COALESCE(completed_at, ?),
+        updated_at = ?
+      WHERE room_id = ?
+        AND status IN (${placeholders})
+        AND updated_at < ?
+    `).run(now, now, normalizedRoomId, ...Array.from(ROOM_TURN_ACTIVE_STATUSES), cutoff);
+    return result.changes || 0;
+  }
+
+  getLatestRoomTurn(roomId) {
+    const row = this.db.prepare(`
+      SELECT *
+      FROM room_turns
+      WHERE room_id = ?
+      ORDER BY sequence_no DESC, updated_at DESC, created_at DESC, id DESC
+      LIMIT 1
+    `).get(roomId);
+    return this._parseRoomTurnRow(row);
+  }
+
+  createRoomTurn(input = {}) {
+    const roomId = String(input.roomId || '').trim();
+    const content = String(input.content || '').trim();
+    const initiatorRole = String(input.initiatorRole || 'user').trim().toLowerCase() || 'user';
+    const initiatorName = String(input.initiatorName || '').trim() || null;
+    const requestId = String(input.requestId || '').trim() || null;
+    const mentions = Array.isArray(input.mentions)
+      ? Array.from(new Set(input.mentions.map((value) => String(value || '').trim()).filter(Boolean)))
+      : [];
+    const status = String(input.status || 'pending').trim().toLowerCase() || 'pending';
+    const metadata = input.metadata && typeof input.metadata === 'object' && !Array.isArray(input.metadata)
+      ? input.metadata
+      : {};
+    const now = Number.isFinite(input.createdAt) ? input.createdAt : Date.now();
+
+    if (!roomId) {
+      throw new Error('roomId is required');
+    }
+    if (!content) {
+      throw new Error('content is required');
+    }
+
+    const activeTurnStaleMs = Number.isFinite(input.activeTurnStaleMs)
+      ? input.activeTurnStaleMs
+      : DEFAULT_ROOM_TURN_STALE_MS;
+
+    const create = this.db.transaction(() => {
+      const existing = requestId ? this.getRoomTurnByRequestId(roomId, requestId) : null;
+      if (existing) {
+        return {
+          ...existing,
+          reusedRequest: true
+        };
+      }
+
+      this.expireStaleRoomTurns(roomId, {
+        now,
+        staleMs: activeTurnStaleMs
+      });
+
+      const activeTurn = this.getLatestActiveRoomTurn(roomId);
+      if (activeTurn) {
+        const error = new Error(`room ${roomId} is already processing turn ${activeTurn.id}`);
+        error.code = 'room_busy';
+        error.roomId = roomId;
+        error.turnId = activeTurn.id;
+        throw error;
+      }
+
+      const id = String(input.id || `turn_${generateId()}`).trim();
+      const sequenceNo = Number.isInteger(input.sequenceNo) && input.sequenceNo > 0
+        ? input.sequenceNo
+        : this.getNextRoomTurnSequence(roomId);
+      this.db.prepare(`
+        INSERT INTO room_turns (
+          id, room_id, sequence_no, request_id, initiator_role, initiator_name,
+          content, mentions_json, status, error, metadata, created_at, started_at,
+          completed_at, updated_at
+        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+      `).run(
+        id,
+        roomId,
+        sequenceNo,
+        requestId,
+        initiatorRole,
+        initiatorName,
+        content,
+        JSON.stringify(mentions),
+        status,
+        null,
+        JSON.stringify(metadata),
+        now,
+        status === 'running' ? now : null,
+        ROOM_TURN_TERMINAL_STATUSES.has(status) ? now : null,
+        now
+      );
+      this.updateRoom(roomId, { updatedAt: now });
+      return this.getRoomTurn(id);
+    });
+
+    return create.immediate();
+  }
+
+  updateRoomTurn(turnId, patch = {}) {
+    const existing = this.getRoomTurn(turnId);
+    if (!existing) {
+      return null;
+    }
+
+    const updates = [];
+    const params = [];
+    if (patch.status !== undefined) {
+      updates.push('status = ?');
+      params.push(String(patch.status || '').trim().toLowerCase() || existing.status);
+    }
+    if (patch.error !== undefined) {
+      updates.push('error = ?');
+      params.push(String(patch.error || '').trim() || null);
+    }
+    if (patch.mentions !== undefined) {
+      const mentions = Array.isArray(patch.mentions)
+        ? Array.from(new Set(patch.mentions.map((value) => String(value || '').trim()).filter(Boolean)))
+        : [];
+      updates.push('mentions_json = ?');
+      params.push(JSON.stringify(mentions));
+    }
+    if (patch.metadata !== undefined) {
+      const metadata = patch.metadata && typeof patch.metadata === 'object' && !Array.isArray(patch.metadata)
+        ? patch.metadata
+        : {};
+      updates.push('metadata = ?');
+      params.push(JSON.stringify(metadata));
+    }
+    if (patch.startedAt !== undefined) {
+      updates.push('started_at = ?');
+      params.push(Number.isFinite(patch.startedAt) ? patch.startedAt : null);
+    }
+    if (patch.completedAt !== undefined) {
+      updates.push('completed_at = ?');
+      params.push(Number.isFinite(patch.completedAt) ? patch.completedAt : null);
+    }
+
+    const updatedAt = Number.isFinite(patch.updatedAt) ? patch.updatedAt : Date.now();
+    updates.push('updated_at = ?');
+    params.push(updatedAt);
+    params.push(turnId);
+
+    this.db.prepare(`
+      UPDATE room_turns
+      SET ${updates.join(', ')}
+      WHERE id = ?
+    `).run(...params);
+    this.updateRoom(existing.roomId, { updatedAt });
+    return this.getRoomTurn(turnId);
+  }
+
+  addRoomMessage(input = {}) {
+    const roomId = String(input.roomId || '').trim();
+    const turnId = String(input.turnId || '').trim() || null;
+    const participantId = String(input.participantId || '').trim() || null;
+    const role = String(input.role || '').trim().toLowerCase();
+    const content = String(input.content || '').trim();
+    const metadata = input.metadata && typeof input.metadata === 'object' && !Array.isArray(input.metadata)
+      ? input.metadata
+      : {};
+    const createdAt = Number.isFinite(input.createdAt) ? input.createdAt : Date.now();
+
+    if (!roomId) {
+      throw new Error('roomId is required');
+    }
+    if (!role) {
+      throw new Error('role is required');
+    }
+    if (!content) {
+      throw new Error('content is required');
+    }
+
+    const insert = this.db.transaction(() => {
+      const sequenceNo = Number.isInteger(input.sequenceNo) && input.sequenceNo > 0
+        ? input.sequenceNo
+        : this.getNextRoomMessageSequence(roomId);
+      const result = this.db.prepare(`
+        INSERT INTO room_messages (
+          room_id, turn_id, sequence_no, participant_id, role, content, metadata, created_at
+        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+      `).run(
+        roomId,
+        turnId,
+        sequenceNo,
+        participantId,
+        role,
+        content,
+        JSON.stringify(metadata),
+        createdAt
+      );
+
+      if (participantId) {
+        this.updateRoomParticipant(participantId, {
+          lastMessageAt: createdAt,
+          updatedAt: createdAt
+        });
+      } else {
+        this.updateRoom(roomId, { updatedAt: createdAt });
+      }
+
+      const row = this.db.prepare('SELECT * FROM room_messages WHERE id = ?').get(result.lastInsertRowid);
+      return this._parseRoomMessageRow(row);
+    });
+
+    return insert.immediate();
+  }
+
+  listRoomMessages(roomId, options = {}) {
+    const clauses = ['room_id = ?'];
+    const params = [roomId];
+    if (Number.isInteger(options.afterId) && options.afterId > 0) {
+      clauses.push('id > ?');
+      params.push(options.afterId);
+    }
+    if (options.turnId) {
+      clauses.push('turn_id = ?');
+      params.push(options.turnId);
+    }
+    const limit = clampLimit(options.limit, 100, 500);
+    return this.db.prepare(`
+      SELECT *
+      FROM room_messages
+      WHERE ${clauses.join(' AND ')}
+      ORDER BY id ASC
+      LIMIT ?
+    `).all(...params, limit).map((row) => this._parseRoomMessageRow(row));
+  }
+
+  countRoomMessages(roomId) {
+    const row = this.db.prepare(`
+      SELECT COUNT(*) AS count
+      FROM room_messages
+      WHERE room_id = ?
+    `).get(roomId);
+    return row?.count || 0;
+  }
+
+  getRecentRoomMessages(roomId, limit = 12) {
+    const rows = this.db.prepare(`
+      SELECT *
+      FROM room_messages
+      WHERE room_id = ?
+      ORDER BY sequence_no DESC, id DESC
+      LIMIT ?
+    `).all(roomId, clampLimit(limit, 12, 200));
+    return rows.reverse().map((row) => this._parseRoomMessageRow(row));
+  }
+
+  // =====================
+  // Message History Primitive
+  // =====================
+
+  _buildMessageSelectorClause(options = {}) {
+    const selectors = [];
+    if (options.terminalId) {
+      selectors.push({ sql: 'terminal_id = ?', value: options.terminalId });
+    }
+    if (options.rootSessionId) {
+      selectors.push({ sql: 'root_session_id = ?', value: options.rootSessionId });
+    }
+    if (options.traceId) {
+      selectors.push({ sql: 'trace_id = ?', value: options.traceId });
+    }
+
+    if (selectors.length !== 1) {
+      throw new Error('Exactly one of terminalId, rootSessionId, or traceId is required');
+    }
+
+    const clauses = [selectors[0].sql];
+    const params = [selectors[0].value];
+
+    if (Number.isInteger(options.afterId) && options.afterId > 0) {
+      clauses.push('id > ?');
+      params.push(options.afterId);
+    }
+
+    if (options.role) {
+      clauses.push('role = ?');
+      params.push(options.role);
+    }
+
+    return { clauses, params };
+  }
+
+  queryMessages(options = {}) {
+    const { clauses, params } = this._buildMessageSelectorClause(options);
+    const limit = clampLimit(options.limit, 100, 501);
+    const sql = `SELECT * FROM messages WHERE ${clauses.join(' AND ')} ORDER BY id ASC LIMIT ?`;
+    const rows = this.db.prepare(sql).all(...params, limit);
+    return rows.map((row) => ({
+      ...row,
+      metadata: parseJsonField(row.metadata) || {}
+    }));
+  }
+
+  listFinishedRunsForRepair(limit = 200) {
+    return this.db.prepare(`
+      SELECT id, root_session_id, task_id
+      FROM runs
+      WHERE completed_at IS NOT NULL
+      ORDER BY completed_at DESC, started_at DESC, id DESC
+      LIMIT ?
+    `).all(clampLimit(limit, 200, 1000)).map((row) => ({
+      id: row.id,
+      rootSessionId: row.root_session_id || null,
+      taskId: row.task_id || null
+    }));
+  }
+
+  repairRunRootSessionIds() {
+    let repaired = 0;
+
+    const byRunEvent = this.db.run(`
+      UPDATE runs
+      SET root_session_id = (
+        SELECT se.root_session_id
+        FROM session_events se
+        WHERE se.run_id = runs.id
+          AND se.root_session_id IS NOT NULL
+          AND TRIM(se.root_session_id) <> ''
+        ORDER BY se.occurred_at ASC, se.recorded_at ASC, se.id ASC
+        LIMIT 1
+      )
+      WHERE (runs.root_session_id IS NULL OR TRIM(runs.root_session_id) = '')
+        AND EXISTS (
+          SELECT 1
+          FROM session_events se
+          WHERE se.run_id = runs.id
+            AND se.root_session_id IS NOT NULL
+            AND TRIM(se.root_session_id) <> ''
+        )
+    `);
+    repaired += byRunEvent.changes || 0;
+
+    const byTraceSpan = this.db.run(`
+      UPDATE runs
+      SET root_session_id = (
+        SELECT t.root_session_id
+        FROM spans s
+        JOIN terminals t ON t.terminal_id = s.terminal_id
+        WHERE s.trace_id = runs.trace_id
+          AND t.root_session_id IS NOT NULL
+          AND TRIM(t.root_session_id) <> ''
+        ORDER BY s.start_time ASC, s.id ASC
+        LIMIT 1
+      )
+      WHERE (runs.root_session_id IS NULL OR TRIM(runs.root_session_id) = '')
+        AND runs.trace_id IS NOT NULL
+        AND EXISTS (
+          SELECT 1
+          FROM spans s
+          JOIN terminals t ON t.terminal_id = s.terminal_id
+          WHERE s.trace_id = runs.trace_id
+            AND t.root_session_id IS NOT NULL
+            AND TRIM(t.root_session_id) <> ''
+        )
+    `);
+    repaired += byTraceSpan.changes || 0;
+
+    return repaired;
+  }
+
+  repairMessageRootSessionIds() {
+    const result = this.db.run(`
+      UPDATE messages
+      SET root_session_id = (
+        SELECT t.root_session_id
+        FROM terminals t
+        WHERE t.terminal_id = messages.terminal_id
+          AND t.root_session_id IS NOT NULL
+          AND TRIM(t.root_session_id) <> ''
+        LIMIT 1
+      )
+      WHERE (messages.root_session_id IS NULL OR TRIM(messages.root_session_id) = '')
+        AND EXISTS (
+          SELECT 1
+          FROM terminals t
+          WHERE t.terminal_id = messages.terminal_id
+            AND t.root_session_id IS NOT NULL
+            AND TRIM(t.root_session_id) <> ''
+        )
+    `);
+    return result.changes || 0;
+  }
+
+  repairTerminalLastMessageAt() {
+    const result = this.db.run(`
+      UPDATE terminals
+      SET last_message_at = (
+        SELECT MAX(messages.created_at)
+        FROM messages
+        WHERE messages.terminal_id = terminals.terminal_id
+      )
+      WHERE EXISTS (
+        SELECT 1
+        FROM messages
+        WHERE messages.terminal_id = terminals.terminal_id
+      )
+    `);
+    return result.changes || 0;
+  }
+
+  repairAttachedRootTerminals() {
+    const repair = this.db.transaction(() => {
+      const rows = this.db.all(`
+        SELECT *
+        FROM session_events
+        WHERE event_type = 'session_started'
+          AND root_session_id = session_id
+        ORDER BY occurred_at ASC, recorded_at ASC, id ASC
+      `);
+
+      let repaired = 0;
+      for (const row of rows) {
+        const payload = parseJsonField(row.payload_json) || {};
+        const metadata = parseJsonField(row.metadata) || {};
+        const attachMode = String(payload.attachMode || metadata.attachMode || '').trim().toLowerCase();
+        if (!attachMode.includes('attach')) {
+          continue;
+        }
+
+        const rootSessionId = row.root_session_id;
+        if (!rootSessionId) {
+          continue;
+        }
+
+        const existing = this.getTerminal(rootSessionId);
+        const externalSessionRef =
+          payload.externalSessionRef ||
+          payload.clientSessionRef ||
+          metadata.externalSessionRef ||
+          metadata.clientSessionRef ||
+          null;
+        const workDir = metadata.workspaceRoot || payload.workDir || null;
+        const model = payload.model || metadata.model || null;
+        const adapter = inferAdapterFromOriginClient(
+          row.origin_client || metadata.clientName || null,
+          'codex-cli'
+        );
+
+        if (existing) {
+          this.updateTerminalBinding(rootSessionId, {
+            adapter,
+            role: 'main',
+            workDir,
+            rootSessionId,
+            parentSessionId: null,
+            sessionKind: 'attach',
+            originClient: row.origin_client || existing.origin_client || 'mcp',
+            externalSessionRef,
+            lineageDepth: 0,
+            sessionMetadata: metadata,
+            harnessSessionId: rootSessionId,
+            captureMode: existing.capture_mode || 'raw-tty',
+            model
+          });
+          continue;
+        }
+
+        this.registerTerminal(
+          rootSessionId,
+          `attached-${rootSessionId.slice(0, 12)}`,
+          'root',
+          adapter,
+          null,
+          'main',
+          workDir,
+          null,
+          {
+            rootSessionId,
+            parentSessionId: null,
+            sessionKind: 'attach',
+            originClient: row.origin_client || 'mcp',
+            externalSessionRef,
+            lineageDepth: 0,
+            sessionMetadata: metadata,
+            harnessSessionId: rootSessionId,
+            providerThreadRef: null,
+            captureMode: 'raw-tty',
+            model
+          }
+        );
+        repaired += 1;
+      }
+
+      return repaired;
+    });
+
+    return repair.immediate();
+  }
+
+  countMessages(options = {}) {
+    const { clauses, params } = this._buildMessageSelectorClause(options);
+    const row = this.db.get(
+      `SELECT COUNT(*) AS count FROM messages WHERE ${clauses.join(' AND ')}`,
+      ...params
+    );
+    return row?.count || 0;
+  }
+
+  // =====================
+  // Memory Snapshot Operations
+  // =====================
+
+  upsertMemorySnapshot(snapshot = {}) {
+    const scope = String(snapshot.scope || '').trim().toLowerCase();
+    const scopeId = String(snapshot.scopeId || '').trim();
+    const generationTrigger = String(snapshot.generationTrigger || '').trim().toLowerCase();
+    const generationStrategy = String(snapshot.generationStrategy || 'rule_based').trim().toLowerCase();
+
+    if (!MEMORY_SNAPSHOT_SCOPES.has(scope)) {
+      throw new Error(`Unsupported memory snapshot scope: ${scope || 'unknown'}`);
+    }
+    if (!scopeId) {
+      throw new Error('scopeId is required');
+    }
+    if (!MEMORY_SNAPSHOT_GENERATION_TRIGGERS.has(generationTrigger)) {
+      throw new Error(`Unsupported generation trigger: ${generationTrigger || 'unknown'}`);
+    }
+    if (!MEMORY_SNAPSHOT_GENERATION_STRATEGIES.has(generationStrategy)) {
+      throw new Error(`Unsupported generation strategy: ${generationStrategy || 'unknown'}`);
+    }
+
+    const existing = this.getMemorySnapshot(scope, scopeId);
+    const id = snapshot.id || existing?.id || generateId();
+    const now = Number.isFinite(snapshot.updatedAt) ? snapshot.updatedAt : Date.now();
+    const createdAt = existing?.createdAt || (Number.isFinite(snapshot.createdAt) ? snapshot.createdAt : now);
+    const brief = truncateText(snapshot.brief, 1500) || '(no brief available)';
+
+    this.db.run(`
+      INSERT INTO memory_snapshots (
+        id, scope, scope_id, run_id, root_session_id, task_id,
+        brief, key_decisions, pending_items, generation_trigger,
+        generation_strategy, metadata, created_at, updated_at
+      ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+      ON CONFLICT(scope, scope_id) DO UPDATE SET
+        run_id = excluded.run_id,
+        root_session_id = excluded.root_session_id,
+        task_id = excluded.task_id,
+        brief = excluded.brief,
+        key_decisions = excluded.key_decisions,
+        pending_items = excluded.pending_items,
+        generation_trigger = excluded.generation_trigger,
+        generation_strategy = excluded.generation_strategy,
+        metadata = excluded.metadata,
+        updated_at = excluded.updated_at
+    `,
+    id,
+    scope,
+    scopeId,
+    snapshot.runId || null,
+    snapshot.rootSessionId || null,
+    snapshot.taskId || null,
+    brief,
+    JSON.stringify(dedupeStrings(snapshot.keyDecisions || [], 20)),
+    JSON.stringify(dedupeStrings(snapshot.pendingItems || [], 20)),
+    generationTrigger,
+    generationStrategy,
+    snapshot.metadata == null ? null : JSON.stringify(snapshot.metadata),
+    createdAt,
+    now);
+
+    return id;
+  }
+
+  getMemorySnapshot(scope, scopeId) {
+    const row = this.db.get(
+      'SELECT * FROM memory_snapshots WHERE scope = ? AND scope_id = ?',
+      scope,
+      scopeId
+    );
+    return row ? this._parseMemorySnapshotRow(row) : null;
+  }
+
+  listMemorySnapshots(options = {}) {
+    const clauses = [];
+    const params = [];
+
+    if (options.scope) {
+      clauses.push('scope = ?');
+      params.push(options.scope);
+    }
+    if (options.rootSessionId) {
+      clauses.push('root_session_id = ?');
+      params.push(options.rootSessionId);
+    }
+    if (options.taskId) {
+      clauses.push('task_id = ?');
+      params.push(options.taskId);
+    }
+    if (Number.isInteger(options.beforeTimestamp) && options.beforeTimestamp > 0) {
+      clauses.push('updated_at < ?');
+      params.push(options.beforeTimestamp);
+    }
+
+    const limit = clampLimit(options.limit, 20, 100);
+    const whereSql = clauses.length ? `WHERE ${clauses.join(' AND ')}` : '';
+    const sql = `SELECT * FROM memory_snapshots ${whereSql} ORDER BY updated_at DESC LIMIT ?`;
+    return this.db.prepare(sql).all(...params, limit).map((row) => this._parseMemorySnapshotRow(row));
+  }
+
+  deleteMemorySnapshot(scope, scopeId) {
+    const result = this.db.run('DELETE FROM memory_snapshots WHERE scope = ? AND scope_id = ?', scope, scopeId);
+    return result.changes > 0;
+  }
+
+  _parseMemorySnapshotRow(row) {
+    return {
+      id: row.id,
+      scope: row.scope,
+      scopeId: row.scope_id,
+      runId: row.run_id || null,
+      rootSessionId: row.root_session_id || null,
+      taskId: row.task_id || null,
+      brief: row.brief || null,
+      keyDecisions: parseJsonField(row.key_decisions) || [],
+      pendingItems: parseJsonField(row.pending_items) || [],
+      generationTrigger: row.generation_trigger,
+      generationStrategy: row.generation_strategy,
+      metadata: parseJsonField(row.metadata) || {},
+      createdAt: row.created_at,
+      updatedAt: row.updated_at
+    };
+  }
+
+  _mapRunRow(row) {
+    return {
+      id: row.id,
+      kind: row.kind,
+      status: row.status,
+      messageHash: row.message_hash,
+      inputSummary: row.input_summary,
+      workingDirectory: row.working_directory,
+      initiator: row.initiator,
+      traceId: row.trace_id,
+      discussionId: row.discussion_id,
+      currentStep: row.current_step,
+      activeParticipantCount: row.active_participant_count,
+      decisionSummary: row.decision_summary,
+      decisionSource: row.decision_source,
+      failureClass: row.failure_class,
+      retryCount: row.retry_count,
+      metadata: parseJsonField(row.metadata),
+      startedAt: row.started_at,
+      lastHeartbeatAt: row.last_heartbeat_at,
+      completedAt: row.completed_at,
+      durationMs: row.duration_ms,
+      rootSessionId: row.root_session_id || null,
+      taskId: row.task_id || null
+    };
+  }
+
+  // =====================
+  // Run/Root Bundle Primitives
+  // =====================
+
+  getRunsByRootSessionId(rootSessionId, options = {}) {
+    const limit = clampLimit(options.limit, 20, 100);
+    const rows = this.db.prepare(`
+      SELECT * FROM runs
+      WHERE root_session_id = ?
+      ORDER BY COALESCE(completed_at, started_at) DESC, id DESC
+      LIMIT ?
+    `).all(rootSessionId, limit);
+    return rows.map((row) => this._mapRunRow(row));
+  }
+
+  getLatestCompletedRuns(rootSessionId, limit = 20) {
+    const rows = this.db.prepare(`
+      SELECT * FROM runs
+      WHERE root_session_id = ? AND completed_at IS NOT NULL
+      ORDER BY completed_at DESC, started_at DESC, id DESC
+      LIMIT ?
+    `).all(rootSessionId, clampLimit(limit, 20, 50));
+    return rows.map((row) => this._mapRunRow(row));
+  }
+
+  getLatestRunsForTask(taskId, limit = 5) {
+    const rows = this.db.prepare(`
+      SELECT * FROM runs
+      WHERE task_id = ?
+      ORDER BY COALESCE(completed_at, started_at) DESC, id DESC
+      LIMIT ?
+    `).all(taskId, clampLimit(limit, 5, 20));
+    return rows.map((row) => this._mapRunRow(row));
+  }
+
+  getRunById(runId) {
+    const run = this.db.get('SELECT * FROM runs WHERE id = ?', runId);
+    return run ? this._mapRunRow(run) : null;
+  }
+
+  getRunOutputs(runId) {
+    return this.db.prepare(`
+      SELECT output_kind, preview_text, full_text, created_at
+      FROM run_outputs
+      WHERE run_id = ?
+      ORDER BY created_at ASC, id ASC
+    `).all(runId).map((row) => ({
+      outputKind: row.output_kind,
+      previewText: row.preview_text,
+      fullText: row.full_text,
+      createdAt: row.created_at
+    }));
+  }
+
+  getLatestCompletedAtForRoot(rootSessionId) {
+    const row = this.db.get(
+      `SELECT MAX(completed_at) AS latest_completed_at FROM runs WHERE root_session_id = ? AND completed_at IS NOT NULL`,
+      rootSessionId
+    );
+    return row?.latest_completed_at || null;
+  }
+
+  countCompletedRuns(rootSessionId) {
+    const row = this.db.get(
+      `SELECT COUNT(*) AS count FROM runs WHERE root_session_id = ? AND completed_at IS NOT NULL`,
+      rootSessionId
+    );
+    return row?.count || 0;
+  }
+
+  getRootParticipantAdapters(rootSessionId) {
+    const rows = this.db.all(`
+      SELECT DISTINCT rp.adapter
+      FROM run_participants rp
+      JOIN runs r ON r.id = rp.run_id
+      WHERE r.root_session_id = ? AND rp.adapter IS NOT NULL
+      ORDER BY rp.adapter ASC
+    `, rootSessionId);
+    return rows.map((row) => row.adapter);
+  }
+
+  getRootUsageSummary(rootSessionId) {
+    const row = this.db.get(`
+      SELECT
+        COUNT(*) AS record_count,
+        COALESCE(SUM(input_tokens), 0) AS input_tokens,
+        COALESCE(SUM(output_tokens), 0) AS output_tokens,
+        COALESCE(SUM(reasoning_tokens), 0) AS reasoning_tokens,
+        COALESCE(SUM(cached_input_tokens), 0) AS cached_input_tokens,
+        COALESCE(SUM(total_tokens), 0) AS total_tokens,
+        COALESCE(SUM(cost_usd), 0) AS cost_usd,
+        COALESCE(SUM(duration_ms), 0) AS duration_ms
+      FROM usage_records
+      WHERE root_session_id = ?
+    `, rootSessionId);
+
+    return {
+      recordCount: row?.record_count || 0,
+      inputTokens: row?.input_tokens || 0,
+      outputTokens: row?.output_tokens || 0,
+      reasoningTokens: row?.reasoning_tokens || 0,
+      cachedInputTokens: row?.cached_input_tokens || 0,
+      totalTokens: row?.total_tokens || 0,
+      costUsd: row?.cost_usd || 0,
+      durationMs: row?.duration_ms || 0
+    };
+  }
+
+  listRunSnapshotsByRoot(rootSessionId, limit = 20) {
+    return this.db.prepare(`
+      SELECT ms.*, r.kind AS run_kind, r.status AS run_status, r.completed_at
+      FROM memory_snapshots ms
+      LEFT JOIN runs r ON r.id = ms.run_id
+      WHERE ms.scope = 'run' AND ms.root_session_id = ?
+      ORDER BY COALESCE(r.completed_at, r.started_at, ms.updated_at) DESC, ms.updated_at DESC
+      LIMIT ?
+    `).all(rootSessionId, clampLimit(limit, 20, 50)).map((row) => ({
+      ...this._parseMemorySnapshotRow(row),
+      runKind: row.run_kind || null,
+      runStatus: row.run_status || null,
+      completedAt: row.completed_at || null
+    }));
+  }
+
+  listRunSnapshotsByTask(taskId, limit = 5) {
+    return this.db.prepare(`
+      SELECT ms.*, r.kind AS run_kind, r.status AS run_status, r.completed_at
+      FROM memory_snapshots ms
+      LEFT JOIN runs r ON r.id = ms.run_id
+      WHERE ms.scope = 'run' AND ms.task_id = ?
+      ORDER BY COALESCE(r.completed_at, r.started_at, ms.updated_at) DESC, ms.updated_at DESC
+      LIMIT ?
+    `).all(taskId, clampLimit(limit, 5, 20)).map((row) => ({
+      ...this._parseMemorySnapshotRow(row),
+      runKind: row.run_kind || null,
+      runStatus: row.run_status || null,
+      completedAt: row.completed_at || null
+    }));
+  }
+
+  getTopFindings(taskId, limit = 20) {
+    const rows = this.db.prepare(`
+      SELECT *
+      FROM findings
+      WHERE task_id = ?
+      ORDER BY
+        CASE severity
+          WHEN 'critical' THEN 0
+          WHEN 'high' THEN 1
+          WHEN 'medium' THEN 2
+          WHEN 'low' THEN 3
+          WHEN 'info' THEN 4
+          ELSE 99
+        END ASC,
+        created_at DESC
+      LIMIT ?
+    `).all(taskId, clampLimit(limit, 20, 50));
+
+    return rows.map((row) => ({
+      ...row,
+      metadata: row.metadata ? JSON.parse(row.metadata) : {}
+    }));
+  }
+
+  _buildRunMemoryBundle(scopeId, options = {}) {
+    const run = this.getRunById(scopeId);
+    const snapshot = this.getMemorySnapshot('run', scopeId);
+    if (!run && !snapshot) {
+      return null;
+    }
+
+    const findings = run?.taskId ? this.getTopFindings(run.taskId, 20) : [];
+
+    return {
+      scopeType: 'run',
+      scopeId,
+      brief: snapshot?.brief || truncateText(run?.decisionSummary, 1500),
+      keyDecisions: snapshot?.keyDecisions || [],
+      pendingItems: snapshot?.pendingItems || [],
+      findings,
+      recentRuns: [],
+      rawPointers: options.includeRawPointers === false
+        ? null
+        : {
+            runId: scopeId,
+            discussionId: run?.discussionId || null,
+            traceId: run?.traceId || null
+          },
+      isStale: false
+    };
+  }
+
+  _buildRootMemoryBundle(scopeId, options = {}) {
+    const snapshot = this.getMemorySnapshot('root', scopeId);
+    const recentRuns = this.listRunSnapshotsByRoot(scopeId, options.recentRunsLimit || 3).map((entry) => ({
+      runId: entry.runId,
+      brief: entry.brief,
+      keyDecisions: entry.keyDecisions,
+      pendingItems: entry.pendingItems,
+      status: entry.runStatus,
+      kind: entry.runKind,
+      completedAt: entry.completedAt,
+      updatedAt: entry.updatedAt
+    }));
+    const latestCompletedAt = this.getLatestCompletedAtForRoot(scopeId);
+    if (!snapshot && recentRuns.length === 0 && !latestCompletedAt) {
+      return null;
+    }
+    const isStale = Boolean(snapshot && latestCompletedAt && latestCompletedAt > snapshot.updatedAt);
+
+    const fallbackBrief = recentRuns.length
+      ? truncateText(recentRuns.map((entry, index) => `${index + 1}. ${entry.brief || `${entry.kind || 'run'} ${entry.runId}`}`).join('\n'), 1500)
+      : null;
+
+    return {
+      scopeType: 'root',
+      scopeId,
+      brief: snapshot?.brief || fallbackBrief,
+      keyDecisions: snapshot?.keyDecisions || dedupeStrings(recentRuns.flatMap((entry) => entry.keyDecisions), 20),
+      pendingItems: snapshot?.pendingItems || dedupeStrings(recentRuns.flatMap((entry) => entry.pendingItems), 20),
+      findings: [],
+      recentRuns,
+      rawPointers: options.includeRawPointers === false
+        ? null
+        : {
+            runIds: recentRuns.map((entry) => entry.runId)
+          },
+      isStale: !snapshot ? recentRuns.length > 0 : isStale
+    };
+  }
+
+  _buildTaskMemoryBundle(scopeId, options = {}) {
+    const recentRunsLimit = clampLimit(options.recentRunsLimit, 3, 10);
+    const latestRuns = this.getLatestRunsForTask(scopeId, 5);
+    const runSnapshots = this.listRunSnapshotsByTask(scopeId, 5);
+    const latestContext = this.getLatestContext(scopeId);
+    const briefs = runSnapshots
+      .map((entry) => entry.brief)
+      .filter(Boolean)
+      .slice(0, Math.min(recentRunsLimit, 3));
+    const brief = briefs.length
+      ? truncateText(briefs.join('\n\n'), 1500)
+      : truncateText(latestContext?.summary, 1500);
+    const keyDecisions = runSnapshots.length
+      ? dedupeStrings(runSnapshots.flatMap((entry) => entry.keyDecisions), 20)
+      : dedupeStrings(latestContext?.keyDecisions || [], 20);
+    const pendingItems = runSnapshots.length
+      ? dedupeStrings(runSnapshots.flatMap((entry) => entry.pendingItems), 20)
+      : dedupeStrings(latestContext?.pendingItems || [], 20);
+    const findings = this.getTopFindings(scopeId, 20);
+    const artifacts = this.getArtifacts(scopeId).map((artifact) => ({
+      key: artifact.key,
+      type: artifact.type
+    }));
+    const contextIds = this.getContext(scopeId).slice(0, 5).map((entry) => entry.id);
+    const snapshotByRunId = new Map(runSnapshots.map((entry) => [entry.runId, entry]));
+
+    return {
+      scopeType: 'task',
+      scopeId,
+      brief,
+      keyDecisions,
+      pendingItems,
+      findings,
+      recentRuns: latestRuns.slice(0, recentRunsLimit).map((run) => {
+        const snapshot = snapshotByRunId.get(run.id);
+        return {
+          runId: run.id,
+          brief: snapshot?.brief || truncateText(run.decisionSummary, 1500),
+          keyDecisions: snapshot?.keyDecisions || [],
+          pendingItems: snapshot?.pendingItems || [],
+          status: run.status,
+          kind: run.kind,
+          completedAt: run.completedAt
+        };
+      }),
+      rawPointers: options.includeRawPointers === false
+        ? null
+        : {
+            runIds: latestRuns.map((run) => run.id),
+            artifactKeys: artifacts,
+            findingIds: findings.map((finding) => finding.id),
+            contextIds
+          },
+      isStale: false
+    };
+  }
+
+  getMemoryBundle(scopeId, scopeType = 'task', options = {}) {
+    const normalizedScopeType = String(scopeType || 'task').trim().toLowerCase();
+    const bundleOptions = {
+      recentRunsLimit: clampLimit(options.recentRunsLimit, 3, 10),
+      includeRawPointers: options.includeRawPointers !== false
+    };
+
+    if (normalizedScopeType === 'run') {
+      return this._buildRunMemoryBundle(scopeId, bundleOptions);
+    }
+    if (normalizedScopeType === 'root') {
+      return this._buildRootMemoryBundle(scopeId, bundleOptions);
+    }
+    if (normalizedScopeType === 'task') {
+      return this._buildTaskMemoryBundle(scopeId, bundleOptions);
+    }
+
+    throw new Error(`Unsupported memory bundle scope type: ${scopeType}`);
+  }
+
   // =================
   // Utility Methods
   // =================
@@ -1978,7 +3608,8 @@ class OrchestrationDB {
       findings: this.db.prepare("SELECT COUNT(*) as count FROM findings").get().count,
       context: this.db.prepare("SELECT COUNT(*) as count FROM context").get().count,
       messages: this.db.prepare("SELECT COUNT(*) as count FROM messages").get().count,
-      usageRecords: this.db.prepare("SELECT COUNT(*) as count FROM usage_records").get().count
+      usageRecords: this.db.prepare("SELECT COUNT(*) as count FROM usage_records").get().count,
+      memorySnapshots: this.db.prepare("SELECT COUNT(*) as count FROM memory_snapshots").get().count
     };
   }
 }

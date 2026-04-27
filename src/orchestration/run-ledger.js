@@ -270,8 +270,8 @@ class RunLedgerService {
         id, kind, status, message_hash, input_summary, working_directory, initiator,
         trace_id, discussion_id, current_step, active_participant_count, decision_summary,
         decision_source, failure_class, retry_count, metadata, started_at,
-        last_heartbeat_at, completed_at, duration_ms
-      ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+        last_heartbeat_at, completed_at, duration_ms, root_session_id, task_id
+      ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
     `).run(
       runId,
       input.kind,
@@ -292,7 +292,9 @@ class RunLedgerService {
       startedAt,
       input.lastHeartbeatAt || startedAt,
       input.completedAt || null,
-      input.durationMs || null
+      input.durationMs || null,
+      input.rootSessionId || null,
+      input.taskId || null
     );
 
     return runId;
@@ -317,7 +319,9 @@ class RunLedgerService {
       started_at: patch.startedAt,
       last_heartbeat_at: patch.lastHeartbeatAt,
       completed_at: patch.completedAt,
-      duration_ms: patch.durationMs
+      duration_ms: patch.durationMs,
+      root_session_id: patch.rootSessionId,
+      task_id: patch.taskId
     });
 
     if (!statement) {
@@ -825,7 +829,9 @@ class RunLedgerService {
       startedAt: row.started_at,
       lastHeartbeatAt: row.last_heartbeat_at,
       completedAt: row.completed_at,
-      durationMs: row.duration_ms
+      durationMs: row.duration_ms,
+      rootSessionId: row.root_session_id || null,
+      taskId: row.task_id || null
     };
   }
 

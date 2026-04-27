@@ -113,6 +113,7 @@ class CodexCliAdapter extends BaseLLMAdapter {
 
     const workDir = options.workDir || this.config.workDir;
     const model = options.model || this.config.model;
+    const providerSessionId = String(options.providerSessionId || '').trim() || null;
 
     // Ensure work directory exists
     if (!fs.existsSync(workDir)) {
@@ -121,7 +122,7 @@ class CodexCliAdapter extends BaseLLMAdapter {
 
     // Create session metadata without making an API call
     const session = {
-      codexSessionId: null,  // Will be set after first message
+      codexSessionId: providerSessionId,  // May be pre-seeded for exact resume
       ready: true,
       messageCount: 0,
       systemPrompt: options.systemPrompt,
@@ -141,7 +142,8 @@ class CodexCliAdapter extends BaseLLMAdapter {
       sessionId,
       status: 'ready',
       adapter: this.name,
-      codexSessionId: null,
+      codexSessionId: providerSessionId,
+      providerSessionId,
       model: model || 'default'
     };
   }
@@ -441,6 +443,7 @@ class CodexCliAdapter extends BaseLLMAdapter {
             type: 'result',
             content: finalContent,
             metadata: {
+              providerSessionId: session.codexSessionId || null,
               costUsd: finalStats?.costUsd,
               durationMs: finalStats?.durationMs,
               inputTokens: finalStats?.inputTokens,

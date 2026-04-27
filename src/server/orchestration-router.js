@@ -17,6 +17,8 @@ const { runDiscussion } = require('../orchestration/discussion-runner');
 const { runPlanReview, runPrReview } = require('../orchestration/review-protocols');
 const { RunLedgerService } = require('../orchestration/run-ledger');
 const { buildRootSessionSnapshot, listRootSessionSummaries } = require('../orchestration/root-session-monitor');
+const { getProviderSessionRegistry } = require('../orchestration/provider-session-registry');
+const { RoomService } = require('../orchestration/room-service');
 const {
   normalizeManagedRootAdapter,
   inferManagedRootOriginClient,
@@ -42,6 +44,15 @@ function createOrchestrationRouter(context) {
   const runLedgerReadsEnabled = process.env.RUN_LEDGER_READS_ENABLED === '1';
   const requireRootAttach = process.env.CLIAGENTS_REQUIRE_ROOT_ATTACH === '1';
   const runLedger = runLedgerWritesEnabled || runLedgerReadsEnabled ? new RunLedgerService(db) : null;
+  const providerSessionRegistry = getProviderSessionRegistry();
+  const roomService = db
+    ? new RoomService({
+        db,
+        sessionManager: apiSessionManager || sessionManager,
+        runLedger,
+        sessionEventsEnabled
+      })
+    : null;
 
   function parseQueryInteger(value, fallback) {
     const parsed = Number.parseInt(value, 10);
@@ -166,6 +177,15 @@ function createOrchestrationRouter(context) {
     return sessionManager.getOutput(terminalId, options);
   }
 
+  const ATTACHED_ROOT_BROKER_CHILD_SESSION_KINDS = new Set([
+    'worker',
+    'handoff',
+    'discussion',
+    'consensus',
+    'review',
+    'subagent'
+  ]);
+
   function getRootSessionSnapshot(rootSessionId, options = {}) {
     if (!rootSessionId || !db?.listSessionEvents || !db?.listTerminals) {
       return null;
@@ -195,9 +215,6 @@ function createOrchestrationRouter(context) {
     const rootSessionId = liveTerminal?.rootSessionId
       || terminalRow?.root_session_id
       || terminalRow?.rootSessionId
-      || liveTerminal?.terminalId
-      || terminalRow?.terminal_id
-      || terminalRow?.terminalId
       || null;
 
     if (!rootSessionId) {
@@ -206,7 +223,7 @@ function createOrchestrationRouter(context) {
 
     return getRootSessionSnapshot(rootSessionId, {
       eventLimit: 120,
-      terminalLimit: 80
+      terminalLimit: 200
     });
   }
 
@@ -339,21 +356,15 @@ function createOrchestrationRouter(context) {
       } else if (!rootSessionId && allowImplicitRootCreate) {
         rootSessionId = crypto.randomBytes(16).toString('hex');
         attachedRoot = true;
-        db.addSessionEvent({
+        ensureRootSessionStarted({
           rootSessionId,
-          sessionId: rootSessionId,
-          parentSessionId: null,
-          eventType: 'session_started',
           originClient: originClient || 'system',
-          idempotencyKey: `${rootSessionId}:${rootSessionId}:session_started:http-attach`,
           payloadSummary: `HTTP root attach via ${originClient || clientName || 'system'}`,
-          payloadJson: {
-            attachMode: 'implicit-http-first-use',
-            sessionKind: 'attach',
-            externalSessionRef,
-            clientName
-          },
-          metadata: Object.keys(metadata).length > 0 ? metadata : null
+          externalSessionRef,
+          clientName,
+          sessionMetadata: Object.keys(metadata).length > 0 ? metadata : null,
+          attachMode: 'implicit-http-first-use',
+          model: metadata.model || null
         });
       }
     }
@@ -465,6 +476,68 @@ function createOrchestrationRouter(context) {
     };
   }
 
+  function ensureLogicalRootTerminalRecord({
+    rootSessionId,
+    originClient,
+    externalSessionRef,
+    sessionMetadata,
+    model = null,
+    providerThreadRef = null,
+    workDir = null
+  }) {
+    if (!db?.registerTerminal || !db?.updateTerminalBinding || !db?.getTerminal || !rootSessionId) {
+      return;
+    }
+
+    const normalizedMetadata = normalizeSessionMetadata(sessionMetadata);
+    const adapterSeed = normalizedMetadata.adapter
+      || normalizedMetadata.clientName
+      || originClient
+      || 'codex-cli';
+    let adapter = 'codex-cli';
+    try {
+      adapter = normalizeManagedRootAdapter(adapterSeed);
+    } catch {
+      adapter = 'codex-cli';
+    }
+    const resolvedWorkDir = workDir || normalizedMetadata.workspaceRoot || null;
+    const binding = {
+      adapter,
+      role: 'main',
+      workDir: resolvedWorkDir,
+      rootSessionId,
+      parentSessionId: null,
+      sessionKind: 'attach',
+      originClient: originClient || 'mcp',
+      externalSessionRef: externalSessionRef || null,
+      lineageDepth: 0,
+      sessionMetadata: normalizedMetadata,
+      harnessSessionId: rootSessionId,
+      providerThreadRef,
+      captureMode: 'raw-tty',
+      model: model || normalizedMetadata.model || null,
+      status: 'idle'
+    };
+    const existing = db.getTerminal(rootSessionId);
+
+    if (existing) {
+      db.updateTerminalBinding(rootSessionId, binding);
+      return;
+    }
+
+    db.registerTerminal(
+      rootSessionId,
+      `attached-${rootSessionId.slice(0, 12)}`,
+      'root',
+      adapter,
+      null,
+      'main',
+      resolvedWorkDir,
+      null,
+      binding
+    );
+  }
+
   function ensureRootSessionStarted({
     rootSessionId,
     originClient,
@@ -472,11 +545,24 @@ function createOrchestrationRouter(context) {
     clientName,
     sessionMetadata,
     attachMode,
-    payloadSummary
+    payloadSummary,
+    model = null,
+    providerThreadRef = null,
+    workDir = null
   }) {
     if (!db?.addSessionEvent || !rootSessionId) {
       return;
     }
+
+    ensureLogicalRootTerminalRecord({
+      rootSessionId,
+      originClient,
+      externalSessionRef,
+      sessionMetadata,
+      model,
+      providerThreadRef,
+      workDir
+    });
 
     db.addSessionEvent({
       rootSessionId,
@@ -490,15 +576,152 @@ function createOrchestrationRouter(context) {
         attachMode: attachMode || 'explicit',
         sessionKind: 'attach',
         externalSessionRef: externalSessionRef || null,
-        clientName: clientName || null
+        clientName: clientName || null,
+        model: model || null
       },
       metadata: sessionMetadata && Object.keys(sessionMetadata).length > 0 ? sessionMetadata : null
     });
   }
 
+  function buildRoomPayload(roomId) {
+    const snapshot = roomService?.getRoom(roomId);
+    if (!snapshot) {
+      return null;
+    }
+
+    return {
+      room: snapshot.room,
+      participants: snapshot.participants,
+      latestTurn: snapshot.latestTurn
+    };
+  }
+
+  function extractRequestId(req, body = {}) {
+    return readHeaderValue(req, 'idempotency-key')
+      || readHeaderValue(req, 'x-idempotency-key')
+      || body.requestId
+      || body.idempotencyKey
+      || null;
+  }
+
   // Mount shared memory routes at /orchestration/memory
-  const memoryRouter = createMemoryRouter();
+  const memoryRouter = createMemoryRouter({ db });
   router.use('/memory', memoryRouter);
+
+  /**
+   * GET /orchestration/provider-sessions
+   * Discover provider-local sessions that the broker can import or exact-resume.
+   */
+  router.get('/provider-sessions', (req, res) => {
+    try {
+      const adapter = req.query.adapter ? String(req.query.adapter) : 'codex-cli';
+      const limit = parseQueryInteger(req.query.limit, 20);
+      const includeArchived = parseQueryBoolean(req.query.includeArchived, false);
+      const result = providerSessionRegistry.listSessions({
+        adapter,
+        limit,
+        includeArchived
+      });
+
+      res.json(result);
+    } catch (error) {
+      res.status(500).json({
+        error: { code: 'internal_error', message: error.message }
+      });
+    }
+  });
+
+  /**
+   * POST /orchestration/provider-sessions/import
+   * Import a provider-local session as an attached, read-only root.
+   */
+  router.post('/provider-sessions/import', (req, res) => {
+    try {
+      if (!db?.addSessionEvent || !db?.registerTerminal || !db?.updateTerminalBinding) {
+        return res.status(503).json({
+          error: { code: 'unavailable', message: 'root session storage is not configured' }
+        });
+      }
+
+      const adapter = normalizeManagedRootAdapter(req.body?.adapter || 'codex-cli');
+      const providerSessionId = String(req.body?.providerSessionId || '').trim();
+      if (!providerSessionId) {
+        return res.status(400).json({
+          error: { code: 'missing_parameter', message: 'providerSessionId is required', param: 'providerSessionId' }
+        });
+      }
+
+      const descriptor = providerSessionRegistry.getSession({ adapter, providerSessionId });
+      if (!descriptor) {
+        const supportInfo = providerSessionRegistry.listSessions({ adapter, limit: 1 });
+        return res.status(supportInfo.supported ? 404 : 400).json({
+          error: {
+            code: supportInfo.supported ? 'provider_session_not_found' : 'not_supported',
+            message: supportInfo.supported
+              ? `No ${adapter} provider session found for ${providerSessionId}`
+              : `Provider-session discovery is not supported for ${adapter}`
+          }
+        });
+      }
+
+      const existingRootTerminal = typeof db.findRootTerminalByProviderThreadRef === 'function'
+        ? db.findRootTerminalByProviderThreadRef(adapter, providerSessionId)
+        : null;
+      const rootSessionId = req.body?.rootSessionId
+        || existingRootTerminal?.root_session_id
+        || crypto.randomBytes(16).toString('hex');
+      const originClient = inferManagedRootOriginClient(adapter);
+      const externalSessionRef = req.body?.externalSessionRef
+        || existingRootTerminal?.external_session_ref
+        || `provider-import:${adapter}:${providerSessionId}`;
+      const sessionMetadata = normalizeSessionMetadata(req.body?.sessionMetadata);
+      sessionMetadata.attachMode = 'provider-session-import';
+      sessionMetadata.adapter = adapter;
+      sessionMetadata.importedProviderSession = true;
+      sessionMetadata.importedProviderSessionId = providerSessionId;
+      sessionMetadata.importedProviderSessionTitle = descriptor.title || null;
+      sessionMetadata.providerResumeCapability = descriptor.resumeCapability || 'exact';
+      if (descriptor.cwd && !sessionMetadata.workspaceRoot) {
+        sessionMetadata.workspaceRoot = descriptor.cwd;
+      }
+      if (descriptor.model && !sessionMetadata.model) {
+        sessionMetadata.model = descriptor.model;
+      }
+      if (!sessionMetadata.externalSessionRef) {
+        sessionMetadata.externalSessionRef = externalSessionRef;
+      }
+      if (!sessionMetadata.clientSessionRef) {
+        sessionMetadata.clientSessionRef = externalSessionRef;
+      }
+
+      ensureRootSessionStarted({
+        rootSessionId,
+        originClient,
+        externalSessionRef,
+        clientName: originClient,
+        sessionMetadata,
+        attachMode: 'provider-session-import',
+        payloadSummary: `Imported ${adapter} provider session ${descriptor.title || providerSessionId}`,
+        model: descriptor.model || null,
+        providerThreadRef: providerSessionId,
+        workDir: descriptor.cwd || null
+      });
+
+      res.json({
+        importedRoot: true,
+        reusedImportedRoot: Boolean(existingRootTerminal),
+        rootSessionId,
+        adapter,
+        providerSessionId,
+        externalSessionRef,
+        descriptor
+      });
+    } catch (error) {
+      res.status(500).json({
+        error: { code: 'internal_error', message: error.message }
+      });
+    }
+  });
 
   /**
    * POST /orchestration/handoff
@@ -1120,6 +1343,270 @@ function createOrchestrationRouter(context) {
   });
 
   /**
+   * POST /orchestration/rooms
+   * Create a persistent multi-agent room backed by direct-session participants.
+   */
+  router.post('/rooms', (req, res) => {
+    try {
+      if (!db || !roomService) {
+        return res.status(503).json({
+          error: { code: 'unavailable', message: 'room persistence is not configured' }
+        });
+      }
+
+      const participants = Array.isArray(req.body?.participants) ? req.body.participants : [];
+      if (participants.length === 0) {
+        return res.status(400).json({
+          error: { code: 'missing_parameter', message: 'participants array is required', param: 'participants' }
+        });
+      }
+
+      const normalizedParticipants = participants.map((participant, index) => {
+        const adapter = normalizeManagedRootAdapter(participant?.adapter || 'codex-cli');
+        return {
+          adapter,
+          displayName: participant?.displayName || participant?.name || `${adapter}-${index + 1}`,
+          model: participant?.model || null,
+          systemPrompt: participant?.systemPrompt || null,
+          workDir: participant?.workDir || req.body?.workDir || null,
+          providerSessionId: participant?.providerSessionId || null,
+          importedFromProviderSessionId: participant?.importedFromProviderSessionId || participant?.providerSessionId || null,
+          metadata: participant?.metadata || {}
+        };
+      });
+
+      const rootSessionId = req.body?.rootSessionId || crypto.randomBytes(16).toString('hex');
+      const title = String(req.body?.title || req.body?.name || '').trim() || null;
+      const originClient = String(req.body?.originClient || 'mcp').trim() || 'mcp';
+      const externalSessionRef = String(req.body?.externalSessionRef || `room:${rootSessionId}`).trim();
+      const sessionMetadata = normalizeSessionMetadata(req.body?.sessionMetadata);
+      sessionMetadata.attachMode = 'room-root';
+      sessionMetadata.room = true;
+      sessionMetadata.roomTitle = title || null;
+      if (req.body?.workDir && !sessionMetadata.workspaceRoot) {
+        sessionMetadata.workspaceRoot = req.body.workDir;
+      }
+
+      ensureRootSessionStarted({
+        rootSessionId,
+        originClient,
+        externalSessionRef,
+        clientName: originClient,
+        sessionMetadata,
+        attachMode: 'room-root',
+        payloadSummary: `Room ${title || rootSessionId} created`,
+        workDir: req.body?.workDir || null
+      });
+
+      ensureLogicalRootTerminalRecord({
+        rootSessionId,
+        originClient,
+        externalSessionRef,
+        sessionMetadata,
+        workDir: req.body?.workDir || null
+      });
+
+      const existingRoom = roomService.getRoomByRootSessionId(rootSessionId);
+      if (existingRoom) {
+        return res.status(409).json({
+          error: {
+            code: 'room_exists',
+            message: `Room already exists for root session ${rootSessionId}`,
+            roomId: existingRoom.room.id,
+            rootSessionId
+          }
+        });
+      }
+
+      const created = roomService.createRoom({
+        roomId: req.body?.roomId || null,
+        rootSessionId,
+        title,
+        participants: normalizedParticipants,
+        workDir: req.body?.workDir || null,
+        metadata: req.body?.metadata || {}
+      });
+
+      res.json(created);
+    } catch (error) {
+      if (error?.code === 'SQLITE_CONSTRAINT_UNIQUE' || /UNIQUE constraint failed: rooms\.(id|root_session_id)/.test(String(error?.message || ''))) {
+        const existingRoom = typeof roomService?.getRoomByRootSessionId === 'function'
+          ? roomService.getRoomByRootSessionId(req.body?.rootSessionId || null)
+          : null;
+        return res.status(409).json({
+          error: {
+            code: 'room_exists',
+            message: existingRoom
+              ? `Room already exists for root session ${existingRoom.room.rootSessionId}`
+              : 'Room already exists',
+            roomId: existingRoom?.room?.id || null,
+            rootSessionId: existingRoom?.room?.rootSessionId || req.body?.rootSessionId || null
+          }
+        });
+      }
+      res.status(500).json({
+        error: { code: 'internal_error', message: error.message }
+      });
+    }
+  });
+
+  /**
+   * GET /orchestration/rooms/:roomId
+   * Get room metadata and participant state.
+   */
+  router.get('/rooms/:roomId', (req, res) => {
+    try {
+      if (!roomService) {
+        return res.status(503).json({
+          error: { code: 'unavailable', message: 'room persistence is not configured' }
+        });
+      }
+
+      const payload = buildRoomPayload(req.params.roomId);
+      if (!payload) {
+        return res.status(404).json({
+          error: { code: 'room_not_found', message: `Room ${req.params.roomId} not found` }
+        });
+      }
+
+      res.json(payload);
+    } catch (error) {
+      res.status(500).json({
+        error: { code: 'internal_error', message: error.message }
+      });
+    }
+  });
+
+  /**
+   * GET /orchestration/rooms/:roomId/messages
+   * Get durable room transcript messages.
+   */
+  router.get('/rooms/:roomId/messages', (req, res) => {
+    try {
+      if (!roomService) {
+        return res.status(503).json({
+          error: { code: 'unavailable', message: 'room persistence is not configured' }
+        });
+      }
+
+      const afterId = parseQueryInteger(req.query.after_id, undefined);
+      const limit = parseQueryInteger(req.query.limit, 100);
+      const payload = roomService.getRoomMessages(req.params.roomId, {
+        afterId,
+        limit
+      });
+      if (!payload) {
+        return res.status(404).json({
+          error: { code: 'room_not_found', message: `Room ${req.params.roomId} not found` }
+        });
+      }
+
+      res.json(payload);
+    } catch (error) {
+      if (error.code === 'invalid_request') {
+        return res.status(400).json({
+          error: { code: error.code, message: error.message, param: error.param || null }
+        });
+      }
+      res.status(500).json({
+        error: { code: 'internal_error', message: error.message }
+      });
+    }
+  });
+
+  /**
+   * POST /orchestration/rooms/:roomId/messages
+   * Send one room turn to all active participants or an explicit mentions subset.
+   */
+  router.post('/rooms/:roomId/messages', async (req, res) => {
+    try {
+      if (!roomService) {
+        return res.status(503).json({
+          error: { code: 'unavailable', message: 'room persistence is not configured' }
+        });
+      }
+      if (!req.body?.content) {
+        return res.status(400).json({
+          error: { code: 'missing_parameter', message: 'content is required', param: 'content' }
+        });
+      }
+
+      const result = await roomService.sendRoomMessage(req.params.roomId, {
+        content: req.body.content,
+        mentions: Array.isArray(req.body.mentions) ? req.body.mentions : [],
+        initiatorRole: req.body.initiatorRole || 'user',
+        initiatorName: req.body.initiatorName || null,
+        requestId: extractRequestId(req, req.body),
+        metadata: req.body.metadata || {}
+      });
+
+      res.json(result);
+    } catch (error) {
+      if (error.code === 'not_found') {
+        return res.status(404).json({
+          error: { code: 'room_not_found', message: error.message }
+        });
+      }
+      if (error.code === 'room_busy') {
+        return res.status(409).json({
+          error: { code: 'room_busy', message: error.message, roomId: error.roomId || req.params.roomId, turnId: error.turnId || null }
+        });
+      }
+      res.status(500).json({
+        error: { code: 'internal_error', message: error.message }
+      });
+    }
+  });
+
+  /**
+   * POST /orchestration/rooms/:roomId/discuss
+   * Run a bounded multi-agent discussion over room participants and append only a compact summary.
+   */
+  router.post('/rooms/:roomId/discuss', async (req, res) => {
+    try {
+      if (!roomService) {
+        return res.status(503).json({
+          error: { code: 'unavailable', message: 'room persistence is not configured' }
+        });
+      }
+      if (!req.body?.message) {
+        return res.status(400).json({
+          error: { code: 'missing_parameter', message: 'message is required', param: 'message' }
+        });
+      }
+
+      const result = await roomService.discussRoom(req.params.roomId, {
+        message: req.body.message,
+        participantIds: Array.isArray(req.body.participantIds) ? req.body.participantIds : (Array.isArray(req.body.mentions) ? req.body.mentions : []),
+        initiatorRole: req.body.initiatorRole || 'user',
+        initiatorName: req.body.initiatorName || null,
+        requestId: extractRequestId(req, req.body),
+        rounds: Array.isArray(req.body.rounds) ? req.body.rounds : undefined,
+        judge: req.body.judge === undefined ? null : req.body.judge,
+        timeout: req.body.timeout || null,
+        workDir: req.body.workDir || null,
+        metadata: req.body.metadata || {}
+      });
+
+      res.json(result);
+    } catch (error) {
+      if (error.code === 'not_found') {
+        return res.status(404).json({
+          error: { code: 'room_not_found', message: error.message }
+        });
+      }
+      if (error.code === 'room_busy') {
+        return res.status(409).json({
+          error: { code: 'room_busy', message: error.message, roomId: error.roomId || req.params.roomId, turnId: error.turnId || null }
+        });
+      }
+      res.status(500).json({
+        error: { code: 'internal_error', message: error.message }
+      });
+    }
+  });
+
+  /**
    * GET /orchestration/terminals
    * List all persistent terminals
    */
@@ -1380,15 +1867,38 @@ function createOrchestrationRouter(context) {
 
       const rootSnapshot = resolveTerminalRootAccess(req.params.id);
       if (rootSnapshot?.rootMode === 'attached') {
-        return res.status(403).json({
-          error: {
-            code: 'root_read_only',
-            message: `Root session ${rootSnapshot.rootSessionId} is attached and read-only. Remote execution requires a managed or adopted root.`,
-            rootSessionId: rootSnapshot.rootSessionId,
-            rootMode: rootSnapshot.rootMode,
-            terminalId: req.params.id
-          }
-        });
+        const terminalSession = (rootSnapshot.sessions || []).find(s => s.sessionId === req.params.id);
+        const liveTerminal = getLiveTerminal(req.params.id);
+        const isRoot = req.params.id === rootSnapshot.rootSessionId;
+        const liveRootSessionId = liveTerminal?.rootSessionId || liveTerminal?.root_session_id || null;
+        const liveParentSessionId = liveTerminal?.parentSessionId || liveTerminal?.parent_session_id || null;
+        const dbParentSessionId = terminalSession?.parentSessionId || terminalSession?.parent_session_id || null;
+        const dbOriginClient = String(terminalSession?.originClient || terminalSession?.origin_client || '').trim().toLowerCase();
+        const liveOriginClient = String(liveTerminal?.originClient || liveTerminal?.origin_client || '').trim().toLowerCase();
+        const dbSessionKind = String(terminalSession?.sessionKind || terminalSession?.session_kind || '').trim().toLowerCase();
+        const liveSessionKind = String(liveTerminal?.sessionKind || liveTerminal?.session_kind || '').trim().toLowerCase();
+        const hasBrokerChildRole = Boolean(terminalSession?.agentProfile || terminalSession?.agent_profile || liveTerminal?.agentProfile)
+          || ATTACHED_ROOT_BROKER_CHILD_SESSION_KINDS.has(dbSessionKind || liveSessionKind);
+        const isBrokerOwnedChild = Boolean(terminalSession && liveTerminal)
+          && liveRootSessionId === rootSnapshot.rootSessionId
+          && liveParentSessionId === rootSnapshot.rootSessionId
+          && dbParentSessionId === rootSnapshot.rootSessionId
+          && dbOriginClient === 'mcp'
+          && liveOriginClient === 'mcp'
+          && hasBrokerChildRole
+          && (!dbSessionKind || !liveSessionKind || dbSessionKind === liveSessionKind);
+
+        if (isRoot || !isBrokerOwnedChild) {
+          return res.status(403).json({
+            error: {
+              code: 'root_read_only',
+              message: `Root session ${rootSnapshot.rootSessionId} is attached and read-only. Remote execution requires a managed or adopted root.`,
+              rootSessionId: rootSnapshot.rootSessionId,
+              rootMode: rootSnapshot.rootMode,
+              terminalId: req.params.id
+            }
+          });
+        }
       }
 
       await sessionManager.sendInput(req.params.id, message);
@@ -1878,7 +2388,54 @@ function createOrchestrationRouter(context) {
       }
 
       const adapter = normalizeManagedRootAdapter(req.body?.adapter || 'codex-cli');
-      const workDir = req.body?.workDir || req.body?.workingDirectory || process.cwd();
+      const requestedResumeMode = String(req.body?.resumeMode || 'new').trim().toLowerCase() || 'new';
+      const providerSessionId = String(req.body?.providerSessionId || '').trim() || null;
+      const sourceRootSessionId = String(req.body?.sourceRootSessionId || '').trim() || null;
+      if (!['new', 'reattach', 'exact', 'context'].includes(requestedResumeMode)) {
+        return res.status(400).json({
+          error: { code: 'invalid_request', message: `Unsupported resumeMode: ${requestedResumeMode}` }
+        });
+      }
+      if (requestedResumeMode === 'exact' && !providerSessionId) {
+        return res.status(400).json({
+          error: { code: 'missing_parameter', message: 'providerSessionId is required for resumeMode=exact', param: 'providerSessionId' }
+        });
+      }
+
+      const sourceRootBundle = sourceRootSessionId && typeof db?.getMemoryBundle === 'function'
+        ? db.getMemoryBundle(sourceRootSessionId, 'root', {
+          recentRunsLimit: 3,
+          includeRawPointers: true
+        })
+        : null;
+      const sourceRootMessages = sourceRootSessionId && typeof db?.queryMessages === 'function'
+        ? db.queryMessages({
+          rootSessionId: sourceRootSessionId,
+          limit: 12
+        })
+        : [];
+      const carriedContextPrompt = requestedResumeMode === 'context' && sourceRootSessionId
+        ? [
+          'You are continuing prior cliagents work in a new managed root.',
+          `Previous root session: ${sourceRootSessionId}.`,
+          sourceRootBundle?.brief ? `Summary:\n${sourceRootBundle.brief}` : null,
+          Array.isArray(sourceRootBundle?.keyDecisions) && sourceRootBundle.keyDecisions.length > 0
+            ? `Key decisions:\n${sourceRootBundle.keyDecisions.map((entry) => `- ${entry}`).join('\n')}`
+            : null,
+          Array.isArray(sourceRootBundle?.pendingItems) && sourceRootBundle.pendingItems.length > 0
+            ? `Pending items:\n${sourceRootBundle.pendingItems.map((entry) => `- ${entry}`).join('\n')}`
+            : null,
+          sourceRootMessages.length > 0
+            ? `Recent conversation excerpts:\n${sourceRootMessages.slice(-8).map((entry) => `${entry.role}: ${String(entry.content || '').slice(0, 280)}`).join('\n')}`
+            : null,
+          'Treat this as carried context, not a full transcript replay.'
+        ].filter(Boolean).join('\n\n')
+        : null;
+
+      const workDir = req.body?.workDir
+        || req.body?.workingDirectory
+        || sourceRootBundle?.rawPointers?.workDir
+        || process.cwd();
       const originClient = inferManagedRootOriginClient(adapter);
       const externalSessionRef = buildManagedRootExternalSessionRef(originClient, req.body?.externalSessionRef || null);
       const sessionMetadata = normalizeSessionMetadata(req.body?.sessionMetadata);
@@ -1887,7 +2444,10 @@ function createOrchestrationRouter(context) {
       if (!sessionMetadata.launchProfile) {
         sessionMetadata.launchProfile = String(req.body?.profile || 'guarded-root').trim() || 'guarded-root';
       }
-      const systemPrompt = composeManagedRootSystemPrompt(req.body?.systemPrompt || null, {
+      const effectiveSystemPrompt = carriedContextPrompt
+        ? [carriedContextPrompt, req.body?.systemPrompt || null].filter(Boolean).join('\n\n')
+        : (req.body?.systemPrompt || null);
+      const systemPrompt = composeManagedRootSystemPrompt(effectiveSystemPrompt, {
         profile: sessionMetadata.launchProfile
       });
 
@@ -1909,6 +2469,14 @@ function createOrchestrationRouter(context) {
         : 'managed-launch-generated';
       sessionMetadata.launchSource = 'http-root-launch';
       sessionMetadata.managedLaunch = true;
+      sessionMetadata.resumeMode = requestedResumeMode;
+      if (providerSessionId) {
+        sessionMetadata.providerResumeSessionId = providerSessionId;
+        sessionMetadata.providerResumeLatest = false;
+      }
+      if (sourceRootSessionId) {
+        sessionMetadata.sourceRootSessionId = sourceRootSessionId;
+      }
       sessionMetadata.providerStartMode = deferProviderStartUntilAttached ? 'after-attach' : 'immediate';
       if (launchEnvironment) {
         sessionMetadata.launchEnvironment = launchEnvironment;
@@ -2198,26 +2766,30 @@ function createOrchestrationRouter(context) {
           });
         }
 
-        db.addSessionEvent({
+        ensureRootSessionStarted({
           rootSessionId,
-          sessionId: rootSessionId,
-          parentSessionId: null,
-          eventType: 'session_started',
           originClient: resolved.originClient || 'system',
-          idempotencyKey: `${rootSessionId}:${rootSessionId}:session_started:http-explicit-attach`,
           payloadSummary: `HTTP root attach via ${resolved.originClient || resolved.clientName || 'system'}`,
-          payloadJson: {
-            attachMode: 'explicit-http-attach',
-            sessionKind: 'attach',
-            externalSessionRef: resolved.externalSessionRef || null,
-            clientName: resolved.clientName || null
-          },
-          metadata: Object.keys(sessionMetadata).length > 0 ? sessionMetadata : null
+          externalSessionRef: resolved.externalSessionRef || null,
+          clientName: resolved.clientName || null,
+          sessionMetadata: Object.keys(sessionMetadata).length > 0 ? sessionMetadata : null,
+          attachMode: 'explicit-http-attach',
+          model: sessionMetadata.model || null
         });
 
         resolved.rootSessionId = rootSessionId;
         resolved.sessionMetadata = Object.keys(sessionMetadata).length > 0 ? sessionMetadata : null;
         createdRoot = true;
+      }
+
+      if (resolved.rootSessionId) {
+        ensureLogicalRootTerminalRecord({
+          rootSessionId: resolved.rootSessionId,
+          originClient: resolved.originClient || 'mcp',
+          externalSessionRef: resolved.externalSessionRef || null,
+          sessionMetadata: resolved.sessionMetadata || null,
+          model: resolved.sessionMetadata?.model || null
+        });
       }
 
       res.json({

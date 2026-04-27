@@ -188,6 +188,158 @@ async function testClaudeCodeDetection() {
   console.log('  ✅ Claude Code detection works correctly');
 }
 
+async function testClaudeCodeStreamJsonDetection() {
+  console.log('\n📝 Test: Claude Code stream-json detection');
+
+  const detector = new ClaudeCodeDetector();
+
+  const assistantOutput = [
+    '__CLIAGENTS_RUN_START__abcd1234abcd1234',
+    '{"type":"assistant","session_id":"sess_abc","message":{"content":[{"type":"text","text":"Reviewing..."}]}}'
+  ].join('\n');
+  assert.strictEqual(detector.detectStatus(assistantOutput), TerminalStatus.PROCESSING,
+    'Should detect PROCESSING from stream-json assistant event');
+
+  const resultOutput = [
+    '__CLIAGENTS_RUN_START__abcd1234abcd1234',
+    '{"type":"result","session_id":"sess_abc","message":{"content":[{"type":"text","text":"Review complete."}]}}'
+  ].join('\n');
+  assert.strictEqual(detector.detectStatus(resultOutput), TerminalStatus.COMPLETED,
+    'Should detect COMPLETED from stream-json result event');
+
+  const doneOutput = [
+    '__CLIAGENTS_RUN_START__abcd1234abcd1234',
+    '{"type":"done","session_id":"sess_abc"}'
+  ].join('\n');
+  assert.strictEqual(detector.detectStatus(doneOutput), TerminalStatus.COMPLETED,
+    'Should detect COMPLETED from stream-json done event');
+
+  const thinkingOutput = '{"type":"thinking","session_id":"sess_abc","message":"Analyzing..."}';
+  assert.strictEqual(detector.detectStatus(thinkingOutput), TerminalStatus.PROCESSING,
+    'Should detect PROCESSING from stream-json thinking event');
+
+  const toolUseOutput = '{"type":"tool_use","session_id":"sess_abc","tool":{"name":"Read","input":{"file_path":"src/foo.js"}}}';
+  assert.strictEqual(detector.detectStatus(toolUseOutput), TerminalStatus.PROCESSING,
+    'Should detect PROCESSING from stream-json tool_use event');
+
+  const systemOutput = '{"type":"system","session_id":"sess_abc","message":{"content":"Using HaRAC..."}}';
+  assert.strictEqual(detector.detectStatus(systemOutput), TerminalStatus.IDLE,
+    'Should treat stream-json system metadata as non-processing on its own');
+
+  const multiLineJsonOutput = [
+    '__CLIAGENTS_RUN_START__abcd1234abcd1234',
+    'some preamble text',
+    '{"type":"assistant","session_id":"sess_abc","message":{"content":[{"type":"text","text":"Done reviewing."}]}}',
+    'some trailing text'
+  ].join('\n');
+  assert.strictEqual(detector.detectStatus(multiLineJsonOutput), TerminalStatus.PROCESSING,
+    'Should detect PROCESSING from multi-line JSON with assistant type');
+
+  const resultMultiLineOutput = [
+    '__CLIAGENTS_RUN_START__abcd1234abcd1234',
+    '{"type":"result","session_id":"sess_abc","content":"The review found no issues."}'
+  ].join('\n');
+  assert.strictEqual(detector.detectStatus(resultMultiLineOutput), TerminalStatus.COMPLETED,
+    'Should detect COMPLETED from stream-json result without message wrapper');
+
+  console.log('  ✅ Claude Code stream-json detection works correctly');
+}
+
+async function testClaudeCodeReviewProseMisclassification() {
+  console.log('\n📝 Test: Claude Code review prose misclassification prevention');
+
+  const detector = new ClaudeCodeDetector();
+
+  const reviewOutputWithNumbers = `
+Here's my review:
+
+1. Error handling looks good
+2. Performance is acceptable
+3. Code style is consistent
+
+The changes are ready to merge.
+`;
+  assert.notStrictEqual(detector.detectStatus(reviewOutputWithNumbers), TerminalStatus.WAITING_USER_ANSWER,
+    'Should NOT misclassify review prose with numbered lists as WAITING_USER_ANSWER');
+
+  const reviewOutputWithQuestion = `
+Review Summary:
+- All tests pass
+- No regressions found
+
+Which areas should I investigate next?
+`;
+  assert.notStrictEqual(detector.detectStatus(reviewOutputWithQuestion), TerminalStatus.WAITING_USER_ANSWER,
+    'Should NOT misclassify rhetorical question in review as WAITING_USER_ANSWER');
+
+  const permissionLikeReviewOutput = `
+Review feedback:
+Do you want to add a retry here?
+That would make the branch more robust.
+`;
+  assert.notStrictEqual(detector.detectStatus(permissionLikeReviewOutput), TerminalStatus.WAITING_PERMISSION,
+    'Should NOT misclassify review suggestions as WAITING_PERMISSION');
+
+  const codeReviewOutput = `
+\`\`\`javascript
+if (error) {
+  throw new Error("Failed: " + message);
+}
+\`\`\`
+
+The error propagation looks correct.
+`;
+  assert.notStrictEqual(detector.detectStatus(codeReviewOutput), TerminalStatus.ERROR,
+    'Should NOT misclassify code snippet with "Error" as ERROR');
+
+  const spinnerInCode = `
+function process() {
+  const spinner = '✶'; // Unicode spinner in code
+  return spinner;
+}
+`;
+  assert.notStrictEqual(detector.detectStatus(spinnerInCode), TerminalStatus.PROCESSING,
+    'Should NOT misclassify spinner character in code comments as PROCESSING');
+
+  console.log('  ✅ Claude Code review prose misclassification prevention works');
+}
+
+async function testClaudeCodeMissingExitMarkerSuccess() {
+  console.log('\n📝 Test: Claude Code missing exit marker with prompt-return success');
+
+  const detector = new ClaudeCodeDetector();
+
+  const promptReturnOutput = `
+__CLIAGENTS_RUN_START__abcd1234abcd1234
+{"type":"result","session_id":"sess_abc","message":{"content":[{"type":"text","text":"Review complete."}]}}
+mojave@host cliagents % `;
+  assert.strictEqual(detector.detectStatus(promptReturnOutput), TerminalStatus.COMPLETED,
+    'Should detect COMPLETED from stream-json result with prompt return');
+
+  const completionMarkerOutput = `
+__CLIAGENTS_RUN_START__abcd1234abcd1234
+⏺ Review complete.
+mojave@host cliagents % `;
+  assert.strictEqual(detector.detectStatus(completionMarkerOutput), TerminalStatus.COMPLETED,
+    'Should detect COMPLETED from ⏺ marker with prompt return');
+
+  const doneMarkerOutput = `
+__CLIAGENTS_RUN_START__abcd1234abcd1234
+Done.
+mojave@host cliagents % `;
+  assert.strictEqual(detector.detectStatus(doneMarkerOutput), TerminalStatus.COMPLETED,
+    'Should detect COMPLETED from Done. with prompt return');
+
+  const errorPromptOutput = `
+__CLIAGENTS_RUN_START__abcd1234abcd1234
+Something went wrong here.
+mojave@host cliagents % `;
+  assert.notStrictEqual(detector.detectStatus(errorPromptOutput), TerminalStatus.COMPLETED,
+    'Should NOT detect COMPLETED from error-like prose with prompt return');
+
+  console.log('  ✅ Claude Code missing exit marker with prompt-return success works');
+}
+
 // Test: Factory creates correct detector
 async function testDetectorFactory() {
   console.log('\n📝 Test: Detector factory');
@@ -270,6 +422,9 @@ async function runTests() {
     testQwenCliDetection,
     testOpencodeCliDetection,
     testClaudeCodeDetection,
+    testClaudeCodeStreamJsonDetection,
+    testClaudeCodeReviewProseMisclassification,
+    testClaudeCodeMissingExitMarkerSuccess,
     testDetectorFactory,
     testBaseDetectorDefaults,
     testTerminalStatusEnum,

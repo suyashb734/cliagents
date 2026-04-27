@@ -1,5 +1,39 @@
 const crypto = require('crypto');
 const { createSessionEventRecorder } = require('./session-event-recorder');
+const { getMemorySnapshotService } = require('./memory-snapshot-service');
+
+const MIN_TIMEOUT_FLOOR_MS = 1;
+
+function normalizeTimeoutMs(timeout) {
+  const normalized = Number(timeout);
+  if (!Number.isFinite(normalized) || normalized <= 0) {
+    return null;
+  }
+  return normalized;
+}
+
+function computeRemainingBudget(startedAt, timeout) {
+  const normalizedTimeout = normalizeTimeoutMs(timeout);
+  if (normalizedTimeout == null) {
+    return null;
+  }
+  return Math.max(0, normalizedTimeout - (Date.now() - startedAt));
+}
+
+function resolveEffectiveTimeout(configuredTimeout, workflowStartedAt, workflowTimeout) {
+  const stageTimeout = normalizeTimeoutMs(configuredTimeout);
+  const remainingBudget = workflowStartedAt == null
+    ? null
+    : computeRemainingBudget(workflowStartedAt, workflowTimeout);
+
+  if (remainingBudget == null) {
+    return stageTimeout;
+  }
+  if (remainingBudget <= 0) {
+    return MIN_TIMEOUT_FLOOR_MS;
+  }
+  return stageTimeout == null ? remainingBudget : Math.min(stageTimeout, remainingBudget);
+}
 
 const DEFAULT_ROUNDS = [
   {
@@ -227,6 +261,7 @@ async function ensureSession(sessionManager, state, options = {}) {
     systemPrompt: state.systemPrompt,
     workDir: state.workDir || options.workDir,
     model: state.model,
+    providerSessionId: state.providerSessionId || null,
     jsonSchema: state.jsonSchema,
     jsonMode: state.jsonMode
   });
@@ -239,6 +274,7 @@ async function ensureSession(sessionManager, state, options = {}) {
 async function runRoundForParticipant(sessionManager, state, prompt, context = {}) {
   const { roundIndex, roundName, timeout, runLedger, runId } = context;
   const startedAt = Date.now();
+  let timeoutId = null;
   const stepId = runLedger && runId && state.participantId
     ? runLedger.appendStep({
         runId,
@@ -309,10 +345,52 @@ async function runRoundForParticipant(sessionManager, state, prompt, context = {
       });
     }
 
+    const effectiveTimeout = resolveEffectiveTimeout(
+      state.timeout || timeout,
+      context.workflowStartedAt,
+      context.workflowTimeout
+    );
+    if (effectiveTimeout === MIN_TIMEOUT_FLOOR_MS && context.workflowStartedAt != null) {
+      const remainingBudget = computeRemainingBudget(context.workflowStartedAt, context.workflowTimeout);
+      if (remainingBudget <= 0) {
+        throw new Error(`participant timed out before round ${roundIndex + 1} started`);
+      }
+    }
+
     const sessionId = await ensureSession(sessionManager, state, context);
-    const response = await sessionManager.send(sessionId, prompt, {
-      timeout: state.timeout || timeout || undefined
+    const sendPromise = sessionManager.send(sessionId, prompt, {
+      timeout: effectiveTimeout || undefined
     });
+    const response = effectiveTimeout != null
+      ? await Promise.race([
+          sendPromise,
+          new Promise((_, reject) => {
+            timeoutId = setTimeout(() => {
+              void (async () => {
+                try {
+                  await sessionManager.interruptSession?.(sessionId);
+                } catch {}
+              })();
+              reject(new Error(`participant timed out after ${effectiveTimeout}ms`));
+            }, effectiveTimeout);
+          })
+        ])
+      : await sendPromise;
+
+    const latestSession = typeof sessionManager.getSession === 'function'
+      ? sessionManager.getSession(sessionId)
+      : null;
+    state.providerSessionId = String(
+      response?.metadata?.providerSessionId
+      || latestSession?.providerSessionId
+      || state.providerSessionId
+      || ''
+    ).trim() || null;
+
+    if (timeoutId) {
+      clearTimeout(timeoutId);
+      timeoutId = null;
+    }
     const completedAt = Date.now();
 
     if (runLedger && runId && state.participantId) {
@@ -372,6 +450,10 @@ async function runRoundForParticipant(sessionManager, state, prompt, context = {
       metadata: response.metadata || {}
     };
   } catch (error) {
+    if (timeoutId) {
+      clearTimeout(timeoutId);
+      timeoutId = null;
+    }
     const completedAt = Date.now();
     const failureClass = classifyFailure(error);
     state.failed = true;
@@ -442,6 +524,11 @@ async function runJudge(sessionManager, judgeSpec, prompt, options = {}) {
   const runLedger = options.runLedger || null;
   const runId = options.runId || null;
   const participantId = options.participantId || null;
+  const effectiveTimeout = resolveEffectiveTimeout(
+    judgeSpec.timeout || options.timeout,
+    options.workflowStartedAt,
+    options.workflowTimeout
+  );
   const stepId = runLedger && runId && participantId
     ? runLedger.appendStep({
         runId,
@@ -508,18 +595,26 @@ async function runJudge(sessionManager, judgeSpec, prompt, options = {}) {
       });
     }
 
+    if (effectiveTimeout === MIN_TIMEOUT_FLOOR_MS && options.workflowStartedAt != null) {
+      const remainingBudget = computeRemainingBudget(options.workflowStartedAt, options.workflowTimeout);
+      if (remainingBudget <= 0) {
+        throw new Error('judge timed out before execution started');
+      }
+    }
+
     session = await sessionManager.createSession({
       adapter: judgeSpec.adapter,
       sessionId: `discussion-judge-${crypto.randomBytes(6).toString('hex')}`,
       systemPrompt: judgeSpec.systemPrompt,
       workDir: judgeSpec.workDir || options.workDir,
       model: judgeSpec.model,
+      providerSessionId: judgeSpec.providerSessionId || null,
       jsonSchema: judgeSpec.jsonSchema,
       jsonMode: judgeSpec.jsonMode
     });
 
     const response = await sessionManager.send(session.sessionId, prompt, {
-      timeout: judgeSpec.timeout || options.timeout || undefined
+      timeout: effectiveTimeout || undefined
     });
     const completedAt = Date.now();
 
@@ -688,15 +783,19 @@ async function runDiscussion(sessionManager, message, options = {}) {
           hasJudge: Boolean(judgeSpec),
           contextSummary: summarizeText(context, 400)
         },
-        startedAt
+        startedAt,
+        rootSessionId: rootSessionId || null,
+        taskId: options.taskId || null
       })
     : null;
+  const effectiveRootSessionId = rootSessionId || discussionId;
+  const effectiveTaskId = options.taskId || null;
   const eventRecorder = createSessionEventRecorder({
     db,
     enabled: sessionEventsEnabled,
     workflowKind: 'discussion',
     workflowSessionId: discussionId,
-    rootSessionId: rootSessionId || discussionId,
+    rootSessionId: effectiveRootSessionId,
     parentSessionId,
     originClient: originClient || 'system',
     externalSessionRef,
@@ -704,6 +803,13 @@ async function runDiscussion(sessionManager, message, options = {}) {
     runId,
     discussionId
   });
+
+  if (runLedger && runId) {
+    runLedger.updateRun(runId, {
+      rootSessionId: effectiveRootSessionId,
+      taskId: effectiveTaskId
+    });
+  }
 
   eventRecorder.recordWorkflowStarted({
     payloadSummary: `Discussion started: ${summarizeText(message, 120)}`,
@@ -791,6 +897,8 @@ async function runDiscussion(sessionManager, message, options = {}) {
     model: participant.model,
     timeout: participant.timeout || null,
     workDir: participant.workDir || workDir || null,
+    participantRef: participant.participantRef || null,
+    providerSessionId: participant.providerSessionId || null,
     jsonMode: participant.jsonMode,
     jsonSchema: participant.jsonSchema || null,
     controlSessionId: null,
@@ -880,6 +988,8 @@ async function runDiscussion(sessionManager, message, options = {}) {
           roundIndex,
           roundName: round.name,
           timeout,
+          workflowStartedAt: startedAt,
+          workflowTimeout: timeout,
           workDir,
           runLedger,
           runId,
@@ -973,12 +1083,14 @@ async function runDiscussion(sessionManager, message, options = {}) {
 
   const participantResults = states.map((state) => ({
     participantId: state.participantId,
+    participantRef: state.participantRef || null,
     name: state.name,
     adapter: state.adapter,
     success: !state.failed,
     error: state.error,
     failureClass: state.failureClass,
-    roundsCompleted: roundResults.filter((roundResult) => roundResult.responses.some((response) => response.adapter === state.adapter && response.name === state.name && response.success)).length
+    roundsCompleted: roundResults.filter((roundResult) => roundResult.responses.some((response) => response.adapter === state.adapter && response.name === state.name && response.success)).length,
+    providerSessionId: state.providerSessionId || null
   }));
 
   const successfulParticipants = participantResults.filter((entry) => entry.success);
@@ -1011,6 +1123,8 @@ async function runDiscussion(sessionManager, message, options = {}) {
 
     judgeResult = await runJudge(sessionManager, judgeSpec, buildJudgePrompt({ message, context, rounds: roundResults }), {
       timeout,
+      workflowStartedAt: startedAt,
+      workflowTimeout: timeout,
       workDir,
       runLedger,
       runId,
@@ -1087,6 +1201,17 @@ async function runDiscussion(sessionManager, message, options = {}) {
 
   if (discussionStore) {
     discussionStore.updateDiscussionStatus(discussionId, runStatus);
+  }
+
+  const snapshotService = getMemorySnapshotService();
+  if (snapshotService && runId) {
+    const snapshot = snapshotService.writeRunSnapshot(runId, {
+      rootSessionId: effectiveRootSessionId,
+      taskId: effectiveTaskId
+    });
+    if (snapshot && effectiveRootSessionId) {
+      snapshotService.scheduleRootRefresh(effectiveRootSessionId);
+    }
   }
 
   eventRecorder.recordEvent({

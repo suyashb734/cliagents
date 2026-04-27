@@ -1821,7 +1821,13 @@ class PersistentSessionManager extends EventEmitter {
       return null;
     }
 
-    const tail = String(output || '').slice(run.baselineOutputLength);
+    const outputText = String(output || '');
+    const lastStartIndex = outputText.lastIndexOf(run.startMarker);
+    const tail = lastStartIndex >= 0
+      ? outputText.slice(lastStartIndex)
+      : (run.baselineOutputLength > 0 && run.baselineOutputLength < outputText.length)
+        ? outputText.slice(run.baselineOutputLength)
+        : outputText;
     this._syncProviderThreadRefFromOutput(terminal, tail, detector);
     const sawStartMarkerInTail = hasTrackedRunStartMarker(tail, run.runId);
     const exitMatch = matchTrackedRunExitMarker(tail, run.exitMarkerPrefix);
@@ -1863,6 +1869,17 @@ class PersistentSessionManager extends EventEmitter {
 
     if (lastNonEmptyLine && /^[\w.-]+@[\w.-]+.*[#$%>]\s*$/.test(lastNonEmptyLine)) {
       if (sawStartMarkerInTail || sawStartMarkerInLog) {
+        const hasSubstantiveOutput = this._hasSubstantiveRunOutput(
+          [tail, logTail].filter(Boolean).join('\n'),
+          detector
+        );
+        if (hasSubstantiveOutput) {
+          if (run.exitCode == null) {
+            run.exitCode = 0;
+          }
+          run.completedAt = new Date();
+          return TerminalStatus.COMPLETED;
+        }
         if (run.exitCode == null) {
           run.exitCode = 1;
         }
@@ -1873,6 +1890,23 @@ class PersistentSessionManager extends EventEmitter {
     }
 
     return TerminalStatus.PROCESSING;
+  }
+
+  _hasSubstantiveRunOutput(output, detector) {
+    const tail = String(output || '');
+    if (!tail) {
+      return false;
+    }
+    if (detector && typeof detector.isStreamingJson === 'function' && detector.isStreamingJson(tail)) {
+      const status = detector.detectFromStreamJson(tail);
+      if (status === TerminalStatus.COMPLETED) {
+        return true;
+      }
+    }
+    if (/⏺\s+|Done\.|Completed\./i.test(tail)) {
+      return true;
+    }
+    return false;
   }
 
   _buildReuseContext(options = {}) {
@@ -2568,7 +2602,7 @@ class PersistentSessionManager extends EventEmitter {
     const resolvedProviderThreadRef = boundProviderSessionId
       || normalizeProviderThreadRef(adapter, providerResumeSessionId || null)
       || null;
-    const shouldResumeLatestProviderSession = recoveredManagedRoot && !providerResumeSessionId;
+    const shouldResumeLatestProviderSession = Boolean(recoveryMetadata.providerResumeLatest === true) && !providerResumeSessionId;
     const sessionName = `cliagents-${terminalId.slice(0, 6)}`;
     // Truncate prefix to ensure window name stays under 50-char tmux limit
     // Format: prefix (max 23 chars) + dash + terminalId suffix (26 chars) = max 50
@@ -2755,6 +2789,7 @@ class PersistentSessionManager extends EventEmitter {
           lineageDepth: terminal.lineageDepth,
           sessionMetadata: terminal.sessionMetadata,
           harnessSessionId: terminal.harnessSessionId,
+          model: terminal.model || null,
           providerThreadRef: terminal.providerThreadRef,
           adoptedAt: terminal.adoptedAt,
           captureMode: terminal.captureMode
@@ -2963,6 +2998,7 @@ class PersistentSessionManager extends EventEmitter {
         this.db.updateTerminalBinding(terminal.terminalId, {
           adapter: terminal.adapter,
           role: terminal.role,
+          model: terminal.model || null,
           workDir: terminal.workDir,
           logPath: terminal.logPath,
           rootSessionId: terminal.rootSessionId,
@@ -2997,6 +3033,7 @@ class PersistentSessionManager extends EventEmitter {
             lineageDepth: terminal.lineageDepth,
             sessionMetadata: terminal.sessionMetadata,
             harnessSessionId: terminal.harnessSessionId,
+            model: terminal.model || null,
             providerThreadRef: terminal.providerThreadRef,
             adoptedAt: terminal.adoptedAt,
             captureMode: terminal.captureMode

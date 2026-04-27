@@ -5,10 +5,11 @@
  * Uses spawn-per-message with session resume (-r) for persistent sessions.
  */
 
-const { spawn, execFileSync, execSync } = require('child_process');
+const cp = require('child_process');
 const fs = require('fs');
 const path = require('path');
 const BaseLLMAdapter = require('../core/base-llm-adapter');
+
 const { createAdapterContract, defineAdapterCapabilities, EXECUTION_MODES } = require('./contract');
 const { logConversation, logSessionStart } = require('../utils/conversation-logger');
 const { updateGenerationParams, getGenerationParams } = require('../utils/gemini-config');
@@ -18,6 +19,10 @@ const DEFAULT_GEMINI_MODEL_FALLBACKS = [
   'gemini-2.5-pro',
   'gemini-3-pro-preview'
 ];
+
+async function sleep(ms) {
+  return new Promise((resolve) => setTimeout(resolve, ms));
+}
 
 function inferGeminiBrokerDefaultModel() {
   if (process.env.CLIAGENTS_GEMINI_MODEL) {
@@ -169,7 +174,7 @@ class GeminiCliAdapter extends BaseLLMAdapter {
 
     // Try to find gemini using 'which'
     try {
-      const result = execSync('which gemini', { encoding: 'utf8', timeout: 5000 }).trim();
+      const result = cp.execSync('which gemini', { encoding: 'utf8', timeout: 5000 }).trim();
       if (result) {
         this._geminiPathCache = result;
         return result;
@@ -300,8 +305,18 @@ class GeminiCliAdapter extends BaseLLMAdapter {
    * Check if Gemini CLI is available
    */
   async isAvailable() {
+    const geminiPath = this._getGeminiPath();
+    if (geminiPath && geminiPath !== 'gemini') {
+      try {
+        fs.accessSync(geminiPath, fs.constants.X_OK);
+        return true;
+      } catch {
+        return false;
+      }
+    }
+
     return new Promise((resolve) => {
-      const check = spawn('which', ['gemini']);
+      const check = cp.spawn('which', ['gemini']);
       check.on('close', (code) => resolve(code === 0));
       check.on('error', () => resolve(false));
     });
@@ -310,29 +325,74 @@ class GeminiCliAdapter extends BaseLLMAdapter {
   /**
    * Get list of Gemini sessions
    */
-  _listGeminiSessions(workDir = process.cwd()) {
-    try {
-      const geminiPath = this._getGeminiPath();
-      const output = execFileSync(geminiPath, ['--list-sessions'], {
-        cwd: workDir,
-        env: {
-          ...process.env,
-          NO_COLOR: '1'
-        },
-        encoding: 'utf-8',
-        timeout: 30000
-      });
-      return output
-        .split('\n')
-        .map(line => line.match(/^\s*(\d+)\.\s+.+\[(.+)\]\s*$/))
-        .filter(Boolean)
-        .map((match) => ({
-          index: Number(match[1]),
-          sessionId: match[2]
-        }));
-    } catch (e) {
-      return [];
+  async _listGeminiSessions(workDir = process.cwd(), options = {}) {
+    const {
+      deadline = null,
+      maxAttempts = 3,
+      timeoutMs = 30000
+    } = options;
+    const geminiPath = this._getGeminiPath();
+    let lastError = null;
+    const attemptLimit = Number.isFinite(Number(maxAttempts)) && Number(maxAttempts) > 0
+      ? Math.floor(Number(maxAttempts))
+      : 3;
+    const baseTimeoutMs = Number.isFinite(Number(timeoutMs)) && Number(timeoutMs) > 0
+      ? Math.floor(Number(timeoutMs))
+      : 30000;
+
+    for (let attempt = 1; attempt <= attemptLimit; attempt++) {
+      const remainingBudget = deadline == null ? null : Math.max(0, deadline - Date.now());
+      if (remainingBudget !== null && remainingBudget <= 0) {
+        break;
+      }
+
+      const commandTimeoutMs = remainingBudget == null
+        ? baseTimeoutMs
+        : Math.max(1, Math.min(baseTimeoutMs, remainingBudget));
+
+      try {
+        const { stdout } = await new Promise((resolve, reject) => {
+          cp.execFile(geminiPath, ['--list-sessions'], {
+            cwd: workDir,
+            env: {
+              ...process.env,
+              NO_COLOR: '1'
+            },
+            encoding: 'utf-8',
+            timeout: commandTimeoutMs
+          }, (err, stdout, stderr) => {
+            if (err) reject(err);
+            else resolve({ stdout, stderr });
+          });
+        });
+
+        if (!stdout) return [];
+
+        return stdout
+          .split('\n')
+          .map((line) => line.match(/^\s*(\d+)\.\s+.*?\[([^\]]+)\]/))
+          .filter(Boolean)
+          .map((match) => ({
+            index: Number(match[1]),
+            sessionId: match[2].trim()
+          }));
+      } catch (e) {
+        lastError = e;
+        if (attempt < attemptLimit) {
+          const remainingAfterFailure = deadline == null ? null : Math.max(0, deadline - Date.now());
+          if (remainingAfterFailure !== null && remainingAfterFailure <= 0) {
+            break;
+          }
+          const backoffMs = attempt * 200;
+          await sleep(remainingAfterFailure == null ? backoffMs : Math.min(backoffMs, remainingAfterFailure));
+        }
+      }
     }
+
+    if (lastError) {
+      console.warn(`[GeminiAdapter] _listGeminiSessions failed after ${attemptLimit} attempts: ${lastError.message}`);
+    }
+    return [];
   }
 
   /**
@@ -340,8 +400,8 @@ class GeminiCliAdapter extends BaseLLMAdapter {
    */
   async _resolveGeminiResumeRef(session, options = {}) {
     const {
-      timeoutMs = 10000,
-      pollIntervalMs = 500
+      timeoutMs = 20000,
+      pollIntervalMs = 750
     } = options;
 
     if (!session.geminiSessionId) {
@@ -349,17 +409,27 @@ class GeminiCliAdapter extends BaseLLMAdapter {
     }
 
     const deadline = Date.now() + timeoutMs;
+    let attemptCount = 0;
 
     while (Date.now() <= deadline) {
-      const sessions = this._listGeminiSessions(session.workDir);
+      attemptCount++;
+      const sessions = await this._listGeminiSessions(session.workDir, { deadline });
       const match = sessions.find((entry) => entry.sessionId === session.geminiSessionId);
       if (match) {
+        if (attemptCount > 1) {
+          console.log(`[GeminiAdapter] Resolved session ${session.geminiSessionId} after ${attemptCount} attempts`);
+        }
         return String(match.index);
       }
 
-      await new Promise((resolve) => setTimeout(resolve, pollIntervalMs));
+      const remainingBudget = Math.max(0, deadline - Date.now());
+      if (remainingBudget === 0) {
+        break;
+      }
+      await sleep(Math.min(pollIntervalMs, remainingBudget));
     }
 
+    console.warn(`[GeminiAdapter] Failed to resolve Gemini session ${session.geminiSessionId} after ${timeoutMs}ms`);
     return null;
   }
 
@@ -369,28 +439,45 @@ class GeminiCliAdapter extends BaseLLMAdapter {
    */
   async _detectNewGeminiSessionId(workDir, sessionsBefore = [], options = {}) {
     const {
-      timeoutMs = 12000,
-      pollIntervalMs = 500
+      deadline: requestedDeadline = null,
+      timeoutMs = 20000,
+      pollIntervalMs = 750
     } = options;
 
-    const beforeSet = new Set((sessionsBefore || []).map((entry) => entry.sessionId));
-    const deadline = Date.now() + timeoutMs;
+    const normalizedSessionsBefore = Array.isArray(sessionsBefore) ? sessionsBefore : [];
+    const beforeSet = new Set(normalizedSessionsBefore.map((entry) => entry.sessionId));
+    const timeoutDeadline = Date.now() + timeoutMs;
+    const deadline = Number.isFinite(requestedDeadline)
+      ? Math.min(requestedDeadline, timeoutDeadline)
+      : timeoutDeadline;
     let latestSessions = [];
+    let attemptCount = 0;
 
     while (Date.now() <= deadline) {
-      latestSessions = this._listGeminiSessions(workDir);
+      attemptCount++;
+      latestSessions = await this._listGeminiSessions(workDir, { deadline });
 
-      const created = latestSessions.find((entry) => !beforeSet.has(entry.sessionId));
+      const created = latestSessions.slice().reverse().find((entry) => !beforeSet.has(entry.sessionId));
       if (created?.sessionId) {
+        if (attemptCount > 1) {
+          console.log(`[GeminiAdapter] Detected new session ${created.sessionId} after ${attemptCount} attempts`);
+        }
         return created.sessionId;
       }
 
-      await new Promise((resolve) => setTimeout(resolve, pollIntervalMs));
+      const remainingBudget = Math.max(0, deadline - Date.now());
+      if (remainingBudget === 0) {
+        break;
+      }
+      await sleep(Math.min(pollIntervalMs, remainingBudget));
     }
 
-    // Conservative fallback: if a list exists, return top entry (newest in Gemini output order).
-    if (latestSessions.length > 0) {
-      return latestSessions[0].sessionId || null;
+    // Fallback only when the workDir had no prior sessions; otherwise the
+    // newest visible session may belong to an older conversation.
+    if (beforeSet.size === 0 && latestSessions.length > 0) {
+      const fallbackId = latestSessions[latestSessions.length - 1].sessionId;
+      console.warn(`[GeminiAdapter] Detection timeout. Falling back to newest session: ${fallbackId}`);
+      return fallbackId || null;
     }
 
     return null;
@@ -442,7 +529,11 @@ class GeminiCliAdapter extends BaseLLMAdapter {
     }
 
     // Non-JSON mode: normal init with session creation
-    const sessionsBeforeInit = this._listGeminiSessions(workDir);
+    const spawnDeadline = Date.now() + this.config.timeout;
+    const sessionsBeforeInit = await this._listGeminiSessions(workDir, {
+      deadline: spawnDeadline,
+      timeoutMs: Math.min(this.config.timeout, 15000)
+    });
 
     const initPrompt = options.systemPrompt
       ? `You are starting a new session. ${options.systemPrompt}. Acknowledge with "Ready."`
@@ -498,6 +589,7 @@ class GeminiCliAdapter extends BaseLLMAdapter {
 
     if (!geminiSessionId) {
       geminiSessionId = await this._detectNewGeminiSessionId(workDir, sessionsBeforeInit, {
+        deadline: spawnDeadline,
         timeoutMs: 12000,
         pollIntervalMs: 500
       });
@@ -551,7 +643,7 @@ class GeminiCliAdapter extends BaseLLMAdapter {
     console.log('[GeminiAdapter] Timeout:', timeout);
 
     return new Promise((resolve, reject) => {
-      const proc = spawn(geminiPath, args, {
+      const proc = cp.spawn(geminiPath, args, {
         cwd: workDir,
         env: {
           ...process.env,
@@ -720,7 +812,7 @@ class GeminiCliAdapter extends BaseLLMAdapter {
 
     console.log('[GeminiAdapter] Streaming:', geminiPath, args.join(' '));
 
-    const proc = spawn(geminiPath, args, {
+    const proc = cp.spawn(geminiPath, args, {
       cwd: workDir,
       env: {
         ...process.env,
@@ -741,6 +833,7 @@ class GeminiCliAdapter extends BaseLLMAdapter {
     let settleTimer = null;
     let settleForceKillTimer = null;
     let earlyExitRequested = false;
+    let finalResult = null;
 
     const scheduleSettleExit = () => {
       if (!finalResult || timedOut) {
@@ -811,7 +904,6 @@ class GeminiCliAdapter extends BaseLLMAdapter {
 
     // Process streaming JSON output in real-time
     let buffer = '';  // Buffer for incomplete JSON lines
-    let finalResult = null;
     let lastAssistantContent = '';
 
     try {

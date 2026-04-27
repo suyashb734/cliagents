@@ -719,6 +719,226 @@ async function testInputRouteRejectsAttachedRootsAsReadOnly() {
   }
 }
 
+async function testInputRouteAllowsAttachedRootChildBrokerWork() {
+  const rootDir = makeTempDir('cliagents-root-child-work-input-');
+  const db = new OrchestrationDB({
+    dbPath: path.join(rootDir, 'cliagents.db'),
+    dataDir: rootDir
+  });
+  const sendCalls = [];
+
+  const rootSessionId = 'attached-root-session';
+  const rootTerminalId = 'attached-root-terminal';
+  const childTerminalId = 'attached-child-terminal-84';
+
+  db.registerTerminal(
+    rootTerminalId,
+    'tmux-attached-1',
+    '0',
+    'codex-cli',
+    'main_codex-cli',
+    'attach',
+    rootDir,
+    path.join(rootDir, 'attached-root.log'),
+    {
+      rootSessionId,
+      sessionKind: 'attach',
+      originClient: 'codex'
+    }
+  );
+  db.addSessionEvent({
+    rootSessionId,
+    sessionId: rootSessionId,
+    eventType: 'session_started',
+    originClient: 'codex',
+    idempotencyKey: 'attached-root-start',
+    payloadJson: {
+      sessionKind: 'attach',
+      adapter: 'codex-cli'
+    },
+    metadata: {
+      attachMode: 'explicit-http-attach'
+    }
+  });
+
+  for (let index = 1; index <= 84; index += 1) {
+    const terminalId = index === 84 ? childTerminalId : `attached-child-terminal-${index}`;
+    db.registerTerminal(
+      terminalId,
+      'tmux-attached-1',
+      String(index),
+      'codex-cli',
+      index === 84 ? null : 'worker_codex-cli',
+      index === 84 ? 'review' : 'worker',
+      rootDir,
+      path.join(rootDir, `${terminalId}.log`),
+      {
+        rootSessionId,
+        parentSessionId: rootSessionId,
+        sessionKind: index === 84 ? 'review' : 'worker',
+        agentProfile: index === 84 ? null : 'researcher',
+        originClient: 'mcp'
+      }
+    );
+  }
+
+  const { server, baseUrl } = await startApp({
+    sessionManager: {
+      getTerminal(terminalId) {
+        if (terminalId === rootTerminalId) {
+          return {
+            terminalId: rootTerminalId,
+            rootSessionId,
+            sessionKind: 'attach',
+            originClient: 'codex'
+          };
+        }
+        if (terminalId === childTerminalId) {
+          return {
+            terminalId: childTerminalId,
+            rootSessionId,
+            parentSessionId: rootSessionId,
+            harnessSessionId: childTerminalId,
+            sessionKind: 'review',
+            originClient: 'mcp'
+          };
+        }
+        return null;
+      },
+      getOutput() {
+        return '';
+      },
+      async sendInput(terminalId, message) {
+        sendCalls.push({ terminalId, message });
+      },
+      getStatus() {
+        return 'idle';
+      }
+    },
+    apiSessionManager: {
+      getAdapterNames() {
+        return [];
+      },
+      getAdapter() {
+        return null;
+      }
+    },
+    db
+  });
+
+  try {
+    const res = await request(baseUrl, 'POST', `/orchestration/terminals/${childTerminalId}/input`, {
+      message: 'Continue.'
+    });
+    assert.strictEqual(res.status, 200);
+    assert.strictEqual(res.data.success, true);
+    assert.strictEqual(sendCalls.length, 1);
+    assert.strictEqual(sendCalls[0].terminalId, childTerminalId);
+    assert.strictEqual(sendCalls[0].message, 'Continue.');
+  } finally {
+    await stopApp(server);
+    db.close();
+    fs.rmSync(rootDir, { recursive: true, force: true });
+  }
+}
+
+async function testInputRouteRejectsDbOnlyAttachedRootChildSpoof() {
+  const rootDir = makeTempDir('cliagents-root-child-spoof-input-');
+  const db = new OrchestrationDB({
+    dbPath: path.join(rootDir, 'cliagents.db'),
+    dataDir: rootDir
+  });
+  const sendCalls = [];
+
+  const rootSessionId = 'attached-root-session';
+  const childTerminalId = 'spoofed-child-terminal';
+
+  db.registerTerminal(
+    'attached-root-terminal',
+    'tmux-attached-1',
+    '0',
+    'codex-cli',
+    'main_codex-cli',
+    'attach',
+    rootDir,
+    path.join(rootDir, 'attached-root.log'),
+    {
+      rootSessionId,
+      sessionKind: 'attach',
+      originClient: 'codex'
+    }
+  );
+  db.registerTerminal(
+    childTerminalId,
+    'tmux-attached-1',
+    '1',
+    'codex-cli',
+    'review_codex-cli',
+    'review',
+    rootDir,
+    path.join(rootDir, 'spoofed-child.log'),
+    {
+      rootSessionId,
+      parentSessionId: rootSessionId,
+      sessionKind: 'review',
+      originClient: 'mcp'
+    }
+  );
+  db.addSessionEvent({
+    rootSessionId,
+    sessionId: rootSessionId,
+    eventType: 'session_started',
+    originClient: 'codex',
+    idempotencyKey: 'attached-root-spoof-start',
+    payloadJson: {
+      sessionKind: 'attach',
+      adapter: 'codex-cli'
+    },
+    metadata: {
+      attachMode: 'explicit-http-attach'
+    }
+  });
+
+  const { server, baseUrl } = await startApp({
+    sessionManager: {
+      getTerminal() {
+        return null;
+      },
+      getOutput() {
+        return '';
+      },
+      async sendInput(terminalId, message) {
+        sendCalls.push({ terminalId, message });
+      },
+      getStatus() {
+        return 'idle';
+      }
+    },
+    apiSessionManager: {
+      getAdapterNames() {
+        return [];
+      },
+      getAdapter() {
+        return null;
+      }
+    },
+    db
+  });
+
+  try {
+    const res = await request(baseUrl, 'POST', `/orchestration/terminals/${childTerminalId}/input`, {
+      message: 'Continue.'
+    });
+    assert.strictEqual(res.status, 403);
+    assert.strictEqual(res.data.error.code, 'root_read_only');
+    assert.strictEqual(sendCalls.length, 0);
+  } finally {
+    await stopApp(server);
+    db.close();
+    fs.rmSync(rootDir, { recursive: true, force: true });
+  }
+}
+
 async function testRootSessionRoutesExposeAttentionSummary() {
   const rootDir = makeTempDir('cliagents-root-session-routes-');
   const db = new OrchestrationDB({
@@ -783,6 +1003,7 @@ async function testRootSessionRoutesExposeAttentionSummary() {
       idempotencyKey: 'root-route-input',
       payloadJson: { question: 'Need approval' }
     });
+    db.addMessage('child-monitor-1', 'assistant', 'Need approval before continuing.');
     const oldOccurredAt = Date.now() - (2 * 60 * 60 * 1000);
     db.addSessionEvent({
       rootSessionId: 'legacy-route-stale',
@@ -841,6 +1062,9 @@ async function testRootSessionRoutesExposeAttentionSummary() {
     assert.strictEqual(listRes.data.hiddenNonUserCount, 0);
     assert.strictEqual(listRes.data.statusFilter, 'all');
     assert.strictEqual(listRes.data.roots[0].live, true);
+    assert(listRes.data.roots[0].lastMessageAt, 'root list should expose message recency');
+    assert.strictEqual(listRes.data.roots[0].messageCount, 1);
+    assert.strictEqual(listRes.data.roots[0].recoveryCapability, 'exact_provider_resume');
 
     const liveListRes = await request(baseUrl, 'GET', '/orchestration/root-sessions?limit=10&statusFilter=live');
     assert.strictEqual(liveListRes.status, 200);
@@ -869,6 +1093,9 @@ async function testRootSessionRoutesExposeAttentionSummary() {
     assert.strictEqual(detailRes.data.sessionKind, 'attached');
     assert.strictEqual(detailRes.data.visibility, 'read-only');
     assert.strictEqual(detailRes.data.replyCapability, 'partial');
+    assert(detailRes.data.lastMessageAt, 'detail snapshot should expose message recency');
+    assert.strictEqual(detailRes.data.messageCount, 1);
+    assert.strictEqual(detailRes.data.recoveryCapability, 'exact_provider_resume');
     assert(detailRes.data.activitySummary, 'detail snapshot should expose activity summary');
     assert(detailRes.data.attention.reasons.some((reason) => reason.code === 'user_input_required'));
 
@@ -2091,6 +2318,12 @@ async function run() {
 
     await testInputRouteRejectsAttachedRootsAsReadOnly();
     console.log('  ✓ terminal input route rejects attached roots as read-only');
+
+    await testInputRouteAllowsAttachedRootChildBrokerWork();
+    console.log('  ✓ terminal input route allows broker-owned child work under attached roots');
+
+    await testInputRouteRejectsDbOnlyAttachedRootChildSpoof();
+    console.log('  ✓ terminal input route rejects DB-only child spoofing under attached roots');
 
     await testRootSessionRoutesExposeAttentionSummary();
     console.log('  ✓ root-session routes expose attention summaries and detail snapshots');

@@ -382,6 +382,24 @@ async function run() {
     const persistedOrphanedTerminal = db.getTerminal(orphanedOutputRoot.terminalId);
     assert.strictEqual(persistedOrphanedTerminal.status, 'orphaned');
 
+    const recoveredCodexFreshRoot = await manager.createTerminal({
+      adapter: 'codex-cli',
+      role: 'main',
+      workDir: rootDir,
+      originClient: 'codex',
+      externalSessionRef: 'codex:managed:fresh-recovery-test',
+      sessionKind: 'main',
+      permissionMode: 'default',
+      sessionMetadata: {
+        clientName: 'codex',
+        attachMode: 'managed-root-launch',
+        managedLaunch: true,
+        recoveredManagedRoot: true
+      }
+    });
+    const recoveredCodexFreshHistory = fakeTmux.getHistory(recoveredCodexFreshRoot.sessionName, recoveredCodexFreshRoot.windowName);
+    assert(!recoveredCodexFreshHistory.includes('resume --last'), 'did not expect recovered Codex root without an exact handle to resume the latest provider session');
+
     const recoveredClaudeRoot = await manager.createTerminal({
       adapter: 'claude-code',
       role: 'main',
@@ -987,7 +1005,116 @@ async function run() {
       incompletePrompt
     );
     fakeTmux.setCurrentCommand(liveIncompleteClaudeWorker.sessionName, liveIncompleteClaudeWorker.windowName, 'zsh');
-    assert.strictEqual(manager.getStatus(incompleteClaudeWorker.terminalId), TerminalStatus.ERROR);
+    assert.strictEqual(manager.getStatus(incompleteClaudeWorker.terminalId), TerminalStatus.ERROR,
+      'Missing exit marker with plain prose should remain ERROR');
+
+    const successIncompleteClaudeWorker = await manager.createTerminal({
+      adapter: 'claude-code',
+      role: 'worker',
+      agentProfile: 'review_claude-code',
+      rootSessionId: 'fafafafafafafafafafafafafafafafa',
+      parentSessionId: 'fafafafafafafafafafafafafafafafa',
+      sessionKind: 'reviewer',
+      originClient: 'mcp',
+      externalSessionRef: 'codex:thread-success-incomplete',
+      permissionMode: 'auto',
+      workDir: rootDir
+    });
+    await manager.sendInput(successIncompleteClaudeWorker.terminalId, 'Trigger missing exit marker but with completion marker.');
+    const liveSuccessIncompleteClaudeWorker = manager.terminals.get(successIncompleteClaudeWorker.terminalId);
+    const successIncompletePrompt = [
+      liveSuccessIncompleteClaudeWorker.activeRun.startMarker,
+      '⏺ Claude review complete.',
+      'mojave@host cliagents % '
+    ].join('\n');
+    fs.writeFileSync(liveSuccessIncompleteClaudeWorker.logPath, successIncompletePrompt, 'utf8');
+    fakeTmux.setHistory(
+      liveSuccessIncompleteClaudeWorker.sessionName,
+      liveSuccessIncompleteClaudeWorker.windowName,
+      successIncompletePrompt
+    );
+    fakeTmux.setCurrentCommand(liveSuccessIncompleteClaudeWorker.sessionName, liveSuccessIncompleteClaudeWorker.windowName, 'zsh');
+    assert.strictEqual(manager.getStatus(successIncompleteClaudeWorker.terminalId), TerminalStatus.COMPLETED,
+      'Missing exit marker but with completion marker and prompt return should be COMPLETED');
+
+    const streamJsonSuccessWorker = await manager.createTerminal({
+      adapter: 'claude-code',
+      role: 'worker',
+      agentProfile: 'review_claude-code',
+      rootSessionId: 'gagagagagagagagagagagagagagagagag',
+      parentSessionId: 'gagagagagagagagagagagagagagagagag',
+      sessionKind: 'reviewer',
+      originClient: 'mcp',
+      externalSessionRef: 'codex:thread-stream-json-success',
+      permissionMode: 'auto',
+      workDir: rootDir
+    });
+    await manager.sendInput(streamJsonSuccessWorker.terminalId, 'Trigger stream-json result without exit marker.');
+    const liveStreamJsonSuccessWorker = manager.terminals.get(streamJsonSuccessWorker.terminalId);
+    const streamJsonSuccessPrompt = [
+      liveStreamJsonSuccessWorker.activeRun.startMarker,
+      '{"type":"result","session_id":"sess_abc","message":{"content":"Review complete."}}',
+      'mojave@host cliagents % '
+    ].join('\n');
+    fs.writeFileSync(liveStreamJsonSuccessWorker.logPath, streamJsonSuccessPrompt, 'utf8');
+    fakeTmux.setHistory(
+      liveStreamJsonSuccessWorker.sessionName,
+      liveStreamJsonSuccessWorker.windowName,
+      streamJsonSuccessPrompt
+    );
+    fakeTmux.setCurrentCommand(liveStreamJsonSuccessWorker.sessionName, liveStreamJsonSuccessWorker.windowName, 'zsh');
+    assert.strictEqual(manager.getStatus(streamJsonSuccessWorker.terminalId), TerminalStatus.COMPLETED,
+      'Missing exit marker but with stream-json result and prompt return should be COMPLETED');
+
+    const truncatedClaudeWorker = await manager.createTerminal({
+      adapter: 'claude-code',
+      role: 'worker',
+      agentProfile: 'review_claude-code',
+      rootSessionId: 'cdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcd',
+      parentSessionId: 'cdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcd',
+      sessionKind: 'reviewer',
+      originClient: 'mcp',
+      externalSessionRef: 'codex:thread-truncated-tail',
+      permissionMode: 'auto',
+      workDir: rootDir
+    });
+    const liveTruncatedClaudeWorker = manager.terminals.get(truncatedClaudeWorker.terminalId);
+    const oversizedBaseline = `${'previous output line\n'.repeat(600)}mojave@host cliagents % `;
+    fakeTmux.setHistory(
+      liveTruncatedClaudeWorker.sessionName,
+      liveTruncatedClaudeWorker.windowName,
+      oversizedBaseline
+    );
+    await manager.sendInput(truncatedClaudeWorker.terminalId, 'Trigger truncated tmux history completion.');
+    const truncatedCompletionPrompt = [
+      liveTruncatedClaudeWorker.activeRun.startMarker,
+      '{"type":"assistant","session_id":"sess_trunc","message":{"content":[{"type":"text","text":"Reviewing..."}]}}',
+      '{"type":"result","session_id":"sess_trunc","message":{"content":[{"type":"text","text":"Review complete after truncation."}]}}',
+      `${liveTruncatedClaudeWorker.activeRun.exitMarkerPrefix}0`
+    ].join('\n');
+    fs.writeFileSync(liveTruncatedClaudeWorker.logPath, [
+      liveTruncatedClaudeWorker.activeRun.startMarker,
+      '{"type":"assistant","session_id":"sess_trunc","message":{"content":[{"type":"text","text":"Reviewing..."}]}}'
+    ].join('\n'), 'utf8');
+    fakeTmux.setHistory(
+      liveTruncatedClaudeWorker.sessionName,
+      liveTruncatedClaudeWorker.windowName,
+      truncatedCompletionPrompt
+    );
+    fakeTmux.setCurrentCommand(liveTruncatedClaudeWorker.sessionName, liveTruncatedClaudeWorker.windowName, 'zsh');
+    const originalGetOutput = manager.getOutput.bind(manager);
+    manager.getOutput = function getOutputWithTruncatedTail(terminalId, lines, options) {
+      if (terminalId === truncatedClaudeWorker.terminalId) {
+        return truncatedCompletionPrompt;
+      }
+      return originalGetOutput(terminalId, lines, options);
+    };
+    try {
+      assert.strictEqual(manager.getStatus(truncatedClaudeWorker.terminalId), TerminalStatus.COMPLETED,
+        'Tracked runs should remain COMPLETED even when the current tmux snapshot is shorter than the original baseline');
+    } finally {
+      manager.getOutput = originalGetOutput;
+    }
 
     const rootTerminalId = 'bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb';
     const rootSessionName = 'cliagents-root';

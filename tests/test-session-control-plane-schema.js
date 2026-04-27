@@ -46,13 +46,23 @@ function runFreshSchemaAssertions() {
 
     assertContainsAll(
       migrations,
-      ['000000000000_schema_baseline', '0001_run_ledger_core.sql', '0002_run_ledger_inputs.sql', '0003_session_control_plane_scaffold.sql'],
+      [
+        '000000000000_schema_baseline',
+        '0001_run_ledger_core.sql',
+        '0002_run_ledger_inputs.sql',
+        '0003_session_control_plane_scaffold.sql',
+        '0004_terminal_identity_and_adoption.sql',
+        '0005_usage_records.sql',
+        '0006_memory_snapshots.sql',
+        '0007_resume_linkage_and_recency.sql',
+        '0008_provider_sessions_and_rooms.sql'
+      ],
       'schema_migrations'
     );
 
     assertContainsAll(
       getColumnNames(db, 'terminals'),
-      ['root_session_id', 'parent_session_id', 'session_kind', 'origin_client', 'external_session_ref', 'lineage_depth', 'session_metadata'],
+      ['root_session_id', 'parent_session_id', 'session_kind', 'origin_client', 'external_session_ref', 'lineage_depth', 'session_metadata', 'model', 'last_message_at'],
       'terminals columns'
     );
 
@@ -64,7 +74,15 @@ function runFreshSchemaAssertions() {
 
     assertContainsAll(
       getIndexNames(db, 'terminals'),
-      ['idx_terminals_root_session_id', 'idx_terminals_parent_session_id', 'idx_terminals_session_kind', 'idx_terminals_origin_client'],
+      [
+        'idx_terminals_root_session_id',
+        'idx_terminals_parent_session_id',
+        'idx_terminals_session_kind',
+        'idx_terminals_origin_client',
+        'idx_terminals_external_session_ref',
+        'idx_terminals_last_message_at',
+        'idx_terminals_root_last_message'
+      ],
       'terminals indexes'
     );
 
@@ -72,6 +90,97 @@ function runFreshSchemaAssertions() {
       getIndexNames(db, 'session_events'),
       ['idx_session_events_idempotency_key', 'idx_session_events_root_sequence', 'idx_session_events_session_id_occurred_at'],
       'session_events indexes'
+    );
+
+    assertContainsAll(
+      getColumnNames(db, 'rooms'),
+      ['id', 'root_session_id', 'title', 'status', 'metadata', 'created_at', 'updated_at'],
+      'rooms columns'
+    );
+
+    assertContainsAll(
+      getIndexNames(db, 'rooms'),
+      ['idx_rooms_updated_at', 'idx_rooms_status_updated'],
+      'rooms indexes'
+    );
+
+    assertContainsAll(
+      getColumnNames(db, 'room_participants'),
+      [
+        'id',
+        'room_id',
+        'adapter',
+        'display_name',
+        'model',
+        'system_prompt',
+        'work_dir',
+        'provider_session_id',
+        'status',
+        'last_message_at',
+        'imported_from_provider_session_id',
+        'metadata',
+        'created_at',
+        'updated_at'
+      ],
+      'room_participants columns'
+    );
+
+    assertContainsAll(
+      getIndexNames(db, 'room_participants'),
+      [
+        'idx_room_participants_room_status',
+        'idx_room_participants_provider_session',
+        'idx_room_participants_room_last_message'
+      ],
+      'room_participants indexes'
+    );
+
+    assertContainsAll(
+      getColumnNames(db, 'room_turns'),
+      [
+        'id',
+        'room_id',
+        'sequence_no',
+        'request_id',
+        'initiator_role',
+        'initiator_name',
+        'content',
+        'mentions_json',
+        'status',
+        'error',
+        'metadata',
+        'created_at',
+        'started_at',
+        'completed_at',
+        'updated_at'
+      ],
+      'room_turns columns'
+    );
+
+    assertContainsAll(
+      getIndexNames(db, 'room_turns'),
+      [
+        'idx_room_turns_room_sequence',
+        'idx_room_turns_room_request_id',
+        'idx_room_turns_room_status'
+      ],
+      'room_turns indexes'
+    );
+
+    assertContainsAll(
+      getColumnNames(db, 'room_messages'),
+      ['id', 'room_id', 'turn_id', 'sequence_no', 'participant_id', 'role', 'content', 'metadata', 'created_at'],
+      'room_messages columns'
+    );
+
+    assertContainsAll(
+      getIndexNames(db, 'room_messages'),
+      [
+        'idx_room_messages_room_sequence',
+        'idx_room_messages_room_created',
+        'idx_room_messages_room_turn'
+      ],
+      'room_messages indexes'
     );
 
     db.registerTerminal('term-fresh', 'session-fresh', 'window-0', 'codex-cli', 'architect', 'worker', '/tmp/work', '/tmp/log');

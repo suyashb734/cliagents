@@ -56,7 +56,7 @@ const CLAUDE_PATTERNS = {
    * Look for response markers or final output patterns
    * The ⏺ marker indicates a response block
    */
-  COMPLETED: /⏺\s+|Done\.|Completed\.|finished/i,
+  COMPLETED: /⏺\s+|Done\.|Completed\./i,
 
   /**
    * WAITING_PERMISSION: Needs user approval
@@ -64,15 +64,16 @@ const CLAUDE_PATTERNS = {
    * IMPORTANT: Must require start-of-line to avoid matching in response content
    * Real permission prompts appear at the start of lines with specific formats
    */
-  WAITING_PERMISSION: /^(?:Allow|Deny|Skip|Approve|Reject)\b.*\?|^Do you want to|^Permission required/mi,
+  WAITING_PERMISSION: /^(?:Allow|Deny|Skip|Approve|Reject)\b.*\?|^Permission required\b/mi,
 
   /**
    * WAITING_USER_ANSWER: Presenting choices
    * Interactive menus with ❯ selector or numbered choices
    * IMPORTANT: Must be specific to avoid matching numbered lists in responses
    * Only match actual interactive choice prompts, not content with numbers
+   * Require start-of-line anchor to avoid matching review prose with numbered items
    */
-  WAITING_USER_ANSWER: /❯\s*\d+\.\s+\S|Select one:|Choose an option:|Which.*\?\s*$/m,
+  WAITING_USER_ANSWER: /^\s*❯\s*\d+\.\s+\S|^\s*Select one:|^\s*Choose an option:/mi,
 
   /**
    * ERROR: Something went wrong
@@ -113,6 +114,16 @@ class ClaudeCodeDetector extends BaseStatusDetector {
   detectStatus(output) {
     const tail = this.getTail(output);
 
+    // Claude orchestration workers emit stream-json. Prefer event-driven parsing
+    // over generic terminal heuristics so review prose or source snippets do not
+    // get misclassified as questions, permissions, or plain processing.
+    if (this.isStreamingJson(tail)) {
+      const streamJsonStatus = this.detectFromStreamJson(tail);
+      if (streamJsonStatus) {
+        return streamJsonStatus;
+      }
+    }
+
     if (this.patterns.ERROR && this.patterns.ERROR.test(tail)) {
       return TerminalStatus.ERROR;
     }
@@ -135,12 +146,6 @@ class ClaudeCodeDetector extends BaseStatusDetector {
       return TerminalStatus.IDLE;
     }
 
-    // Check for streaming JSON output format
-    // Claude Code with --output-format stream-json outputs JSON objects
-    if (this.isStreamingJson(tail)) {
-      return this.detectFromStreamJson(tail);
-    }
-
     if (this.patterns.COMPLETED && this.patterns.COMPLETED.test(tail)) {
       return TerminalStatus.COMPLETED;
     }
@@ -156,55 +161,86 @@ class ClaudeCodeDetector extends BaseStatusDetector {
    * Check if output appears to be streaming JSON
    */
   isStreamingJson(output) {
-    return output.includes('"type":') && output.includes('"content"');
+    const hasTrackedRunMarker = String(output || '').includes('__CLIAGENTS_RUN_START__');
+    const lines = String(output || '').split('\n');
+    return lines.some((line) => {
+      const obj = this._parseStreamJsonLine(line);
+      return Boolean(
+        obj
+        && typeof obj.type === 'string'
+        && (hasTrackedRunMarker || typeof obj.session_id === 'string')
+      );
+    });
+  }
+
+  /**
+   * Parse a line that may contain a streaming JSON object.
+   * Handles both bare JSON objects and multi-line format with embedded JSON.
+   * @param {string} line
+   * @returns {Object|null}
+   */
+  _parseStreamJsonLine(line) {
+    const trimmed = line.trim();
+    if (!trimmed) {
+      return null;
+    }
+    try {
+      return JSON.parse(trimmed);
+    } catch {
+      const match = trimmed.match(/\{.*\}/s);
+      if (match) {
+        try {
+          return JSON.parse(match[0]);
+        } catch {
+          return null;
+        }
+      }
+      return null;
+    }
   }
 
   /**
    * Detect status from streaming JSON output
    */
   detectFromStreamJson(output) {
-    // Look for the last JSON object
     const lines = output.split('\n').reverse();
 
     for (const line of lines) {
-      if (!line.trim()) continue;
-
-      try {
-        // Try to find a JSON object in the line
-        const jsonMatch = line.match(/\{[^{}]*"type"[^{}]*\}/);
-        if (jsonMatch) {
-          const obj = JSON.parse(jsonMatch[0]);
-
-          // Determine status from event type
-          switch (obj.type) {
-            case 'result':
-            case 'done':
-              return TerminalStatus.COMPLETED;
-
-            case 'thinking':
-            case 'tool_use':
-            case 'text':
-              return TerminalStatus.PROCESSING;
-
-            case 'error':
-              return TerminalStatus.ERROR;
-
-            case 'permission':
-            case 'approval':
-              return TerminalStatus.WAITING_PERMISSION;
-
-            case 'input':
-            case 'question':
-              return TerminalStatus.WAITING_USER_ANSWER;
-          }
-        }
-      } catch (e) {
-        // Not valid JSON, continue to next line
+      const obj = this._parseStreamJsonLine(line);
+      if (!obj || typeof obj.type !== 'string') {
+        continue;
       }
+
+      switch (obj.type) {
+        case 'result':
+        case 'done':
+          return TerminalStatus.COMPLETED;
+
+        case 'thinking':
+        case 'tool_use':
+        case 'assistant':
+        case 'text':
+          return TerminalStatus.PROCESSING;
+
+        case 'system':
+          // Session metadata alone does not imply the worker is still active.
+          continue;
+
+        case 'error':
+          return TerminalStatus.ERROR;
+
+        case 'permission':
+        case 'approval':
+          return TerminalStatus.WAITING_PERMISSION;
+
+        case 'input':
+        case 'question':
+          return TerminalStatus.WAITING_USER_ANSWER;
+      }
+
     }
 
-    // If we found JSON but couldn't determine status, assume processing
-    return TerminalStatus.PROCESSING;
+    return null;
   }
 
   /**

@@ -132,6 +132,7 @@ class ClaudeCodeAdapter extends BaseLLMAdapter {
     const workDir = options.workDir || this.config.workDir;
     const model = options.model || this.config.model; // null = default
     const maxOutputTokens = options.max_output_tokens || this.config.max_output_tokens; // null = default
+    const providerSessionId = String(options.providerSessionId || '').trim() || null;
 
     // Ensure work directory exists
     const fs = require('fs');
@@ -142,7 +143,7 @@ class ClaudeCodeAdapter extends BaseLLMAdapter {
     // Create session metadata without making an API call
     // The actual Claude session ID will be obtained on the first message
     const session = {
-      claudeSessionId: null,  // Will be set after first message
+      claudeSessionId: providerSessionId,  // May be pre-seeded for exact resume
       ready: true,
       messageCount: 0,
       systemPrompt: options.systemPrompt,
@@ -163,7 +164,8 @@ class ClaudeCodeAdapter extends BaseLLMAdapter {
       sessionId,
       status: 'ready',
       adapter: this.name,
-      claudeSessionId: null,  // Not yet assigned
+      claudeSessionId: providerSessionId,
+      providerSessionId,
       model: model || 'default'
     };
   }
@@ -641,6 +643,7 @@ class ClaudeCodeAdapter extends BaseLLMAdapter {
             content: resultContent,
             structuredOutput: chunk.structuredOutput,  // Pass through for clients that want it
             metadata: {
+              providerSessionId: session.claudeSessionId || null,
               costUsd: finalStats?.costUsd,
               durationMs: finalStats?.durationMs,
               inputTokens: finalStats?.inputTokens,

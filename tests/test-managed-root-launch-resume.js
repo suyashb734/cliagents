@@ -21,7 +21,8 @@ const {
   listManagedRootResumeCandidates,
   listManagedRootRecoveryCandidates,
   resolveManagedRootLaunchTarget,
-  buildManagedRootRecoveryLaunchOptions
+  buildManagedRootRecoveryLaunchOptions,
+  buildManagedRootContextLaunchOptions
 } = require('../src/index');
 
 let passed = 0;
@@ -91,6 +92,9 @@ async function run() {
 
     const recoverRoot = parseLaunchArgs(['codex', '--recover-root', 'root-stale']);
     assert.strictEqual(recoverRoot.recoverRootSessionId, 'root-stale');
+
+    const exactProviderResume = parseLaunchArgs(['codex', '--resume-provider-session', 'session-123']);
+    assert.strictEqual(exactProviderResume.providerSessionId, 'session-123');
   });
 
   await test('Launch args reject mixed resume and recover combinations', async () => {
@@ -101,6 +105,10 @@ async function run() {
     assert.throws(
       () => parseLaunchArgs(['codex', '--external-session-ref', 'codex:managed:123', '--recover-latest']),
       /Cannot combine --external-session-ref with resume or recover flags/
+    );
+    assert.throws(
+      () => parseLaunchArgs(['codex', '--resume-provider-session', 'session-123', '--resume-latest']),
+      /Cannot combine --resume-provider-session with resume or recover flags/
     );
   });
 
@@ -264,6 +272,76 @@ async function run() {
     assert.strictEqual(recoveryCandidate.externalSessionRef, 'codex:managed:stale');
   });
 
+  await test('Interrupted Codex root becomes a recover candidate with exact provider resume', async () => {
+    const interruptedSnapshot = buildManagedSnapshot({
+      rootSession: {
+        sessionId: 'root-4',
+        adapter: 'codex-cli',
+        originClient: 'codex',
+        status: 'error',
+        processState: 'alive',
+        terminationStatus: 'error',
+        sessionMetadata: {
+          managedLaunch: true,
+          attachMode: 'managed-root-launch',
+          launchProfile: 'supervised-root'
+        },
+        externalSessionRef: 'codex:managed:resumeable'
+      },
+      sessions: [{
+        sessionId: 'root-4',
+        role: 'main',
+        sessionKind: 'main',
+        status: 'error',
+        terminationStatus: 'error'
+      }],
+      events: [{
+        payload_json: {
+          resumeCommand: 'codex resume 019daf89-b494-7353-8dc8-e4303880a1b5',
+          resumeSessionId: '019daf89-b494-7353-8dc8-e4303880a1b5',
+          attentionMessage: 'Conversation interrupted - tell the model what to do differently.'
+        }
+      }],
+      terminals: [{
+        terminal_id: 'term-4',
+        session_name: 'cliagents-root4',
+        window_name: 'codex-cli-root4',
+        adapter: 'codex-cli',
+        role: 'main',
+        session_kind: 'main',
+        status: 'error',
+        process_state: 'alive',
+        work_dir: '/tmp/project',
+        root_session_id: 'root-4',
+        external_session_ref: 'codex:managed:resumeable'
+      }]
+    });
+
+    const resumeCandidate = normalizeManagedRootResumeCandidate({
+      rootSessionId: 'root-4',
+      originClient: 'codex',
+      status: 'needs_attention'
+    }, interruptedSnapshot, {
+      adapter: 'codex',
+      workDir: '/tmp/project'
+    });
+    assert.strictEqual(resumeCandidate, null);
+
+    const recoveryCandidate = normalizeManagedRootRecoveryCandidate({
+      rootSessionId: 'root-4',
+      originClient: 'codex',
+      status: 'needs_attention'
+    }, interruptedSnapshot, {
+      adapter: 'codex',
+      workDir: '/tmp/project'
+    });
+
+    assert(recoveryCandidate, 'expected interrupted root to recover through provider resume');
+    assert.strictEqual(recoveryCandidate.recoveryReason, 'provider-interrupted');
+    assert.strictEqual(recoveryCandidate.resumeSessionId, '019daf89-b494-7353-8dc8-e4303880a1b5');
+    assert.strictEqual(recoveryCandidate.exactProviderResume, true);
+  });
+
   await test('List managed resume candidates filters live matching roots', async () => {
     const routes = [];
     const candidates = await listManagedRootResumeCandidates({
@@ -378,6 +456,54 @@ async function run() {
     assert.strictEqual(candidates.recoverCandidates.length, 1);
     assert.strictEqual(candidates.resumeCandidates[0].rootSessionId, 'root-1');
     assert.strictEqual(candidates.recoverCandidates[0].rootSessionId, 'root-2');
+  });
+
+  await test('Destroyed roots without provider resume are ignored for managed recovery', async () => {
+    const candidates = await listManagedRootRecoveryCandidates({
+      adapter: 'codex',
+      workDir: '/tmp/project'
+    }, {
+      async callCliagentsJson(route) {
+        if (route.startsWith('/orchestration/root-sessions?')) {
+          return {
+            roots: [
+              { rootSessionId: 'root-destroyed', originClient: 'codex', status: 'needs_attention', lastOccurredAt: '2026-04-16T06:00:00.000Z' }
+            ]
+          };
+        }
+        if (route.includes('/root-destroyed?')) {
+          return {
+            rootSession: {
+              sessionId: 'root-destroyed',
+              adapter: 'codex-cli',
+              originClient: 'codex',
+              status: 'stale',
+              destroyed: true,
+              sessionMetadata: {
+                managedLaunch: true,
+                attachMode: 'managed-root-launch'
+              }
+            },
+            sessions: [{
+              sessionId: 'root-destroyed',
+              role: 'main',
+              sessionKind: 'main',
+              status: 'stale',
+              destroyed: true
+            }],
+            terminals: [],
+            events: [{
+              payload_json: {
+                reason: 'historical-orphan-prune'
+              }
+            }]
+          };
+        }
+        throw new Error(`Unexpected route: ${route}`);
+      }
+    });
+
+    assert.strictEqual(candidates.length, 0);
   });
 
   await test('Managed root selection prompt includes workdir and summary context', async () => {
@@ -604,6 +730,147 @@ async function run() {
     assert.strictEqual(result.candidate.rootSessionId, 'root-1');
   });
 
+  await test('Resolve launch target falls back to context resume for resume-latest', async () => {
+    const recoverCandidate = {
+      rootSessionId: 'root-2',
+      terminalId: 'term-2',
+      sessionName: 'cliagents-root2',
+      adapter: 'codex-cli',
+      status: 'needs_attention',
+      workDir: '/tmp/project',
+      externalSessionRef: 'codex:managed:456',
+      launchAction: 'recover',
+      recoveryReason: 'provider-interrupted',
+      resumeCommand: 'codex resume 019daf89-b494-7353-8dc8-e4303880a1b5',
+      resumeSessionId: '019daf89-b494-7353-8dc8-e4303880a1b5',
+      exactProviderResume: true,
+      consoleUrl: 'http://127.0.0.1:4001/console?root=root-2&terminal=term-2',
+      attachCommand: 'tmux attach -t "cliagents-root2"'
+    };
+    const result = await resolveManagedRootLaunchTarget({
+      adapter: 'codex-cli',
+      workDir: '/tmp/project',
+      resumeLatest: true
+    }, {
+      listManagedRootLaunchCandidates: async () => ({
+        resumeCandidates: [],
+        recoverCandidates: [recoverCandidate]
+      })
+    });
+
+    assert.strictEqual(result.action, 'context');
+    assert.strictEqual(result.reason, 'resume-latest-context');
+    assert.strictEqual(result.candidate.rootSessionId, 'root-2');
+  });
+
+  await test('Resolve launch target falls back to context resume for explicit resume-root', async () => {
+    const recoverCandidate = {
+      rootSessionId: 'root-2',
+      terminalId: 'term-2',
+      sessionName: 'cliagents-root2',
+      adapter: 'codex-cli',
+      status: 'needs_attention',
+      workDir: '/tmp/project',
+      externalSessionRef: 'codex:managed:456',
+      launchAction: 'recover',
+      recoveryReason: 'provider-interrupted',
+      resumeCommand: 'codex resume 019daf89-b494-7353-8dc8-e4303880a1b5',
+      resumeSessionId: '019daf89-b494-7353-8dc8-e4303880a1b5',
+      exactProviderResume: true,
+      consoleUrl: 'http://127.0.0.1:4001/console?root=root-2&terminal=term-2',
+      attachCommand: 'tmux attach -t "cliagents-root2"'
+    };
+    const result = await resolveManagedRootLaunchTarget({
+      adapter: 'codex-cli',
+      workDir: '/tmp/project',
+      resumeRootSessionId: 'root-2'
+    }, {
+      getManagedRootResumeCandidate: async () => null,
+      getManagedRootRecoveryCandidate: async () => recoverCandidate
+    });
+
+    assert.strictEqual(result.action, 'context');
+    assert.strictEqual(result.reason, 'explicit-resume-root-context');
+    assert.strictEqual(result.candidate.rootSessionId, 'root-2');
+  });
+
+  await test('Resolve launch target keeps exact recovery for recover-latest when an exact handle exists', async () => {
+    const recoverCandidate = {
+      rootSessionId: 'root-3',
+      terminalId: 'term-3',
+      sessionName: 'cliagents-root3',
+      adapter: 'codex-cli',
+      status: 'needs_attention',
+      workDir: '/tmp/project',
+      externalSessionRef: 'codex:managed:789',
+      launchAction: 'recover',
+      recoveryReason: 'provider-interrupted',
+      resumeCommand: 'codex resume 019daf89-b494-7353-8dc8-e4303880a1b5',
+      resumeSessionId: '019daf89-b494-7353-8dc8-e4303880a1b5',
+      exactProviderResume: true
+    };
+
+    const result = await resolveManagedRootLaunchTarget({
+      adapter: 'codex-cli',
+      workDir: '/tmp/project',
+      recoverLatest: true
+    }, {
+      listManagedRootLaunchCandidates: async () => ({
+        resumeCandidates: [],
+        recoverCandidates: [recoverCandidate]
+      })
+    });
+
+    assert.strictEqual(result.action, 'recover');
+    assert.strictEqual(result.reason, 'recover-latest');
+    assert.strictEqual(result.candidate.rootSessionId, 'root-3');
+  });
+
+  await test('Resolve launch target falls back to context recovery for recover-latest without an exact handle', async () => {
+    const recoverCandidate = {
+      rootSessionId: 'root-4',
+      terminalId: 'term-4',
+      sessionName: 'cliagents-root4',
+      adapter: 'codex-cli',
+      status: 'needs_attention',
+      workDir: '/tmp/project',
+      externalSessionRef: 'codex:managed:999',
+      launchAction: 'recover',
+      recoveryReason: 'process-exited',
+      exactProviderResume: false
+    };
+
+    const result = await resolveManagedRootLaunchTarget({
+      adapter: 'codex-cli',
+      workDir: '/tmp/project',
+      recoverLatest: true
+    }, {
+      listManagedRootLaunchCandidates: async () => ({
+        resumeCandidates: [],
+        recoverCandidates: [recoverCandidate]
+      })
+    });
+
+    assert.strictEqual(result.action, 'context');
+    assert.strictEqual(result.reason, 'recover-latest-context');
+    assert.strictEqual(result.candidate.rootSessionId, 'root-4');
+  });
+
+  await test('Resolve launch target throws for resume-latest when no matching roots exist', async () => {
+    await assert.rejects(
+      () => resolveManagedRootLaunchTarget({
+        adapter: 'codex-cli',
+        resumeLatest: true
+      }, {
+        listManagedRootLaunchCandidates: async () => ({
+          resumeCandidates: [],
+          recoverCandidates: []
+        })
+      }),
+      /No resumable managed roots found/
+    );
+  });
+
   await test('Resolve launch target respects interactive selection and new-root fallback', async () => {
     const candidate = {
       rootSessionId: 'root-1',
@@ -656,7 +923,7 @@ async function run() {
       }),
       promptForManagedRootSelection: async () => recoverCandidate
     });
-    assert.strictEqual(recovered.action, 'recover');
+    assert.strictEqual(recovered.action, 'context');
 
     const fresh = await resolveManagedRootLaunchTarget({
       adapter: 'codex-cli',
@@ -671,6 +938,63 @@ async function run() {
     });
     assert.strictEqual(fresh.action, 'launch');
     assert.strictEqual(fresh.reason, 'interactive-new-root');
+  });
+
+  await test('Context launch options carry root memory and preserve sticky identity', async () => {
+    const candidate = {
+      rootSessionId: 'root-stale',
+      terminalId: 'term-stale',
+      adapter: 'codex-cli',
+      status: 'needs_attention',
+      workDir: '/tmp/project',
+      model: 'o4-mini',
+      externalSessionRef: 'codex:managed:stale',
+      recoveryCapability: 'context_resume',
+      latestSummary: 'Finish the persistence repair work.'
+    };
+    const launchOptions = {
+      adapter: 'codex-cli',
+      workDir: '/tmp/project',
+      model: 'o4-mini',
+      modelExplicit: true,
+      profile: 'guarded-root',
+      profileExplicit: false,
+      permissionMode: null,
+      permissionModeExplicit: false,
+      systemPrompt: 'Stay concise.'
+    };
+
+    const contextOptions = await buildManagedRootContextLaunchOptions(launchOptions, candidate, {
+      async callCliagentsJson(route) {
+        if (route.startsWith('/orchestration/memory/bundle/root-stale')) {
+          return {
+            brief: 'The root was stabilizing persistence and resume behavior.',
+            keyDecisions: ['Use context resume for dead roots'],
+            pendingItems: ['Run the focused tests'],
+            rawPointers: { runIds: ['run-1', 'run-2'] },
+            isStale: false
+          };
+        }
+        if (route.startsWith('/orchestration/memory/messages?root_session_id=root-stale')) {
+          return {
+            messages: [
+              { role: 'user', content: 'Finish the resume fix.' },
+              { role: 'assistant', content: 'Working through the broker semantics now.' }
+            ]
+          };
+        }
+        throw new Error(`Unexpected route: ${route}`);
+      }
+    });
+
+    assert.strictEqual(contextOptions.externalSessionRef, 'codex:managed:stale');
+    assert.strictEqual(contextOptions.sessionMetadata.resumeMode, 'context');
+    assert.strictEqual(contextOptions.sessionMetadata.previousRootSessionId, 'root-stale');
+    assert.strictEqual(contextOptions.sessionMetadata.carriedContextMessageCount, 2);
+    assert.deepStrictEqual(contextOptions.sessionMetadata.carriedContextRunIds, ['run-1', 'run-2']);
+    assert(contextOptions.systemPrompt.includes('Use context resume for dead roots'));
+    assert(contextOptions.systemPrompt.includes('Finish the resume fix.'));
+    assert(contextOptions.systemPrompt.includes('Additional operator instructions'));
   });
 
   await test('Recovery launch options preserve root lineage and external session ref', async () => {
@@ -720,6 +1044,7 @@ async function run() {
     assert.strictEqual(recovered.sessionMetadata.recoveredManagedRoot, true);
     assert.strictEqual(recovered.sessionMetadata.recoveredFromRootSessionId, 'root-stale');
     assert.strictEqual(recovered.sessionMetadata.recoveryReason, 'provider-exited');
+    assert.strictEqual(recovered.sessionMetadata.providerResumeLatest, false);
   });
 
   console.log(`\n${passed} passed, ${failed} failed`);

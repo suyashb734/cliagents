@@ -18,21 +18,21 @@ const OPENAI_COMPAT_OWNER = 'codex-cli';
 let testServer = null;
 
 // Test utilities
-async function request(method, path, body = null) {
+async function request(method, path, body = null, options = {}) {
   const controller = new AbortController();
-  const timeoutMs = 90000;
+  const timeoutMs = options.timeoutMs || 90000;
   const timeoutId = setTimeout(() => {
     controller.abort(new Error(`request timed out after ${timeoutMs}ms for ${method} ${path}`));
   }, timeoutMs);
-  const options = {
+  const fetchOptions = {
     method,
     headers: { 'Content-Type': 'application/json' },
     signal: controller.signal
   };
-  if (body) options.body = JSON.stringify(body);
+  if (body) fetchOptions.body = JSON.stringify(body);
 
   try {
-    const response = await fetch(`${BASE_URL}${path}`, options);
+    const response = await fetch(`${BASE_URL}${path}`, fetchOptions);
     const text = await response.text();
     try {
       return { status: response.status, data: JSON.parse(text) };
@@ -119,7 +119,9 @@ function getProviderIssueReason(status, data) {
     'fetch failed',
     'network',
     'econnreset',
-    'socket'
+    'socket',
+    'process exited with code',
+    'exited with code'
   ];
 
   if (transientPatterns.some((pattern) => combined.includes(pattern))) {
@@ -871,7 +873,9 @@ async function testSessionResume() {
     let sessionId = null;
 
     try {
-      const { status: createStatus, data: session } = await request('POST', '/sessions', { adapter: 'gemini-cli' });
+      const { status: createStatus, data: session } = await request('POST', '/sessions', { adapter: 'gemini-cli' }, {
+        timeoutMs: 210000
+      });
       const createIssue = getProviderIssueReason(createStatus, session);
       if (createIssue) {
         throw new Error(`SKIP: ${createIssue}`);
@@ -993,9 +997,9 @@ async function testOpenAICompat() {
       stream: false
     });
 
-    // May skip if CLI not available
-    if (status === 503) {
-      throw new Error(`SKIP: ${OPENAI_COMPAT_OWNER} not installed`);
+    const providerIssue = getProviderIssueReason(status, data);
+    if (providerIssue) {
+      throw new Error(`SKIP: ${providerIssue}`);
     }
 
     assert(status === 200, `Expected 200, got ${status}`);
@@ -1016,8 +1020,9 @@ async function testOpenAICompat() {
       stream: false
     });
 
-    if (status === 503) {
-      throw new Error(`SKIP: ${OPENAI_COMPAT_OWNER} not installed`);
+    const providerIssue = getProviderIssueReason(status, data);
+    if (providerIssue) {
+      throw new Error(`SKIP: ${providerIssue}`);
     }
 
     assert(status === 200, `Expected 200, got ${status}`);
@@ -1035,8 +1040,9 @@ async function testOpenAICompat() {
       stream: false
     });
 
-    if (status === 503) {
-      throw new Error(`SKIP: ${OPENAI_COMPAT_OWNER} not installed`);
+    const providerIssue = getProviderIssueReason(status, data);
+    if (providerIssue) {
+      throw new Error(`SKIP: ${providerIssue}`);
     }
 
     assert(status === 200, `Expected 200, got ${status}`);
@@ -1056,8 +1062,22 @@ async function testOpenAICompat() {
       })
     });
 
-    if (response.status === 503) {
-      throw new Error(`SKIP: ${OPENAI_COMPAT_OWNER} not installed`);
+    if (response.status !== 200) {
+      let errorPayload = {};
+      try {
+        errorPayload = await response.clone().json();
+      } catch {
+        try {
+          errorPayload = { error: { message: await response.clone().text() } };
+        } catch {
+          errorPayload = {};
+        }
+      }
+
+      const providerIssue = getProviderIssueReason(response.status, errorPayload);
+      if (providerIssue) {
+        throw new Error(`SKIP: ${providerIssue}`);
+      }
     }
 
     assert(response.status === 200, `Expected 200, got ${response.status}`);

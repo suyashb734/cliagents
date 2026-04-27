@@ -145,8 +145,8 @@ function summarizeOutputExcerpt(value, maxLength = 240) {
 
 function inferSessionStatus(node) {
   if (node.blocked) return 'blocked';
-  if (node.stale) return 'stale';
   if (node.destroyed) return 'destroyed';
+  if (node.stale) return 'stale';
 
   if (node.taskState || node.terminalStatus) {
     return node.taskState || node.terminalStatus;
@@ -290,6 +290,7 @@ function buildSessionMap(events, terminals, rootSessionId) {
     node.adapter = terminal.adapter || node.adapter;
     node.agentProfile = terminal.agent_profile || node.agentProfile;
     node.role = terminal.role || node.role;
+    node.model = terminal.model || node.model;
     node.workDir = terminal.work_dir || node.workDir;
     node.originClient = terminal.origin_client || node.originClient;
     node.externalSessionRef = terminal.external_session_ref || node.externalSessionRef;
@@ -553,6 +554,34 @@ function deriveRootMode(classification, rootSession) {
   return 'attached';
 }
 
+function deriveRecoveryCapability({
+  rootMode,
+  sessions,
+  counts,
+  lastMessageAt,
+  eventCount
+}) {
+  const sessionList = Array.isArray(sessions) ? sessions : [];
+  const liveCount = Number(counts?.live || 0);
+
+  if ((rootMode === 'managed' || rootMode === 'adopted') && liveCount > 0) {
+    return 'live_reattach';
+  }
+
+  const hasExactResumeHandle = sessionList.some((session) => (
+    Boolean(session?.providerThreadRef) || Boolean(session?.resumeCommand)
+  ));
+  if (hasExactResumeHandle) {
+    return 'exact_provider_resume';
+  }
+
+  if (lastMessageAt || Number(eventCount || 0) > 0) {
+    return 'context_resume';
+  }
+
+  return 'unrecoverable';
+}
+
 function resolveInteractiveTerminalId(rootSessionId, sessionList, rootMode) {
   if (rootMode !== 'managed' && rootMode !== 'adopted') {
     return null;
@@ -797,7 +826,7 @@ function shouldArchiveRootSummary(summary, options = {}) {
     return false;
   }
 
-  const lastOccurredAt = normalizeTimestamp(summary?.lastOccurredAt || summary?.lastRecordedAt);
+  const lastOccurredAt = normalizeTimestamp(summary?.lastMessageAt || summary?.lastOccurredAt || summary?.lastRecordedAt);
   if (!Number.isFinite(lastOccurredAt)) {
     return false;
   }
@@ -887,6 +916,20 @@ function buildRootSessionSnapshot({
     parentSessionId: null,
     status: 'unknown'
   };
+  const mainTerminal = terminals.find((terminal) => (
+    String(terminal?.role || '').trim().toLowerCase() === 'main'
+    && String(terminal?.session_kind || '').trim().toLowerCase() === 'main'
+  )) || terminals.find((terminal) => {
+    const terminalRootSessionId = terminal?.root_session_id || terminal?.rootSessionId || terminal?.terminal_id || terminal?.terminalId;
+    return terminalRootSessionId === rootSessionId;
+  }) || null;
+  const lastMessageAtMs = terminals.reduce((max, terminal) => (
+    Math.max(max, normalizeTimestamp(terminal?.last_message_at || terminal?.lastMessageAt))
+  ), 0);
+  const lastMessageAt = lastMessageAtMs > 0 ? new Date(lastMessageAtMs).toISOString() : null;
+  const messageCount = typeof db.countMessages === 'function'
+    ? db.countMessages({ rootSessionId })
+    : 0;
 
   const counts = {
     sessions: sessionList.length,
@@ -911,6 +954,13 @@ function buildRootSessionSnapshot({
   const rootMode = deriveRootMode(classification, rootSession);
   const interactiveTerminalId = resolveInteractiveTerminalId(rootSessionId, sessionList, rootMode);
   const rootStatus = deriveRootStatus(sessionList, attention);
+  const recoveryCapability = deriveRecoveryCapability({
+    rootMode,
+    sessions: sessionList,
+    counts,
+    lastMessageAt,
+    eventCount: events.length
+  });
   const activity = deriveRootActivityDetails({
     rootStatus,
     rootSession,
@@ -924,7 +974,12 @@ function buildRootSessionSnapshot({
   return {
     rootSessionId,
     status: rootStatus,
-    rootSession,
+    rootSession: {
+      ...rootSession,
+      model: rootSession.model || mainTerminal?.model || null,
+      lastMessageAt,
+      messageCount
+    },
     rootType: classification.rootType,
     rootMode,
     sessionKind: capabilities.sessionKind,
@@ -937,6 +992,9 @@ function buildRootSessionSnapshot({
     userFacing: classification.userFacing,
     externalSessionRef: classification.externalSessionRef,
     clientName: classification.clientName,
+    lastMessageAt,
+    messageCount,
+    recoveryCapability,
     counts,
     attention,
     latestConclusion: summarizeConclusionEvent(latestConclusionEvent),
@@ -1000,6 +1058,8 @@ function listRootSessionSummaries({
 
     return {
       rootSessionId: row.root_session_id,
+      lastMessageAt: row.last_message_at || null,
+      messageCount: row.message_count || 0,
       lastRecordedAt: row.last_recorded_at,
       lastOccurredAt: row.last_occurred_at,
       eventCount: row.event_count,
@@ -1017,14 +1077,22 @@ function listRootSessionSummaries({
       userFacing: snapshot?.userFacing !== false,
       externalSessionRef: snapshot?.externalSessionRef || null,
       clientName: snapshot?.clientName || null,
+      model: snapshot?.rootSession?.model || null,
       latestConclusion: snapshot?.latestConclusion || null,
       attention: snapshot?.attention || { requiresAttention: false, reasons: [] },
       counts: snapshot?.counts || null,
-      live: Boolean(snapshot?.counts?.live)
+      live: Boolean(snapshot?.counts?.live),
+      recoveryCapability: deriveRecoveryCapability({
+        rootMode: snapshot?.rootMode || null,
+        sessions: snapshot?.sessions || [],
+        counts: snapshot?.counts || null,
+        lastMessageAt: row.last_message_at || null,
+        eventCount: row.event_count || 0
+      })
     };
   }).sort((left, right) => {
-    const leftTime = normalizeTimestamp(left.lastOccurredAt || left.lastRecordedAt) || 0;
-    const rightTime = normalizeTimestamp(right.lastOccurredAt || right.lastRecordedAt) || 0;
+    const leftTime = normalizeTimestamp(left.lastMessageAt || left.lastOccurredAt || left.lastRecordedAt) || 0;
+    const rightTime = normalizeTimestamp(right.lastMessageAt || right.lastOccurredAt || right.lastRecordedAt) || 0;
     if (rightTime !== leftTime) {
       return rightTime - leftTime;
     }

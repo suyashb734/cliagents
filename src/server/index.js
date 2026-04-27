@@ -7,6 +7,7 @@
 const express = require('express');
 const { WebSocketServer } = require('ws');
 const cors = require('cors');
+const os = require('os');
 const path = require('path');
 const fs = require('fs');
 const { execSync } = require('child_process');
@@ -33,8 +34,10 @@ const { authenticateRequest, validateApiKey } = require('./auth');
 // Orchestration components
 const { PersistentSessionManager } = require('../tmux/session-manager');
 const { createAllDetectors } = require('../status-detectors/factory');
-const { getDB } = require('../database/db');
+const { getDB, closeDB } = require('../database/db');
 const { RunLedgerService } = require('../orchestration/run-ledger');
+const { getMemoryMaintenanceService, resetMemoryMaintenanceService } = require('../orchestration/memory-maintenance-service');
+const { getMemorySnapshotService, resetMemorySnapshotService } = require('../orchestration/memory-snapshot-service');
 const InboxService = require('../services/inbox-service');
 const { createOrchestrationRouter } = require('./orchestration-router');
 
@@ -159,6 +162,19 @@ class AgentServer {
       // Start inbox delivery loop
       inboxService.start();
 
+      // Bind snapshot/maintenance services to this DB instance so restart/test cycles
+      // do not retain stale singleton state from a previous server instance.
+      const memorySnapshotService = getMemorySnapshotService(db, console);
+      const memoryMaintenance = getMemoryMaintenanceService({
+        sweepIntervalMs: options.orchestration?.memoryRepairSweepMs,
+        snapshotService: memorySnapshotService,
+        logger: console
+      });
+      memoryMaintenance.start();
+      memoryMaintenance.runOnce().catch((error) => {
+        console.warn('[AgentServer] Initial memory repair sweep failed:', error.message);
+      });
+
       const runLedger = process.env.RUN_LEDGER_ENABLED === '1'
         ? new RunLedgerService(db)
         : null;
@@ -167,6 +183,7 @@ class AgentServer {
       this.orchestration = {
         db,
         runLedger,
+        memoryMaintenance,
         sessionManager: persistentSessionManager,
         inboxService,
         enabled: true
@@ -684,10 +701,13 @@ class AgentServer {
 
     // Simple one-shot ask (creates session, sends message, returns response, terminates)
     app.post('/ask', async (req, res) => {
+      let ephemeralWorkDir = null;
+      let session = null;
       try {
         const {
           message, adapter, systemPrompt, timeout, jsonSchema, allowedTools, model,
-          workDir, workingDirectory
+          workDir, workingDirectory,
+          temperature, top_p, top_k, max_output_tokens
         } = req.body;
         if (!message) {
           return sendError(res, 'MISSING_PARAMETER', { message: 'Message is required', param: 'message' });
@@ -700,39 +720,54 @@ class AgentServer {
         }
 
         const resolvedWorkDir = workDir ?? workingDirectory;
-        const workDirValidation = validateWorkDir(resolvedWorkDir);
+        if (!resolvedWorkDir) {
+          const adapterLabel = String(adapter || this.sessionManager.defaultAdapter || 'session')
+            .toLowerCase()
+            .replace(/[^a-z0-9_-]+/g, '-')
+            .replace(/^-+|-+$/g, '') || 'session';
+          ephemeralWorkDir = fs.mkdtempSync(path.join(os.tmpdir(), `cliagents-ask-${adapterLabel}-`));
+        }
+        const validationTarget = resolvedWorkDir || ephemeralWorkDir;
+        const workDirValidation = validateWorkDir(validationTarget);
+        const effectiveWorkDir = workDirValidation.valid ? workDirValidation.sanitized : validationTarget;
         if (!workDirValidation.valid) {
-          return sendError(res, 'INVALID_PARAMETER', { message: workDirValidation.error, param: resolvedWorkDir === workingDirectory ? 'workingDirectory' : 'workDir' });
+          if (ephemeralWorkDir && fs.existsSync(ephemeralWorkDir)) {
+            fs.rmSync(ephemeralWorkDir, { recursive: true, force: true });
+          }
+          return sendError(res, 'INVALID_PARAMETER', { message: workDirValidation.error, param: validationTarget === workingDirectory ? 'workingDirectory' : 'workDir' });
         }
 
         // Create session with JSON schema support
-        const session = await this.sessionManager.createSession({
+        session = await this.sessionManager.createSession({
           adapter,
           systemPrompt,
           jsonSchema,      // JSON schema for structured output (Claude only)
           allowedTools,    // Allowed tools
           model,           // Model selection
-          workDir: workDirValidation.sanitized
+          workDir: effectiveWorkDir,
+          temperature,
+          top_p,
+          top_k,
+          max_output_tokens
         });
 
-        try {
-          // Send message with JSON schema
-          const response = await this.sessionManager.send(session.sessionId, message, {
-            timeout,
-            jsonSchema      // Also pass per-message for Claude
-          });
+        const response = await this.sessionManager.send(session.sessionId, message, {
+          timeout,
+          jsonSchema      // Also pass per-message for Claude
+        });
 
-          // Terminate session
-          await this.sessionManager.terminateSession(session.sessionId);
-
-          res.json(response);
-        } catch (error) {
-          // Clean up on error
-          await this.sessionManager.terminateSession(session.sessionId);
-          throw error;
-        }
+        res.json(response);
       } catch (error) {
         sendError(res, 'INTERNAL_ERROR', { message: error.message });
+      } finally {
+        if (session?.sessionId) {
+          try {
+            await this.sessionManager.terminateSession(session.sessionId);
+          } catch {}
+        }
+        if (ephemeralWorkDir && fs.existsSync(ephemeralWorkDir)) {
+          fs.rmSync(ephemeralWorkDir, { recursive: true, force: true });
+        }
       }
     });
 
@@ -1178,6 +1213,11 @@ class AgentServer {
    */
   async stop() {
     this._stopRunLedgerSweep();
+    if (this.orchestration?.memoryMaintenance && typeof this.orchestration.memoryMaintenance.stop === 'function') {
+      this.orchestration.memoryMaintenance.stop();
+    }
+    resetMemoryMaintenanceService();
+    resetMemorySnapshotService();
 
     // Stop orchestration background loops first (prevents hanging process on tests/shutdown)
     if (this.orchestration?.inboxService && typeof this.orchestration.inboxService.stop === 'function') {
@@ -1219,6 +1259,10 @@ class AgentServer {
 
     // Shutdown session manager
     await this.sessionManager.shutdown();
+
+    if (this.orchestration?.db) {
+      closeDB();
+    }
 
     // Close HTTP server
     if (this.server) {

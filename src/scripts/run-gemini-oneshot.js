@@ -157,7 +157,13 @@ async function main() {
   });
   const geminiPath = adapter._getGeminiPath();
   const models = buildModelOrder(requestedModel);
-  const sessionsBefore = requestedSessionId ? [] : adapter._listGeminiSessions(workDir);
+  // Best-effort snapshot for detecting the session created by this run. Other Gemini
+  // processes in the same workDir can still create sessions during this window.
+  const sessionsBefore = requestedSessionId
+    ? []
+    : await adapter._listGeminiSessions(workDir, {
+        timeoutMs: Math.min(timeoutMs, 10000)
+      });
   const resumeRef = requestedSessionId
     ? await adapter._resolveGeminiResumeRef({
       geminiSessionId: requestedSessionId,

@@ -1,5 +1,39 @@
 const crypto = require('crypto');
 const { createSessionEventRecorder } = require('./session-event-recorder');
+const { getMemorySnapshotService } = require('./memory-snapshot-service');
+
+const MIN_TIMEOUT_FLOOR_MS = 1;
+
+function normalizeTimeoutMs(timeout) {
+  const normalized = Number(timeout);
+  if (!Number.isFinite(normalized) || normalized <= 0) {
+    return null;
+  }
+  return normalized;
+}
+
+function computeRemainingBudget(startedAt, timeout) {
+  const normalizedTimeout = normalizeTimeoutMs(timeout);
+  if (normalizedTimeout == null) {
+    return null;
+  }
+  return Math.max(0, normalizedTimeout - (Date.now() - startedAt));
+}
+
+function resolveEffectiveTimeout(configuredTimeout, workflowStartedAt, workflowTimeout) {
+  const stageTimeout = normalizeTimeoutMs(configuredTimeout);
+  const remainingBudget = workflowStartedAt == null
+    ? null
+    : computeRemainingBudget(workflowStartedAt, workflowTimeout);
+
+  if (remainingBudget == null) {
+    return stageTimeout;
+  }
+  if (remainingBudget <= 0) {
+    return MIN_TIMEOUT_FLOOR_MS;
+  }
+  return stageTimeout == null ? remainingBudget : Math.min(stageTimeout, remainingBudget);
+}
 
 function summarizeText(text, maxLength = 1200) {
   return String(text || '').trim().slice(0, maxLength) || null;
@@ -82,6 +116,7 @@ async function runParticipant(sessionManager, participant, message, options = {}
     : null;
 
   let session = null;
+  let timeoutId = null;
 
   if (ledger && participantId) {
     ledger.updateParticipant(participantId, {
@@ -140,10 +175,44 @@ async function runParticipant(sessionManager, participant, message, options = {}
       });
     }
 
+    const remainingBudgetBeforeCreate = options.workflowStartedAt != null
+      ? computeRemainingBudget(options.workflowStartedAt, options.workflowTimeout)
+      : null;
+    if (remainingBudgetBeforeCreate !== null && remainingBudgetBeforeCreate <= 0) {
+      throw new Error(`${options.role || 'participant'} timed out before execution started`);
+    }
+
     session = await sessionManager.createSession(sessionOptions);
-    const response = await sessionManager.send(session.sessionId, message, {
-      timeout: participant.timeout || options.timeout
+    const timeoutMs = resolveEffectiveTimeout(
+      participant.timeout || options.timeout,
+      options.workflowStartedAt,
+      options.workflowTimeout
+    );
+    const effectiveTimeoutMs = timeoutMs === null ? undefined : Math.max(timeoutMs, MIN_TIMEOUT_FLOOR_MS);
+    const sendPromise = sessionManager.send(session.sessionId, message, {
+      timeout: effectiveTimeoutMs
     });
+    const response = effectiveTimeoutMs != null
+      ? await Promise.race([
+          sendPromise,
+          new Promise((_, reject) => {
+            timeoutId = setTimeout(() => {
+              void (async () => {
+                try {
+                  await sessionManager.interruptSession?.(session.sessionId);
+                } catch {}
+              })();
+              reject(new Error(`${options.role || 'participant'} timed out after ${effectiveTimeoutMs}ms`));
+            }, effectiveTimeoutMs);
+          })
+        ])
+      : await sendPromise;
+
+    if (timeoutId) {
+      clearTimeout(timeoutId);
+      timeoutId = null;
+    }
+
     const completedAt = Date.now();
 
     if (ledger && participantId && runId) {
@@ -194,6 +263,10 @@ async function runParticipant(sessionManager, participant, message, options = {}
       metadata: response.metadata || {}
     };
   } catch (error) {
+    if (timeoutId) {
+      clearTimeout(timeoutId);
+      timeoutId = null;
+    }
     const completedAt = Date.now();
     const failureClass = classifyFailure(error);
 
@@ -250,6 +323,9 @@ async function runParticipant(sessionManager, participant, message, options = {}
       failureClass
     };
   } finally {
+    if (timeoutId) {
+      clearTimeout(timeoutId);
+    }
     if (session?.sessionId) {
       try {
         await sessionManager.terminateSession(session.sessionId);
@@ -297,16 +373,20 @@ async function runConsensus(sessionManager, message, options = {}) {
           participantCount: participants.length,
           hasJudge: Boolean(judge)
         },
-        startedAt
+        startedAt,
+        rootSessionId: rootSessionId || null,
+        taskId: options.taskId || null
       }) 
     : null;
   const workflowSessionId = runId || `consensus_${crypto.randomBytes(8).toString('hex')}`;
+  const effectiveRootSessionId = rootSessionId || workflowSessionId;
+  const effectiveTaskId = options.taskId || null;
   const eventRecorder = createSessionEventRecorder({
     db,
     enabled: sessionEventsEnabled,
     workflowKind: 'workflow',
     workflowSessionId,
-    rootSessionId: rootSessionId || workflowSessionId,
+    rootSessionId: effectiveRootSessionId,
     parentSessionId: parentSessionId || null,
     originClient: originClient || 'system',
     externalSessionRef,
@@ -368,13 +448,17 @@ async function runConsensus(sessionManager, message, options = {}) {
       status: 'running',
       currentStep: 'participants',
       activeParticipantCount: participantSpecs.length,
-      lastHeartbeatAt: startedAt
+      lastHeartbeatAt: startedAt,
+      rootSessionId: effectiveRootSessionId,
+      taskId: effectiveTaskId
     });
   }
 
   const participantResults = await Promise.all(
     participantSpecs.map((participant) => runParticipant(sessionManager, participant, message, {
       timeout,
+      workflowStartedAt: startedAt,
+      workflowTimeout: timeout,
       workDir,
       runLedger,
       runId,
@@ -458,6 +542,8 @@ async function runConsensus(sessionManager, message, options = {}) {
     const judgePrompt = buildJudgePrompt(message, successfulParticipants);
     consensus = await runParticipant(sessionManager, judge, judgePrompt, {
       timeout,
+      workflowStartedAt: startedAt,
+      workflowTimeout: timeout,
       workDir,
       runLedger,
       runId,
@@ -505,6 +591,17 @@ async function runConsensus(sessionManager, message, options = {}) {
         judgeSuccess: judge ? Boolean(consensus?.success) : null
       }
     });
+  }
+
+  const snapshotService = getMemorySnapshotService();
+  if (snapshotService && runId) {
+    const snapshot = snapshotService.writeRunSnapshot(runId, {
+      rootSessionId: effectiveRootSessionId,
+      taskId: effectiveTaskId
+    });
+    if (snapshot && effectiveRootSessionId) {
+      snapshotService.scheduleRootRefresh(effectiveRootSessionId);
+    }
   }
 
   eventRecorder.recordEvent({

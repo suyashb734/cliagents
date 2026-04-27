@@ -9,14 +9,264 @@
 
 const express = require('express');
 const { getDB } = require('../database/db');
+const {
+  peekMemoryMaintenanceService
+} = require('../orchestration/memory-maintenance-service');
+
+const MEMORY_BUNDLE_SCOPE_TYPES = new Set(['run', 'root', 'task']);
+const MESSAGE_ROLES = new Set(['user', 'assistant', 'system', 'tool']);
+
+function parseBooleanQuery(value, fallback = false) {
+  if (typeof value === 'boolean') {
+    return value;
+  }
+  if (typeof value !== 'string') {
+    return fallback;
+  }
+
+  const normalized = value.trim().toLowerCase();
+  if (!normalized) {
+    return fallback;
+  }
+  if (['1', 'true', 'yes', 'on'].includes(normalized)) {
+    return true;
+  }
+  if (['0', 'false', 'no', 'off'].includes(normalized)) {
+    return false;
+  }
+  return fallback;
+}
+
+function parseIntegerQuery(value, {
+  fallback,
+  min = 0,
+  max = Number.MAX_SAFE_INTEGER,
+  param = 'value'
+} = {}) {
+  if (value === undefined || value === null || value === '') {
+    return fallback;
+  }
+
+  const parsed = Number.parseInt(value, 10);
+  if (!Number.isFinite(parsed) || parsed < min) {
+    const error = new Error(`${param} must be an integer >= ${min}`);
+    error.code = 'invalid_request';
+    error.param = param;
+    throw error;
+  }
+
+  return Math.min(parsed, max);
+}
+
+function sendRouteError(res, status, code, message, param) {
+  return res.status(status).json({
+    error: {
+      code,
+      message,
+      ...(param ? { param } : {})
+    }
+  });
+}
 
 /**
  * Create the memory router
  * @returns {express.Router}
  */
-function createMemoryRouter() {
+function createMemoryRouter(options = {}) {
   const router = express.Router();
-  const db = getDB();
+  const db = options.db || getDB();
+  const getMaintenanceService = options.getMemoryMaintenanceService || peekMemoryMaintenanceService;
+
+  // ============================================================
+  // Memory Bundle Endpoints
+  // ============================================================
+
+  /**
+   * GET /orchestration/memory/bundle/:scopeId
+   * Get a consolidated memory bundle for a run, root, or task
+   */
+  router.get('/bundle/:scopeId', (req, res) => {
+    try {
+      const { scopeId } = req.params;
+      const {
+        scope_type = 'task',
+        recent_runs_limit = 3,
+        include_raw_pointers = 'true'
+      } = req.query;
+
+      if (!MEMORY_BUNDLE_SCOPE_TYPES.has(scope_type)) {
+        return sendRouteError(
+          res,
+          400,
+          'invalid_request',
+          `scope_type must be one of ${Array.from(MEMORY_BUNDLE_SCOPE_TYPES).join(', ')}`,
+          'scope_type'
+        );
+      }
+
+      const bundle = db.getMemoryBundle(scopeId, scope_type, {
+        recentRunsLimit: parseIntegerQuery(recent_runs_limit, {
+          fallback: 3,
+          min: 1,
+          max: 10,
+          param: 'recent_runs_limit'
+        }),
+        includeRawPointers: parseBooleanQuery(include_raw_pointers, true)
+      });
+
+      if (!bundle) {
+        return res.status(404).json({
+          error: { code: 'not_found', message: `Memory bundle not found for ${scope_type} ${scopeId}` }
+        });
+      }
+
+      res.json(bundle);
+    } catch (error) {
+      console.error('[memory/bundle] Get error:', error.message);
+      if (error.code === 'invalid_request') {
+        return sendRouteError(res, 400, error.code, error.message, error.param);
+      }
+      res.status(500).json({
+        error: { code: 'internal_error', message: error.message }
+      });
+    }
+  });
+
+  // ============================================================
+  // Message History Endpoints
+  // ============================================================
+
+  /**
+   * GET /orchestration/memory/messages
+   * Get durable message history with pagination
+   */
+  router.get('/messages', (req, res) => {
+    try {
+      const {
+        terminal_id,
+        root_session_id,
+        trace_id,
+        after_id,
+        limit = 100,
+        role
+      } = req.query;
+
+      const selectors = [terminal_id, root_session_id, trace_id].filter(Boolean);
+      if (selectors.length !== 1) {
+        return sendRouteError(
+          res,
+          400,
+          'invalid_request',
+          'Exactly one of terminal_id, root_session_id, or trace_id is required'
+        );
+      }
+
+      if (role && !MESSAGE_ROLES.has(role)) {
+        return sendRouteError(
+          res,
+          400,
+          'invalid_request',
+          `role must be one of ${Array.from(MESSAGE_ROLES).join(', ')}`,
+          'role'
+        );
+      }
+
+      const requestedLimit = parseIntegerQuery(limit, {
+        fallback: 100,
+        min: 1,
+        max: 500,
+        param: 'limit'
+      });
+      const afterId = parseIntegerQuery(after_id, {
+        fallback: undefined,
+        min: 1,
+        param: 'after_id'
+      });
+
+      const rows = db.queryMessages({
+        terminalId: terminal_id,
+        rootSessionId: root_session_id,
+        traceId: trace_id,
+        afterId,
+        limit: requestedLimit + 1,
+        role
+      });
+      const hasMore = rows.length > requestedLimit;
+      const messages = rows.slice(0, requestedLimit).map((row) => ({
+        id: row.id,
+        terminalId: row.terminal_id,
+        traceId: row.trace_id,
+        rootSessionId: row.root_session_id || null,
+        role: row.role,
+        content: row.content,
+        metadata: row.metadata || {},
+        createdAt: row.created_at
+      }));
+      const totalCount = db.countMessages({
+        terminalId: terminal_id,
+        rootSessionId: root_session_id,
+        traceId: trace_id,
+        role
+      });
+      const remainingCount = db.countMessages({
+        terminalId: terminal_id,
+        rootSessionId: root_session_id,
+        traceId: trace_id,
+        afterId,
+        role
+      });
+
+      res.json({
+        messages,
+        pagination: {
+          total: totalCount,
+          remaining: remainingCount,
+          returned: messages.length,
+          limit: requestedLimit,
+          afterId,
+          hasMore,
+          nextAfterId: hasMore ? messages[messages.length - 1]?.id || null : null
+        }
+      });
+    } catch (error) {
+      console.error('[memory/messages] Get error:', error.message);
+      if (error.code === 'invalid_request') {
+        return sendRouteError(res, 400, error.code, error.message, error.param);
+      }
+      res.status(500).json({
+        error: { code: 'internal_error', message: error.message }
+      });
+    }
+  });
+
+  // ============================================================
+  // Snapshot Maintenance Endpoints
+  // ============================================================
+
+  /**
+   * POST /orchestration/memory/snapshots/repair
+   * Run a manual memory repair sweep
+   */
+  router.post('/snapshots/repair', async (req, res) => {
+    try {
+      const service = getMaintenanceService();
+      if (!service) {
+        return sendRouteError(
+          res,
+          503,
+          'service_unavailable',
+          'memory maintenance service is not initialized'
+        );
+      }
+      const result = await service.runOnce();
+      res.json(result);
+    } catch (error) {
+      console.error('[memory/snapshots/repair] Error:', error.message);
+      res.status(500).json({
+        error: { code: 'internal_error', message: error.message }
+      });
+    }
+  });
 
   // ============================================================
   // Artifact Endpoints

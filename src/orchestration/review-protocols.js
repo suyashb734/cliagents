@@ -1,5 +1,39 @@
 const crypto = require('crypto');
 const { createSessionEventRecorder } = require('./session-event-recorder');
+const { getMemorySnapshotService } = require('./memory-snapshot-service');
+
+const MIN_TIMEOUT_FLOOR_MS = 1;
+
+function normalizeTimeoutMs(timeout) {
+  const normalized = Number(timeout);
+  if (!Number.isFinite(normalized) || normalized <= 0) {
+    return null;
+  }
+  return normalized;
+}
+
+function computeRemainingBudget(startedAt, timeout) {
+  const normalizedTimeout = normalizeTimeoutMs(timeout);
+  if (normalizedTimeout == null) {
+    return null;
+  }
+  return Math.max(0, normalizedTimeout - (Date.now() - startedAt));
+}
+
+function resolveEffectiveTimeout(configuredTimeout, workflowStartedAt, workflowTimeout) {
+  const stageTimeout = normalizeTimeoutMs(configuredTimeout);
+  const remainingBudget = workflowStartedAt == null
+    ? null
+    : computeRemainingBudget(workflowStartedAt, workflowTimeout);
+
+  if (remainingBudget == null) {
+    return stageTimeout;
+  }
+  if (remainingBudget <= 0) {
+    return MIN_TIMEOUT_FLOOR_MS;
+  }
+  return stageTimeout == null ? remainingBudget : Math.min(stageTimeout, remainingBudget);
+}
 
 const REVIEW_VERDICTS = new Set(['approve', 'revise', 'reject']);
 const BLOCKER_SEVERITIES = new Set(['low', 'medium', 'high', 'critical']);
@@ -291,6 +325,11 @@ async function runParticipant(sessionManager, participant, message, options = {}
   const runId = options.runId || null;
   const participantId = options.participantId || null;
   const outputKind = options.role === 'judge' ? 'judge_final' : 'participant_final';
+  const effectiveTimeout = resolveEffectiveTimeout(
+    participant.timeout || options.timeout,
+    options.workflowStartedAt,
+    options.workflowTimeout
+  );
   const stepId = ledger && participantId && runId
     ? ledger.appendStep({
         runId,
@@ -363,6 +402,13 @@ async function runParticipant(sessionManager, participant, message, options = {}
       });
     }
 
+    if (effectiveTimeout === MIN_TIMEOUT_FLOOR_MS && options.workflowStartedAt != null) {
+      const remainingBudget = computeRemainingBudget(options.workflowStartedAt, options.workflowTimeout);
+      if (remainingBudget <= 0) {
+        throw new Error(`${options.role || 'participant'} timed out before execution started`);
+      }
+    }
+
     session = await sessionManager.createSession({
       adapter: participant.adapter,
       sessionId,
@@ -373,9 +419,9 @@ async function runParticipant(sessionManager, participant, message, options = {}
       jsonSchema: participant.jsonSchema
     });
 
-    const timeoutMs = Number(participant.timeout || options.timeout || 0);
+    const timeoutMs = Number(effectiveTimeout || 0);
     const sendPromise = sessionManager.send(session.sessionId, message, {
-      timeout: timeoutMs
+      timeout: timeoutMs || undefined
     });
     const response = timeoutMs > 0
       ? await Promise.race([
@@ -385,9 +431,6 @@ async function runParticipant(sessionManager, participant, message, options = {}
               void (async () => {
                 try {
                   await sessionManager.interruptSession?.(session.sessionId);
-                } catch {}
-                try {
-                  await sessionManager.terminateSession?.(session.sessionId);
                 } catch {}
               })();
               reject(new Error(`participant timed out after ${timeoutMs}ms`));
@@ -554,16 +597,20 @@ async function runReviewProtocol(sessionManager, protocol, payload, options = {}
           reviewerCount: reviewers.length,
           hasJudge: Boolean(judgeSpec)
         },
-        startedAt
+        startedAt,
+        rootSessionId: options.rootSessionId || null,
+        taskId: options.taskId || null
       })
     : null;
   const workflowSessionId = runId || `${protocol.name}-${crypto.randomBytes(8).toString('hex')}`;
+  const effectiveRootSessionId = options.rootSessionId || workflowSessionId;
+  const effectiveTaskId = options.taskId || null;
   const eventRecorder = createSessionEventRecorder({
     db: options.db || null,
     enabled: options.sessionEventsEnabled,
     workflowKind: 'workflow',
     workflowSessionId,
-    rootSessionId: options.rootSessionId || workflowSessionId,
+    rootSessionId: effectiveRootSessionId,
     parentSessionId: options.parentSessionId || null,
     originClient: options.originClient || 'system',
     externalSessionRef: options.externalSessionRef || null,
@@ -626,13 +673,17 @@ async function runReviewProtocol(sessionManager, protocol, payload, options = {}
       status: 'running',
       currentStep: 'reviewers',
       activeParticipantCount: reviewerSpecs.length,
-      lastHeartbeatAt: startedAt
+      lastHeartbeatAt: startedAt,
+      rootSessionId: effectiveRootSessionId,
+      taskId: effectiveTaskId
     });
   }
 
   const reviewerRuns = await Promise.all(
     reviewerSpecs.map((reviewer) => runParticipant(sessionManager, reviewer, originalMessage, {
       ...options,
+      workflowStartedAt: startedAt,
+      workflowTimeout: options.timeout,
       runLedger,
       runId,
       role: 'reviewer',
@@ -719,6 +770,8 @@ async function runReviewProtocol(sessionManager, protocol, payload, options = {}
     const judgePrompt = buildJudgeMessage(protocol.name, originalMessage, successfulReviewers);
     judge = await runParticipant(sessionManager, judgeSpec, judgePrompt, {
       ...options,
+      workflowStartedAt: startedAt,
+      workflowTimeout: options.timeout,
       runLedger,
       runId,
       role: 'judge',
@@ -766,6 +819,17 @@ async function runReviewProtocol(sessionManager, protocol, payload, options = {}
         finalVerdict
       }
     });
+  }
+
+  const snapshotService = getMemorySnapshotService();
+  if (snapshotService && runId) {
+    const snapshot = snapshotService.writeRunSnapshot(runId, {
+      rootSessionId: effectiveRootSessionId,
+      taskId: effectiveTaskId
+    });
+    if (snapshot && effectiveRootSessionId) {
+      snapshotService.scheduleRootRefresh(effectiveRootSessionId);
+    }
   }
 
   eventRecorder.recordEvent({

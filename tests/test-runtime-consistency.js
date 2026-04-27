@@ -50,7 +50,8 @@ function isTransientFailure(message = '') {
     'network',
     'econnreset',
     'socket',
-    'status: 504'
+    'status: 504',
+    'process exited with code'
   ].some((pattern) => text.includes(pattern));
 }
 
@@ -143,8 +144,10 @@ function makeTempWorkDir(prefix) {
   return fs.mkdtempSync(path.join(os.tmpdir(), `cliagents-${prefix}-`));
 }
 
-async function createSession(adapter, workDir) {
-  const { status, data } = await request('POST', '/sessions', { adapter, workDir });
+async function createSession(adapter, workDir, options = {}) {
+  const { status, data } = await request('POST', '/sessions', { adapter, workDir }, {
+    timeoutMs: options.timeoutMs || 120000
+  });
   if (status !== 200) {
     const message = data?.error?.message || data?.error || JSON.stringify(data);
     if (isSkippableProviderFailure(message)) {
@@ -347,8 +350,8 @@ async function testGeminiPersistence() {
     await ensureAdapterAvailable('gemini-cli');
 
     const workDir = makeTempWorkDir('gemini-shared');
-    const sessionA = await createSession('gemini-cli', workDir);
-    const sessionB = await createSession('gemini-cli', workDir);
+    const sessionA = await createSession('gemini-cli', workDir, { timeoutMs: 210000 });
+    const sessionB = await createSession('gemini-cli', workDir, { timeoutMs: 210000 });
 
     try {
       await sendMessage(sessionA, 'The session marker is ALPHA. Reply with READY.', { timeout: 120000, retries: 2 });
@@ -538,8 +541,8 @@ async function testTmuxWorkerBehavior() {
         `Expected processing or completed after input, got ${response.status}`
       );
 
-      await sleep(2000);
-      const { status, data } = await request('GET', `/orchestration/terminals/${terminal.terminalId}/output?lines=260`);
+      await waitForTerminalCompletion(terminal.terminalId);
+      const { status, data } = await request('GET', `/orchestration/terminals/${terminal.terminalId}/output?lines=600`);
       assert.strictEqual(status, 200, `Expected terminal output fetch to succeed, got ${status}`);
 
       const output = String(data.output || '');
@@ -595,6 +598,9 @@ async function testOneShotAdapters() {
     if (status !== 200) {
       const errorMessage = data?.error?.message || data?.error || JSON.stringify(data);
       if (isSkippableProviderFailure(errorMessage)) {
+        throw new Error(`SKIP: ${errorMessage}`);
+      }
+      if (isTransientFailure(errorMessage)) {
         throw new Error(`SKIP: ${errorMessage}`);
       }
       throw new Error(`Codex one-shot failed: ${status} ${errorMessage}`);

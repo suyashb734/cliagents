@@ -155,6 +155,7 @@ class SessionManager extends EventEmitter {
     const sessionId = options.sessionId || this.generateSessionId();
     const effectiveWorkDir = options.workDir || adapter.config?.workDir || null;
     const effectiveModel = options.model ?? adapter.config?.model ?? null;
+    const effectiveProviderSessionId = String(options.providerSessionId || '').trim() || null;
 
     // Spawn the session
     const result = await adapter.spawn(sessionId, {
@@ -162,6 +163,7 @@ class SessionManager extends EventEmitter {
       allowedTools: options.allowedTools,
       workDir: effectiveWorkDir,
       model: effectiveModel,          // Model selection (adapter-specific)
+      providerSessionId: effectiveProviderSessionId,
       jsonSchema: options.jsonSchema, // JSON Schema for structured output (Claude only)
       jsonMode: options.jsonMode,
       // Generation parameters (Gemini only - writes to ~/.gemini/config.yaml)
@@ -177,6 +179,7 @@ class SessionManager extends EventEmitter {
       adapterName,
       workDir: effectiveWorkDir,
       model: result?.model ?? effectiveModel,
+      providerSessionId: result?.providerSessionId ?? effectiveProviderSessionId,
       createdAt: Date.now(),
       lastActivity: Date.now(),
       status: 'stable',         // 'stable' | 'running' | 'error'
@@ -190,7 +193,8 @@ class SessionManager extends EventEmitter {
       adapter: adapterName,
       status: 'ready',
       workDir: effectiveWorkDir,
-      model: result?.model ?? effectiveModel
+      model: result?.model ?? effectiveModel,
+      providerSessionId: result?.providerSessionId ?? effectiveProviderSessionId
     };
   }
 
@@ -220,6 +224,10 @@ class SessionManager extends EventEmitter {
     try {
       // Use sendAndWait for simpler API
       const response = await adapter.sendAndWait(sessionId, message, options);
+      const responseProviderSessionId = String(response?.metadata?.providerSessionId || '').trim() || null;
+      if (responseProviderSessionId) {
+        session.providerSessionId = responseProviderSessionId;
+      }
 
       session.status = 'stable';
       session.lastActivity = Date.now();
@@ -296,6 +304,7 @@ class SessionManager extends EventEmitter {
       adapterName: session.adapterName,
       workDir: session.workDir,
       model: session.model,
+      providerSessionId: session.providerSessionId || null,
       hasActiveProcess,
       idleMs: Date.now() - session.lastActivity
     };

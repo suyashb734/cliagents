@@ -86,6 +86,20 @@ async function startFakeCliagentsServer() {
     },
     rootDetailResponse: null,
     rootDetailById: new Map(),
+    memoryBundleResponse: null,
+    memoryBundleByScopeId: new Map(),
+    memoryMessagesResponse: null,
+    providerSessionsResponse: null,
+    providerSessionImportResponses: [],
+    providerSessionImportBodies: [],
+    roomCreateResponses: [],
+    roomCreateBodies: [],
+    roomById: new Map(),
+    roomMessagesById: new Map(),
+    roomMessageResponses: [],
+    roomMessageBodies: [],
+    roomDiscussResponses: [],
+    roomDiscussBodies: [],
     attachResponses: [],
     attachBodies: [],
     launchResponses: [],
@@ -179,6 +193,127 @@ async function startFakeCliagentsServer() {
 
     if (req.method === 'POST' && req.url === '/orchestration/model-routing/recommend') {
       return writeJson(200, state.recommendModelResponse);
+    }
+
+    const memoryBundleMatch = req.url.match(/^\/orchestration\/memory\/bundle\/([^?]+)(\?.*)?$/);
+    if (req.method === 'GET' && memoryBundleMatch) {
+      const scopeId = decodeURIComponent(memoryBundleMatch[1]);
+      const bundle = state.memoryBundleByScopeId.get(scopeId) || state.memoryBundleResponse;
+      if (!bundle) {
+        return writeJson(404, { error: { message: 'not found' } });
+      }
+      return writeJson(200, bundle);
+    }
+
+    if (req.method === 'GET' && req.url.startsWith('/orchestration/memory/messages?')) {
+      return writeJson(200, state.memoryMessagesResponse || { messages: [] });
+    }
+
+    if (req.method === 'GET' && req.url.startsWith('/orchestration/provider-sessions')) {
+      return writeJson(200, state.providerSessionsResponse || {
+        adapter: 'codex-cli',
+        supported: true,
+        sessions: []
+      });
+    }
+
+    if (req.method === 'POST' && req.url === '/orchestration/provider-sessions/import') {
+      const body = await readBody();
+      state.providerSessionImportBodies.push(body);
+      const response = state.providerSessionImportResponses.length > 0
+        ? state.providerSessionImportResponses.shift()
+        : {
+            importedRoot: true,
+            reusedImportedRoot: false,
+            rootSessionId: 'imported-root-1',
+            adapter: body.adapter || 'codex-cli',
+            providerSessionId: body.providerSessionId,
+            externalSessionRef: body.externalSessionRef || `provider-import:${body.adapter || 'codex-cli'}:${body.providerSessionId}`,
+            descriptor: {
+              title: 'Imported provider session'
+            }
+          };
+      return writeJson(200, response);
+    }
+
+    if (req.method === 'POST' && req.url === '/orchestration/rooms') {
+      const body = await readBody();
+      state.roomCreateBodies.push(body);
+      const response = state.roomCreateResponses.length > 0
+        ? state.roomCreateResponses.shift()
+        : {
+            room: {
+              id: body.roomId || 'room-1',
+              rootSessionId: 'room-root-1',
+              title: body.title || 'Room 1'
+            },
+            participants: Array.isArray(body.participants)
+              ? body.participants.map((participant, index) => ({
+                  id: `participant-${index + 1}`,
+                  adapter: participant.adapter,
+                  displayName: participant.displayName || participant.name || participant.adapter
+                }))
+              : [],
+            latestTurn: null
+          };
+      if (response.room?.id) {
+        state.roomById.set(response.room.id, response);
+      }
+      return writeJson(200, response);
+    }
+
+    const roomMessagesMatch = req.url.match(/^\/orchestration\/rooms\/([^/]+)\/messages(\?.*)?$/);
+    if (roomMessagesMatch && req.method === 'GET') {
+      const roomId = decodeURIComponent(roomMessagesMatch[1]);
+      const payload = state.roomMessagesById.get(roomId) || {
+        room: { id: roomId, rootSessionId: 'room-root-1' },
+        messages: []
+      };
+      return writeJson(200, payload);
+    }
+
+    if (roomMessagesMatch && req.method === 'POST') {
+      const roomId = decodeURIComponent(roomMessagesMatch[1]);
+      const body = await readBody();
+      state.roomMessageBodies.push({ roomId, body });
+      const response = state.roomMessageResponses.length > 0
+        ? state.roomMessageResponses.shift()
+        : {
+            roomId,
+            turn: { id: 'turn-1', status: 'completed' },
+            participantResults: [{ participantId: 'participant-1', success: true }],
+            messages: [
+              { id: 1, role: 'user', content: body.content },
+              { id: 2, role: 'assistant', participantId: 'participant-1', content: 'Done.' }
+            ]
+          };
+      return writeJson(200, response);
+    }
+
+    const roomDiscussMatch = req.url.match(/^\/orchestration\/rooms\/([^/]+)\/discuss$/);
+    if (roomDiscussMatch && req.method === 'POST') {
+      const roomId = decodeURIComponent(roomDiscussMatch[1]);
+      const body = await readBody();
+      state.roomDiscussBodies.push({ roomId, body });
+      const response = state.roomDiscussResponses.length > 0
+        ? state.roomDiscussResponses.shift()
+        : {
+            roomId,
+            turn: { id: 'turn-discuss-1', status: 'completed' },
+            runId: 'run-room-1',
+            discussionId: 'discussion-room-1'
+          };
+      return writeJson(200, response);
+    }
+
+    const roomMatch = req.url.match(/^\/orchestration\/rooms\/([^/?]+)$/);
+    if (roomMatch && req.method === 'GET') {
+      const roomId = decodeURIComponent(roomMatch[1]);
+      const payload = state.roomById.get(roomId);
+      if (!payload) {
+        return writeJson(404, { error: { message: 'not found' } });
+      }
+      return writeJson(200, payload);
     }
 
     const detailMatch = req.url.match(/^\/orchestration\/root-sessions\/([^?]+)(\?.*)?$/);
@@ -275,6 +410,20 @@ async function run() {
     assert(listModelsTool, 'list_models should be exposed in the MCP tool list');
     const recommendModelTool = mod.TOOLS.find((tool) => tool.name === 'recommend_model');
     assert(recommendModelTool, 'recommend_model should be exposed in the MCP tool list');
+    const listProviderSessionsTool = mod.TOOLS.find((tool) => tool.name === 'list_provider_sessions');
+    assert(listProviderSessionsTool, 'list_provider_sessions should be exposed in the MCP tool list');
+    const importProviderSessionTool = mod.TOOLS.find((tool) => tool.name === 'import_provider_session');
+    assert(importProviderSessionTool, 'import_provider_session should be exposed in the MCP tool list');
+    const createRoomTool = mod.TOOLS.find((tool) => tool.name === 'create_room');
+    assert(createRoomTool, 'create_room should be exposed in the MCP tool list');
+    const sendRoomMessageTool = mod.TOOLS.find((tool) => tool.name === 'send_room_message');
+    assert(sendRoomMessageTool, 'send_room_message should be exposed in the MCP tool list');
+    const getRoomTool = mod.TOOLS.find((tool) => tool.name === 'get_room');
+    assert(getRoomTool, 'get_room should be exposed in the MCP tool list');
+    const getRoomMessagesTool = mod.TOOLS.find((tool) => tool.name === 'get_room_messages');
+    assert(getRoomMessagesTool, 'get_room_messages should be exposed in the MCP tool list');
+    const discussRoomTool = mod.TOOLS.find((tool) => tool.name === 'discuss_room');
+    assert(discussRoomTool, 'discuss_room should be exposed in the MCP tool list');
 
     fakeServer.state.rootsResponse = {
       roots: [
@@ -380,6 +529,50 @@ async function run() {
     assert(recommendedText.includes('selected_model: minimax-coding-plan/MiniMax-M2.7'));
     assert(recommendedText.includes('selected_provider: minimax-coding-plan'));
 
+    fakeServer.state.providerSessionsResponse = {
+      adapter: 'codex-cli',
+      supported: true,
+      sessions: [
+        {
+          providerSessionId: 'session-abc',
+          title: 'Finance tracker',
+          updatedAt: '2026-04-22T10:00:00.000Z',
+          cwd: '/tmp/finance-tracker',
+          resumeCapability: 'exact'
+        }
+      ]
+    };
+    const providerSessionsResult = await mod.handleListProviderSessions({
+      adapter: 'codex-cli'
+    });
+    const providerSessionsText = providerSessionsResult.content[0].text;
+    assert(providerSessionsText.includes('Provider Sessions (codex-cli)'));
+    assert(providerSessionsText.includes('session-abc'));
+    assert(providerSessionsText.includes('title="Finance tracker"'));
+
+    fakeServer.state.providerSessionImportResponses = [
+      {
+        importedRoot: true,
+        reusedImportedRoot: false,
+        rootSessionId: 'imported-root-1',
+        adapter: 'codex-cli',
+        providerSessionId: 'session-abc',
+        externalSessionRef: 'provider-import:codex-cli:session-abc',
+        descriptor: {
+          title: 'Finance tracker'
+        }
+      }
+    ];
+    const importProviderResult = await mod.handleImportProviderSession({
+      adapter: 'codex-cli',
+      providerSessionId: 'session-abc'
+    });
+    const importProviderText = importProviderResult.content[0].text;
+    assert(importProviderText.includes('Provider Session Imported'));
+    assert(importProviderText.includes('provider_session_id: session-abc'));
+    assert.strictEqual(fakeServer.state.providerSessionImportBodies.at(-1).adapter, 'codex-cli');
+    assert.strictEqual(fakeServer.state.providerSessionImportBodies.at(-1).providerSessionId, 'session-abc');
+
     fakeServer.state.launchResponses = [
       {
         rootSessionId: 'managed-root-1',
@@ -405,6 +598,143 @@ async function run() {
     assert.strictEqual(fakeServer.state.launchBodies.at(-1).workDir, '/tmp/project');
     assert.strictEqual(fakeServer.state.launchBodies.at(-1).permissionMode, 'bypassPermissions');
     assert.strictEqual(fakeServer.state.launchBodies.at(-1).sessionMetadata.launchProfile, 'supervised-root');
+
+    fakeServer.state.launchResponses = [
+      {
+        rootSessionId: 'managed-root-exact-1',
+        terminalId: 'managed-terminal-exact-1',
+        sessionName: 'cliagents-managed-exact-1',
+        adapter: 'codex-cli',
+        externalSessionRef: 'codex:thread-exact-1',
+        attachCommand: 'tmux attach -t "cliagents-managed-exact-1"',
+        consoleUrl: '/console?root=managed-root-exact-1&terminal=managed-terminal-exact-1',
+        managedRoot: true
+      }
+    ];
+    const exactLaunchResult = await mod.handleLaunchRootSession({
+      adapter: 'codex-cli',
+      workDir: '/tmp/project',
+      resumeMode: 'exact',
+      providerSessionId: 'session-abc'
+    });
+    const exactLaunchText = exactLaunchResult.content[0].text;
+    assert(exactLaunchText.includes('Managed Root Exact Resumed'));
+    assert(exactLaunchText.includes('provider_session_id: session-abc'));
+    assert.strictEqual(fakeServer.state.launchBodies.at(-1).resumeMode, 'exact');
+    assert.strictEqual(fakeServer.state.launchBodies.at(-1).providerSessionId, 'session-abc');
+
+    fakeServer.state.roomCreateResponses = [
+      {
+        room: {
+          id: 'room-1',
+          rootSessionId: 'room-root-1',
+          title: 'Planning room'
+        },
+        participants: [
+          { id: 'participant-1', adapter: 'codex-cli', displayName: 'Codex' },
+          { id: 'participant-2', adapter: 'claude-code', displayName: 'Claude' }
+        ],
+        latestTurn: null
+      }
+    ];
+    const createRoomResult = await mod.handleCreateRoom({
+      title: 'Planning room',
+      participants: [
+        { adapter: 'codex-cli', displayName: 'Codex' },
+        { adapter: 'claude-code', displayName: 'Claude' }
+      ]
+    });
+    const createRoomText = createRoomResult.content[0].text;
+    assert(createRoomText.includes('Room Created'));
+    assert(createRoomText.includes('room_id: room-1'));
+    assert.strictEqual(fakeServer.state.roomCreateBodies.at(-1).title, 'Planning room');
+
+    fakeServer.state.roomById.set('room-1', {
+      room: {
+        id: 'room-1',
+        rootSessionId: 'room-root-1',
+        title: 'Planning room'
+      },
+      participants: [
+        { id: 'participant-1', adapter: 'codex-cli', displayName: 'Codex' },
+        { id: 'participant-2', adapter: 'claude-code', displayName: 'Claude' }
+      ],
+      latestTurn: {
+        id: 'turn-1',
+        status: 'completed'
+      }
+    });
+    const getRoomResult = await mod.handleGetRoom({ roomId: 'room-1' });
+    const getRoomText = getRoomResult.content[0].text;
+    assert(getRoomText.includes('## Room'));
+    assert(getRoomText.includes('room_id: room-1'));
+    assert(getRoomText.includes('latest_turn_status: completed'));
+
+    fakeServer.state.roomMessageResponses = [
+      {
+        roomId: 'room-1',
+        turn: { id: 'turn-1', status: 'completed' },
+        participantResults: [
+          { participantId: 'participant-1', success: true },
+          { participantId: 'participant-2', success: true }
+        ],
+        messages: [
+          { id: 1, role: 'user', content: 'Give an update.' },
+          { id: 2, role: 'assistant', participantId: 'participant-1', content: 'Codex update.' },
+          { id: 3, role: 'assistant', participantId: 'participant-2', content: 'Claude update.' }
+        ]
+      }
+    ];
+    const sendRoomMessageResult = await mod.handleSendRoomMessage({
+      roomId: 'room-1',
+      content: 'Give an update.',
+      mentions: ['participant-1'],
+      requestId: 'room-turn-1'
+    });
+    const sendRoomMessageText = sendRoomMessageResult.content[0].text;
+    assert(sendRoomMessageText.includes('Room Turn Completed'));
+    assert(sendRoomMessageText.includes('participant_results: 2'));
+    assert.strictEqual(fakeServer.state.roomMessageBodies.at(-1).roomId, 'room-1');
+    assert.strictEqual(fakeServer.state.roomMessageBodies.at(-1).body.requestId, 'room-turn-1');
+
+    fakeServer.state.roomMessagesById.set('room-1', {
+      room: {
+        id: 'room-1',
+        rootSessionId: 'room-root-1'
+      },
+      messages: [
+        { id: 1, role: 'system', content: 'Room created.' },
+        { id: 2, role: 'user', content: 'Give an update.' },
+        { id: 3, role: 'assistant', participantId: 'participant-1', content: 'Codex update.' }
+      ]
+    });
+    const getRoomMessagesResult = await mod.handleGetRoomMessages({
+      roomId: 'room-1',
+      afterId: 1,
+      limit: 10
+    });
+    const getRoomMessagesText = getRoomMessagesResult.content[0].text;
+    assert(getRoomMessagesText.includes('Room Messages'));
+    assert(getRoomMessagesText.includes('returned: 3'));
+    assert(getRoomMessagesText.includes('3. assistant(participant-1): Codex update.'));
+
+    fakeServer.state.roomDiscussResponses = [
+      {
+        roomId: 'room-1',
+        turn: { id: 'turn-discuss-1', status: 'completed' },
+        runId: 'run-room-1',
+        discussionId: 'discussion-room-1'
+      }
+    ];
+    const discussRoomResult = await mod.handleDiscussRoom({
+      roomId: 'room-1',
+      message: 'Debate the persistence plan.'
+    });
+    const discussRoomText = discussRoomResult.content[0].text;
+    assert(discussRoomText.includes('Room Discussion Completed'));
+    assert(discussRoomText.includes('discussion_id: discussion-room-1'));
+    assert.strictEqual(fakeServer.state.roomDiscussBodies.at(-1).roomId, 'room-1');
+    assert.strictEqual(fakeServer.state.roomDiscussBodies.at(-1).body.message, 'Debate the persistence plan.');
 
     fakeServer.state.adoptResponses = [
       {
@@ -507,6 +837,97 @@ async function run() {
       fakeServer.state.launchBodies.at(-1).sessionMetadata.providerResumeSessionId,
       '019d94a6-2cd8-7742-8e4e-123456789abc'
     );
+
+    fakeServer.state.rootsResponse = {
+      roots: [
+        {
+          rootSessionId: 'context-root-1',
+          originClient: 'codex',
+          status: 'needs_attention',
+          recoveryCapability: 'context_resume'
+        }
+      ]
+    };
+    fakeServer.state.rootDetailById.set('context-root-1', {
+      rootSessionId: 'context-root-1',
+      status: 'needs_attention',
+      rootMode: 'managed',
+      recoveryCapability: 'context_resume',
+      rootSession: {
+        sessionId: 'context-root-1',
+        adapter: 'codex-cli',
+        originClient: 'codex',
+        status: 'needs_attention',
+        model: 'o4-mini',
+        sessionMetadata: {
+          attachMode: 'managed-root-launch',
+          managedLaunch: true,
+          clientName: 'codex'
+        },
+        externalSessionRef: 'codex:thread-context-1'
+      },
+      sessions: [
+        {
+          sessionId: 'context-root-1',
+          role: 'main',
+          sessionKind: 'main'
+        }
+      ],
+      terminals: [
+        {
+          terminal_id: 'context-root-1',
+          session_name: 'cliagents-context-1',
+          role: 'main',
+          session_kind: 'main',
+          process_state: 'exited',
+          status: 'idle',
+          work_dir: '/tmp/project',
+          origin_client: 'codex',
+          external_session_ref: 'codex:thread-context-1'
+        }
+      ],
+      events: []
+    });
+    fakeServer.state.memoryBundleByScopeId.set('context-root-1', {
+      scopeType: 'root',
+      scopeId: 'context-root-1',
+      brief: 'Persistence hardening was in progress.',
+      keyDecisions: ['Dead roots should context-resume by default'],
+      pendingItems: ['Re-run the focused tests'],
+      rawPointers: { runIds: ['run-context-1'] },
+      isStale: false
+    });
+    fakeServer.state.memoryMessagesResponse = {
+      messages: [
+        { role: 'user', content: 'Finish the persistence hardening.' },
+        { role: 'assistant', content: 'The broker launch path is next.' }
+      ]
+    };
+    fakeServer.state.launchResponses = [
+      {
+        rootSessionId: 'context-root-2',
+        terminalId: 'context-terminal-2',
+        sessionName: 'cliagents-context-2',
+        adapter: 'codex-cli',
+        externalSessionRef: 'codex:thread-context-1',
+        attachCommand: 'tmux attach -t "cliagents-context-2"',
+        consoleUrl: '/console?root=context-root-2&terminal=context-terminal-2',
+        managedRoot: true
+      }
+    ];
+    const contextResumeResult = await mod.handleLaunchRootSession({
+      adapter: 'codex-cli',
+      workDir: '/tmp/project',
+      resumeLatest: true
+    });
+    const contextResumeText = contextResumeResult.content[0].text;
+    assert(contextResumeText.includes('Managed Root Resumed with Context'));
+    assert(contextResumeText.includes('previous_root_session_id: context-root-1'));
+    assert.strictEqual(fakeServer.state.launchBodies.at(-1).externalSessionRef, 'codex:thread-context-1');
+    assert.strictEqual(fakeServer.state.launchBodies.at(-1).sessionMetadata.resumeMode, 'context');
+    assert.strictEqual(fakeServer.state.launchBodies.at(-1).sessionMetadata.previousRootSessionId, 'context-root-1');
+    assert.strictEqual(fakeServer.state.launchBodies.at(-1).sessionMetadata.carriedContextMessageCount, 2);
+    assert(fakeServer.state.launchBodies.at(-1).systemPrompt.includes('Dead roots should context-resume by default'));
 
     fakeServer.state.attachResponses = [
       {
@@ -696,6 +1117,19 @@ async function run() {
       }),
       /attached and read-only/
     );
+
+    fakeServer.state.inputResponses = [
+      {
+        status: 200,
+        body: { success: true, terminalId: 'child-terminal-1', status: 'idle' }
+      }
+    ];
+    const replyResult = await mod.handleReplyToTerminal({
+      terminalId: 'child-terminal-1',
+      message: 'Follow up.'
+    });
+    assert(replyResult.content[0].text.includes('Terminal Updated'));
+    assert(replyResult.content[0].text.includes('child-terminal-1'));
 
     const implicitUpgrade = loadMcpModule({
       ...envOverrides,

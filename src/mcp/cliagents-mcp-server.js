@@ -32,7 +32,8 @@ const { extractOutput } = require('../utils/output-extractor');
 const {
   resolveManagedRootLaunchTarget,
   launchManagedRootSession,
-  buildManagedRootRecoveryLaunchOptions
+  buildManagedRootRecoveryLaunchOptions,
+  buildManagedRootContextLaunchOptions
 } = require('../index');
 
 const CLIAGENTS_URL = process.env.CLIAGENTS_URL || 'http://localhost:4001';
@@ -1342,7 +1343,7 @@ This calls cliagents' direct-session discussion route and returns the completed 
         },
         resumeLatest: {
           type: 'boolean',
-          description: 'Resume the most recent matching live managed root.'
+          description: 'Resume the most recent matching managed root if one exists, preferring live reattach and then a new linked root with carried context.'
         },
         recoverRootSessionId: {
           type: 'string',
@@ -1350,10 +1351,70 @@ This calls cliagents' direct-session discussion route and returns the completed 
         },
         recoverLatest: {
           type: 'boolean',
-          description: 'Recover the most recent matching stale or shell-only managed root.'
+          description: 'Recover the most recent matching stale, interrupted, or shell-only managed root.'
+        },
+        resumeMode: {
+          type: 'string',
+          enum: ['new', 'reattach', 'exact', 'context'],
+          description: 'Optional explicit resume mode override for launch routing.'
+        },
+        providerSessionId: {
+          type: 'string',
+          description: 'Provider-native session ID to exact-resume into a new managed root.'
+        },
+        sourceRootSessionId: {
+          type: 'string',
+          description: 'Optional source root session ID to link or carry context from when using exact or context resume.'
         }
       },
       required: ['adapter']
+    }
+  },
+  {
+    name: 'list_provider_sessions',
+    description: 'List provider-local sessions that cliagents can import or exact-resume. V1 only implements Codex local-session discovery.',
+    inputSchema: {
+      type: 'object',
+      properties: {
+        adapter: {
+          type: 'string',
+          description: 'Provider adapter name. Defaults to codex-cli.'
+        },
+        limit: {
+          type: 'integer',
+          description: 'Maximum sessions to return. Default: 20'
+        },
+        includeArchived: {
+          type: 'boolean',
+          description: 'Whether to include archived provider sessions. Default: false'
+        }
+      }
+    }
+  },
+  {
+    name: 'import_provider_session',
+    description: 'Import a provider-local session as a read-only attached root that can later anchor exact resume or child broker work.',
+    inputSchema: {
+      type: 'object',
+      properties: {
+        adapter: {
+          type: 'string',
+          description: 'Provider adapter name. Defaults to codex-cli.'
+        },
+        providerSessionId: {
+          type: 'string',
+          description: 'Provider-native session ID to import.'
+        },
+        externalSessionRef: {
+          type: 'string',
+          description: 'Optional stable external session ref to bind to the imported root.'
+        },
+        rootSessionId: {
+          type: 'string',
+          description: 'Optional existing root session id to bind to the imported provider session.'
+        }
+      },
+      required: ['providerSessionId']
     }
   },
   {
@@ -1486,6 +1547,211 @@ This calls cliagents' direct-session discussion route and returns the completed 
           description: 'Return a human summary or raw JSON. Default: summary'
         }
       }
+    }
+  },
+  {
+    name: 'get_memory_bundle',
+    description: 'Get a consolidated memory bundle (brief, key decisions, findings) for a run, root, or task.',
+    inputSchema: {
+      type: 'object',
+      properties: {
+        scopeId: {
+          type: 'string',
+          description: 'The ID of the run, root session, or task.'
+        },
+        scopeType: {
+          type: 'string',
+          enum: ['run', 'root', 'task'],
+          description: 'The type of scope for the memory bundle. Default: task',
+          default: 'task'
+        },
+        recentRunsLimit: {
+          type: 'integer',
+          description: 'Number of recent runs to include in the bundle (max 10). Default: 3',
+          default: 3,
+          minimum: 1,
+          maximum: 10
+        },
+        includeRawPointers: {
+          type: 'boolean',
+          description: 'Whether to include raw pointers to findings, artifacts, etc. Default: true',
+          default: true
+        }
+      },
+      required: ['scopeId']
+    }
+  },
+  {
+    name: 'get_message_window',
+    description: 'Get durable message history for a terminal, root session, or trace. Exactly one selector is required.',
+    inputSchema: {
+      type: 'object',
+      properties: {
+        terminalId: {
+          type: 'string',
+          description: 'Filter by terminal ID.'
+        },
+        rootSessionId: {
+          type: 'string',
+          description: 'Filter by root session ID.'
+        },
+        traceId: {
+          type: 'string',
+          description: 'Filter by trace ID.'
+        },
+        afterId: {
+          type: 'integer',
+          description: 'Return messages after this ID (exclusive cursor for pagination).'
+        },
+        limit: {
+          type: 'integer',
+          description: 'Maximum messages to return (max 500). Default: 100',
+          default: 100,
+          minimum: 1,
+          maximum: 500
+        },
+        role: {
+          type: 'string',
+          enum: ['user', 'assistant', 'system', 'tool'],
+          description: 'Filter by message role.'
+        }
+      }
+    }
+  },
+  {
+    name: 'create_room',
+    description: 'Create a persistent group-chat room backed by direct-session participants.',
+    inputSchema: {
+      type: 'object',
+      properties: {
+        title: {
+          type: 'string',
+          description: 'Optional room title.'
+        },
+        roomId: {
+          type: 'string',
+          description: 'Optional explicit room ID.'
+        },
+        workDir: {
+          type: 'string',
+          description: 'Default working directory for room participants.'
+        },
+        participants: {
+          type: 'array',
+          description: 'Room participants to persist.',
+          items: {
+            type: 'object',
+            properties: {
+              adapter: { type: 'string' },
+              displayName: { type: 'string' },
+              model: { type: 'string' },
+              systemPrompt: { type: 'string' },
+              workDir: { type: 'string' },
+              providerSessionId: { type: 'string' }
+            },
+            required: ['adapter']
+          }
+        }
+      },
+      required: ['participants']
+    }
+  },
+  {
+    name: 'send_room_message',
+    description: 'Send one persistent room turn. By default the message is broadcast to all active participants; mentions targets only the named participants.',
+    inputSchema: {
+      type: 'object',
+      properties: {
+        roomId: {
+          type: 'string',
+          description: 'Target room ID.'
+        },
+        content: {
+          type: 'string',
+          description: 'Message content to send.'
+        },
+        mentions: {
+          type: 'array',
+          items: { type: 'string' },
+          description: 'Optional participant IDs to target.'
+        },
+        requestId: {
+          type: 'string',
+          description: 'Optional idempotency key for this room turn.'
+        }
+      },
+      required: ['roomId', 'content']
+    }
+  },
+  {
+    name: 'get_room',
+    description: 'Get room metadata, participants, and latest turn state.',
+    inputSchema: {
+      type: 'object',
+      properties: {
+        roomId: {
+          type: 'string',
+          description: 'Room ID to inspect.'
+        }
+      },
+      required: ['roomId']
+    }
+  },
+  {
+    name: 'get_room_messages',
+    description: 'Get durable room transcript messages.',
+    inputSchema: {
+      type: 'object',
+      properties: {
+        roomId: {
+          type: 'string',
+          description: 'Room ID to inspect.'
+        },
+        afterId: {
+          type: 'integer',
+          description: 'Return room messages after this message ID (exclusive).'
+        },
+        limit: {
+          type: 'integer',
+          description: 'Maximum room messages to return (max 500). Default: 100'
+        }
+      },
+      required: ['roomId']
+    }
+  },
+  {
+    name: 'discuss_room',
+    description: 'Run a bounded discussion across selected room participants and append only a compact summary back into the room.',
+    inputSchema: {
+      type: 'object',
+      properties: {
+        roomId: {
+          type: 'string',
+          description: 'Room ID to use.'
+        },
+        message: {
+          type: 'string',
+          description: 'Primary discussion question or task.'
+        },
+        participantIds: {
+          type: 'array',
+          items: { type: 'string' },
+          description: 'Optional subset of room participant IDs to include.'
+        },
+        requestId: {
+          type: 'string',
+          description: 'Optional idempotency key for this discussion turn.'
+        },
+        rounds: {
+          type: 'array',
+          description: 'Optional custom discussion rounds.'
+        },
+        judge: {
+          type: ['object', 'null'],
+          description: 'Optional final judge config. Pass null to skip judge synthesis.'
+        }
+      },
+      required: ['roomId', 'message']
     }
   },
   // Shared Memory Tools
@@ -2797,11 +3063,15 @@ async function handleLaunchRootSession(args) {
     resumeLatest: args?.resumeLatest === true,
     recoverRootSessionId: args?.recoverRootSessionId || null,
     recoverLatest: args?.recoverLatest === true,
+    resumeMode: args?.resumeMode || null,
+    providerSessionId: args?.providerSessionId || null,
+    sourceRootSessionId: args?.sourceRootSessionId || null,
     detach: true
   };
 
   const hasResumeFlag = Boolean(launchOptions.resumeRootSessionId || launchOptions.resumeLatest);
   const hasRecoverFlag = Boolean(launchOptions.recoverRootSessionId || launchOptions.recoverLatest);
+  const hasExplicitResumeMode = Boolean(launchOptions.resumeMode);
   if (launchOptions.forceNewRoot && (hasResumeFlag || hasRecoverFlag)) {
     throw new Error('Cannot combine forceNewRoot with resume or recover options');
   }
@@ -2810,6 +3080,52 @@ async function handleLaunchRootSession(args) {
   }
   if (hasResumeFlag && hasRecoverFlag) {
     throw new Error('Cannot combine resume and recover options in the same launch_root_session call');
+  }
+  if (hasExplicitResumeMode && (hasResumeFlag || hasRecoverFlag || launchOptions.forceNewRoot)) {
+    throw new Error('Cannot combine resumeMode with resume/recover selectors or forceNewRoot');
+  }
+
+  if (launchOptions.resumeMode === 'exact' || launchOptions.resumeMode === 'context' || launchOptions.resumeMode === 'new') {
+    if (launchOptions.resumeMode === 'exact' && !launchOptions.providerSessionId) {
+      throw new Error('providerSessionId is required when resumeMode=exact');
+    }
+    const res = await callCliagents('POST', '/orchestration/root-sessions/launch', {
+      adapter: launchOptions.adapter,
+      workDir: launchOptions.workDir,
+      model: launchOptions.model || null,
+      permissionMode: launchOptions.permissionMode || null,
+      profile: launchOptions.profile,
+      systemPrompt: launchOptions.systemPrompt || null,
+      externalSessionRef: launchOptions.externalSessionRef || null,
+      allowedTools: launchOptions.allowedTools,
+      resumeMode: launchOptions.resumeMode,
+      providerSessionId: launchOptions.providerSessionId || null,
+      sourceRootSessionId: launchOptions.sourceRootSessionId || null
+    });
+    if (res.status !== 200) {
+      throw new Error(`Failed to launch root session: ${JSON.stringify(res.data)}`);
+    }
+    const data = res.data || {};
+    return {
+      content: [{
+        type: 'text',
+        text: [
+          launchOptions.resumeMode === 'exact'
+            ? '## Managed Root Exact Resumed'
+            : (launchOptions.resumeMode === 'context' ? '## Managed Root Resumed with Context' : '## Managed Root Launched'),
+          '',
+          `adapter: ${data.adapter || launchOptions.adapter}`,
+          `root_session_id: ${data.rootSessionId || 'n/a'}`,
+          `terminal_id: ${data.terminalId || 'n/a'}`,
+          `session_name: ${data.sessionName || 'n/a'}`,
+          launchOptions.resumeMode === 'exact' ? `provider_session_id: ${launchOptions.providerSessionId}` : null,
+          launchOptions.sourceRootSessionId ? `source_root_session_id: ${launchOptions.sourceRootSessionId}` : null,
+          `external_session_ref: ${data.externalSessionRef || launchOptions.externalSessionRef || 'n/a'}`,
+          `console_url: ${data.consoleUrl || 'n/a'}`,
+          data.attachCommand ? `attach_command: ${data.attachCommand}` : null
+        ].filter(Boolean).join('\n')
+      }]
+    };
   }
 
   const launchTarget = await resolveManagedRootLaunchTarget(launchOptions, {
@@ -2858,6 +3174,33 @@ async function handleLaunchRootSession(args) {
           `recovery_reason: ${previousCandidate.recoveryReason || 'stale-root'}`,
           `external_session_ref: ${result.externalSessionRef || previousCandidate.externalSessionRef || 'n/a'}`,
           `provider_resume_session_id: ${recoveryOptions.sessionMetadata?.providerResumeSessionId || 'latest'}`,
+          `console_url: ${result.consoleUrl || 'n/a'}`,
+          result.attachCommand ? `attach_command: ${result.attachCommand}` : null
+        ].filter(Boolean).join('\n')
+      }]
+    };
+  }
+
+  if (launchTarget.action === 'context') {
+    const previousCandidate = launchTarget.candidate;
+    const contextOptions = await buildManagedRootContextLaunchOptions(launchOptions, previousCandidate);
+    const result = await launchManagedRootSession(contextOptions);
+
+    return {
+      content: [{
+        type: 'text',
+        text: [
+          '## Managed Root Resumed with Context',
+          '',
+          `adapter: ${result.adapter}`,
+          `previous_root_session_id: ${previousCandidate.rootSessionId}`,
+          `root_session_id: ${result.rootSessionId}`,
+          `terminal_id: ${result.terminalId}`,
+          `session_name: ${result.sessionName}`,
+          `profile: ${contextOptions.profile}`,
+          'resume_mode: context',
+          `context_reason: ${contextOptions.sessionMetadata?.modelSwitch ? 'model-switch' : (previousCandidate.recoveryReason || 'stale-root')}`,
+          `external_session_ref: ${result.externalSessionRef || previousCandidate.externalSessionRef || 'n/a'}`,
           `console_url: ${result.consoleUrl || 'n/a'}`,
           result.attachCommand ? `attach_command: ${result.attachCommand}` : null
         ].filter(Boolean).join('\n')
@@ -2916,6 +3259,219 @@ async function handleAdoptRootSession(args) {
         `console_url: ${data.consoleUrl || 'n/a'}`,
         data.attachCommand ? `attach_command: ${data.attachCommand}` : null
       ].filter(Boolean).join('\n')
+    }]
+  };
+}
+
+async function handleListProviderSessions(args) {
+  const adapter = args?.adapter || 'codex-cli';
+  const params = new URLSearchParams();
+  params.set('adapter', adapter);
+  if (Number.isFinite(args?.limit)) {
+    params.set('limit', String(args.limit));
+  }
+  if (args?.includeArchived === true) {
+    params.set('includeArchived', '1');
+  }
+
+  const res = await callCliagents('GET', `/orchestration/provider-sessions?${params.toString()}`);
+  if (res.status !== 200) {
+    throw new Error(`Failed to list provider sessions: ${JSON.stringify(res.data)}`);
+  }
+
+  const data = res.data || {};
+  const sessions = Array.isArray(data.sessions) ? data.sessions : [];
+  if (!data.supported) {
+    return {
+      content: [{
+        type: 'text',
+        text: `Provider-session discovery is not supported for ${adapter}.`
+      }]
+    };
+  }
+  if (sessions.length === 0) {
+    return {
+      content: [{
+        type: 'text',
+        text: `No provider-local sessions found for ${adapter}.`
+      }]
+    };
+  }
+
+  return {
+    content: [{
+      type: 'text',
+      text: [
+        `## Provider Sessions (${adapter})`,
+        '',
+        sessions.map((session) => (
+          `- ${session.providerSessionId} title="${truncateText(session.title || session.preview || 'session', 80)}"${session.updatedAt ? ` updated=${session.updatedAt}` : ''}${session.cwd ? ` cwd=${session.cwd}` : ''}${session.resumeCapability ? ` resume=${session.resumeCapability}` : ''}`
+        )).join('\n')
+      ].join('\n')
+    }]
+  };
+}
+
+async function handleImportProviderSession(args) {
+  const res = await callCliagents('POST', '/orchestration/provider-sessions/import', {
+    adapter: args?.adapter || 'codex-cli',
+    providerSessionId: args?.providerSessionId,
+    externalSessionRef: args?.externalSessionRef || null,
+    rootSessionId: args?.rootSessionId || null
+  });
+  if (res.status !== 200) {
+    throw new Error(`Failed to import provider session: ${JSON.stringify(res.data)}`);
+  }
+
+  const data = res.data || {};
+  return {
+    content: [{
+      type: 'text',
+      text: [
+        '## Provider Session Imported',
+        '',
+        `adapter: ${data.adapter || args?.adapter || 'codex-cli'}`,
+        `provider_session_id: ${data.providerSessionId || args?.providerSessionId || 'n/a'}`,
+        `root_session_id: ${data.rootSessionId || 'n/a'}`,
+        `reused: ${data.reusedImportedRoot ? 'yes' : 'no'}`,
+        `external_session_ref: ${data.externalSessionRef || 'n/a'}`,
+        data.descriptor?.title ? `title: ${data.descriptor.title}` : null
+      ].filter(Boolean).join('\n')
+    }]
+  };
+}
+
+async function handleCreateRoom(args) {
+  const res = await callCliagents('POST', '/orchestration/rooms', {
+    roomId: args?.roomId || null,
+    title: args?.title || null,
+    workDir: args?.workDir || null,
+    participants: Array.isArray(args?.participants) ? args.participants : []
+  });
+  if (res.status !== 200) {
+    throw new Error(`Failed to create room: ${JSON.stringify(res.data)}`);
+  }
+
+  const data = res.data || {};
+  return {
+    content: [{
+      type: 'text',
+      text: [
+        '## Room Created',
+        '',
+        `room_id: ${data.room?.id || 'n/a'}`,
+        `root_session_id: ${data.room?.rootSessionId || 'n/a'}`,
+        data.room?.title ? `title: ${data.room.title}` : null,
+        `participants: ${Array.isArray(data.participants) ? data.participants.length : 0}`
+      ].filter(Boolean).join('\n')
+    }]
+  };
+}
+
+async function handleSendRoomMessage(args) {
+  const res = await callCliagents('POST', `/orchestration/rooms/${encodeURIComponent(args?.roomId || '')}/messages`, {
+    content: args?.content,
+    mentions: Array.isArray(args?.mentions) ? args.mentions : [],
+    requestId: args?.requestId || null
+  });
+  if (res.status !== 200) {
+    throw new Error(`Failed to send room message: ${JSON.stringify(res.data)}`);
+  }
+
+  const data = res.data || {};
+  return {
+    content: [{
+      type: 'text',
+      text: [
+        '## Room Turn Completed',
+        '',
+        `room_id: ${data.roomId || args?.roomId || 'n/a'}`,
+        `turn_id: ${data.turn?.id || 'n/a'}`,
+        `status: ${data.turn?.status || 'unknown'}`,
+        `participant_results: ${Array.isArray(data.participantResults) ? data.participantResults.length : 0}`
+      ].join('\n')
+    }]
+  };
+}
+
+async function handleGetRoom(args) {
+  const res = await callCliagents('GET', `/orchestration/rooms/${encodeURIComponent(args?.roomId || '')}`);
+  if (res.status !== 200) {
+    throw new Error(`Failed to get room: ${JSON.stringify(res.data)}`);
+  }
+  const data = res.data || {};
+  return {
+    content: [{
+      type: 'text',
+      text: [
+        '## Room',
+        '',
+        `room_id: ${data.room?.id || 'n/a'}`,
+        `root_session_id: ${data.room?.rootSessionId || 'n/a'}`,
+        data.room?.title ? `title: ${data.room.title}` : null,
+        `participants: ${Array.isArray(data.participants) ? data.participants.length : 0}`,
+        data.latestTurn?.id ? `latest_turn_id: ${data.latestTurn.id}` : null,
+        data.latestTurn?.status ? `latest_turn_status: ${data.latestTurn.status}` : null
+      ].filter(Boolean).join('\n')
+    }]
+  };
+}
+
+async function handleGetRoomMessages(args) {
+  const params = new URLSearchParams();
+  if (Number.isInteger(args?.afterId)) {
+    params.set('after_id', String(args.afterId));
+  }
+  if (Number.isFinite(args?.limit)) {
+    params.set('limit', String(args.limit));
+  }
+  const qs = params.toString();
+  const res = await callCliagents('GET', `/orchestration/rooms/${encodeURIComponent(args?.roomId || '')}/messages${qs ? `?${qs}` : ''}`);
+  if (res.status !== 200) {
+    throw new Error(`Failed to get room messages: ${JSON.stringify(res.data)}`);
+  }
+  const data = res.data || {};
+  const messages = Array.isArray(data.messages) ? data.messages : [];
+  return {
+    content: [{
+      type: 'text',
+      text: [
+        '## Room Messages',
+        '',
+        `room_id: ${data.room?.id || args?.roomId || 'n/a'}`,
+        `returned: ${messages.length}`,
+        '',
+        messages.map((message) => `${message.id}. ${message.role}${message.participantId ? `(${message.participantId})` : ''}: ${truncateText(message.content, 160)}`).join('\n')
+      ].filter(Boolean).join('\n')
+    }]
+  };
+}
+
+async function handleDiscussRoom(args) {
+  const res = await callCliagents('POST', `/orchestration/rooms/${encodeURIComponent(args?.roomId || '')}/discuss`, {
+    message: args?.message,
+    participantIds: Array.isArray(args?.participantIds) ? args.participantIds : [],
+    requestId: args?.requestId || null,
+    rounds: Array.isArray(args?.rounds) ? args.rounds : undefined,
+    judge: Object.prototype.hasOwnProperty.call(args || {}, 'judge') ? args.judge : null
+  });
+  if (res.status !== 200) {
+    throw new Error(`Failed to discuss room: ${JSON.stringify(res.data)}`);
+  }
+
+  const data = res.data || {};
+  return {
+    content: [{
+      type: 'text',
+      text: [
+        '## Room Discussion Completed',
+        '',
+        `room_id: ${data.roomId || args?.roomId || 'n/a'}`,
+        `turn_id: ${data.turn?.id || 'n/a'}`,
+        `status: ${data.turn?.status || 'unknown'}`,
+        `run_id: ${data.runId || 'n/a'}`,
+        `discussion_id: ${data.discussionId || 'n/a'}`
+      ].join('\n')
     }]
   };
 }
@@ -3160,6 +3716,126 @@ async function handleGetUsageSummary(args) {
         ...breakdownLines,
         ...recordLines
       ].join('\n')
+    }]
+  };
+}
+
+async function handleGetMemoryBundle(args) {
+  const { scopeId, scopeType = 'task', recentRunsLimit = 3, includeRawPointers = true } = args;
+  if (!scopeId) {
+    throw new Error('scopeId is required');
+  }
+
+  const params = new URLSearchParams();
+  params.set('scope_type', scopeType);
+  params.set('recent_runs_limit', String(recentRunsLimit));
+  params.set('include_raw_pointers', String(includeRawPointers));
+
+  const res = await callWithRetry(
+    'GET',
+    `/orchestration/memory/bundle/${encodeURIComponent(scopeId)}?${params.toString()}`
+  );
+
+  if (res.status !== 200) {
+    throw new Error(`Failed to get memory bundle: ${JSON.stringify(res.data)}`);
+  }
+
+  const bundle = res.data;
+  let text = `## Memory Bundle: ${bundle.scopeType} ${bundle.scopeId}\n\n`;
+  text += `**Brief:** ${bundle.brief || 'n/a'}\n\n`;
+
+  if (bundle.keyDecisions?.length > 0) {
+    text += `### Key Decisions\n${bundle.keyDecisions.map(d => `- ${d}`).join('\n')}\n\n`;
+  }
+
+  if (bundle.pendingItems?.length > 0) {
+    text += `### Pending Items\n${bundle.pendingItems.map(i => `- ${i}`).join('\n')}\n\n`;
+  }
+
+  if (bundle.findings?.length > 0) {
+    text += `### Top Findings\n${bundle.findings.map(f => `- [${f.severity}/${f.type}] ${f.content}`).join('\n')}\n\n`;
+  }
+
+  if (bundle.recentRuns?.length > 0) {
+    text += `### Recent Runs\n`;
+    for (const run of bundle.recentRuns) {
+      text += `- **${run.runId}** (${run.kind}): ${run.status} - ${run.brief || 'no brief'}\n`;
+    }
+    text += '\n';
+  }
+
+  if (bundle.isStale) {
+    text += `*Note: This bundle is marked as STALE and may need a refresh.*\n\n`;
+  }
+
+  if (bundle.rawPointers) {
+    text += `### Raw Pointers\n\`\`\`json\n${JSON.stringify(bundle.rawPointers, null, 2)}\n\`\`\`\n`;
+  }
+
+  return {
+    content: [{
+      type: 'text',
+      text
+    }]
+  };
+}
+
+async function handleGetMessageWindow(args) {
+  const { terminalId, rootSessionId, traceId, afterId, limit = 100, role } = args;
+
+  const selectors = [terminalId, rootSessionId, traceId].filter(Boolean);
+  if (selectors.length !== 1) {
+    throw new Error('Exactly one of terminalId, rootSessionId, or traceId is required');
+  }
+
+  const params = new URLSearchParams();
+  if (terminalId) params.set('terminal_id', terminalId);
+  if (rootSessionId) params.set('root_session_id', rootSessionId);
+  if (traceId) params.set('trace_id', traceId);
+  if (afterId) params.set('after_id', String(afterId));
+  if (limit) params.set('limit', String(limit));
+  if (role) params.set('role', role);
+
+  const res = await callWithRetry('GET', `/orchestration/memory/messages?${params.toString()}`);
+
+  if (res.status !== 200) {
+    throw new Error(`Failed to get messages: ${JSON.stringify(res.data)}`);
+  }
+
+  const { messages, pagination } = res.data;
+
+  if (messages.length === 0) {
+    return {
+      content: [{
+        type: 'text',
+        text: 'No messages found for the given criteria.'
+      }]
+    };
+  }
+
+  let text = `## Message History\n`;
+  text += `Count: ${messages.length} / Total: ${pagination.total}\n\n`;
+
+  for (const msg of messages) {
+    const timestamp = msg.createdAt || msg.created_at;
+    const time = timestamp ? new Date(timestamp).toISOString().split('T')[1].split('.')[0] : 'unknown';
+    text += `### [${msg.id}] ${msg.role.toUpperCase()} @ ${time}\n`;
+    text += `${msg.content}\n\n`;
+    if (msg.metadata && Object.keys(msg.metadata).length > 0) {
+      text += `*Metadata: ${JSON.stringify(msg.metadata)}*\n\n`;
+    }
+    text += `---\n\n`;
+  }
+
+  if (pagination.hasMore || pagination.has_more) {
+    const lastId = pagination.nextAfterId || messages[messages.length - 1].id;
+    text += `*More messages available. Use afterId=${lastId} to fetch next page.*`;
+  }
+
+  return {
+    content: [{
+      type: 'text',
+      text
     }]
   };
 }
@@ -3460,6 +4136,12 @@ async function handleRequest(request) {
           case 'launch_root_session':
             result = await handleLaunchRootSession(args);
             break;
+          case 'list_provider_sessions':
+            result = await handleListProviderSessions(args);
+            break;
+          case 'import_provider_session':
+            result = await handleImportProviderSession(args);
+            break;
           case 'adopt_root_session':
             result = await handleAdoptRootSession(args);
             break;
@@ -3474,6 +4156,27 @@ async function handleRequest(request) {
             break;
           case 'get_usage_summary':
             result = await handleGetUsageSummary(args);
+            break;
+          case 'get_memory_bundle':
+            result = await handleGetMemoryBundle(args);
+            break;
+          case 'get_message_window':
+            result = await handleGetMessageWindow(args);
+            break;
+          case 'create_room':
+            result = await handleCreateRoom(args);
+            break;
+          case 'send_room_message':
+            result = await handleSendRoomMessage(args);
+            break;
+          case 'get_room':
+            result = await handleGetRoom(args);
+            break;
+          case 'get_room_messages':
+            result = await handleGetRoomMessages(args);
+            break;
+          case 'discuss_room':
+            result = await handleDiscussRoom(args);
             break;
           // Shared Memory Tools
           case 'share_finding':
@@ -3560,9 +4263,18 @@ module.exports = {
   handleGetUsageSummary,
   handleListModels,
   handleRecommendModel,
+  handleListProviderSessions,
+  handleImportProviderSession,
+  handleCreateRoom,
+  handleSendRoomMessage,
+  handleGetRoom,
+  handleGetRoomMessages,
+  handleDiscussRoom,
   handleGetRunDetail,
   handleListRootSessions,
   handleListRuns,
+  handleGetMemoryBundle,
+  handleGetMessageWindow,
   handleResetRootSession,
   handleRequest,
   clearPersistedRootContext,

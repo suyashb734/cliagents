@@ -197,6 +197,9 @@ function parseLaunchArgs(rawArgs = []) {
       case '--recover-latest':
         parsed.recoverLatest = true;
         break;
+      case '--resume-provider-session':
+        parsed.providerSessionId = args.shift();
+        break;
       case '--allow-tool':
         parsed.allowedTools.push(args.shift());
         break;
@@ -216,8 +219,12 @@ function parseLaunchArgs(rawArgs = []) {
   }
   const hasResumeFlag = Boolean(parsed.resumeRootSessionId || parsed.resumeLatest);
   const hasRecoverFlag = Boolean(parsed.recoverRootSessionId || parsed.recoverLatest);
+  const hasProviderResume = Boolean(parsed.providerSessionId);
   if (parsed.forceNewRoot && (hasResumeFlag || hasRecoverFlag)) {
     throw new Error('Cannot combine --new-root with resume or recover flags');
+  }
+  if (hasProviderResume && (hasResumeFlag || hasRecoverFlag)) {
+    throw new Error('Cannot combine --resume-provider-session with resume or recover flags');
   }
   if (parsed.externalSessionRef && (hasResumeFlag || hasRecoverFlag)) {
     throw new Error('Cannot combine --external-session-ref with resume or recover flags');
@@ -242,9 +249,10 @@ function printLaunchUsage() {
   console.log('  --external-session-ref <id>   Stable external session ref to bind');
   console.log('  --new-root                    Always create a fresh managed root');
   console.log('  --resume-root <id>            Reattach to a specific live managed root');
-  console.log('  --resume-latest               Reattach to the most recent matching live root');
+  console.log('  --resume-latest               Resume the most recent matching root if one exists, preferring live reattach then carried context');
   console.log('  --recover-root <id>           Recover a specific stale or shell-only managed root');
-  console.log('  --recover-latest              Recover the most recent stale or shell-only root');
+  console.log('  --recover-latest              Recover the most recent stale, interrupted, or shell-only root');
+  console.log('  --resume-provider-session <id> Exact-resume a provider-local session into a new managed root');
   console.log('  --allow-tool <tool>           Restrict allowed tools (repeatable)');
   console.log('  --detach                      Create the terminal without attaching');
   console.log('');
@@ -624,6 +632,10 @@ function resolveLaunchWorkDir(workDir) {
   return path.resolve(workDir || process.cwd());
 }
 
+function describeLaunchWorkDir(workDir) {
+  return workDir ? resolveLaunchWorkDir(workDir) : 'the current workspace';
+}
+
 function normalizeActivityTimestamp(value) {
   if (value == null) {
     return 0;
@@ -637,9 +649,165 @@ function normalizeActivityTimestamp(value) {
 
 function getRootSessionActivityAge(record) {
   return formatManagedRootCandidateAge({
-    lastOccurredAt: record?.lastOccurredAt || null,
+    lastOccurredAt: record?.lastMessageAt || record?.lastOccurredAt || null,
     lastRecordedAt: record?.lastRecordedAt || null
   });
+}
+
+function truncateManagedRootContextText(value, maxLength = 320) {
+  const text = String(value || '').trim();
+  if (!text) {
+    return '';
+  }
+  if (text.length <= maxLength) {
+    return text;
+  }
+  return `${text.slice(0, Math.max(0, maxLength - 16)).trimEnd()}... [truncated]`;
+}
+
+function isExistingRootModelCompatible(launchOptions = {}, candidate = null) {
+  if (!candidate || !launchOptions?.modelExplicit) {
+    return true;
+  }
+  const requestedModel = String(launchOptions.model || '').trim();
+  const candidateModel = String(candidate.model || '').trim();
+  if (!requestedModel) {
+    return true;
+  }
+  if (!candidateModel) {
+    return false;
+  }
+  return requestedModel === candidateModel;
+}
+
+function combineManagedRootSystemPrompt(contextPrompt, explicitPrompt = null) {
+  const sections = [];
+  const normalizedContext = String(contextPrompt || '').trim();
+  const normalizedExplicit = String(explicitPrompt || '').trim();
+
+  if (normalizedContext) {
+    sections.push(normalizedContext);
+  }
+  if (normalizedExplicit) {
+    sections.push(`Additional operator instructions:\n${normalizedExplicit}`);
+  }
+
+  return sections.join('\n\n') || null;
+}
+
+function buildManagedRootContextResumePrompt(candidate, bundle, messageWindow = []) {
+  const sections = [
+    'You are continuing prior work from an older cliagents root session in a new linked root.',
+    `Previous root session: ${candidate?.rootSessionId || 'unknown'}.`
+  ];
+
+  if (bundle?.brief) {
+    sections.push(`Summary:\n${truncateManagedRootContextText(bundle.brief, 1500)}`);
+  } else if (candidate?.latestSummary) {
+    sections.push(`Summary:\n${truncateManagedRootContextText(candidate.latestSummary, 1500)}`);
+  }
+
+  if (Array.isArray(bundle?.keyDecisions) && bundle.keyDecisions.length > 0) {
+    sections.push(`Key decisions:\n${bundle.keyDecisions.slice(0, 8).map((entry) => `- ${truncateManagedRootContextText(entry, 180)}`).join('\n')}`);
+  }
+
+  if (Array.isArray(bundle?.pendingItems) && bundle.pendingItems.length > 0) {
+    sections.push(`Pending items:\n${bundle.pendingItems.slice(0, 8).map((entry) => `- ${truncateManagedRootContextText(entry, 180)}`).join('\n')}`);
+  }
+
+  const formattedMessages = (Array.isArray(messageWindow) ? messageWindow : [])
+    .slice(-8)
+    .map((entry) => `${entry.role || 'message'}: ${truncateManagedRootContextText(entry.content, 280)}`)
+    .filter(Boolean);
+  if (formattedMessages.length > 0) {
+    sections.push(`Recent conversation excerpts:\n${formattedMessages.join('\n')}`);
+  }
+
+  sections.push('Treat this as carried context only. Continue from here instead of asking to reconstruct the prior thread.');
+  return sections.filter(Boolean).join('\n\n');
+}
+
+function createManagedRootLaunchTarget(action, reason, options = {}) {
+  const resumeModeByAction = {
+    launch: 'new',
+    resume: 'reattach',
+    recover: 'exact',
+    context: 'context'
+  };
+
+  return {
+    action,
+    resumeMode: resumeModeByAction[action] || 'new',
+    reason,
+    ...(options.candidate ? { candidate: options.candidate } : {}),
+    ...(options.candidates ? { candidates: options.candidates } : {})
+  };
+}
+
+function canRecoverManagedRootExactly(launchOptions = {}, candidate = null) {
+  return Boolean(candidate)
+    && isExistingRootModelCompatible(launchOptions, candidate)
+    && hasExactManagedRootProviderResume(candidate);
+}
+
+async function buildManagedRootContextLaunchOptions(launchOptions, candidate, dependencies = {}) {
+  if (!candidate) {
+    throw new Error('Context resume requires a managed root candidate');
+  }
+
+  const callJson = dependencies.callCliagentsJson || callCliagentsJson;
+  const logger = dependencies.logger || console;
+  const rootSessionId = candidate.rootSessionId;
+  const encodedRootSessionId = encodeURIComponent(rootSessionId);
+  const safeCallJson = async (route) => {
+    try {
+      return await callJson(route);
+    } catch (error) {
+      logger.warn?.(`[cliagents] Failed to load carried context for ${rootSessionId}: ${error.message}`);
+      return null;
+    }
+  };
+
+  const [bundle, messageWindow] = await Promise.all([
+    safeCallJson(
+      `/orchestration/memory/bundle/${encodedRootSessionId}?scope_type=root&recent_runs_limit=3&include_raw_pointers=true`
+    ),
+    safeCallJson(
+      `/orchestration/memory/messages?root_session_id=${encodedRootSessionId}&limit=12`
+    )
+  ]);
+  const messageList = Array.isArray(messageWindow?.messages) ? messageWindow.messages : [];
+  const contextPrompt = buildManagedRootContextResumePrompt(candidate, bundle, messageList);
+  const modelSwitch = launchOptions?.modelExplicit && !isExistingRootModelCompatible(launchOptions, candidate);
+
+  return {
+    ...launchOptions,
+    adapter: candidate.adapter || launchOptions.adapter,
+    workDir: candidate.workDir || launchOptions.workDir,
+    profile: launchOptions.profileExplicit ? launchOptions.profile : (candidate.launchProfile || launchOptions.profile),
+    model: launchOptions.modelExplicit ? launchOptions.model : (candidate.model || launchOptions.model || null),
+    permissionMode: launchOptions.permissionModeExplicit ? launchOptions.permissionMode : null,
+    systemPrompt: combineManagedRootSystemPrompt(contextPrompt, launchOptions.systemPrompt),
+    externalSessionRef: candidate.externalSessionRef || launchOptions.externalSessionRef || null,
+    sessionMetadata: {
+      contextResumedManagedRoot: true,
+      contextResume: true,
+      resumeMode: 'context',
+      previousRootSessionId: candidate.rootSessionId,
+      previousTerminalId: candidate.terminalId || null,
+      previousRootStatus: candidate.status || null,
+      previousProcessState: candidate.processState || null,
+      previousCurrentCommand: candidate.currentCommand || null,
+      previousProviderThreadRef: candidate.providerThreadRef || null,
+      previousRecoveryCapability: candidate.recoveryCapability || null,
+      recoveryReason: candidate.recoveryReason || null,
+      modelSwitch,
+      carriedContextSource: 'root-bundle+message-window',
+      carriedContextMessageCount: messageList.length,
+      carriedContextStale: bundle?.isStale === true,
+      carriedContextRunIds: Array.isArray(bundle?.rawPointers?.runIds) ? bundle.rawPointers.runIds : []
+    }
+  };
 }
 
 function getRootSessionMainTerminal(snapshot) {
@@ -717,8 +885,12 @@ function buildRootSessionOperatorRecord(summary, snapshot, options = {}) {
     workDir,
     processState,
     terminalStatus,
+    model: summary.model || rootSession.model || null,
+    lastMessageAt: summary.lastMessageAt || null,
+    messageCount: summary.messageCount || 0,
     lastOccurredAt: summary.lastOccurredAt || null,
     lastRecordedAt: summary.lastRecordedAt || null,
+    recoveryCapability: summary.recoveryCapability || null,
     attention: summary.attention || snapshot?.attention || { requiresAttention: false, reasons: [] },
     latestSummary: summary.activitySummary || snapshot?.activitySummary || summary.latestConclusion?.summary || '',
     activityExcerpt: summary.activityExcerpt || snapshot?.activityExcerpt || '',
@@ -735,8 +907,8 @@ function compareRootSessionOperatorRecords(left, right) {
   if (Boolean(left?.attention?.requiresAttention) !== Boolean(right?.attention?.requiresAttention)) {
     return left.attention?.requiresAttention ? -1 : 1;
   }
-  const rightTime = normalizeActivityTimestamp(right?.lastOccurredAt || right?.lastRecordedAt);
-  const leftTime = normalizeActivityTimestamp(left?.lastOccurredAt || left?.lastRecordedAt);
+  const rightTime = normalizeActivityTimestamp(right?.lastMessageAt || right?.lastOccurredAt || right?.lastRecordedAt);
+  const leftTime = normalizeActivityTimestamp(left?.lastMessageAt || left?.lastOccurredAt || left?.lastRecordedAt);
   if (rightTime !== leftTime) {
     return rightTime - leftTime;
   }
@@ -881,6 +1053,17 @@ function buildManagedRootProviderLatestResumeCommand(adapter) {
   }
 }
 
+function hasExactManagedRootProviderResume(candidate = null) {
+  return Boolean(
+    candidate
+    && (
+      candidate.resumeSessionId
+      || candidate.resumeCommand
+      || candidate.providerThreadRef
+    )
+  );
+}
+
 function extractManagedRootRecoveryHint(snapshot, rootSessionId) {
   const sessions = Array.isArray(snapshot?.sessions) ? snapshot.sessions : [];
   const events = Array.isArray(snapshot?.events) ? snapshot.events : [];
@@ -965,26 +1148,54 @@ function buildManagedRootLaunchCandidate(summary, snapshot, options = {}) {
     return null;
   }
 
+  const sessions = Array.isArray(snapshot?.sessions) ? snapshot.sessions : [];
+  const mainSession = sessions.find((session) => (
+    session?.sessionId === rootSessionId
+    || (
+      String(session?.role || '').trim().toLowerCase() === 'main'
+      && String(session?.sessionKind || '').trim().toLowerCase() === 'main'
+    )
+  )) || null;
   const terminalId = summary?.interactiveTerminalId || snapshot?.interactiveTerminalId || mainTerminal?.terminal_id || rootSession.terminalId || null;
   const sessionName = mainTerminal?.session_name || null;
+  const rootStatus = String(rootSession.status || summary?.status || mainTerminal?.status || 'unknown').trim().toLowerCase() || 'unknown';
   const processState = String(mainTerminal?.process_state || rootSession.processState || '').trim().toLowerCase() || null;
   const terminalStatus = String(mainTerminal?.status || rootSession.terminalStatus || '').trim().toLowerCase() || null;
   const currentCommand = normalizeManagedRootCurrentCommand(mainTerminal?.current_command || mainTerminal?.currentCommand || null);
-  const hasLiveTerminal = Boolean(sessionName)
-    && processState !== 'exited'
-    && terminalStatus !== 'orphaned';
-  const shellOnlyRoot = hasLiveTerminal && isManagedRootShellCommand(currentCommand);
   const recoveryHint = extractManagedRootRecoveryHint(snapshot, rootSessionId);
   const providerThreadRef = recoveryHint.providerThreadRef
     || rootSession.providerThreadRef
     || mainTerminal?.provider_thread_ref
     || mainTerminal?.providerThreadRef
     || null;
-  const launchAction = hasLiveTerminal && !shellOnlyRoot ? 'resume' : 'recover';
+  const hasExactProviderResume = hasExactManagedRootProviderResume({
+    ...recoveryHint,
+    providerThreadRef
+  });
+  const rootDestroyed = Boolean(mainSession?.destroyed || rootSession.destroyed);
+  const rootTerminatedWithError = String(mainSession?.terminationStatus || rootSession.terminationStatus || '').trim().toLowerCase() === 'error';
+  const hasLiveTerminal = Boolean(sessionName)
+    && processState !== 'exited'
+    && terminalStatus !== 'orphaned';
+  const providerInterrupted = hasExactProviderResume
+    && (
+      terminalStatus === 'error'
+      || rootStatus === 'error'
+      || rootTerminatedWithError
+    );
+  const shellOnlyRoot = hasLiveTerminal && isManagedRootShellCommand(currentCommand);
+  if (rootDestroyed && !sessionName && !hasExactProviderResume && !providerThreadRef) {
+    return null;
+  }
+  const launchAction = hasLiveTerminal && !shellOnlyRoot && !providerInterrupted ? 'resume' : 'recover';
   let recoveryReason = null;
   if (launchAction === 'recover') {
-    if (shellOnlyRoot) {
+    if (providerInterrupted) {
+      recoveryReason = 'provider-interrupted';
+    } else if (shellOnlyRoot) {
       recoveryReason = 'provider-exited';
+    } else if (rootDestroyed) {
+      recoveryReason = 'destroyed';
     } else if (terminalStatus === 'orphaned') {
       recoveryReason = 'orphaned';
     } else if (processState === 'exited') {
@@ -1001,14 +1212,17 @@ function buildManagedRootLaunchCandidate(summary, snapshot, options = {}) {
     windowName: mainTerminal?.window_name || null,
     adapter,
     originClient: expectedOriginClient,
-    status: String(rootSession.status || summary?.status || terminalStatus || 'unknown').trim().toLowerCase() || 'unknown',
+    status: rootStatus,
     processState,
     workDir: candidateWorkDir,
-    model: rootSession.model || null,
+    model: mainTerminal?.model || rootSession.model || null,
     externalSessionRef: rootSession.externalSessionRef || summary?.externalSessionRef || mainTerminal?.external_session_ref || null,
     launchProfile: rootMetadata.launchProfile || null,
+    lastMessageAt: summary?.lastMessageAt || null,
+    messageCount: summary?.messageCount || 0,
     lastOccurredAt: summary?.lastOccurredAt || null,
     lastRecordedAt: summary?.lastRecordedAt || null,
+    recoveryCapability: summary?.recoveryCapability || null,
     latestSummary: snapshot?.activitySummary
       || summary?.activitySummary
       || rootSession.latestConclusion?.summary
@@ -1021,6 +1235,7 @@ function buildManagedRootLaunchCandidate(summary, snapshot, options = {}) {
     currentCommand,
     launchAction,
     recoveryReason,
+    exactProviderResume: hasExactProviderResume,
     resumeCommand: recoveryHint.resumeCommand,
     resumeSessionId: recoveryHint.resumeSessionId,
     providerThreadRef,
@@ -1122,6 +1337,7 @@ function buildRootSessionSummaryFromSnapshot(rootSessionId, snapshot) {
     rootSessionId,
     status: snapshot?.status || rootSession.status || 'unknown',
     originClient: rootSession.originClient || null,
+    model: rootSession.model || null,
     rootType: snapshot?.rootType || null,
     rootMode: snapshot?.rootMode || null,
     interactiveTerminalId: snapshot?.interactiveTerminalId || null,
@@ -1132,7 +1348,10 @@ function buildRootSessionSummaryFromSnapshot(rootSessionId, snapshot) {
     activitySummary: snapshot?.activitySummary || null,
     activityExcerpt: snapshot?.activityExcerpt || null,
     activitySource: snapshot?.activitySource || 'fallback',
+    lastMessageAt: snapshot?.lastMessageAt || rootSession.lastMessageAt || null,
+    messageCount: snapshot?.messageCount || rootSession.messageCount || 0,
     lastOccurredAt,
+    recoveryCapability: snapshot?.recoveryCapability || null,
     live: typeof snapshot?.counts?.live === 'number' ? snapshot.counts.live > 0 : null
   };
 }
@@ -1250,7 +1469,7 @@ async function getManagedRootRecoveryCandidate(rootSessionId, options = {}, depe
 }
 
 function formatManagedRootCandidateAge(candidate) {
-  const rawValue = candidate.lastOccurredAt || candidate.lastRecordedAt || null;
+  const rawValue = candidate.lastMessageAt || candidate.lastOccurredAt || candidate.lastRecordedAt || null;
   const timestamp = rawValue == null ? NaN : Date.parse(rawValue);
   if (!Number.isFinite(timestamp)) {
     return 'recent';
@@ -1424,10 +1643,10 @@ async function promptForManagedRootSelection(candidates, options = {}) {
 
 async function resolveManagedRootLaunchTarget(launchOptions, dependencies = {}) {
   if (launchOptions.forceNewRoot) {
-    return { action: 'launch', reason: 'force-new-root' };
+    return createManagedRootLaunchTarget('launch', 'force-new-root');
   }
   if (launchOptions.externalSessionRef) {
-    return { action: 'launch', reason: 'explicit-external-session-ref' };
+    return createManagedRootLaunchTarget('launch', 'explicit-external-session-ref');
   }
 
   const listCandidates = dependencies.listManagedRootLaunchCandidates || listManagedRootLaunchCandidates;
@@ -1441,14 +1660,24 @@ async function resolveManagedRootLaunchTarget(launchOptions, dependencies = {}) 
       adapter: launchOptions.adapter,
       workDir: launchOptions.workDir
     }, dependencies);
-    if (!candidate) {
-      throw new Error(`Managed root ${launchOptions.resumeRootSessionId} is not attachable for adapter ${launchOptions.adapter}`);
+    if (candidate && isExistingRootModelCompatible(launchOptions, candidate)) {
+      return createManagedRootLaunchTarget('resume', 'explicit-resume-root', { candidate });
     }
-    return {
-      action: 'resume',
-      reason: 'explicit-resume-root',
-      candidate
-    };
+    const recoveryCandidate = await getRecoveryCandidate(launchOptions.resumeRootSessionId, {
+      adapter: launchOptions.adapter,
+      workDir: launchOptions.workDir
+    }, dependencies);
+    const contextCandidate = candidate || recoveryCandidate;
+    if (contextCandidate) {
+      return createManagedRootLaunchTarget(
+        'context',
+        isExistingRootModelCompatible(launchOptions, contextCandidate)
+          ? 'explicit-resume-root-context'
+          : 'explicit-resume-root-model-switch',
+        { candidate: contextCandidate }
+      );
+    }
+    throw new Error(`Managed root ${launchOptions.resumeRootSessionId} is not attachable for adapter ${launchOptions.adapter}`);
   }
 
   if (launchOptions.recoverRootSessionId) {
@@ -1459,11 +1688,16 @@ async function resolveManagedRootLaunchTarget(launchOptions, dependencies = {}) 
     if (!candidate) {
       throw new Error(`Managed root ${launchOptions.recoverRootSessionId} is not recoverable for adapter ${launchOptions.adapter}`);
     }
-    return {
-      action: 'recover',
-      reason: 'explicit-recover-root',
-      candidate
-    };
+    if (canRecoverManagedRootExactly(launchOptions, candidate)) {
+      return createManagedRootLaunchTarget('recover', 'explicit-recover-root', { candidate });
+    }
+    return createManagedRootLaunchTarget(
+      'context',
+      isExistingRootModelCompatible(launchOptions, candidate)
+        ? 'explicit-recover-root-context'
+        : 'explicit-recover-root-model-switch',
+      { candidate }
+    );
   }
 
   const candidates = await listCandidates({
@@ -1474,33 +1708,47 @@ async function resolveManagedRootLaunchTarget(launchOptions, dependencies = {}) 
   const recoverCandidates = Array.isArray(candidates?.recoverCandidates) ? candidates.recoverCandidates : [];
 
   if (launchOptions.resumeLatest) {
-    if (!resumeCandidates.length) {
-      throw new Error(`No resumable managed roots found for ${launchOptions.adapter} in ${resolveLaunchWorkDir(launchOptions.workDir)}`);
+    if (resumeCandidates.length) {
+      const candidate = resumeCandidates[0];
+      if (isExistingRootModelCompatible(launchOptions, candidate)) {
+        return createManagedRootLaunchTarget('resume', 'resume-latest', { candidate });
+      }
+      return createManagedRootLaunchTarget('context', 'resume-latest-model-switch', { candidate });
     }
-    return {
-      action: 'resume',
-      reason: 'resume-latest',
-      candidate: resumeCandidates[0]
-    };
+    if (recoverCandidates.length) {
+      return createManagedRootLaunchTarget(
+        'context',
+        isExistingRootModelCompatible(launchOptions, recoverCandidates[0])
+          ? 'resume-latest-context'
+          : 'resume-latest-model-switch',
+        { candidate: recoverCandidates[0] }
+      );
+    }
+    throw new Error(`No resumable managed roots found for ${launchOptions.adapter} in ${describeLaunchWorkDir(launchOptions.workDir)}`);
   }
 
   if (launchOptions.recoverLatest) {
     if (!recoverCandidates.length) {
-      throw new Error(`No recoverable managed roots found for ${launchOptions.adapter} in ${resolveLaunchWorkDir(launchOptions.workDir)}`);
+      throw new Error(`No recoverable managed roots found for ${launchOptions.adapter} in ${describeLaunchWorkDir(launchOptions.workDir)}`);
     }
-    return {
-      action: 'recover',
-      reason: 'recover-latest',
-      candidate: recoverCandidates[0]
-    };
+    if (canRecoverManagedRootExactly(launchOptions, recoverCandidates[0])) {
+      return createManagedRootLaunchTarget('recover', 'recover-latest', { candidate: recoverCandidates[0] });
+    }
+    return createManagedRootLaunchTarget(
+      'context',
+      isExistingRootModelCompatible(launchOptions, recoverCandidates[0])
+        ? 'recover-latest-context'
+        : 'recover-latest-model-switch',
+      { candidate: recoverCandidates[0] }
+    );
   }
 
   if (!interactive || launchOptions.detach || (resumeCandidates.length === 0 && recoverCandidates.length === 0)) {
-    return {
-      action: 'launch',
-      reason: (resumeCandidates.length === 0 && recoverCandidates.length === 0) ? 'no-matching-roots' : 'non-interactive',
-      candidates
-    };
+    return createManagedRootLaunchTarget(
+      'launch',
+      (resumeCandidates.length === 0 && recoverCandidates.length === 0) ? 'no-matching-roots' : 'non-interactive',
+      { candidates }
+    );
   }
 
   const selectedCandidate = await selectCandidate(candidates, {
@@ -1508,19 +1756,33 @@ async function resolveManagedRootLaunchTarget(launchOptions, dependencies = {}) 
     workDir: resolveLaunchWorkDir(launchOptions.workDir)
   });
   if (!selectedCandidate) {
-    return {
-      action: 'launch',
-      reason: 'interactive-new-root',
-      candidates
-    };
+    return createManagedRootLaunchTarget('launch', 'interactive-new-root', { candidates });
   }
 
-  return {
-    action: selectedCandidate.launchAction === 'recover' ? 'recover' : 'resume',
-    reason: 'interactive-selection',
+  if (selectedCandidate.launchAction === 'recover') {
+    return createManagedRootLaunchTarget(
+      'context',
+      isExistingRootModelCompatible(launchOptions, selectedCandidate)
+        ? 'interactive-selection-context'
+        : 'interactive-selection-model-switch',
+      {
+        candidate: selectedCandidate,
+        candidates
+      }
+    );
+  }
+
+  if (!isExistingRootModelCompatible(launchOptions, selectedCandidate)) {
+    return createManagedRootLaunchTarget('context', 'interactive-selection-model-switch', {
+      candidate: selectedCandidate,
+      candidates
+    });
+  }
+
+  return createManagedRootLaunchTarget('resume', 'interactive-selection', {
     candidate: selectedCandidate,
     candidates
-  };
+  });
 }
 
 function printManagedRootLaunchResult(result, launchOptions) {
@@ -1559,8 +1821,7 @@ function printManagedRootResumeResult(candidate) {
 function printManagedRootRecoveryResult(result, previousCandidate, launchOptions) {
   const exactProviderResumeId = previousCandidate.resumeSessionId || previousCandidate.providerThreadRef || null;
   const automaticProviderResumeCommand = previousCandidate.resumeCommand
-    || buildManagedRootProviderResumeCommand(previousCandidate.adapter, exactProviderResumeId)
-    || buildManagedRootProviderLatestResumeCommand(previousCandidate.adapter);
+    || buildManagedRootProviderResumeCommand(previousCandidate.adapter, exactProviderResumeId);
 
   console.log('Managed Root Recovered');
   console.log(`  adapter: ${result.adapter}`);
@@ -1576,7 +1837,29 @@ function printManagedRootRecoveryResult(result, previousCandidate, launchOptions
   console.log(`  external_session_ref: ${result.externalSessionRef || previousCandidate.externalSessionRef || 'n/a'}`);
   if (automaticProviderResumeCommand) {
     console.log(`  provider_resume: automatic (${automaticProviderResumeCommand})`);
+  } else {
+    console.log('  provider_resume: none (exact provider session unavailable; a fresh provider session was started)');
   }
+  console.log(`  console_url: ${new URL(result.consoleUrl || '/console', getCliagentsBaseUrl()).toString()}`);
+  if (result.attachCommand) {
+    console.log(`  attach_command: ${result.attachCommand}`);
+  }
+}
+
+function printManagedRootContextResult(result, previousCandidate, launchOptions) {
+  console.log('Managed Root Resumed with Context');
+  console.log(`  adapter: ${result.adapter}`);
+  console.log(`  previous_root_session_id: ${previousCandidate.rootSessionId}`);
+  console.log(`  root_session_id: ${result.rootSessionId}`);
+  console.log(`  terminal_id: ${result.terminalId}`);
+  console.log(`  session_name: ${result.sessionName}`);
+  console.log(`  profile: ${launchOptions.profile}`);
+  if (result.providerStartMode) {
+    console.log(`  provider_start: ${result.providerStartMode}`);
+  }
+  console.log('  resume_mode: context');
+  console.log(`  context_reason: ${launchOptions.sessionMetadata?.modelSwitch ? 'model-switch' : (previousCandidate.recoveryReason || 'stale-root')}`);
+  console.log(`  external_session_ref: ${result.externalSessionRef || previousCandidate.externalSessionRef || 'n/a'}`);
   console.log(`  console_url: ${new URL(result.consoleUrl || '/console', getCliagentsBaseUrl()).toString()}`);
   if (result.attachCommand) {
     console.log(`  attach_command: ${result.attachCommand}`);
@@ -1691,6 +1974,9 @@ async function launchManagedRootSession(options = {}) {
         launchProfile: profile.id,
         launchEnvironment
       },
+      resumeMode: options.resumeMode || 'new',
+      providerSessionId: options.providerSessionId || null,
+      sourceRootSessionId: options.sourceRootSessionId || null,
       launchEnvironment,
       deferProviderStartUntilAttached: options.deferProviderStartUntilAttached === true,
       allowedTools: Array.isArray(options.allowedTools) && options.allowedTools.length > 0
@@ -1721,7 +2007,7 @@ function buildManagedRootRecoveryLaunchOptions(launchOptions, candidate) {
       previousCurrentCommand: candidate.currentCommand || null,
       providerResumeCommand: candidate.resumeCommand || null,
       providerResumeSessionId,
-      providerResumeLatest: !providerResumeSessionId
+      providerResumeLatest: false
     }
   };
 }
@@ -1733,6 +2019,19 @@ async function handleLaunchCommand(rawArgs = []) {
     return;
   }
   const deferProviderStartUntilAttached = !launchOptions.detach && Boolean(process.stdin.isTTY && process.stdout.isTTY);
+
+  if (launchOptions.providerSessionId) {
+    const result = await launchManagedRootSession({
+      ...launchOptions,
+      resumeMode: 'exact',
+      deferProviderStartUntilAttached
+    });
+    printManagedRootLaunchResult(result, launchOptions);
+    if (!launchOptions.detach && process.stdout.isTTY) {
+      attachToManagedSession(result);
+    }
+    return;
+  }
 
   const launchTarget = await resolveManagedRootLaunchTarget(launchOptions);
   if (launchTarget.action === 'resume') {
@@ -1749,6 +2048,17 @@ async function handleLaunchCommand(rawArgs = []) {
     recoveryOptions.deferProviderStartUntilAttached = deferProviderStartUntilAttached;
     const result = await launchManagedRootSession(recoveryOptions);
     printManagedRootRecoveryResult(result, launchTarget.candidate, recoveryOptions);
+    if (!launchOptions.detach && process.stdout.isTTY) {
+      attachToManagedSession(result);
+    }
+    return;
+  }
+
+  if (launchTarget.action === 'context') {
+    const contextOptions = await buildManagedRootContextLaunchOptions(launchOptions, launchTarget.candidate);
+    contextOptions.deferProviderStartUntilAttached = deferProviderStartUntilAttached;
+    const result = await launchManagedRootSession(contextOptions);
+    printManagedRootContextResult(result, launchTarget.candidate, contextOptions);
     if (!launchOptions.detach && process.stdout.isTTY) {
       attachToManagedSession(result);
     }
@@ -1836,6 +2146,7 @@ module.exports = {
   resolveManagedRootLaunchTarget,
   launchManagedRootSession,
   buildManagedRootRecoveryLaunchOptions,
+  buildManagedRootContextLaunchOptions,
   attachToManagedSession,
   handleLaunchCommand,
   handleListRootsCommand,
