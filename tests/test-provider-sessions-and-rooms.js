@@ -330,6 +330,15 @@ async function runRouteAssertions(homeDir, fixture) {
     assert.strictEqual(roomGetRes.data.room.id, roomId);
     assert.strictEqual(roomGetRes.data.participants.length, 2);
 
+    const roomListRes = await request(
+      serverHandle.baseUrl,
+      'GET',
+      '/orchestration/rooms?limit=10'
+    );
+    assert.strictEqual(roomListRes.status, 200);
+    assert(Array.isArray(roomListRes.data.rooms));
+    assert(roomListRes.data.rooms.some((entry) => entry.room?.id === roomId));
+
     const duplicateRoomRes = await request(
       serverHandle.baseUrl,
       'POST',
@@ -491,6 +500,7 @@ async function runRouteAssertions(homeDir, fixture) {
     assert.strictEqual(discussRes.status, 200, JSON.stringify(discussRes.data));
     assert(discussRes.data.discussionId, 'expected room discussion to return a discussion id');
     assert(['completed', 'partial'].includes(discussRes.data.turn.status));
+    assert.strictEqual(discussRes.data.turn.metadata.writebackMode, 'summary');
     assert(discussRes.data.messages.some((message) => message.role === 'system' && message.content.includes('Room discussion completed')));
 
     const roomAfterDiscussionRes = await request(
@@ -509,6 +519,54 @@ async function runRouteAssertions(homeDir, fixture) {
     assert.strictEqual(finalMessagesRes.status, 200);
     assert(finalMessagesRes.data.messages.length > fullMessageCount);
     assert(finalMessagesRes.data.messages.at(-1).content.includes('Room discussion completed'));
+    assert(finalMessagesRes.data.messages.every((message) => message.metadata?.discussionArtifact !== true), 'default room transcript view should hide discussion artifacts');
+
+    const curatedDiscussRes = await request(
+      serverHandle.baseUrl,
+      'POST',
+      `/orchestration/rooms/${encodeURIComponent(roomId)}/discuss`,
+      {
+        message: 'Show the actual round outputs in the room transcript.',
+        participantIds: [codexParticipant.id, claudeParticipant.id],
+        writebackMode: 'curated_transcript',
+        rounds: [
+          {
+            name: 'position',
+            transcriptMode: 'none',
+            instructions: 'State one recommendation.'
+          }
+        ],
+        judge: null
+      }
+    );
+    assert.strictEqual(curatedDiscussRes.status, 200, JSON.stringify(curatedDiscussRes.data));
+    assert.strictEqual(curatedDiscussRes.data.turn.metadata.writebackMode, 'curated_transcript');
+    assert(curatedDiscussRes.data.messages.some((message) => message.metadata?.discussionArtifact === true), 'curated writeback should return artifact-tagged room messages');
+
+    const hiddenArtifactMessagesRes = await request(
+      serverHandle.baseUrl,
+      'GET',
+      `/orchestration/rooms/${encodeURIComponent(roomId)}/messages?limit=80`
+    );
+    assert.strictEqual(hiddenArtifactMessagesRes.status, 200);
+    assert(hiddenArtifactMessagesRes.data.messages.every((message) => message.metadata?.discussionArtifact !== true), 'artifact rows should stay hidden by default');
+
+    const allMessagesRes = await request(
+      serverHandle.baseUrl,
+      'GET',
+      `/orchestration/rooms/${encodeURIComponent(roomId)}/messages?limit=120&artifact_mode=include`
+    );
+    assert.strictEqual(allMessagesRes.status, 200);
+    assert(allMessagesRes.data.messages.some((message) => message.metadata?.discussionArtifact === true), 'include mode should return discussion artifact rows');
+
+    const onlyArtifactMessagesRes = await request(
+      serverHandle.baseUrl,
+      'GET',
+      `/orchestration/rooms/${encodeURIComponent(roomId)}/messages?limit=120&artifact_mode=only`
+    );
+    assert.strictEqual(onlyArtifactMessagesRes.status, 200);
+    assert(onlyArtifactMessagesRes.data.messages.length > 0);
+    assert(onlyArtifactMessagesRes.data.messages.every((message) => message.metadata?.discussionArtifact === true), 'artifact-only mode should return only discussion artifacts');
 
     const roomBundle = db.getMemoryBundle(roomRootSessionId, 'root', {
       recentRunsLimit: 3,

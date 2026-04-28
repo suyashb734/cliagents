@@ -1346,6 +1346,33 @@ function createOrchestrationRouter(context) {
   });
 
   /**
+   * GET /orchestration/rooms
+   * List persisted rooms for operator discovery.
+   */
+  router.get('/rooms', (req, res) => {
+    try {
+      if (!roomService) {
+        return res.status(503).json({
+          error: { code: 'unavailable', message: 'room persistence is not configured' }
+        });
+      }
+
+      const limit = parseQueryInteger(req.query.limit, 20);
+      const status = req.query.status ? String(req.query.status).trim().toLowerCase() : null;
+      res.json({
+        rooms: roomService.listRooms({
+          limit,
+          status
+        })
+      });
+    } catch (error) {
+      res.status(500).json({
+        error: { code: 'internal_error', message: error.message }
+      });
+    }
+  });
+
+  /**
    * POST /orchestration/rooms
    * Create a persistent multi-agent room backed by direct-session participants.
    */
@@ -1494,9 +1521,11 @@ function createOrchestrationRouter(context) {
 
       const afterId = parseQueryInteger(req.query.after_id, undefined);
       const limit = parseQueryInteger(req.query.limit, 100);
+      const artifactMode = req.query.artifact_mode ? String(req.query.artifact_mode).trim().toLowerCase() : 'exclude';
       const payload = roomService.getRoomMessages(req.params.roomId, {
         afterId,
-        limit
+        limit,
+        artifactMode
       });
       if (!payload) {
         return res.status(404).json({
@@ -1563,7 +1592,7 @@ function createOrchestrationRouter(context) {
 
   /**
    * POST /orchestration/rooms/:roomId/discuss
-   * Run a bounded multi-agent discussion over room participants and append only a compact summary.
+   * Run a bounded multi-agent discussion over room participants.
    */
   router.post('/rooms/:roomId/discuss', async (req, res) => {
     try {
@@ -1588,6 +1617,7 @@ function createOrchestrationRouter(context) {
         judge: req.body.judge === undefined ? null : req.body.judge,
         timeout: req.body.timeout || null,
         workDir: req.body.workDir || null,
+        writebackMode: req.body.writebackMode || null,
         metadata: req.body.metadata || {}
       });
 

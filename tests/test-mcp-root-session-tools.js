@@ -94,6 +94,7 @@ async function startFakeCliagentsServer() {
     providerSessionImportBodies: [],
     roomCreateResponses: [],
     roomCreateBodies: [],
+    roomListResponse: null,
     roomById: new Map(),
     roomMessagesById: new Map(),
     roomMessageResponses: [],
@@ -262,6 +263,10 @@ async function startFakeCliagentsServer() {
       return writeJson(200, response);
     }
 
+    if (req.method === 'GET' && (req.url === '/orchestration/rooms' || req.url.startsWith('/orchestration/rooms?'))) {
+      return writeJson(200, state.roomListResponse || { rooms: [] });
+    }
+
     const roomMessagesMatch = req.url.match(/^\/orchestration\/rooms\/([^/]+)\/messages(\?.*)?$/);
     if (roomMessagesMatch && req.method === 'GET') {
       const roomId = decodeURIComponent(roomMessagesMatch[1]);
@@ -416,6 +421,8 @@ async function run() {
     assert(importProviderSessionTool, 'import_provider_session should be exposed in the MCP tool list');
     const createRoomTool = mod.TOOLS.find((tool) => tool.name === 'create_room');
     assert(createRoomTool, 'create_room should be exposed in the MCP tool list');
+    const listRoomsTool = mod.TOOLS.find((tool) => tool.name === 'list_rooms');
+    assert(listRoomsTool, 'list_rooms should be exposed in the MCP tool list');
     const sendRoomMessageTool = mod.TOOLS.find((tool) => tool.name === 'send_room_message');
     assert(sendRoomMessageTool, 'send_room_message should be exposed in the MCP tool list');
     const getRoomTool = mod.TOOLS.find((tool) => tool.name === 'get_room');
@@ -649,6 +656,29 @@ async function run() {
     assert(createRoomText.includes('room_id: room-1'));
     assert.strictEqual(fakeServer.state.roomCreateBodies.at(-1).title, 'Planning room');
 
+    fakeServer.state.roomListResponse = {
+      rooms: [
+        {
+          room: {
+            id: 'room-1',
+            rootSessionId: 'room-root-1',
+            title: 'Planning room'
+          },
+          latestTurn: {
+            id: 'turn-1',
+            status: 'completed'
+          },
+          participantCount: 2,
+          messageCount: 5
+        }
+      ]
+    };
+    const listRoomsResult = await mod.handleListRooms({ limit: 5 });
+    const listRoomsText = listRoomsResult.content[0].text;
+    assert(listRoomsText.includes('## Rooms'));
+    assert(listRoomsText.includes('room-1'));
+    assert(listRoomsText.includes('participants=2'));
+
     fakeServer.state.roomById.set('room-1', {
       room: {
         id: 'room-1',
@@ -711,7 +741,8 @@ async function run() {
     const getRoomMessagesResult = await mod.handleGetRoomMessages({
       roomId: 'room-1',
       afterId: 1,
-      limit: 10
+      limit: 10,
+      artifactMode: 'include'
     });
     const getRoomMessagesText = getRoomMessagesResult.content[0].text;
     assert(getRoomMessagesText.includes('Room Messages'));
@@ -728,13 +759,16 @@ async function run() {
     ];
     const discussRoomResult = await mod.handleDiscussRoom({
       roomId: 'room-1',
-      message: 'Debate the persistence plan.'
+      message: 'Debate the persistence plan.',
+      writebackMode: 'curated_transcript'
     });
     const discussRoomText = discussRoomResult.content[0].text;
     assert(discussRoomText.includes('Room Discussion Completed'));
     assert(discussRoomText.includes('discussion_id: discussion-room-1'));
+    assert(discussRoomText.includes('writeback_mode: curated_transcript'));
     assert.strictEqual(fakeServer.state.roomDiscussBodies.at(-1).roomId, 'room-1');
     assert.strictEqual(fakeServer.state.roomDiscussBodies.at(-1).body.message, 'Debate the persistence plan.');
+    assert.strictEqual(fakeServer.state.roomDiscussBodies.at(-1).body.writebackMode, 'curated_transcript');
 
     fakeServer.state.adoptResponses = [
       {

@@ -1193,6 +1193,19 @@
           </div>
           <div class="list" id="discussions-list"></div>
         </section>
+
+        <section class="card">
+          <div class="panel-header">
+            <div>
+              <div class="panel-title">Rooms</div>
+              <div class="panel-subtitle">Reads <code>/orchestration/rooms</code> and the durable room transcript APIs.</div>
+            </div>
+            <div class="panel-actions">
+              <span class="panel-subtitle" id="rooms-summary">Loading...</span>
+            </div>
+          </div>
+          <div class="list" id="rooms-list"></div>
+        </section>
       </div>
 
       <div class="stack">
@@ -1240,6 +1253,26 @@
             <div class="empty-state">Select a discussion run to inspect round summaries, judge output, and raw discussion messages.</div>
           </div>
         </section>
+
+        <section class="card">
+          <div class="panel-header">
+            <div>
+              <div class="panel-title">Room Detail</div>
+              <div class="panel-subtitle">Curated room transcript, participants, and links back to the backing run and discussion.</div>
+            </div>
+            <div class="panel-actions">
+              <select class="compact-select" id="room-artifact-mode">
+                <option value="exclude">Conversation</option>
+                <option value="include">Conversation + Artifacts</option>
+                <option value="only">Artifacts Only</option>
+              </select>
+              <span class="panel-subtitle" id="room-detail-status">No room selected</span>
+            </div>
+          </div>
+          <div class="detail-body" id="room-detail">
+            <div class="empty-state">Select a room to inspect participants, transcript, and the latest room turn.</div>
+          </div>
+        </section>
       </div>
     </div>
   </div>
@@ -1259,6 +1292,7 @@
       apiKey: localStorage.getItem('cliagents.console.apiKey') || '',
       terminals: [],
       discussionRuns: [],
+      rooms: [],
       sessionRoots: [],
       sessionRootsArchivedCount: 0,
       sessionRootsHiddenDetachedCount: 0,
@@ -1276,6 +1310,8 @@
       selectedTerminalId: urlState.get('terminal') || null,
       selectedDiscussionId: urlState.get('discussion') || null,
       selectedRunId: urlState.get('run') || null,
+      selectedRoomId: urlState.get('room') || null,
+      roomArtifactMode: new Set(['exclude', 'include', 'only']).has(urlState.get('roomArtifacts')) ? urlState.get('roomArtifacts') : 'exclude',
       socket: null,
       socketConnected: false,
       rootSnapshots: {},
@@ -1306,12 +1342,17 @@
       mobileRootPanel: document.getElementById('mobile-root-panel'),
       discussionsSummary: document.getElementById('discussions-summary'),
       discussionsList: document.getElementById('discussions-list'),
+      roomsSummary: document.getElementById('rooms-summary'),
+      roomsList: document.getElementById('rooms-list'),
       sessionTreeDetail: document.getElementById('session-tree-detail'),
       sessionTreeStatus: document.getElementById('session-tree-status'),
       terminalDetail: document.getElementById('terminal-detail'),
       terminalDetailStatus: document.getElementById('terminal-detail-status'),
       discussionDetail: document.getElementById('discussion-detail'),
-      discussionDetailStatus: document.getElementById('discussion-detail-status')
+      discussionDetailStatus: document.getElementById('discussion-detail-status'),
+      roomArtifactMode: document.getElementById('room-artifact-mode'),
+      roomDetail: document.getElementById('room-detail'),
+      roomDetailStatus: document.getElementById('room-detail-status')
     };
 
     function getAuthHeaders() {
@@ -1715,6 +1756,8 @@
       if (state.selectedTerminalId) params.set('terminal', state.selectedTerminalId);
       if (state.selectedDiscussionId) params.set('discussion', state.selectedDiscussionId);
       if (state.selectedRunId) params.set('run', state.selectedRunId);
+      if (state.selectedRoomId) params.set('room', state.selectedRoomId);
+      if (state.roomArtifactMode && state.roomArtifactMode !== 'exclude') params.set('roomArtifacts', state.roomArtifactMode);
       const query = params.toString();
       const nextUrl = query ? `${window.location.pathname}?${query}` : window.location.pathname;
       window.history.replaceState(null, '', nextUrl);
@@ -1853,7 +1896,7 @@
         stale: isTerminalStale(terminal)
       }).waiting).length;
       const runningDiscussions = state.discussionRuns.filter((run) => ['running', 'pending', 'partial'].includes(run.status)).length;
-      const selected = state.selectedRootSessionId || state.selectedTerminalId || state.selectedDiscussionId || 'none';
+      const selected = state.selectedRoomId || state.selectedRootSessionId || state.selectedTerminalId || state.selectedDiscussionId || 'none';
 
       elements.statTerminals.textContent = waitingTerminals > 0
         ? `${activeTerminals} • ${waitingTerminals} waiting`
@@ -2000,6 +2043,46 @@
           syncUrlState();
           renderDiscussions();
           refreshSelectedDiscussion();
+          updateStats();
+        });
+      });
+
+      updateStats();
+    }
+
+    function renderRooms() {
+      elements.roomsSummary.textContent = `${state.rooms.length} loaded`;
+      if (!state.rooms.length) {
+        elements.roomsList.innerHTML = '<div class="empty-state">No persisted rooms found yet. This pane depends on <code>/orchestration/rooms</code>.</div>';
+        updateStats();
+        return;
+      }
+
+      elements.roomsList.innerHTML = state.rooms.map((entry) => {
+        const room = entry.room || {};
+        const latestTurn = entry.latestTurn || {};
+        return `
+          <div class="row ${room.id === state.selectedRoomId ? 'active' : ''}" data-room-id="${room.id || ''}">
+            <div class="row-top">
+              <div class="row-title">${escapeHtml(room.title || room.id || 'room')}</div>
+              <span class="${statusClass(latestTurn.status || room.status || 'unknown')}">${escapeHtml(latestTurn.status || room.status || 'active')}</span>
+            </div>
+            <div class="row-meta">
+              <div><strong>Room:</strong> ${escapeHtml(room.id || 'n/a')}</div>
+              <div><strong>Participants:</strong> ${escapeHtml(String(entry.participantCount || 0))}</div>
+              <div><strong>Messages:</strong> ${escapeHtml(String(entry.messageCount || 0))}</div>
+              <div><strong>Updated:</strong> ${escapeHtml(formatTimestamp(room.updatedAt || room.updated_at))}</div>
+            </div>
+          </div>
+        `;
+      }).join('');
+
+      elements.roomsList.querySelectorAll('[data-room-id]').forEach((node) => {
+        node.addEventListener('click', () => {
+          state.selectedRoomId = node.dataset.roomId || null;
+          syncUrlState();
+          renderRooms();
+          refreshSelectedRoom();
           updateStats();
         });
       });
@@ -2615,6 +2698,24 @@
         elements.discussionsSummary.textContent = error.message;
       }
       renderDiscussions();
+    }
+
+    async function refreshRooms() {
+      try {
+        const data = await fetchJson('/orchestration/rooms?limit=30');
+        state.rooms = Array.isArray(data.rooms) ? data.rooms : [];
+      } catch (error) {
+        state.rooms = [];
+        elements.roomsSummary.textContent = error.message;
+      }
+
+      const selectedRoomStillExists = state.selectedRoomId
+        && state.rooms.some((entry) => entry?.room?.id === state.selectedRoomId);
+      if (!selectedRoomStillExists && state.rooms.length > 0) {
+        state.selectedRoomId = state.rooms[0].room?.id || null;
+        syncUrlState();
+      }
+      renderRooms();
     }
 
     async function refreshSessionRoots() {
@@ -3515,6 +3616,113 @@
       }
     }
 
+    function renderRoomDetail(roomPayload, roomMessagesPayload) {
+      const room = roomPayload?.room || {};
+      const participants = roomPayload?.participants || [];
+      const latestTurn = roomPayload?.latestTurn || {};
+      const messages = roomMessagesPayload?.messages || [];
+      const latestMetadata = latestTurn?.metadata || {};
+      const runId = latestMetadata.runId || null;
+      const discussionId = latestMetadata.discussionId || null;
+
+      elements.roomDetailStatus.textContent = `${room.id || state.selectedRoomId} • ${latestTurn.status || room.status || 'active'}`;
+      elements.roomDetail.innerHTML = `
+        <div class="detail-grid">
+          <div>
+            <div class="detail-label">Room ID</div>
+            <div>${escapeHtml(room.id || 'n/a')}</div>
+          </div>
+          <div>
+            <div class="detail-label">Root Session</div>
+            <div>${escapeHtml(room.rootSessionId || 'n/a')}</div>
+          </div>
+          <div>
+            <div class="detail-label">Latest Turn</div>
+            <div><span class="${statusClass(latestTurn.status || room.status || 'unknown')}">${escapeHtml(latestTurn.status || room.status || 'unknown')}</span></div>
+          </div>
+          <div>
+            <div class="detail-label">Artifact View</div>
+            <div>${escapeHtml(state.roomArtifactMode)}</div>
+          </div>
+        </div>
+
+        <div>
+          <div class="detail-label">Participants</div>
+          <div class="row-meta">
+            ${participants.length ? participants.map((participant) => `
+              <div><strong>${escapeHtml(participant.displayName || participant.adapter || participant.id || 'participant')}:</strong> ${escapeHtml(participant.adapter || 'n/a')} ${participant.model ? `(${escapeHtml(participant.model)})` : ''}</div>
+            `).join('') : '<div class="empty-state">No room participants recorded.</div>'}
+          </div>
+        </div>
+
+        <div>
+          <div class="detail-label">Backing Audit</div>
+          <div class="row-meta">
+            <div><strong>Run ID:</strong> ${escapeHtml(runId || 'n/a')}</div>
+            <div><strong>Discussion ID:</strong> ${escapeHtml(discussionId || 'n/a')}</div>
+          </div>
+          <div class="toolbar" style="margin-top: 8px;">
+            ${runId ? `<button class="btn" type="button" data-open-room-run="${escapeHtml(runId)}">Open Run</button>` : ''}
+            ${discussionId ? `<button class="btn" type="button" data-open-room-discussion="${escapeHtml(discussionId)}" data-open-room-run="${escapeHtml(runId || '')}">Open Discussion</button>` : ''}
+          </div>
+        </div>
+
+        <div>
+          <div class="detail-label">Room Transcript</div>
+          <div class="message-list">
+            ${messages.length ? messages.map((message) => `
+              <div class="message-item">
+                <div class="message-head">
+                  <span>
+                    ${escapeHtml(message.role)}
+                    ${message.participantId ? ` (${escapeHtml(message.metadata?.displayName || message.participantId)})` : ''}
+                    ${message.metadata?.discussionArtifact ? ` • ${escapeHtml(message.metadata?.artifactType || 'artifact')}` : ''}
+                    ${message.metadata?.roundName ? ` • ${escapeHtml(message.metadata.roundName)}` : ''}
+                  </span>
+                  <span>${escapeHtml(formatTimestamp(message.createdAt || message.created_at))}</span>
+                </div>
+                <div class="message-body">${escapeHtml(message.content || '')}</div>
+              </div>
+            `).join('') : '<div class="empty-state">No room messages stored for this selection.</div>'}
+          </div>
+        </div>
+      `;
+
+      elements.roomDetail.querySelectorAll('[data-open-room-run]').forEach((button) => {
+        button.onclick = async () => {
+          const nextRunId = button.dataset.openRoomRun || null;
+          if (!nextRunId) {
+            return;
+          }
+          state.selectedRunId = nextRunId;
+          const nextDiscussionId = button.dataset.openRoomDiscussion || discussionId || null;
+          if (nextDiscussionId) {
+            state.selectedDiscussionId = nextDiscussionId;
+          }
+          syncUrlState();
+          await refreshDiscussionRuns();
+          await refreshSelectedDiscussion();
+        };
+      });
+    }
+
+    async function refreshSelectedRoom() {
+      if (!state.selectedRoomId) {
+        elements.roomDetailStatus.textContent = 'No room selected';
+        elements.roomDetail.innerHTML = '<div class="empty-state">Select a room to inspect participants, transcript, and the latest room turn.</div>';
+        return;
+      }
+
+      try {
+        const roomPayload = await fetchJson(`/orchestration/rooms/${encodeURIComponent(state.selectedRoomId)}`);
+        const roomMessagesPayload = await fetchJson(`/orchestration/rooms/${encodeURIComponent(state.selectedRoomId)}/messages?limit=120&artifact_mode=${encodeURIComponent(state.roomArtifactMode)}`);
+        renderRoomDetail(roomPayload, roomMessagesPayload);
+      } catch (error) {
+        elements.roomDetailStatus.textContent = 'Room unavailable';
+        elements.roomDetail.innerHTML = `<div class="empty-state">${escapeHtml(error.message)}</div>`;
+      }
+    }
+
     function reconnectSocket() {
       if (state.socket) {
         state.socket.onopen = null;
@@ -3571,9 +3779,11 @@
         refreshTerminals(),
         refreshSessionRoots(),
         refreshDiscussionRuns(),
+        refreshRooms(),
         refreshSelectedSessionRoot(),
         refreshSelectedTerminal(),
-        refreshSelectedDiscussion()
+        refreshSelectedDiscussion(),
+        refreshSelectedRoom()
       ]);
       updateStats();
       state.refreshInFlight = false;
@@ -3596,6 +3806,7 @@
     elements.includeArchivedRoots.checked = state.includeArchivedRoots;
     elements.sessionRootScope.value = state.rootScope;
     elements.sessionRootFilter.value = state.rootStatusFilter;
+    elements.roomArtifactMode.value = state.roomArtifactMode;
     elements.saveApiKey.addEventListener('click', saveApiKey);
     elements.refreshAll.addEventListener('click', refreshAll);
     elements.reconcileRuns.addEventListener('click', reconcileStaleRuns);
@@ -3620,6 +3831,11 @@
       state.rootStatusFilter = nextFilter;
       syncUrlState();
       renderSessionRoots();
+    });
+    elements.roomArtifactMode.addEventListener('change', async (event) => {
+      state.roomArtifactMode = new Set(['exclude', 'include', 'only']).has(event.target.value) ? event.target.value : 'exclude';
+      syncUrlState();
+      await refreshSelectedRoom();
     });
 
     reconnectSocket();

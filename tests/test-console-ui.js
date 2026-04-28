@@ -28,7 +28,10 @@ async function run() {
     assert(routePage.text.includes('/orchestration/terminals'), '/console should use the terminals API');
     assert(routePage.text.includes('/orchestration/runs?kind=discussion'), '/console should use discussion run discovery');
     assert(routePage.text.includes('/orchestration/discussions/'), '/console should load persisted discussion threads');
+    assert(routePage.text.includes('/orchestration/rooms'), '/console should use the room discovery API');
     assert(routePage.text.includes('cliagents Root Sessions'), '/console should expose the cliagents root-session panel');
+    assert(routePage.text.includes('Room Detail'), '/console should expose a first-class room detail surface');
+    assert(routePage.text.includes('Conversation + Artifacts'), '/console should expose room artifact filtering controls');
     assert(routePage.text.includes("const queryParams = new URLSearchParams({"), '/console should build scoped root-session summary queries with URLSearchParams');
     assert(routePage.text.includes("queryParams.set('statusFilter', state.rootStatusFilter)"), '/console should pass the root status filter to the broker when supported');
     assert(routePage.text.includes("const query = `/orchestration/root-sessions?${queryParams.toString()}`"), '/console should request root-session summaries through the composed query');

@@ -105,6 +105,28 @@ function buildDiscussionContext(room, bundle, recentMessages) {
   ].filter(Boolean).join('\n\n');
 }
 
+const ROOM_ARTIFACT_MODES = new Set(['exclude', 'include', 'only']);
+const ROOM_DISCUSSION_WRITEBACK_MODES = new Set(['summary', 'curated_transcript']);
+
+function normalizeArtifactMode(value, fallback = 'exclude') {
+  const normalized = String(value || '').trim().toLowerCase();
+  return ROOM_ARTIFACT_MODES.has(normalized) ? normalized : fallback;
+}
+
+function normalizeDiscussionWritebackMode(value, fallback = 'summary') {
+  const normalized = String(value || '').trim().toLowerCase();
+  return ROOM_DISCUSSION_WRITEBACK_MODES.has(normalized) ? normalized : fallback;
+}
+
+function buildDiscussionArtifactMetadata(baseMetadata = {}, patch = {}) {
+  return {
+    ...baseMetadata,
+    ...patch,
+    mode: patch.mode || baseMetadata.mode || 'discussion',
+    discussionArtifact: true
+  };
+}
+
 function computeTurnStatus(results) {
   const successCount = results.filter((entry) => entry.success).length;
   const failureCount = results.length - successCount;
@@ -177,6 +199,19 @@ class RoomService {
     };
   }
 
+  listRooms(options = {}) {
+    return this.db.listRooms(options).map((room) => {
+      const participants = this.db.listRoomParticipants(room.id);
+      const latestTurn = this.db.getLatestRoomTurn(room.id) || null;
+      return {
+        room,
+        latestTurn,
+        participantCount: participants.length,
+        messageCount: this.db.countRoomMessages(room.id)
+      };
+    });
+  }
+
   getRoomByRootSessionId(rootSessionId) {
     const room = this.db.getRoomByRootSessionId(rootSessionId);
     if (!room) {
@@ -193,9 +228,11 @@ class RoomService {
 
     const requestedLimit = Math.max(1, Math.min(Number(options.limit || 100), 500));
     const afterId = Number.isInteger(options.afterId) ? options.afterId : undefined;
+    const artifactMode = normalizeArtifactMode(options.artifactMode, 'exclude');
     const rows = this.db.listRoomMessages(roomId, {
       afterId,
       turnId: options.turnId || null,
+      artifactMode,
       limit: requestedLimit + 1
     });
     const hasMore = rows.length > requestedLimit;
@@ -205,10 +242,11 @@ class RoomService {
       room,
       messages,
       pagination: {
-        total: this.db.countRoomMessages(roomId),
+        total: this.db.countRoomMessages(roomId, { artifactMode }),
         returned: messages.length,
         limit: requestedLimit,
         afterId: afterId || null,
+        artifactMode,
         hasMore,
         nextAfterId: hasMore ? messages[messages.length - 1]?.id || null : null
       }
@@ -222,7 +260,7 @@ class RoomService {
     }
 
     const participants = this.db.listRoomParticipants(roomId);
-    const recentMessages = this.db.getRecentRoomMessages(roomId, 12);
+    const recentMessages = this.db.getRecentRoomMessages(roomId, 12, { artifactMode: 'exclude' });
     return this.db.upsertMemorySnapshot({
       scope: 'root',
       scopeId: room.rootSessionId,
@@ -246,6 +284,126 @@ class RoomService {
       return this.db.getRoomParticipantsByIds(roomId, mentions).filter((participant) => participant.status === 'active');
     }
     return this.db.listRoomParticipants(roomId, { status: 'active' });
+  }
+
+  _collectDiscussionArtifacts(events = [], participantIndex = new Map()) {
+    const artifacts = [];
+
+    for (const event of Array.isArray(events) ? events : []) {
+      if (event.type === 'discussion_started') {
+        artifacts.push({
+          role: 'system',
+          content: `Room discussion started with ${event.participantCount || 0} participant(s).`,
+          metadata: buildDiscussionArtifactMetadata({
+            runId: event.runId || null,
+            discussionId: event.discussionId || null
+          }, {
+            artifactType: 'discussion_started'
+          }),
+          createdAt: event.startedAt || Date.now()
+        });
+        continue;
+      }
+
+      if (event.type === 'round_started') {
+        artifacts.push({
+          role: 'system',
+          content: `Round ${Number(event.roundIndex || 0) + 1}: ${event.roundName}`,
+          metadata: buildDiscussionArtifactMetadata({
+            runId: event.runId || null,
+            discussionId: event.discussionId || null
+          }, {
+            artifactType: 'round_started',
+            roundIndex: event.roundIndex,
+            roundName: event.roundName || null,
+            transcriptMode: event.transcriptMode || null
+          }),
+          createdAt: event.startedAt || Date.now()
+        });
+        continue;
+      }
+
+      if (event.type === 'participant_response') {
+        const response = event.response || {};
+        const participant = participantIndex.get(response.participantRef || '');
+        artifacts.push({
+          role: 'assistant',
+          participantId: participant?.id || response.participantRef || null,
+          content: response.output || '',
+          metadata: buildDiscussionArtifactMetadata({
+            runId: event.runId || null,
+            discussionId: event.discussionId || null
+          }, {
+            artifactType: 'participant_response',
+            roundIndex: event.roundIndex,
+            roundName: event.roundName || null,
+            adapter: response.adapter || participant?.adapter || null,
+            displayName: response.name || participant?.displayName || null
+          }),
+          createdAt: Date.now()
+        });
+        continue;
+      }
+
+      if (event.type === 'participant_failure') {
+        const response = event.response || {};
+        const participant = participantIndex.get(response.participantRef || '');
+        artifacts.push({
+          role: 'system',
+          participantId: participant?.id || response.participantRef || null,
+          content: `${response.name || participant?.displayName || response.adapter || 'participant'} failed during ${event.roundName || 'discussion'}: ${response.error || 'unknown error'}`,
+          metadata: buildDiscussionArtifactMetadata({
+            runId: event.runId || null,
+            discussionId: event.discussionId || null
+          }, {
+            artifactType: 'participant_failure',
+            roundIndex: event.roundIndex,
+            roundName: event.roundName || null,
+            adapter: response.adapter || participant?.adapter || null,
+            displayName: response.name || participant?.displayName || null,
+            failureClass: response.failureClass || null
+          }),
+          createdAt: Date.now()
+        });
+        continue;
+      }
+
+      if (event.type === 'judge_completed' && event.judge) {
+        artifacts.push({
+          role: 'system',
+          content: event.judge.success
+            ? `Judge:\n${event.judge.output || ''}`
+            : `Judge failed (${event.judge.failureClass || 'unknown'}): ${event.judge.error || 'unknown error'}`,
+          metadata: buildDiscussionArtifactMetadata({
+            runId: event.runId || null,
+            discussionId: event.discussionId || null
+          }, {
+            artifactType: 'judge_completed',
+            adapter: event.judge.adapter || null,
+            displayName: event.judge.name || null,
+            failureClass: event.judge.success ? null : (event.judge.failureClass || null)
+          }),
+          createdAt: Date.now()
+        });
+        continue;
+      }
+
+      if (event.type === 'discussion_failed') {
+        artifacts.push({
+          role: 'system',
+          content: `Room discussion failed: ${event.error || 'unknown error'}`,
+          metadata: buildDiscussionArtifactMetadata({
+            runId: event.runId || null,
+            discussionId: event.discussionId || null
+          }, {
+            artifactType: 'discussion_failed'
+          }),
+          createdAt: event.failedAt || Date.now()
+        });
+      }
+    }
+
+    return artifacts.filter((artifact) => artifact.content);
   }
 
   async _runParticipantTurn(room, participant, prompt) {
@@ -457,6 +615,7 @@ class RoomService {
       throw new Error('No active participants matched this room discussion');
     }
 
+    const writebackMode = normalizeDiscussionWritebackMode(input.writebackMode, 'summary');
     const turn = this.db.createRoomTurn({
       roomId,
       requestId: input.requestId || input.idempotencyKey || null,
@@ -467,7 +626,8 @@ class RoomService {
       status: 'running',
       metadata: {
         ...(input.metadata || {}),
-        mode: 'discussion'
+        mode: 'discussion',
+        writebackMode
       }
     });
     if (turn.reusedRequest) {
@@ -479,7 +639,7 @@ class RoomService {
         participants: [],
         rounds: [],
         judge: null,
-        messages: this.db.listRoomMessages(roomId, { turnId: turn.id, limit: 500 })
+        messages: this.db.listRoomMessages(roomId, { turnId: turn.id, artifactMode: 'include', limit: 500 })
       };
     }
 
@@ -491,12 +651,17 @@ class RoomService {
       content: input.message,
       metadata: {
         mode: 'discussion',
-        participantIds: participants.map((participant) => participant.id)
+        participantIds: participants.map((participant) => participant.id),
+        writebackMode
       },
       createdAt: startedAt
     });
 
     let result;
+    const discussionEvents = [];
+    const discussionSink = (event) => {
+      discussionEvents.push(event);
+    };
     try {
       const bundle = this.db.getMemoryBundle(room.rootSessionId, 'root', {
         recentRunsLimit: 3,
@@ -505,7 +670,7 @@ class RoomService {
       if (!bundle) {
         console.debug(`[RoomService] No root memory bundle available yet for room discussion ${roomId} (${room.rootSessionId})`);
       }
-      const recentMessages = this.db.getRecentRoomMessages(roomId, 12);
+      const recentMessages = this.db.getRecentRoomMessages(roomId, 12, { artifactMode: 'exclude' });
       result = await this.runDiscussion(this.sessionManager, input.message, {
         participants: participants.map((participant) => ({
           participantRef: participant.id,
@@ -533,9 +698,24 @@ class RoomService {
           roomId,
           turnId: turn.id
         },
-        taskId: `room:${roomId}`
+        taskId: `room:${roomId}`,
+        sink: discussionSink
       });
     } catch (error) {
+      if (writebackMode === 'curated_transcript') {
+        const participantIndex = new Map(participants.map((participant) => [participant.id, participant]));
+        for (const artifact of this._collectDiscussionArtifacts(discussionEvents, participantIndex)) {
+          this.db.addRoomMessage({
+            roomId,
+            turnId: turn.id,
+            participantId: artifact.participantId || null,
+            role: artifact.role,
+            content: artifact.content,
+            metadata: artifact.metadata,
+            createdAt: artifact.createdAt
+          });
+        }
+      }
       this.db.updateRoomTurn(turn.id, {
         status: 'failed',
         error: error.message,
@@ -555,6 +735,21 @@ class RoomService {
       }
     }
 
+    if (writebackMode === 'curated_transcript') {
+      const participantIndex = new Map(participants.map((participant) => [participant.id, participant]));
+      for (const artifact of this._collectDiscussionArtifacts(discussionEvents, participantIndex)) {
+        this.db.addRoomMessage({
+          roomId,
+          turnId: turn.id,
+          participantId: artifact.participantId || null,
+          role: artifact.role,
+          content: artifact.content,
+          metadata: artifact.metadata,
+          createdAt: artifact.createdAt
+        });
+      }
+    }
+
     const discussionSummary = [
       `Room discussion completed with ${(result.participants || []).length} participant(s).`,
       result.judge?.success && result.judge.output ? `Judge:\n${truncateText(result.judge.output, 900)}` : null,
@@ -570,6 +765,7 @@ class RoomService {
       content: discussionSummary,
       metadata: {
         mode: 'discussion-summary',
+        writebackMode,
         runId: result.runId || null,
         discussionId: result.discussionId || null
       },
@@ -587,6 +783,7 @@ class RoomService {
       metadata: {
         ...(turn.metadata || {}),
         mode: 'discussion',
+        writebackMode,
         runId: result.runId || null,
         discussionId: result.discussionId || null,
         participantIds: participants.map((participant) => participant.id)
@@ -602,7 +799,7 @@ class RoomService {
       participants: result.participants || [],
       rounds: result.rounds || [],
       judge: result.judge || null,
-      messages: this.db.listRoomMessages(roomId, { turnId: turn.id, limit: 500 })
+      messages: this.db.listRoomMessages(roomId, { turnId: turn.id, artifactMode: 'include', limit: 500 })
     };
   }
 }

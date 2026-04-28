@@ -2836,6 +2836,12 @@ class OrchestrationDB {
       clauses.push('turn_id = ?');
       params.push(options.turnId);
     }
+    const artifactMode = String(options.artifactMode || 'exclude').trim().toLowerCase();
+    if (artifactMode === 'exclude') {
+      clauses.push(`COALESCE(json_extract(metadata, '$.discussionArtifact'), 0) != 1`);
+    } else if (artifactMode === 'only') {
+      clauses.push(`COALESCE(json_extract(metadata, '$.discussionArtifact'), 0) = 1`);
+    }
     const limit = clampLimit(options.limit, 100, 500);
     return this.db.prepare(`
       SELECT *
@@ -2846,23 +2852,39 @@ class OrchestrationDB {
     `).all(...params, limit).map((row) => this._parseRoomMessageRow(row));
   }
 
-  countRoomMessages(roomId) {
+  countRoomMessages(roomId, options = {}) {
+    const clauses = ['room_id = ?'];
+    const params = [roomId];
+    const artifactMode = String(options.artifactMode || 'include').trim().toLowerCase();
+    if (artifactMode === 'exclude') {
+      clauses.push(`COALESCE(json_extract(metadata, '$.discussionArtifact'), 0) != 1`);
+    } else if (artifactMode === 'only') {
+      clauses.push(`COALESCE(json_extract(metadata, '$.discussionArtifact'), 0) = 1`);
+    }
     const row = this.db.prepare(`
       SELECT COUNT(*) AS count
       FROM room_messages
-      WHERE room_id = ?
-    `).get(roomId);
+      WHERE ${clauses.join(' AND ')}
+    `).get(...params);
     return row?.count || 0;
   }
 
-  getRecentRoomMessages(roomId, limit = 12) {
+  getRecentRoomMessages(roomId, limit = 12, options = {}) {
+    const clauses = ['room_id = ?'];
+    const params = [roomId];
+    const artifactMode = String(options.artifactMode || 'exclude').trim().toLowerCase();
+    if (artifactMode === 'exclude') {
+      clauses.push(`COALESCE(json_extract(metadata, '$.discussionArtifact'), 0) != 1`);
+    } else if (artifactMode === 'only') {
+      clauses.push(`COALESCE(json_extract(metadata, '$.discussionArtifact'), 0) = 1`);
+    }
     const rows = this.db.prepare(`
       SELECT *
       FROM room_messages
-      WHERE room_id = ?
+      WHERE ${clauses.join(' AND ')}
       ORDER BY sequence_no DESC, id DESC
       LIMIT ?
-    `).all(roomId, clampLimit(limit, 12, 200));
+    `).all(...params, clampLimit(limit, 12, 200));
     return rows.reverse().map((row) => this._parseRoomMessageRow(row));
   }
 

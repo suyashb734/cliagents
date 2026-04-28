@@ -116,6 +116,31 @@ function appendDiscussionMessage(discussionStore, discussionId, senderId, conten
   });
 }
 
+async function emitDiscussionSink(sink, eventType, payload = {}) {
+  if (!sink) {
+    return;
+  }
+
+  const event = {
+    type: eventType,
+    ...payload
+  };
+
+  if (typeof sink === 'function') {
+    await sink(event);
+    return;
+  }
+
+  if (typeof sink[eventType] === 'function') {
+    await sink[eventType](event);
+    return;
+  }
+
+  if (typeof sink.onEvent === 'function') {
+    await sink.onEvent(event);
+  }
+}
+
 function classifyFailure(error) {
   const message = String(error?.message || error || '').toLowerCase();
 
@@ -442,6 +467,7 @@ async function runRoundForParticipant(sessionManager, state, prompt, context = {
 
     return {
       participantId: state.participantId,
+      participantRef: state.participantRef || null,
       senderId: state.discussionSenderId,
       name: state.name,
       adapter: state.adapter,
@@ -509,6 +535,7 @@ async function runRoundForParticipant(sessionManager, state, prompt, context = {
 
     return {
       participantId: state.participantId,
+      participantRef: state.participantRef || null,
       senderId: state.discussionSenderId,
       name: state.name,
       adapter: state.adapter,
@@ -746,7 +773,8 @@ async function runDiscussion(sessionManager, message, options = {}) {
     parentSessionId = null,
     originClient = null,
     externalSessionRef = null,
-    sessionMetadata = null
+    sessionMetadata = null,
+    sink = null
   } = options;
 
   if (!Array.isArray(participants) || participants.length === 0) {
@@ -834,6 +862,16 @@ async function runDiscussion(sessionManager, message, options = {}) {
       contextSummary: summarizeText(context, 400)
     },
     occurredAt: startedAt
+  });
+  await emitDiscussionSink(sink, 'discussion_started', {
+    discussionId,
+    runId,
+    startedAt,
+    message,
+    context: context || null,
+    participantCount: participants.length,
+    roundCount: resolvedRounds.length,
+    hasJudge: Boolean(judgeSpec)
   });
 
   if (discussionStore) {
@@ -964,6 +1002,16 @@ async function runDiscussion(sessionManager, message, options = {}) {
         participantCount: activeStates.filter((state) => !state.failed).length
       }
     });
+    await emitDiscussionSink(sink, 'round_started', {
+      discussionId,
+      runId,
+      roundIndex,
+      roundName: round.name,
+      transcriptMode: round.transcriptMode,
+      instructions: round.instructions,
+      startedAt: Date.now(),
+      participantCount: activeStates.filter((state) => !state.failed).length
+    });
 
     if (runLedger && runId) {
       runLedger.updateRun(runId, {
@@ -1005,6 +1053,22 @@ async function runDiscussion(sessionManager, message, options = {}) {
       responses
     };
     roundResults.push(roundResult);
+    for (const response of responses) {
+      await emitDiscussionSink(sink, response.success ? 'participant_response' : 'participant_failure', {
+        discussionId,
+        runId,
+        roundIndex,
+        roundName: round.name,
+        response
+      });
+    }
+    await emitDiscussionSink(sink, 'round_completed', {
+      discussionId,
+      runId,
+      roundIndex,
+      roundName: round.name,
+      roundResult
+    });
 
     if (discussionStore) {
       for (const response of responses) {
@@ -1147,6 +1211,11 @@ async function runDiscussion(sessionManager, message, options = {}) {
         { messageType: judgeResult.success ? 'answer' : 'info' }
       );
     }
+    await emitDiscussionSink(sink, 'judge_completed', {
+      discussionId,
+      runId,
+      judge: judgeResult
+    });
   }
 
   for (const state of states) {
@@ -1231,8 +1300,7 @@ async function runDiscussion(sessionManager, message, options = {}) {
     },
     occurredAt: completedAt
   });
-
-  return {
+  const finalResult = {
     success: runStatus !== 'failed',
     mode: 'direct-session',
     discussionId,
@@ -1241,6 +1309,14 @@ async function runDiscussion(sessionManager, message, options = {}) {
     judge: judgeResult,
     runId
   };
+  await emitDiscussionSink(sink, 'discussion_completed', {
+    discussionId,
+    runId,
+    completedAt,
+    result: finalResult
+  });
+
+  return finalResult;
 }
 
 module.exports = {

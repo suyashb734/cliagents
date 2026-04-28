@@ -31,6 +31,9 @@ Keep it short. Do not duplicate transient runtime configuration, MCP server list
 - Humans should create or explicitly resume top-level roots. Child sessions should be attached beneath a root, not silently turned into new roots.
 - Managed roots are the main path for browser supervision. If direct provider sessions are attached later, the binding must stay explicit and consistent.
 - Root and child session state should be inspectable from the control plane without depending on raw tmux output alone.
+- Rooms are the primary user-facing conversation surface; runs and discussions remain the backing audit surfaces.
+- `discuss_room` defaults to summary writeback. Curated transcript artifacts are opt-in and must stay distinguishable from the normal room conversation view.
+- Keep `room_busy` single-active-turn semantics unless a branch explicitly widens the room concurrency model.
 
 ## Important Surfaces
 

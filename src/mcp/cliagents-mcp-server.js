@@ -1657,6 +1657,23 @@ This calls cliagents' direct-session discussion route and returns the completed 
     }
   },
   {
+    name: 'list_rooms',
+    description: 'List persisted rooms with compact participant and turn summaries.',
+    inputSchema: {
+      type: 'object',
+      properties: {
+        limit: {
+          type: 'integer',
+          description: 'Maximum rooms to return (max 100). Default: 20'
+        },
+        status: {
+          type: 'string',
+          description: 'Optional room status filter.'
+        }
+      }
+    }
+  },
+  {
     name: 'send_room_message',
     description: 'Send one persistent room turn. By default the message is broadcast to all active participants; mentions targets only the named participants.',
     inputSchema: {
@@ -1714,6 +1731,11 @@ This calls cliagents' direct-session discussion route and returns the completed 
         limit: {
           type: 'integer',
           description: 'Maximum room messages to return (max 500). Default: 100'
+        },
+        artifactMode: {
+          type: 'string',
+          enum: ['exclude', 'include', 'only'],
+          description: 'Control whether discussion artifact rows are hidden, included, or returned exclusively.'
         }
       },
       required: ['roomId']
@@ -1721,7 +1743,7 @@ This calls cliagents' direct-session discussion route and returns the completed 
   },
   {
     name: 'discuss_room',
-    description: 'Run a bounded discussion across selected room participants and append only a compact summary back into the room.',
+    description: 'Run a bounded discussion across selected room participants. By default the room gets a compact summary; curated transcript writeback is opt-in.',
     inputSchema: {
       type: 'object',
       properties: {
@@ -1749,6 +1771,11 @@ This calls cliagents' direct-session discussion route and returns the completed 
         judge: {
           type: ['object', 'null'],
           description: 'Optional final judge config. Pass null to skip judge synthesis.'
+        },
+        writebackMode: {
+          type: 'string',
+          enum: ['summary', 'curated_transcript'],
+          description: 'Control whether only a compact summary or curated transcript artifacts are written back into the room.'
         }
       },
       required: ['roomId', 'message']
@@ -3368,6 +3395,43 @@ async function handleCreateRoom(args) {
   };
 }
 
+async function handleListRooms(args) {
+  const params = new URLSearchParams();
+  if (Number.isFinite(args?.limit)) {
+    params.set('limit', String(args.limit));
+  }
+  if (args?.status) {
+    params.set('status', String(args.status));
+  }
+  const qs = params.toString();
+  const res = await callCliagents('GET', `/orchestration/rooms${qs ? `?${qs}` : ''}`);
+  if (res.status !== 200) {
+    throw new Error(`Failed to list rooms: ${JSON.stringify(res.data)}`);
+  }
+
+  const rooms = Array.isArray(res.data?.rooms) ? res.data.rooms : [];
+  return {
+    content: [{
+      type: 'text',
+      text: [
+        '## Rooms',
+        '',
+        `returned: ${rooms.length}`,
+        '',
+        rooms.map((entry) => {
+          const room = entry.room || {};
+          return [
+            `${room.id || 'n/a'}${room.title ? ` (${room.title})` : ''}`,
+            `participants=${entry.participantCount || 0}`,
+            `messages=${entry.messageCount || 0}`,
+            `latest_turn=${entry.latestTurn?.status || 'n/a'}`
+          ].join(' • ');
+        }).join('\n')
+      ].filter(Boolean).join('\n')
+    }]
+  };
+}
+
 async function handleSendRoomMessage(args) {
   const res = await callCliagents('POST', `/orchestration/rooms/${encodeURIComponent(args?.roomId || '')}/messages`, {
     content: args?.content,
@@ -3425,6 +3489,9 @@ async function handleGetRoomMessages(args) {
   if (Number.isFinite(args?.limit)) {
     params.set('limit', String(args.limit));
   }
+  if (args?.artifactMode) {
+    params.set('artifact_mode', String(args.artifactMode));
+  }
   const qs = params.toString();
   const res = await callCliagents('GET', `/orchestration/rooms/${encodeURIComponent(args?.roomId || '')}/messages${qs ? `?${qs}` : ''}`);
   if (res.status !== 200) {
@@ -3453,7 +3520,8 @@ async function handleDiscussRoom(args) {
     participantIds: Array.isArray(args?.participantIds) ? args.participantIds : [],
     requestId: args?.requestId || null,
     rounds: Array.isArray(args?.rounds) ? args.rounds : undefined,
-    judge: Object.prototype.hasOwnProperty.call(args || {}, 'judge') ? args.judge : null
+    judge: Object.prototype.hasOwnProperty.call(args || {}, 'judge') ? args.judge : null,
+    writebackMode: args?.writebackMode || null
   });
   if (res.status !== 200) {
     throw new Error(`Failed to discuss room: ${JSON.stringify(res.data)}`);
@@ -3470,7 +3538,8 @@ async function handleDiscussRoom(args) {
         `turn_id: ${data.turn?.id || 'n/a'}`,
         `status: ${data.turn?.status || 'unknown'}`,
         `run_id: ${data.runId || 'n/a'}`,
-        `discussion_id: ${data.discussionId || 'n/a'}`
+        `discussion_id: ${data.discussionId || 'n/a'}`,
+        `writeback_mode: ${data.turn?.metadata?.writebackMode || args?.writebackMode || 'summary'}`
       ].join('\n')
     }]
   };
@@ -4166,6 +4235,9 @@ async function handleRequest(request) {
           case 'create_room':
             result = await handleCreateRoom(args);
             break;
+          case 'list_rooms':
+            result = await handleListRooms(args);
+            break;
           case 'send_room_message':
             result = await handleSendRoomMessage(args);
             break;
@@ -4266,6 +4338,7 @@ module.exports = {
   handleListProviderSessions,
   handleImportProviderSession,
   handleCreateRoom,
+  handleListRooms,
   handleSendRoomMessage,
   handleGetRoom,
   handleGetRoomMessages,
