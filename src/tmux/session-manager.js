@@ -367,7 +367,9 @@ function buildGeminiOneShotRunnerCommand(message, terminal) {
   const runnerPath = path.join(__dirname, '../scripts/run-gemini-oneshot.js');
   const workDir = terminal.workDir || process.cwd();
   const resolvedModel = resolveGeminiCommandModel(terminal.model);
-  const providerThreadRef = normalizeProviderThreadRef('gemini-cli', terminal.providerThreadRef);
+  const providerThreadRef = terminal.disableSessionResume === true
+    ? null
+    : normalizeProviderThreadRef('gemini-cli', terminal.providerThreadRef);
   const prompt = buildFirstTurnPrompt(message, terminal);
 
   const args = [
@@ -3181,7 +3183,10 @@ class PersistentSessionManager extends EventEmitter {
     if (isGeminiOrchestration) {
       // Run Gemini one-shot work through the helper so tmux workers get the same
       // model fallback behavior as the direct-session adapter path.
-      const geminiCommand = buildGeminiOneShotRunnerCommand(message, terminal);
+      const geminiCommand = buildGeminiOneShotRunnerCommand(message, {
+        ...terminal,
+        disableSessionResume: true
+      });
       terminal.messageCount = Number.isInteger(terminal.messageCount) ? terminal.messageCount + 1 : 1;
 
       // Send the tracked one-shot command
