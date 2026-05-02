@@ -613,6 +613,38 @@
       return `${minutes}m ${rem}s`;
     }
 
+    function formatInteger(value) {
+      const numeric = Number(value || 0);
+      return new Intl.NumberFormat().format(Number.isFinite(numeric) ? numeric : 0);
+    }
+
+    function formatUsd(value) {
+      const numeric = Number(value || 0);
+      if (!Number.isFinite(numeric)) {
+        return 'n/a';
+      }
+      if (numeric === 0) {
+        return '$0';
+      }
+      const digits = numeric < 1 ? 4 : 2;
+      return new Intl.NumberFormat(undefined, {
+        style: 'currency',
+        currency: 'USD',
+        minimumFractionDigits: 0,
+        maximumFractionDigits: digits
+      }).format(numeric);
+    }
+
+    function formatUsageKey(group, key) {
+      if (!key) return 'unknown';
+      if (group === 'sourceConfidence') {
+        if (key === 'provider_reported') return 'provider reported';
+        if (key === 'estimated') return 'estimated';
+        if (key === 'unknown') return 'unknown';
+      }
+      return key;
+    }
+
     function escapeHtml(value) {
       return String(value ?? '')
         .replace(/&/g, '&amp;')
@@ -632,6 +664,27 @@
     function statusPill(status, fallback = 'pending') {
       const value = status || fallback;
       return `<div class="status-pill status-${escapeHtml(value)}">${escapeHtml(value)}</div>`;
+    }
+
+    async function fetchRunUsage(runId) {
+      if (!runId) {
+        return null;
+      }
+
+      try {
+        const response = await fetch(`${API_BASE}/orchestration/usage/runs/${encodeURIComponent(runId)}?breakdown=adapter,model,sourceConfidence`);
+        const data = await response.json();
+        if (!response.ok) {
+          throw new Error(data?.error?.message || 'Failed to load usage summary');
+        }
+        return data;
+      } catch (error) {
+        return {
+          summary: null,
+          breakdowns: {},
+          unavailableMessage: error.message
+        };
+      }
     }
 
     function readFiltersFromForm() {
@@ -752,6 +805,72 @@
           ${renderBlockers(structured.blockers)}
           ${renderStructuredList('Risks', structured.risks)}
           ${renderStructuredList('Test Gaps', structured.testGaps)}
+        </div>
+      `;
+    }
+
+    function renderUsageSummary(usagePayload) {
+      if (usagePayload?.summary?.recordCount > 0) {
+        const summary = usagePayload.summary;
+        const breakdowns = usagePayload.breakdowns || {};
+        const sourceConfidence = breakdowns.sourceConfidence || [];
+        const adapterRows = breakdowns.adapter || [];
+        const modelRows = breakdowns.model || [];
+        const provenance = sourceConfidence.length === 0
+          ? 'unknown'
+          : (sourceConfidence.length === 1 ? formatUsageKey('sourceConfidence', sourceConfidence[0].key) : 'mixed');
+
+        return `
+          <div style="margin-top: 16px;">
+            <div class="kv-label">Usage Summary</div>
+            <div class="detail-grid" style="margin-top: 10px;">
+              <div class="kv"><div class="kv-label">Records</div><div class="kv-value">${escapeHtml(formatInteger(summary.recordCount))}</div></div>
+              <div class="kv"><div class="kv-label">Provenance</div><div class="kv-value">${escapeHtml(provenance)}</div></div>
+              <div class="kv"><div class="kv-label">Input Tokens</div><div class="kv-value">${escapeHtml(formatInteger(summary.inputTokens))}</div></div>
+              <div class="kv"><div class="kv-label">Output Tokens</div><div class="kv-value">${escapeHtml(formatInteger(summary.outputTokens))}</div></div>
+              <div class="kv"><div class="kv-label">Total Tokens</div><div class="kv-value">${escapeHtml(formatInteger(summary.totalTokens))}</div></div>
+              <div class="kv"><div class="kv-label">Cost</div><div class="kv-value">${escapeHtml(formatUsd(summary.costUsd))}</div></div>
+              <div class="kv"><div class="kv-label">Cached Input Tokens</div><div class="kv-value">${escapeHtml(formatInteger(summary.cachedInputTokens))}</div></div>
+              <div class="kv"><div class="kv-label">Reasoning Tokens</div><div class="kv-value">${escapeHtml(formatInteger(summary.reasoningTokens))}</div></div>
+            </div>
+            ${sourceConfidence.length ? `
+              <div class="badge-row">
+                ${sourceConfidence.map((entry) => `<span class="badge">${escapeHtml(formatUsageKey('sourceConfidence', entry.key))}: ${escapeHtml(formatInteger(entry.totalTokens))} tokens</span>`).join('')}
+              </div>
+            ` : ''}
+            ${adapterRows.length ? `
+              <div class="structured-group">
+                <div class="kv-label">Top Adapters</div>
+                <div class="badge-row">
+                  ${adapterRows.slice(0, 4).map((entry) => `<span class="badge">${escapeHtml(formatUsageKey('adapter', entry.key))}: ${escapeHtml(formatInteger(entry.totalTokens))}</span>`).join('')}
+                </div>
+              </div>
+            ` : ''}
+            ${modelRows.length ? `
+              <div class="structured-group">
+                <div class="kv-label">Top Models</div>
+                <div class="badge-row">
+                  ${modelRows.slice(0, 4).map((entry) => `<span class="badge">${escapeHtml(formatUsageKey('model', entry.key))}: ${escapeHtml(formatInteger(entry.totalTokens))}</span>`).join('')}
+                </div>
+              </div>
+            ` : ''}
+          </div>
+        `;
+      }
+
+      if (usagePayload?.unavailableMessage) {
+        return `
+          <div style="margin-top: 16px;">
+            <div class="kv-label">Usage Summary</div>
+            <div class="muted">${escapeHtml(usagePayload.unavailableMessage)}</div>
+          </div>
+        `;
+      }
+
+      return `
+        <div style="margin-top: 16px;">
+          <div class="kv-label">Usage Summary</div>
+          <div class="muted">No usage records were persisted for this run.</div>
         </div>
       `;
     }
@@ -1129,7 +1248,7 @@
       renderPagination();
     }
 
-    function renderDetail(detail) {
+    function renderDetail(detail, usagePayload) {
       const body = document.getElementById('detail-body');
       const summary = document.getElementById('detail-summary');
       const { run, participants, steps, inputs, outputs, toolEvents } = detail;
@@ -1164,6 +1283,7 @@
             <div class="kv-label">Decision Summary</div>
             <div class="kv-value">${escapeHtml(run.decisionSummary || 'n/a')}</div>
           </div>
+          ${renderUsageSummary(usagePayload)}
           ${run.metadata ? `<div style="margin-top: 16px;"><div class="kv-label">Metadata</div>${jsonBlock(run.metadata)}</div>` : ''}
         </div>
 
@@ -1295,12 +1415,15 @@
       document.getElementById('detail-body').innerHTML = '<div class="empty-state">Loading run detail...</div>';
 
       try {
-        const response = await fetch(`${API_BASE}/orchestration/runs/${encodeURIComponent(runId)}`);
+        const [response, usagePayload] = await Promise.all([
+          fetch(`${API_BASE}/orchestration/runs/${encodeURIComponent(runId)}`),
+          fetchRunUsage(runId)
+        ]);
         const data = await response.json();
         if (!response.ok) {
           throw new Error(data?.error?.message || 'Failed to load run detail');
         }
-        renderDetail(data);
+        renderDetail(data, usagePayload);
       } catch (error) {
         renderDetailError(error.message);
       }

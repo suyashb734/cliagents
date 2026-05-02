@@ -1387,9 +1387,57 @@
       return data;
     }
 
+    async function fetchRunUsageSafe(runId) {
+      if (!runId) {
+        return null;
+      }
+
+      try {
+        return await fetchJson(`/orchestration/usage/runs/${encodeURIComponent(runId)}?breakdown=adapter,model,sourceConfidence`);
+      } catch (error) {
+        return {
+          summary: null,
+          breakdowns: {},
+          unavailableMessage: error.message
+        };
+      }
+    }
+
     function formatTimestamp(value) {
       if (!value) return 'n/a';
       return new Date(value).toLocaleString();
+    }
+
+    function formatInteger(value) {
+      const numeric = Number(value || 0);
+      return new Intl.NumberFormat().format(Number.isFinite(numeric) ? numeric : 0);
+    }
+
+    function formatUsd(value) {
+      const numeric = Number(value || 0);
+      if (!Number.isFinite(numeric)) {
+        return 'n/a';
+      }
+      if (numeric === 0) {
+        return '$0';
+      }
+      const digits = numeric < 1 ? 4 : 2;
+      return new Intl.NumberFormat(undefined, {
+        style: 'currency',
+        currency: 'USD',
+        minimumFractionDigits: 0,
+        maximumFractionDigits: digits
+      }).format(numeric);
+    }
+
+    function formatUsageKey(group, key) {
+      if (!key) return 'unknown';
+      if (group === 'sourceConfidence') {
+        if (key === 'provider_reported') return 'provider reported';
+        if (key === 'estimated') return 'estimated';
+        if (key === 'unknown') return 'unknown';
+      }
+      return key;
     }
 
     function timestampAgeMs(value) {
@@ -3529,7 +3577,70 @@
       }
     }
 
-    function renderDiscussionDetail(runDetail, discussionPayload) {
+    function renderUsageSummary(usagePayload, options = {}) {
+      const title = options.title || 'Run Usage';
+
+      if (usagePayload?.summary?.recordCount > 0) {
+        const summary = usagePayload.summary;
+        const breakdowns = usagePayload.breakdowns || {};
+        const sourceConfidence = breakdowns.sourceConfidence || [];
+        const adapterRows = breakdowns.adapter || [];
+        const modelRows = breakdowns.model || [];
+        const provenance = sourceConfidence.length === 0
+          ? 'unknown'
+          : (sourceConfidence.length === 1 ? formatUsageKey('sourceConfidence', sourceConfidence[0].key) : 'mixed');
+
+        return `
+          <div>
+            <div class="detail-label">${escapeHtml(title)}</div>
+            <div class="detail-grid">
+              <div><div class="detail-label">Records</div><div>${escapeHtml(formatInteger(summary.recordCount))}</div></div>
+              <div><div class="detail-label">Provenance</div><div>${escapeHtml(provenance)}</div></div>
+              <div><div class="detail-label">Input Tokens</div><div>${escapeHtml(formatInteger(summary.inputTokens))}</div></div>
+              <div><div class="detail-label">Output Tokens</div><div>${escapeHtml(formatInteger(summary.outputTokens))}</div></div>
+              <div><div class="detail-label">Total Tokens</div><div>${escapeHtml(formatInteger(summary.totalTokens))}</div></div>
+              <div><div class="detail-label">Cost</div><div>${escapeHtml(formatUsd(summary.costUsd))}</div></div>
+            </div>
+            ${sourceConfidence.length ? `
+              <div class="row-meta" style="margin-top: 10px;">
+                <strong>Confidence:</strong>
+                ${sourceConfidence.map((entry) => `${escapeHtml(formatUsageKey('sourceConfidence', entry.key))} (${escapeHtml(formatInteger(entry.totalTokens))} tokens)`).join(' • ')}
+              </div>
+            ` : ''}
+            ${adapterRows.length ? `
+              <div class="row-meta" style="margin-top: 10px;">
+                <strong>Adapters:</strong>
+                ${adapterRows.slice(0, 4).map((entry) => `${escapeHtml(formatUsageKey('adapter', entry.key))} (${escapeHtml(formatInteger(entry.totalTokens))})`).join(' • ')}
+              </div>
+            ` : ''}
+            ${modelRows.length ? `
+              <div class="row-meta" style="margin-top: 10px;">
+                <strong>Models:</strong>
+                ${modelRows.slice(0, 4).map((entry) => `${escapeHtml(formatUsageKey('model', entry.key))} (${escapeHtml(formatInteger(entry.totalTokens))})`).join(' • ')}
+              </div>
+            ` : ''}
+          </div>
+        `;
+      }
+
+      if (usagePayload?.unavailableMessage) {
+        return `
+          <div>
+            <div class="detail-label">${escapeHtml(title)}</div>
+            <div class="hint">${escapeHtml(usagePayload.unavailableMessage)}</div>
+          </div>
+        `;
+      }
+
+      return `
+        <div>
+          <div class="detail-label">${escapeHtml(title)}</div>
+          <div class="hint">No usage records were persisted for this run.</div>
+        </div>
+      `;
+    }
+
+    function renderDiscussionDetail(runDetail, discussionPayload, usagePayload) {
       const run = runDetail?.run || {};
       const discussion = discussionPayload?.discussion || {};
       const messages = discussionPayload?.messages || [];
@@ -3560,6 +3671,8 @@
           <div class="detail-label">Run Summary</div>
           <div class="hint">${escapeHtml(run.decisionSummary || run.inputSummary || discussion.topic || 'No summary available.')}</div>
         </div>
+
+        ${renderUsageSummary(usagePayload)}
 
         <div>
           <div class="detail-label">Round / Judge Outputs</div>
@@ -3605,18 +3718,21 @@
           ? await fetchJson(`/orchestration/runs/${encodeURIComponent(state.selectedRunId)}`)
           : null;
         const discussionId = runDetail?.run?.discussionId || runDetail?.run?.discussion_id || runDetail?.discussion?.id || state.selectedDiscussionId;
-        const discussionPayload = discussionId
-          ? await fetchJson(`/orchestration/discussions/${encodeURIComponent(discussionId)}`)
-          : { discussion: null, messages: [] };
+        const [discussionPayload, usagePayload] = await Promise.all([
+          discussionId
+            ? fetchJson(`/orchestration/discussions/${encodeURIComponent(discussionId)}`)
+            : Promise.resolve({ discussion: null, messages: [] }),
+          fetchRunUsageSafe(runDetail?.run?.id || state.selectedRunId)
+        ]);
 
-        renderDiscussionDetail(runDetail, discussionPayload);
+        renderDiscussionDetail(runDetail, discussionPayload, usagePayload);
       } catch (error) {
         elements.discussionDetailStatus.textContent = 'Discussion unavailable';
         elements.discussionDetail.innerHTML = `<div class="empty-state">${escapeHtml(error.message)}</div>`;
       }
     }
 
-    function renderRoomDetail(roomPayload, roomMessagesPayload) {
+    function renderRoomDetail(roomPayload, roomMessagesPayload, usagePayload) {
       const room = roomPayload?.room || {};
       const participants = roomPayload?.participants || [];
       const latestTurn = roomPayload?.latestTurn || {};
@@ -3667,6 +3783,8 @@
           </div>
         </div>
 
+        ${runId ? renderUsageSummary(usagePayload, { title: 'Latest Turn Usage' }) : ''}
+
         <div>
           <div class="detail-label">Room Transcript</div>
           <div class="message-list">
@@ -3715,8 +3833,12 @@
 
       try {
         const roomPayload = await fetchJson(`/orchestration/rooms/${encodeURIComponent(state.selectedRoomId)}`);
-        const roomMessagesPayload = await fetchJson(`/orchestration/rooms/${encodeURIComponent(state.selectedRoomId)}/messages?limit=120&artifact_mode=${encodeURIComponent(state.roomArtifactMode)}`);
-        renderRoomDetail(roomPayload, roomMessagesPayload);
+        const latestRunId = roomPayload?.latestTurn?.metadata?.runId || null;
+        const [roomMessagesPayload, usagePayload] = await Promise.all([
+          fetchJson(`/orchestration/rooms/${encodeURIComponent(state.selectedRoomId)}/messages?limit=120&artifact_mode=${encodeURIComponent(state.roomArtifactMode)}`),
+          fetchRunUsageSafe(latestRunId)
+        ]);
+        renderRoomDetail(roomPayload, roomMessagesPayload, usagePayload);
       } catch (error) {
         elements.roomDetailStatus.textContent = 'Room unavailable';
         elements.roomDetail.innerHTML = `<div class="empty-state">${escapeHtml(error.message)}</div>`;
