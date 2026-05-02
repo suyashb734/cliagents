@@ -658,7 +658,11 @@ async function runJudge(sessionManager, judgeSpec, prompt, options = {}) {
         participantId,
         outputKind: 'judge_final',
         content: response.result,
-        metadata: response.metadata || {},
+        metadata: {
+          ...(response.metadata || {}),
+          adapter: judgeSpec.adapter,
+          sendMetadata: response.metadata || {}
+        },
         createdAt: completedAt
       });
       runLedger.updateParticipant(participantId, {

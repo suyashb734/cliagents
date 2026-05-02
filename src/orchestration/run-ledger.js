@@ -444,6 +444,7 @@ class RunLedgerService {
   appendOutput(input) {
     const outputId = input.id || generateId('output');
     const payload = this.prepareOutput(input.content);
+    const createdAt = input.createdAt || Date.now();
 
     this.db.db.prepare(`
       INSERT INTO run_outputs (
@@ -466,8 +467,37 @@ class RunLedgerService {
       payload.storageMode,
       payload.isTruncated,
       serializeJson(input.metadata),
-      input.createdAt || Date.now()
+      createdAt
     );
+
+    if (
+      input.participantId &&
+      input.metadata &&
+      typeof input.metadata === 'object' &&
+      !Array.isArray(input.metadata)
+    ) {
+      if (typeof this.db.addUsageRecordFromMetadata !== 'function') {
+        console.warn('[RunLedgerService] Skipping usage persistence because db.addUsageRecordFromMetadata is unavailable');
+      } else if (typeof this.db.getRunById !== 'function') {
+        console.warn('[RunLedgerService] Persisting usage without root-session linkage because db.getRunById is unavailable');
+      }
+
+      const run = typeof this.db.getRunById === 'function'
+        ? this.db.getRunById(input.runId)
+        : null;
+      const participant = this.db.db.prepare('SELECT adapter FROM run_participants WHERE id = ?').get(input.participantId);
+      if (typeof this.db.addUsageRecordFromMetadata === 'function') {
+        this.db.addUsageRecordFromMetadata({
+          terminalId: input.participantId,
+          rootSessionId: run?.rootSessionId || null,
+          runId: input.runId,
+          participantId: input.participantId,
+          adapter: participant?.adapter || null,
+          metadata: input.metadata,
+          createdAt
+        });
+      }
+    }
 
     return outputId;
   }

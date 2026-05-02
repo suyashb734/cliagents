@@ -56,6 +56,12 @@ function getUsageMetadataSources(metadata) {
     metadata,
     metadata.usage,
     metadata.stats,
+    metadata.responseMetadata,
+    metadata.responseMetadata?.usage,
+    metadata.responseMetadata?.stats,
+    metadata.sendMetadata,
+    metadata.sendMetadata?.usage,
+    metadata.sendMetadata?.stats,
     metadata.result?.usage,
     metadata.result?.stats
   ].filter((value) => value && typeof value === 'object' && !Array.isArray(value));
@@ -73,28 +79,53 @@ function getFirstUsageValue(metadata, keys = []) {
   return null;
 }
 
-function buildUsageRecordFromMessage(terminalRow, terminalId, role, metadata = {}, options = {}) {
-  if (role !== 'assistant') {
-    return null;
+function mergeUsageMetadata(metadata = {}, overlay = {}) {
+  const merged = metadata && typeof metadata === 'object' && !Array.isArray(metadata)
+    ? { ...metadata }
+    : {};
+
+  for (const [key, value] of Object.entries(overlay)) {
+    if (value === undefined || value === null || value === '') {
+      continue;
+    }
+    if (merged[key] === undefined || merged[key] === null || merged[key] === '') {
+      merged[key] = value;
+    }
   }
+
+  return merged;
+}
+
+function buildUsageRecordFromMetadata(context = {}, metadata = {}) {
   if (!metadata || typeof metadata !== 'object' || Array.isArray(metadata)) {
     return null;
   }
 
-  const inputTokens = getFirstUsageValue(metadata, ['inputTokens', 'input_tokens', 'promptTokens', 'prompt_tokens']);
-  const outputTokens = getFirstUsageValue(metadata, ['outputTokens', 'output_tokens', 'completionTokens', 'completion_tokens', 'candidateTokens', 'candidate_tokens']);
-  const reasoningTokens = getFirstUsageValue(metadata, ['reasoningTokens', 'reasoning_tokens']);
-  const cachedInputTokens = getFirstUsageValue(metadata, ['cachedInputTokens', 'cached_input_tokens']);
-  const totalTokens = getFirstUsageValue(metadata, ['totalTokens', 'total_tokens']);
-  const costUsd = getFirstUsageValue(metadata, ['costUsd', 'cost_usd', 'totalCostUsd', 'total_cost_usd']);
-  const durationMs = getFirstUsageValue(metadata, ['durationMs', 'duration_ms']);
-  const adapter = getFirstUsageValue(metadata, ['adapter']) || terminalRow?.adapter || null;
-  const provider = getFirstUsageValue(metadata, ['provider']) || null;
-  const model = getFirstUsageValue(metadata, ['model']) || null;
-  const runId = getFirstUsageValue(metadata, ['runId', 'run_id']) || null;
-  const participantId = getFirstUsageValue(metadata, ['participantId', 'participant_id']) || null;
-  const sourceConfidence = getFirstUsageValue(metadata, ['sourceConfidence', 'source_confidence'])
-    || (metadata.usageEstimated ? 'estimated' : 'provider_reported');
+  const usageMetadata = mergeUsageMetadata(metadata, {
+    runId: context.runId || null,
+    participantId: context.participantId || null,
+    adapter: context.adapter || null,
+    provider: context.provider || null,
+    model: context.model || null,
+    sourceConfidence: context.sourceConfidence || null
+  });
+
+  const inputTokens = getFirstUsageValue(usageMetadata, ['inputTokens', 'input_tokens', 'promptTokens', 'prompt_tokens']);
+  const outputTokens = getFirstUsageValue(usageMetadata, ['outputTokens', 'output_tokens', 'completionTokens', 'completion_tokens', 'candidateTokens', 'candidate_tokens']);
+  const reasoningTokens = getFirstUsageValue(usageMetadata, ['reasoningTokens', 'reasoning_tokens']);
+  const cachedInputTokens = getFirstUsageValue(usageMetadata, ['cachedInputTokens', 'cached_input_tokens']);
+  const totalTokens = getFirstUsageValue(usageMetadata, ['totalTokens', 'total_tokens']);
+  const costUsd = getFirstUsageValue(usageMetadata, ['costUsd', 'cost_usd', 'totalCostUsd', 'total_cost_usd']);
+  const durationMs = getFirstUsageValue(usageMetadata, ['durationMs', 'duration_ms']);
+  const adapter = getFirstUsageValue(usageMetadata, ['adapter']) || context.adapter || null;
+  const provider = getFirstUsageValue(usageMetadata, ['provider']) || context.provider || null;
+  const model = getFirstUsageValue(usageMetadata, ['model']) || context.model || null;
+  const runId = getFirstUsageValue(usageMetadata, ['runId', 'run_id']) || context.runId || null;
+  const participantId = getFirstUsageValue(usageMetadata, ['participantId', 'participant_id']) || context.participantId || null;
+  const usageEstimated = getFirstUsageValue(usageMetadata, ['usageEstimated', 'usage_estimated']);
+  const sourceConfidence = getFirstUsageValue(usageMetadata, ['sourceConfidence', 'source_confidence'])
+    || context.sourceConfidence
+    || (usageEstimated ? 'estimated' : 'provider_reported');
 
   const hasUsageSignal = [
     inputTokens,
@@ -119,8 +150,13 @@ function buildUsageRecordFromMessage(terminalRow, terminalId, role, metadata = {
     normalizedInputTokens + normalizedOutputTokens + normalizedReasoningTokens
   );
 
+  const terminalId = String(context.terminalId || '').trim();
+  if (!terminalId) {
+    return null;
+  }
+
   return {
-    rootSessionId: terminalRow?.root_session_id || terminalRow?.rootSessionId || terminalId,
+    rootSessionId: context.rootSessionId || null,
     terminalId,
     runId,
     participantId,
@@ -135,9 +171,22 @@ function buildUsageRecordFromMessage(terminalRow, terminalId, role, metadata = {
     costUsd: normalizeNullableNumber(costUsd),
     durationMs: normalizeInteger(durationMs, 0),
     sourceConfidence: normalizeUsageConfidence(sourceConfidence),
-    metadata,
-    createdAt: Date.now()
+    metadata: usageMetadata,
+    createdAt: Number.isFinite(context.createdAt) ? context.createdAt : Date.now()
   };
+}
+
+function buildUsageRecordFromMessage(terminalRow, terminalId, role, metadata = {}, options = {}) {
+  if (role !== 'assistant') {
+    return null;
+  }
+
+  return buildUsageRecordFromMetadata({
+    rootSessionId: terminalRow?.root_session_id || terminalRow?.rootSessionId || terminalId,
+    terminalId,
+    adapter: terminalRow?.adapter || null,
+    createdAt: options.createdAt
+  }, metadata);
 }
 
 function buildUsageWhereClause(options = {}) {
@@ -1741,6 +1790,37 @@ class OrchestrationDB {
     createdAt);
 
     return result.lastID;
+  }
+
+  addUsageRecordFromMetadata(input = {}) {
+    const usageInput = input && typeof input === 'object' ? input : {};
+    const terminalId = String(usageInput.terminalId || '').trim();
+    if (!terminalId) {
+      return null;
+    }
+
+    const metadata = usageInput.metadata;
+    if (!metadata || typeof metadata !== 'object' || Array.isArray(metadata)) {
+      return null;
+    }
+
+    const usageRecord = buildUsageRecordFromMetadata({
+      rootSessionId: usageInput.rootSessionId || null,
+      terminalId,
+      runId: usageInput.runId || null,
+      participantId: usageInput.participantId || null,
+      adapter: usageInput.adapter || null,
+      provider: usageInput.provider || null,
+      model: usageInput.model || null,
+      sourceConfidence: usageInput.sourceConfidence || null,
+      createdAt: usageInput.createdAt
+    }, metadata);
+
+    if (!usageRecord) {
+      return null;
+    }
+
+    return this.addUsageRecord(usageRecord);
   }
 
   /**

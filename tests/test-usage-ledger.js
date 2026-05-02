@@ -9,6 +9,7 @@ const os = require('os');
 const path = require('path');
 
 const { OrchestrationDB } = require('../src/database/db');
+const { RunLedgerService } = require('../src/orchestration/run-ledger');
 const { createOrchestrationRouter } = require('../src/server/orchestration-router');
 
 function makeTempDir(prefix) {
@@ -71,6 +72,8 @@ async function run() {
   let appHandle = null;
 
   try {
+    const ledger = new RunLedgerService(db);
+
     db.registerTerminal(
       'usage-root-main',
       'cliagents-usage-root',
@@ -140,6 +143,72 @@ async function run() {
       }
     });
 
+    const directRunId = ledger.createRun({
+      id: 'run-usage-direct',
+      kind: 'discussion',
+      status: 'completed',
+      inputSummary: 'Validate direct-session usage capture.',
+      rootSessionId: 'root-usage-2',
+      startedAt: Date.now(),
+      completedAt: Date.now()
+    });
+    const directParticipantId = ledger.addParticipant({
+      id: 'participant-usage-direct',
+      runId: directRunId,
+      participantRole: 'participant',
+      participantName: 'direct-participant',
+      adapter: 'codex-cli',
+      status: 'completed'
+    });
+    ledger.appendOutput({
+      runId: directRunId,
+      participantId: directParticipantId,
+      outputKind: 'participant_final',
+      content: 'Direct-session orchestration output',
+      metadata: {
+        sendMetadata: {
+          provider: 'openai',
+          model: 'o4-mini',
+          inputTokens: 33,
+          outputTokens: 12,
+          totalTokens: 45,
+          costUsd: 0.11,
+          sourceConfidence: 'provider_reported'
+        }
+      },
+      createdAt: Date.now()
+    });
+    ledger.appendOutput({
+      runId: directRunId,
+      participantId: directParticipantId,
+      outputKind: 'judge_final',
+      content: 'Direct-session review synthesis',
+      metadata: {
+        responseMetadata: {
+          provider: 'anthropic',
+          model: 'claude-sonnet-4',
+          inputTokens: 14,
+          outputTokens: 6,
+          totalTokens: 20,
+          sourceConfidence: 'estimated'
+        }
+      },
+      createdAt: Date.now()
+    });
+    ledger.appendOutput({
+      runId: directRunId,
+      outputKind: 'judge_final',
+      content: 'Aggregate summary output should not duplicate usage.',
+      metadata: {
+        sendMetadata: {
+          inputTokens: 999,
+          outputTokens: 1,
+          totalTokens: 1000
+        }
+      },
+      createdAt: Date.now()
+    });
+
     const rootRecords = db.listUsageRecords({ rootSessionId: 'root-usage-1' });
     assert.strictEqual(rootRecords.length, 2, 'Only assistant messages with usage metadata should emit usage records');
     const rootSummary = db.summarizeUsage({ rootSessionId: 'root-usage-1' });
@@ -149,6 +218,20 @@ async function run() {
     assert.strictEqual(rootSummary.cachedInputTokens, 10);
     assert.strictEqual(rootSummary.reasoningTokens, 5);
     assert.strictEqual(rootSummary.recordCount, 2);
+    const directRunSummary = db.summarizeUsage({ runId: directRunId });
+    assert.strictEqual(directRunSummary.recordCount, 2, 'Direct-session ledger outputs should emit usage records for participant-bound outputs only');
+    assert.strictEqual(directRunSummary.inputTokens, 47);
+    assert.strictEqual(directRunSummary.outputTokens, 18);
+    assert.strictEqual(directRunSummary.totalTokens, 65);
+    assert.strictEqual(directRunSummary.costUsd, 0.11);
+    const directRunRecords = db.listUsageRecords({ runId: directRunId });
+    assert.strictEqual(directRunRecords.length, 2);
+    assert.strictEqual(directRunRecords[0].participant_id, directParticipantId);
+    assert.strictEqual(directRunRecords[0].terminal_id, directParticipantId);
+    assert.strictEqual(directRunRecords[0].run_id, directRunId);
+    assert.strictEqual(directRunRecords[0].root_session_id, 'root-usage-2');
+    assert(directRunRecords.some((record) => record.model === 'o4-mini'));
+    assert(directRunRecords.some((record) => record.model === 'claude-sonnet-4'));
 
     db.deleteTerminal('usage-root-main');
     db.deleteTerminal('usage-child-1');
@@ -193,6 +276,18 @@ async function run() {
     assert.strictEqual(runUsageRes.data.summary.recordCount, 2);
     assert(runUsageRes.data.breakdowns.adapter.some((entry) => entry.key === 'codex-cli'));
     assert(runUsageRes.data.breakdowns.adapter.some((entry) => entry.key === 'opencode-cli'));
+
+    const directRunUsageRes = await request(
+      appHandle.baseUrl,
+      `/orchestration/usage/runs/${directRunId}?breakdown=model,sourceConfidence`
+    );
+    assert.strictEqual(directRunUsageRes.status, 200);
+    assert.strictEqual(directRunUsageRes.data.summary.totalTokens, 65);
+    assert.strictEqual(directRunUsageRes.data.summary.recordCount, 2);
+    assert(directRunUsageRes.data.breakdowns.model.some((entry) => entry.key === 'o4-mini'));
+    assert(directRunUsageRes.data.breakdowns.model.some((entry) => entry.key === 'claude-sonnet-4'));
+    assert(directRunUsageRes.data.breakdowns.sourceConfidence.some((entry) => entry.key === 'provider_reported'));
+    assert(directRunUsageRes.data.breakdowns.sourceConfidence.some((entry) => entry.key === 'estimated'));
 
     const terminalUsageRes = await request(
       appHandle.baseUrl,

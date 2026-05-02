@@ -60,13 +60,31 @@ class FakeSessionManager {
           'PRODUCTION_READINESS',
           '- not yet'
         ].join('\n'),
-        metadata: { judged: true }
+        metadata: {
+          judged: true,
+          provider: 'openai',
+          model: 'judge-o4-mini',
+          inputTokens: 30,
+          outputTokens: 10,
+          totalTokens: 40,
+          costUsd: 0.25,
+          sourceConfidence: 'provider_reported'
+        }
       };
     }
 
     return {
       result: `${adapter} ${roundName} response #${session.sendCount}`,
-      metadata: { roundName, sendCount: session.sendCount }
+      metadata: {
+        roundName,
+        sendCount: session.sendCount,
+        provider: 'test-provider',
+        model: `${adapter}-model`,
+        inputTokens: 10 * session.sendCount,
+        outputTokens: 5 * session.sendCount,
+        totalTokens: 15 * session.sendCount,
+        sourceConfidence: 'estimated'
+      }
     };
   }
 
@@ -123,6 +141,22 @@ async function run() {
     assert(discussionMessages.length >= 7, 'discussion history should include system, participant, and judge messages');
     assert(discussionMessages.some((message) => message.content.includes('Round 1: position')));
     assert(discussionMessages.some((message) => message.content.includes('Judge synthesis')));
+    const usageSummary = db.summarizeUsage({ runId: result.runId });
+    assert.strictEqual(usageSummary.recordCount, 5);
+    assert.strictEqual(usageSummary.inputTokens, 90);
+    assert.strictEqual(usageSummary.outputTokens, 40);
+    assert.strictEqual(usageSummary.totalTokens, 130);
+    assert.strictEqual(usageSummary.costUsd, 0.25);
+    const usageRecords = db.listUsageRecords({ runId: result.runId });
+    assert.strictEqual(usageRecords.length, 5);
+    assert(usageRecords.every((record) => record.run_id === result.runId));
+    assert(usageRecords.every((record) => record.root_session_id === result.discussionId));
+    const rootUsageSummary = db.summarizeUsage({ rootSessionId: result.discussionId });
+    assert.strictEqual(rootUsageSummary.recordCount, 5);
+    assert.strictEqual(rootUsageSummary.totalTokens, 130);
+    const usageBreakdown = db.listUsageBreakdown({ runId: result.runId, groupBy: 'sourceConfidence' });
+    assert(usageBreakdown.some((entry) => entry.key === 'estimated' && entry.totalTokens === 90));
+    assert(usageBreakdown.some((entry) => entry.key === 'provider_reported' && entry.totalTokens === 40));
 
     const partialManager = new FakeSessionManager();
     const partial = await runDiscussion(partialManager, 'Stress the degraded-run path.', {
