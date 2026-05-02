@@ -110,12 +110,17 @@ async function run() {
 
     const text = result.content[0].text;
     assert(text.includes('## Usage Summary: run run-usage-v2'));
+    assert(text.includes('total_tokens: 150'));
     assert(text.includes('execution_tokens: 90'));
     assert(text.includes('planning_tokens: 20'));
     assert(text.includes('judge_tokens: 40'));
     assert(text.includes('broker_overhead_tokens: 60'));
+    assert(text.includes('broker_overhead_share: 40.0%'));
+    assert(text.includes('execution_share: 60.0%'));
     assert(text.includes('role:'));
     assert(text.includes('participant: total_tokens=90'));
+    assert(text.includes('secondary:'));
+    assert(text.includes('cost_usd: 0.12'));
 
     const jsonResult = await mod.handleGetUsageSummary({
       runId: 'run-usage-v2',

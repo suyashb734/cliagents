@@ -3795,6 +3795,10 @@ async function handleGetUsageSummary(args) {
   const summary = res.data?.summary || {};
   const breakdowns = res.data?.breakdowns || {};
   const attribution = res.data?.attribution || null;
+  const formatShare = (value) => {
+    const numeric = Number(value || 0);
+    return Number.isFinite(numeric) ? `${(numeric * 100).toFixed(1)}%` : '0.0%';
+  };
   const breakdownLines = Object.entries(breakdowns).flatMap(([key, rows]) => {
     if (!Array.isArray(rows) || rows.length === 0) {
       return [];
@@ -3802,7 +3806,17 @@ async function handleGetUsageSummary(args) {
     return [
       '',
       `${key}:`,
-      ...rows.slice(0, 5).map((entry) => `- ${entry.key}: total_tokens=${entry.totalTokens} cost_usd=${entry.costUsd}`)
+      ...rows.slice(0, 5).map((entry) => {
+        const parts = [`- ${entry.key}: total_tokens=${entry.totalTokens}`];
+        if (entry.inputTokens || entry.outputTokens) {
+          parts.push(`input_tokens=${entry.inputTokens || 0}`);
+          parts.push(`output_tokens=${entry.outputTokens || 0}`);
+        }
+        if (entry.costUsd) {
+          parts.push(`cost_usd=${entry.costUsd}`);
+        }
+        return parts.join(' ');
+      })
     ];
   });
   const recordLines = Array.isArray(res.data?.records) && res.data.records.length > 0
@@ -3823,10 +3837,18 @@ async function handleGetUsageSummary(args) {
         `- judge_tokens: ${attribution.judgeTokens || 0}`,
         `- supervision_tokens: ${attribution.supervisionTokens || 0}`,
         `- broker_overhead_tokens: ${attribution.brokerOverheadTokens || 0}`,
-        `- broker_overhead_share: ${attribution.brokerOverheadShare || 0}`,
-        `- execution_share: ${attribution.executionShare || 0}`
+        `- broker_overhead_share: ${formatShare(attribution.brokerOverheadShare || 0)}`,
+        `- execution_share: ${formatShare(attribution.executionShare || 0)}`
       ]
     : [];
+
+  const secondaryLines = [];
+  if (summary.costUsd) {
+    secondaryLines.push(`cost_usd: ${summary.costUsd}`);
+  }
+  if (summary.durationMs) {
+    secondaryLines.push(`duration_ms: ${summary.durationMs}`);
+  }
 
   return {
     content: [{
@@ -3835,15 +3857,14 @@ async function handleGetUsageSummary(args) {
         `## Usage Summary: ${scopeLabel}`,
         '',
         `records: ${summary.recordCount || 0}`,
+        `total_tokens: ${summary.totalTokens || 0}`,
         `input_tokens: ${summary.inputTokens || 0}`,
         `output_tokens: ${summary.outputTokens || 0}`,
         `reasoning_tokens: ${summary.reasoningTokens || 0}`,
         `cached_input_tokens: ${summary.cachedInputTokens || 0}`,
-        `total_tokens: ${summary.totalTokens || 0}`,
-        `cost_usd: ${summary.costUsd || 0}`,
-        `duration_ms: ${summary.durationMs || 0}`,
         ...attributionLines,
         ...breakdownLines,
+        ...(secondaryLines.length ? ['', 'secondary:', ...secondaryLines] : []),
         ...recordLines
       ].join('\n')
     }]
