@@ -1581,7 +1581,7 @@ This calls cliagents' direct-session discussion route and returns the completed 
         },
         breakdown: {
           type: 'string',
-          description: 'Optional comma-separated breakdown dimensions: adapter, provider, model, sourceConfidence.'
+          description: 'Optional comma-separated breakdown dimensions: adapter, provider, model, sourceConfidence, role.'
         },
         limit: {
           type: 'number',
@@ -3794,6 +3794,7 @@ async function handleGetUsageSummary(args) {
 
   const summary = res.data?.summary || {};
   const breakdowns = res.data?.breakdowns || {};
+  const attribution = res.data?.attribution || null;
   const breakdownLines = Object.entries(breakdowns).flatMap(([key, rows]) => {
     if (!Array.isArray(rows) || rows.length === 0) {
       return [];
@@ -3809,8 +3810,21 @@ async function handleGetUsageSummary(args) {
         '',
         'recent_records:',
         ...res.data.records.slice(0, 5).map((record) => (
-          `- ${record.terminal_id || record.terminalId}: model=${record.model || 'n/a'} total_tokens=${record.total_tokens || record.totalTokens || 0} confidence=${record.source_confidence || record.sourceConfidence || 'unknown'}`
+          `- ${record.terminal_id || record.terminalId}: role=${record.effective_role || record.effectiveRole || 'unknown'} model=${record.model || 'n/a'} total_tokens=${record.total_tokens || record.totalTokens || 0} confidence=${record.source_confidence || record.sourceConfidence || 'unknown'}`
         ))
+      ]
+    : [];
+  const attributionLines = attribution
+    ? [
+        '',
+        'attribution:',
+        `- execution_tokens: ${attribution.executionTokens || 0}`,
+        `- planning_tokens: ${attribution.planningTokens || 0}`,
+        `- judge_tokens: ${attribution.judgeTokens || 0}`,
+        `- supervision_tokens: ${attribution.supervisionTokens || 0}`,
+        `- broker_overhead_tokens: ${attribution.brokerOverheadTokens || 0}`,
+        `- broker_overhead_share: ${attribution.brokerOverheadShare || 0}`,
+        `- execution_share: ${attribution.executionShare || 0}`
       ]
     : [];
 
@@ -3828,6 +3842,7 @@ async function handleGetUsageSummary(args) {
         `total_tokens: ${summary.totalTokens || 0}`,
         `cost_usd: ${summary.costUsd || 0}`,
         `duration_ms: ${summary.durationMs || 0}`,
+        ...attributionLines,
         ...breakdownLines,
         ...recordLines
       ].join('\n')

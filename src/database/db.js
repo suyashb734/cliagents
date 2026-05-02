@@ -55,6 +55,55 @@ function normalizeUsageConfidence(value) {
   return 'unknown';
 }
 
+function normalizeUsageRole(value) {
+  const normalized = String(value || '').trim().toLowerCase();
+  return normalized || 'unknown';
+}
+
+function classifyUsageRoleBucket(value) {
+  const role = normalizeUsageRole(value);
+
+  if (role === 'judge') {
+    return 'judging';
+  }
+
+  if (role === 'plan' || role === 'planner' || role === 'architect') {
+    return 'planning';
+  }
+
+  if (role === 'main' || role === 'supervisor' || role === 'monitor') {
+    return 'supervision';
+  }
+
+  if (
+    role === 'worker'
+    || role === 'implement'
+    || role === 'participant'
+    || role === 'reviewer'
+    || role === 'review'
+    || role === 'review-security'
+    || role === 'review-performance'
+    || role === 'test'
+    || role === 'fix'
+    || role === 'research'
+    || role === 'document'
+  ) {
+    return 'execution';
+  }
+
+  return 'unknown';
+}
+
+function buildUsageRoleSql(recordAlias = 'usage_records', participantAlias = 'rp', terminalAlias = 't') {
+  return `LOWER(COALESCE(
+    NULLIF(${participantAlias}.participant_role, ''),
+    NULLIF(json_extract(${recordAlias}.metadata, '$.participantRole'), ''),
+    NULLIF(json_extract(${recordAlias}.metadata, '$.role'), ''),
+    NULLIF(${terminalAlias}.role, ''),
+    'unknown'
+  ))`;
+}
+
 function getUsageMetadataSources(metadata) {
   if (!metadata || typeof metadata !== 'object' || Array.isArray(metadata)) {
     return [];
@@ -114,6 +163,7 @@ function buildUsageRecordFromMetadata(context = {}, metadata = {}) {
     adapter: context.adapter || null,
     provider: context.provider || null,
     model: context.model || null,
+    role: context.role || null,
     sourceConfidence: context.sourceConfidence || null
   });
 
@@ -192,6 +242,7 @@ function buildUsageRecordFromMessage(terminalRow, terminalId, role, metadata = {
     rootSessionId: terminalRow?.root_session_id || terminalRow?.rootSessionId || terminalId,
     terminalId,
     adapter: terminalRow?.adapter || null,
+    role: terminalRow?.role || null,
     createdAt: options.createdAt
   }, metadata);
 }
@@ -201,19 +252,19 @@ function buildUsageWhereClause(options = {}) {
   const params = [];
 
   if (options.rootSessionId) {
-    clauses.push('root_session_id = ?');
+    clauses.push('usage_records.root_session_id = ?');
     params.push(options.rootSessionId);
   }
   if (options.terminalId) {
-    clauses.push('terminal_id = ?');
+    clauses.push('usage_records.terminal_id = ?');
     params.push(options.terminalId);
   }
   if (options.runId) {
-    clauses.push('run_id = ?');
+    clauses.push('usage_records.run_id = ?');
     params.push(options.runId);
   }
   if (options.participantId) {
-    clauses.push('participant_id = ?');
+    clauses.push('usage_records.participant_id = ?');
     params.push(options.participantId);
   }
 
@@ -1819,6 +1870,7 @@ class OrchestrationDB {
       adapter: usageInput.adapter || null,
       provider: usageInput.provider || null,
       model: usageInput.model || null,
+      role: usageInput.role || null,
       sourceConfidence: usageInput.sourceConfidence || null,
       createdAt: usageInput.createdAt
     }, metadata);
@@ -1840,8 +1892,14 @@ class OrchestrationDB {
     const offset = Number.isInteger(usageOptions.offset) && usageOptions.offset >= 0 ? usageOptions.offset : 0;
 
     const rows = this.db.all(`
-      SELECT *
+      SELECT
+        usage_records.*,
+        rp.participant_role AS participant_role,
+        t.role AS terminal_role,
+        ${buildUsageRoleSql()} AS effective_role
       FROM usage_records
+      LEFT JOIN run_participants rp ON rp.id = usage_records.participant_id
+      LEFT JOIN terminals t ON t.terminal_id = usage_records.terminal_id
       ${whereSql}
       ORDER BY created_at DESC, id DESC
       LIMIT ? OFFSET ?
@@ -1849,7 +1907,9 @@ class OrchestrationDB {
 
     return rows.map((row) => ({
       ...row,
-      metadata: parseJsonField(row.metadata)
+      metadata: parseJsonField(row.metadata),
+      effectiveRole: normalizeUsageRole(row.effective_role),
+      roleGroup: classifyUsageRoleBucket(row.effective_role)
     }));
   }
 
@@ -1898,15 +1958,27 @@ class OrchestrationDB {
       ['sourceconfidence', 'source_confidence']
     ]);
     const groupColumn = allowedGroupBy.get(groupBy);
-    if (!groupColumn) {
+    const isRoleBreakdown = groupBy === 'role';
+    if (!groupColumn && !isRoleBreakdown) {
       return [];
     }
 
     const { whereSql, params } = buildUsageWhereClause(usageOptions);
     const limit = Number.isInteger(usageOptions.limit) && usageOptions.limit > 0 ? usageOptions.limit : 20;
+    const fromClause = isRoleBreakdown
+      ? `
+      FROM usage_records
+      LEFT JOIN run_participants rp ON rp.id = usage_records.participant_id
+      LEFT JOIN terminals t ON t.terminal_id = usage_records.terminal_id
+    `
+      : 'FROM usage_records';
+    const groupExpr = isRoleBreakdown
+      ? buildUsageRoleSql()
+      : `COALESCE(${groupColumn}, 'unknown')`;
+
     return this.db.all(`
       SELECT
-        COALESCE(${groupColumn}, 'unknown') AS bucket,
+        ${groupExpr} AS bucket,
         COUNT(*) AS record_count,
         COALESCE(SUM(input_tokens), 0) AS input_tokens,
         COALESCE(SUM(output_tokens), 0) AS output_tokens,
@@ -1915,9 +1987,9 @@ class OrchestrationDB {
         COALESCE(SUM(total_tokens), 0) AS total_tokens,
         COALESCE(SUM(cost_usd), 0) AS cost_usd,
         COALESCE(SUM(duration_ms), 0) AS duration_ms
-      FROM usage_records
+      ${fromClause}
       ${whereSql}
-      GROUP BY COALESCE(${groupColumn}, 'unknown')
+      GROUP BY ${groupExpr}
       ORDER BY total_tokens DESC, record_count DESC, bucket ASC
       LIMIT ?
     `, ...params, limit).map((row) => ({
@@ -1931,6 +2003,49 @@ class OrchestrationDB {
       costUsd: row.cost_usd || 0,
       durationMs: row.duration_ms || 0
     }));
+  }
+
+  summarizeUsageAttribution(options = {}) {
+    const summary = this.summarizeUsage(options);
+    const roleBreakdown = this.listUsageBreakdown({
+      ...options,
+      groupBy: 'role',
+      limit: 100
+    });
+
+    const grouped = {
+      planning: { key: 'planning', recordCount: 0, inputTokens: 0, outputTokens: 0, totalTokens: 0, costUsd: 0 },
+      judging: { key: 'judging', recordCount: 0, inputTokens: 0, outputTokens: 0, totalTokens: 0, costUsd: 0 },
+      execution: { key: 'execution', recordCount: 0, inputTokens: 0, outputTokens: 0, totalTokens: 0, costUsd: 0 },
+      supervision: { key: 'supervision', recordCount: 0, inputTokens: 0, outputTokens: 0, totalTokens: 0, costUsd: 0 },
+      unknown: { key: 'unknown', recordCount: 0, inputTokens: 0, outputTokens: 0, totalTokens: 0, costUsd: 0 }
+    };
+
+    for (const entry of roleBreakdown) {
+      const bucket = grouped[classifyUsageRoleBucket(entry.key)];
+      bucket.recordCount += entry.recordCount || 0;
+      bucket.inputTokens += entry.inputTokens || 0;
+      bucket.outputTokens += entry.outputTokens || 0;
+      bucket.totalTokens += entry.totalTokens || 0;
+      bucket.costUsd += entry.costUsd || 0;
+    }
+
+    const totalTokens = summary.totalTokens || 0;
+    const brokerOverheadTokens = grouped.planning.totalTokens + grouped.judging.totalTokens + grouped.supervision.totalTokens;
+    const executionTokens = grouped.execution.totalTokens;
+
+    return {
+      roleBreakdown,
+      roleGroups: Object.values(grouped),
+      planningTokens: grouped.planning.totalTokens,
+      judgeTokens: grouped.judging.totalTokens,
+      executionTokens,
+      supervisionTokens: grouped.supervision.totalTokens,
+      unknownRoleTokens: grouped.unknown.totalTokens,
+      brokerOverheadTokens,
+      brokerOverheadShare: totalTokens > 0 ? brokerOverheadTokens / totalTokens : 0,
+      executionShare: totalTokens > 0 ? executionTokens / totalTokens : 0
+    };
   }
 
   /**

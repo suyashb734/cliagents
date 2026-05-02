@@ -1393,7 +1393,7 @@
       }
 
       try {
-        return await fetchJson(`/orchestration/usage/runs/${encodeURIComponent(runId)}?breakdown=adapter,model,sourceConfidence`);
+        return await fetchJson(`/orchestration/usage/runs/${encodeURIComponent(runId)}?breakdown=adapter,model,sourceConfidence,role`);
       } catch (error) {
         return {
           summary: null,
@@ -3583,9 +3583,11 @@
       if (usagePayload?.summary?.recordCount > 0) {
         const summary = usagePayload.summary;
         const breakdowns = usagePayload.breakdowns || {};
+        const attribution = usagePayload.attribution || null;
         const sourceConfidence = breakdowns.sourceConfidence || [];
         const adapterRows = breakdowns.adapter || [];
         const modelRows = breakdowns.model || [];
+        const roleRows = breakdowns.role || attribution?.roleBreakdown || [];
         const provenance = sourceConfidence.length === 0
           ? 'unknown'
           : (sourceConfidence.length === 1 ? formatUsageKey('sourceConfidence', sourceConfidence[0].key) : 'mixed');
@@ -3617,6 +3619,21 @@
               <div class="row-meta" style="margin-top: 10px;">
                 <strong>Models:</strong>
                 ${modelRows.slice(0, 4).map((entry) => `${escapeHtml(formatUsageKey('model', entry.key))} (${escapeHtml(formatInteger(entry.totalTokens))})`).join(' • ')}
+              </div>
+            ` : ''}
+            ${attribution ? `
+              <div class="row-meta" style="margin-top: 10px;">
+                <strong>Attribution:</strong>
+                execution ${escapeHtml(formatInteger(attribution.executionTokens || 0))} •
+                planning ${escapeHtml(formatInteger(attribution.planningTokens || 0))} •
+                judge ${escapeHtml(formatInteger(attribution.judgeTokens || 0))} •
+                supervision ${escapeHtml(formatInteger(attribution.supervisionTokens || 0))}
+              </div>
+            ` : ''}
+            ${roleRows.length ? `
+              <div class="row-meta" style="margin-top: 10px;">
+                <strong>Roles:</strong>
+                ${roleRows.slice(0, 5).map((entry) => `${escapeHtml(formatUsageKey('role', entry.key))} (${escapeHtml(formatInteger(entry.totalTokens))})`).join(' • ')}
               </div>
             ` : ''}
           </div>

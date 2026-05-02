@@ -160,6 +160,14 @@ async function run() {
       adapter: 'codex-cli',
       status: 'completed'
     });
+    const directJudgeId = ledger.addParticipant({
+      id: 'judge-usage-direct',
+      runId: directRunId,
+      participantRole: 'judge',
+      participantName: 'direct-judge',
+      adapter: 'claude-code',
+      status: 'completed'
+    });
     ledger.appendOutput({
       runId: directRunId,
       participantId: directParticipantId,
@@ -180,7 +188,7 @@ async function run() {
     });
     ledger.appendOutput({
       runId: directRunId,
-      participantId: directParticipantId,
+      participantId: directJudgeId,
       outputKind: 'judge_final',
       content: 'Direct-session review synthesis',
       metadata: {
@@ -210,6 +218,8 @@ async function run() {
 
     const rootRecords = db.listUsageRecords({ rootSessionId: 'root-usage-1' });
     assert.strictEqual(rootRecords.length, 2, 'Only assistant messages with usage metadata should emit usage records');
+    assert(rootRecords.some((record) => record.effectiveRole === 'main'));
+    assert(rootRecords.some((record) => record.effectiveRole === 'worker'));
     const rootSummary = db.summarizeUsage({ rootSessionId: 'root-usage-1' });
     assert.strictEqual(rootSummary.inputTokens, 200);
     assert.strictEqual(rootSummary.outputTokens, 105);
@@ -225,12 +235,22 @@ async function run() {
     assert.strictEqual(directRunSummary.costUsd, 0.11);
     const directRunRecords = db.listUsageRecords({ runId: directRunId });
     assert.strictEqual(directRunRecords.length, 2);
-    assert.strictEqual(directRunRecords[0].participant_id, directParticipantId);
-    assert.strictEqual(directRunRecords[0].terminal_id, directParticipantId);
-    assert.strictEqual(directRunRecords[0].run_id, directRunId);
-    assert.strictEqual(directRunRecords[0].root_session_id, 'root-usage-2');
+    assert(directRunRecords.some((record) => record.effectiveRole === 'participant'));
+    assert(directRunRecords.some((record) => record.effectiveRole === 'judge'));
+    assert(directRunRecords.some((record) => record.participant_id === directParticipantId && record.terminal_id === directParticipantId));
+    assert(directRunRecords.some((record) => record.participant_id === directJudgeId && record.terminal_id === directJudgeId));
+    assert(directRunRecords.every((record) => record.run_id === directRunId));
+    assert(directRunRecords.every((record) => record.root_session_id === 'root-usage-2'));
     assert(directRunRecords.some((record) => record.model === 'o4-mini'));
     assert(directRunRecords.some((record) => record.model === 'claude-sonnet-4'));
+    const directRunRoleBreakdown = db.listUsageBreakdown({ runId: directRunId, groupBy: 'role' });
+    assert(directRunRoleBreakdown.some((entry) => entry.key === 'participant' && entry.totalTokens === 45));
+    assert(directRunRoleBreakdown.some((entry) => entry.key === 'judge' && entry.totalTokens === 20));
+    const directRunAttribution = db.summarizeUsageAttribution({ runId: directRunId });
+    assert.strictEqual(directRunAttribution.executionTokens, 45);
+    assert.strictEqual(directRunAttribution.judgeTokens, 20);
+    assert.strictEqual(directRunAttribution.brokerOverheadTokens, 20);
+    assert.strictEqual(directRunAttribution.roleGroups.find((entry) => entry.key === 'execution').totalTokens, 45);
 
     db.deleteTerminal('usage-root-main');
     db.deleteTerminal('usage-child-1');
@@ -259,26 +279,32 @@ async function run() {
 
     const rootUsageRes = await request(
       appHandle.baseUrl,
-      '/orchestration/usage/roots/root-usage-1?breakdown=model,provider'
+      '/orchestration/usage/roots/root-usage-1?breakdown=model,provider,role'
     );
     assert.strictEqual(rootUsageRes.status, 200);
     assert.strictEqual(rootUsageRes.data.summary.totalTokens, 310);
     assert.strictEqual(rootUsageRes.data.summary.costUsd, 0.42);
     assert(rootUsageRes.data.breakdowns.model.some((entry) => entry.key === 'o4-mini'));
     assert(rootUsageRes.data.breakdowns.provider.some((entry) => entry.key === 'openrouter'));
+    assert(rootUsageRes.data.breakdowns.role.some((entry) => entry.key === 'main' && entry.totalTokens === 170));
+    assert(rootUsageRes.data.breakdowns.role.some((entry) => entry.key === 'worker' && entry.totalTokens === 140));
+    assert.strictEqual(rootUsageRes.data.attribution.supervisionTokens, 170);
+    assert.strictEqual(rootUsageRes.data.attribution.executionTokens, 140);
 
     const runUsageRes = await request(
       appHandle.baseUrl,
-      '/orchestration/usage/runs/run-usage-1?breakdown=adapter'
+      '/orchestration/usage/runs/run-usage-1?breakdown=adapter,role'
     );
     assert.strictEqual(runUsageRes.status, 200);
     assert.strictEqual(runUsageRes.data.summary.recordCount, 2);
     assert(runUsageRes.data.breakdowns.adapter.some((entry) => entry.key === 'codex-cli'));
     assert(runUsageRes.data.breakdowns.adapter.some((entry) => entry.key === 'opencode-cli'));
+    assert(runUsageRes.data.breakdowns.role.some((entry) => entry.key === 'main'));
+    assert(runUsageRes.data.breakdowns.role.some((entry) => entry.key === 'worker'));
 
     const directRunUsageRes = await request(
       appHandle.baseUrl,
-      `/orchestration/usage/runs/${directRunId}?breakdown=model,sourceConfidence`
+      `/orchestration/usage/runs/${directRunId}?breakdown=model,sourceConfidence,role`
     );
     assert.strictEqual(directRunUsageRes.status, 200);
     assert.strictEqual(directRunUsageRes.data.summary.totalTokens, 65);
@@ -287,16 +313,23 @@ async function run() {
     assert(directRunUsageRes.data.breakdowns.model.some((entry) => entry.key === 'claude-sonnet-4'));
     assert(directRunUsageRes.data.breakdowns.sourceConfidence.some((entry) => entry.key === 'provider_reported'));
     assert(directRunUsageRes.data.breakdowns.sourceConfidence.some((entry) => entry.key === 'estimated'));
+    assert(directRunUsageRes.data.breakdowns.role.some((entry) => entry.key === 'participant' && entry.totalTokens === 45));
+    assert(directRunUsageRes.data.breakdowns.role.some((entry) => entry.key === 'judge' && entry.totalTokens === 20));
+    assert.strictEqual(directRunUsageRes.data.attribution.executionTokens, 45);
+    assert.strictEqual(directRunUsageRes.data.attribution.judgeTokens, 20);
+    assert.strictEqual(directRunUsageRes.data.attribution.brokerOverheadTokens, 20);
 
     const terminalUsageRes = await request(
       appHandle.baseUrl,
-      '/orchestration/usage/terminals/usage-child-1?breakdown=model'
+      '/orchestration/usage/terminals/usage-child-1?breakdown=model,role'
     );
     assert.strictEqual(terminalUsageRes.status, 200);
     assert.strictEqual(terminalUsageRes.data.records.length, 1);
     assert.strictEqual(terminalUsageRes.data.records[0].participant_id, 'implementer');
+    assert.strictEqual(terminalUsageRes.data.records[0].effectiveRole, 'worker');
     assert.strictEqual(terminalUsageRes.data.summary.totalTokens, 140);
     assert.strictEqual(terminalUsageRes.data.breakdowns.model[0].key, 'openrouter/qwen/qwen3.6-plus');
+    assert.strictEqual(terminalUsageRes.data.breakdowns.role[0].key, 'worker');
 
     console.log('✅ Usage ledger records assistant usage, aggregates by root/run/terminal, and survives terminal deletion');
   } finally {

@@ -33,6 +33,7 @@ async function run() {
     assert(routePage.text.includes('Discussion Rounds'), '/runs should expose discussion-specific rendering');
     assert(routePage.text.includes('Run Inputs'), '/runs should expose run-level input visibility');
     assert(routePage.text.includes('Usage Summary'), '/runs should expose run usage summaries');
+    assert(routePage.text.includes('Broker Attribution'), '/runs should expose role-aware broker attribution');
     assert(routePage.text.includes('/orchestration/usage/runs/'), '/runs should fetch per-run usage summaries');
     assert(routePage.text.includes('What This Participant Saw'), '/runs should expose participant prompt visibility');
     assert(routePage.text.includes('Previous'), '/runs should expose pagination controls');

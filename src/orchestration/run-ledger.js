@@ -485,7 +485,7 @@ class RunLedgerService {
       const run = typeof this.db.getRunById === 'function'
         ? this.db.getRunById(input.runId)
         : null;
-      const participant = this.db.db.prepare('SELECT adapter FROM run_participants WHERE id = ?').get(input.participantId);
+      const participant = this.db.db.prepare('SELECT adapter, participant_role FROM run_participants WHERE id = ?').get(input.participantId);
       if (typeof this.db.addUsageRecordFromMetadata === 'function') {
         this.db.addUsageRecordFromMetadata({
           terminalId: input.participantId,
@@ -493,6 +493,7 @@ class RunLedgerService {
           runId: input.runId,
           participantId: input.participantId,
           adapter: participant?.adapter || null,
+          role: participant?.participant_role || null,
           metadata: input.metadata,
           createdAt
         });

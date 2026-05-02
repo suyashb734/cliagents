@@ -672,7 +672,7 @@
       }
 
       try {
-        const response = await fetch(`${API_BASE}/orchestration/usage/runs/${encodeURIComponent(runId)}?breakdown=adapter,model,sourceConfidence`);
+        const response = await fetch(`${API_BASE}/orchestration/usage/runs/${encodeURIComponent(runId)}?breakdown=adapter,model,sourceConfidence,role`);
         const data = await response.json();
         if (!response.ok) {
           throw new Error(data?.error?.message || 'Failed to load usage summary');
@@ -813,9 +813,11 @@
       if (usagePayload?.summary?.recordCount > 0) {
         const summary = usagePayload.summary;
         const breakdowns = usagePayload.breakdowns || {};
+        const attribution = usagePayload.attribution || null;
         const sourceConfidence = breakdowns.sourceConfidence || [];
         const adapterRows = breakdowns.adapter || [];
         const modelRows = breakdowns.model || [];
+        const roleRows = breakdowns.role || attribution?.roleBreakdown || [];
         const provenance = sourceConfidence.length === 0
           ? 'unknown'
           : (sourceConfidence.length === 1 ? formatUsageKey('sourceConfidence', sourceConfidence[0].key) : 'mixed');
@@ -851,6 +853,25 @@
                 <div class="kv-label">Top Models</div>
                 <div class="badge-row">
                   ${modelRows.slice(0, 4).map((entry) => `<span class="badge">${escapeHtml(formatUsageKey('model', entry.key))}: ${escapeHtml(formatInteger(entry.totalTokens))}</span>`).join('')}
+                </div>
+              </div>
+            ` : ''}
+            ${attribution ? `
+              <div class="structured-group">
+                <div class="kv-label">Broker Attribution</div>
+                <div class="badge-row">
+                  <span class="badge">execution: ${escapeHtml(formatInteger(attribution.executionTokens || 0))}</span>
+                  <span class="badge">planning: ${escapeHtml(formatInteger(attribution.planningTokens || 0))}</span>
+                  <span class="badge">judge: ${escapeHtml(formatInteger(attribution.judgeTokens || 0))}</span>
+                  <span class="badge">supervision: ${escapeHtml(formatInteger(attribution.supervisionTokens || 0))}</span>
+                </div>
+              </div>
+            ` : ''}
+            ${roleRows.length ? `
+              <div class="structured-group">
+                <div class="kv-label">Roles</div>
+                <div class="badge-row">
+                  ${roleRows.slice(0, 5).map((entry) => `<span class="badge">${escapeHtml(formatUsageKey('role', entry.key))}: ${escapeHtml(formatInteger(entry.totalTokens))}</span>`).join('')}
                 </div>
               </div>
             ` : ''}

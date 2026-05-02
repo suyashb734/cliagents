@@ -104,7 +104,7 @@ function createOrchestrationRouter(context) {
     if (!value) {
       return [];
     }
-    const allowed = new Set(['adapter', 'provider', 'model', 'sourceConfidence']);
+    const allowed = new Set(['adapter', 'provider', 'model', 'sourceConfidence', 'role']);
     return String(value)
       .split(',')
       .map((entry) => entry.trim())
@@ -132,7 +132,10 @@ function createOrchestrationRouter(context) {
     return {
       scope: scopeKey,
       summary,
-      breakdowns
+      breakdowns,
+      attribution: typeof db.summarizeUsageAttribution === 'function'
+        ? db.summarizeUsageAttribution(filters)
+        : null
     };
   }
 

@@ -46,6 +46,7 @@ const TEST_FILES = [
   'test-openai-compat.js',
   'test-mcp-delegate-task.js',
   'test-mcp-batch-status.js',
+  'test-mcp-usage-summary.js',
   'test-mcp-run-ledger-tools.js',
   'test-mcp-root-session-tools.js',
   'test-orchestration-introspection-routes.js',

@@ -34,6 +34,7 @@ async function run() {
     assert(routePage.text.includes('Room Detail'), '/console should expose a first-class room detail surface');
     assert(routePage.text.includes('Run Usage'), '/console should expose run usage in discussion detail');
     assert(routePage.text.includes('Latest Turn Usage'), '/console should expose usage for room-backed audit turns');
+    assert(routePage.text.includes('Attribution:'), '/console should expose broker attribution in usage summaries');
     assert(routePage.text.includes('Conversation + Artifacts'), '/console should expose room artifact filtering controls');
     assert(routePage.text.includes("const queryParams = new URLSearchParams({"), '/console should build scoped root-session summary queries with URLSearchParams');
     assert(routePage.text.includes("queryParams.set('statusFilter', state.rootStatusFilter)"), '/console should pass the root status filter to the broker when supported');
