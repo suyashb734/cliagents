@@ -40,6 +40,13 @@ function normalizeNullableNumber(value) {
   return Number.isFinite(parsed) ? parsed : null;
 }
 
+function normalizeUsageTotalTokens(value, fallback = 0) {
+  if (value === null || value === undefined || value === '') {
+    return fallback;
+  }
+  return normalizeInteger(value, fallback);
+}
+
 function normalizeUsageConfidence(value) {
   const normalized = String(value || '').trim().toLowerCase();
   if (normalized === 'provider_reported' || normalized === 'estimated' || normalized === 'unknown') {
@@ -145,7 +152,7 @@ function buildUsageRecordFromMetadata(context = {}, metadata = {}) {
   const normalizedOutputTokens = normalizeInteger(outputTokens, 0);
   const normalizedReasoningTokens = normalizeInteger(reasoningTokens, 0);
   const normalizedCachedInputTokens = normalizeInteger(cachedInputTokens, 0);
-  const normalizedTotalTokens = normalizeInteger(
+  const normalizedTotalTokens = normalizeUsageTotalTokens(
     totalTokens,
     normalizedInputTokens + normalizedOutputTokens + normalizedReasoningTokens
   );
@@ -1779,7 +1786,7 @@ class OrchestrationDB {
     normalizeInteger(usage.outputTokens, 0),
     normalizeInteger(usage.reasoningTokens, 0),
     normalizeInteger(usage.cachedInputTokens, 0),
-    normalizeInteger(
+    normalizeUsageTotalTokens(
       usage.totalTokens,
       normalizeInteger(usage.inputTokens, 0) + normalizeInteger(usage.outputTokens, 0) + normalizeInteger(usage.reasoningTokens, 0)
     ),

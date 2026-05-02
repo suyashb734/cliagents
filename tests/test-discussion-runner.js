@@ -66,7 +66,6 @@ class FakeSessionManager {
           model: 'judge-o4-mini',
           inputTokens: 30,
           outputTokens: 10,
-          totalTokens: 40,
           costUsd: 0.25,
           sourceConfidence: 'provider_reported'
         }
@@ -82,7 +81,6 @@ class FakeSessionManager {
         model: `${adapter}-model`,
         inputTokens: 10 * session.sendCount,
         outputTokens: 5 * session.sendCount,
-        totalTokens: 15 * session.sendCount,
         sourceConfidence: 'estimated'
       }
     };

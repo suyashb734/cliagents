@@ -189,7 +189,6 @@ async function run() {
           model: 'claude-sonnet-4',
           inputTokens: 14,
           outputTokens: 6,
-          totalTokens: 20,
           sourceConfidence: 'estimated'
         }
       },
