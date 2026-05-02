@@ -476,6 +476,25 @@ __CLIAGENTS_RUN_EXIT__abc123__0
     fakeServer.state.statusPolls.clear();
     fakeServer.state.scenario = {
       routeResponse: {
+        terminalId: 'term-status-stale-processing',
+        adapter: 'claude-code',
+        taskType: 'review',
+        profile: 'review_claude-code'
+      },
+      statuses: ['processing'],
+      output: `
+{"type":"result","subtype":"success","result":"Completed despite stale processing status","terminal_reason":"completed"}
+__CLIAGENTS_RUN_EXIT__stale123__0
+`
+    };
+
+    const staleCompletedStatus = await mod.handleCheckTaskStatus({ terminalId: 'term-status-stale-processing' });
+    assert(staleCompletedStatus.content[0].text.includes('Task Status: COMPLETED'));
+    assert(staleCompletedStatus.content[0].text.includes('Completed despite stale processing status'));
+
+    fakeServer.state.statusPolls.clear();
+    fakeServer.state.scenario = {
+      routeResponse: {
         terminalId: 'term-status-error',
         adapter: 'gemini-cli',
         taskType: 'research',

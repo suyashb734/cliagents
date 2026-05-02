@@ -539,6 +539,37 @@ async function fetchTerminalOutput(terminalId) {
   return outputRes.data?.output || outputRes.data || 'No output captured';
 }
 
+function inferSettledStateFromOutput(rawOutput) {
+  const rawText = typeof rawOutput === 'string'
+    ? rawOutput
+    : (rawOutput == null ? '' : JSON.stringify(rawOutput));
+  if (!rawText.trim()) {
+    return null;
+  }
+
+  const exitMatches = Array.from(rawText.matchAll(/__CLIAGENTS_RUN_EXIT__([A-Za-z0-9_-]+)__(\d+)/g));
+  const lastExitMatch = exitMatches.length > 0 ? exitMatches[exitMatches.length - 1] : null;
+  if (lastExitMatch) {
+    const exitCode = Number.parseInt(lastExitMatch[2], 10);
+    return {
+      status: exitCode === 0 ? 'completed' : 'error',
+      state: exitCode === 0 ? 'completed' : 'error'
+    };
+  }
+
+  const reasonMatches = Array.from(rawText.matchAll(/"terminal_reason"\s*:\s*"(completed|error)"/g));
+  const lastReasonMatch = reasonMatches.length > 0 ? reasonMatches[reasonMatches.length - 1] : null;
+  if (lastReasonMatch) {
+    const status = lastReasonMatch[1];
+    return {
+      status,
+      state: status === 'completed' ? 'completed' : 'error'
+    };
+  }
+
+  return null;
+}
+
 function normalizeSnapshotOutput(rawOutput, adapter, status) {
   const rawText = typeof rawOutput === 'string'
     ? rawOutput
@@ -652,9 +683,24 @@ async function fetchTerminalSnapshot(terminalId, options = {}) {
     terminal
   };
 
-  if (includeOutput || isTerminalSettledStatus(status)) {
+  const shouldInspectRunningOutput = state === 'running';
+  if (includeOutput || isTerminalSettledStatus(status) || shouldInspectRunningOutput) {
     const rawOutput = await fetchTerminalOutput(terminalId);
-    snapshot.output = normalizeSnapshotOutput(rawOutput, snapshot.adapter, status);
+    const inferredSettlement = shouldInspectRunningOutput ? inferSettledStateFromOutput(rawOutput) : null;
+    if (inferredSettlement) {
+      snapshot.state = inferredSettlement.state;
+      snapshot.status = inferredSettlement.status;
+      snapshot.retryAfterMs = getRetryAfterMs(inferredSettlement.status);
+      snapshot.terminal = {
+        ...terminal,
+        status: inferredSettlement.status,
+        taskState: inferredSettlement.status
+      };
+    }
+
+    if (includeOutput || isTerminalSettledStatus(snapshot.status) || inferredSettlement) {
+      snapshot.output = normalizeSnapshotOutput(rawOutput, snapshot.adapter, snapshot.status);
+    }
   }
 
   return snapshot;
