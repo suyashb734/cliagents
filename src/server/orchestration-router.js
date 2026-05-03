@@ -189,7 +189,8 @@ function createOrchestrationRouter(context) {
     'discussion',
     'consensus',
     'review',
-    'subagent'
+    'subagent',
+    'collaborator'
   ]);
 
   function getRootSessionSnapshot(rootSessionId, options = {}) {

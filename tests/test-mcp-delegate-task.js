@@ -130,6 +130,9 @@ async function run() {
   });
 
   try {
+    const delegateTool = mod.TOOLS.find((tool) => tool.name === 'delegate_task');
+    assert(delegateTool.inputSchema.properties.collaborator, 'delegate_task should expose collaborator mode');
+
     fakeServer.state.scenario = {
       routeResponse: {
         terminalId: 'term-complete',
@@ -253,6 +256,39 @@ async function run() {
     assert.strictEqual(fakeServer.state.lastRouteBody.lineageDepth, 1);
     assert.strictEqual(fakeServer.state.lastRouteBody.sessionMetadata.clientName, 'opencode');
     assert.strictEqual(fakeServer.state.lastRouteBody.sessionMetadata.toolName, 'delegate_task');
+
+    fakeServer.state.statusPolls.clear();
+    fakeServer.state.scenario = {
+      routeResponse: {
+        terminalId: 'term-collaborator',
+        adapter: 'claude-code',
+        taskType: 'review',
+        profile: 'review_claude-code'
+      },
+      statuses: ['completed'],
+      output: 'Collaborator reuse configured'
+    };
+
+    await mod.handleDelegateTask({
+      role: 'review',
+      adapter: 'claude-code',
+      collaborator: true,
+      sessionLabel: 'claude-architect',
+      message: 'Continue the long-lived architect collaborator'
+    });
+    assert.strictEqual(fakeServer.state.lastRouteBody.sessionKind, 'collaborator');
+    assert.strictEqual(fakeServer.state.lastRouteBody.sessionLabel, 'claude-architect');
+    assert.strictEqual(fakeServer.state.lastRouteBody.sessionMetadata.collaborator, true);
+
+    await assert.rejects(
+      () => mod.handleDelegateTask({
+        role: 'review',
+        adapter: 'claude-code',
+        collaborator: true,
+        message: 'Missing stable collaborator label'
+      }),
+      /sessionLabel is required when collaborator=true/
+    );
 
     fakeServer.state.statusPolls.clear();
     fakeServer.state.scenario = {

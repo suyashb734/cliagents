@@ -465,7 +465,10 @@ function maybeThrowRootAttachError(response, toolName) {
   throw new Error(`${buildRootAttachRequiredMessage(toolName)} Next action: ${nextAction}.`);
 }
 
-function deriveDelegatedSessionKind(role) {
+function deriveDelegatedSessionKind(role, collaborator = false) {
+  if (collaborator === true) {
+    return 'collaborator';
+  }
   if (role === 'review' || role === 'review-security' || role === 'review-performance') {
     return 'reviewer';
   }
@@ -894,6 +897,10 @@ Timeout presets: "simple" (3 min), "standard" (10 min, default), "complex" (30 m
         sessionLabel: {
           type: 'string',
           description: 'Optional stable label for intentionally reusing the same child shell under the same root. This is a broker-side reuse hint, not a guarantee of provider conversation continuity; use reply_to_terminal when you need to continue an exact known terminal.'
+        },
+        collaborator: {
+          type: 'boolean',
+          description: 'When true, treat this delegated child as a long-lived collaborator. Requires sessionLabel and preserves provider-thread continuity across compatible reuse.'
         },
         preferReuse: {
           type: 'boolean',
@@ -2178,6 +2185,7 @@ async function handleDelegateTask(args) {
     systemPrompt,
     model,
     sessionLabel,
+    collaborator = false,
     preferReuse,
     forceFreshSession,
     // Legacy API: profile
@@ -2191,6 +2199,9 @@ async function handleDelegateTask(args) {
   // Require either role (new API) or profile (legacy API)
   if (!role && !profile) {
     throw new Error('Either role or profile is required');
+  }
+  if (collaborator === true && !String(sessionLabel || '').trim()) {
+    throw new Error('sessionLabel is required when collaborator=true');
   }
 
   // Resolve timeout value
@@ -2231,13 +2242,14 @@ async function handleDelegateTask(args) {
     controlPlaneContext: rootContext ? {
       rootSessionId: rootContext.rootSessionId,
       parentSessionId: rootContext.rootSessionId,
-      sessionKind: deriveDelegatedSessionKind(role),
+      sessionKind: deriveDelegatedSessionKind(role, collaborator),
       originClient: rootContext.originClient,
       externalSessionRef: rootContext.externalSessionRef,
       lineageDepth: 1,
       sessionMetadata: {
         ...rootContext.sessionMetadata,
-        toolName: 'delegate_task'
+        toolName: 'delegate_task',
+        ...(collaborator === true ? { collaborator: true } : {})
       }
     } : null
   });

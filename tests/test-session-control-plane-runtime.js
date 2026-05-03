@@ -576,6 +576,98 @@ async function run() {
     fakeTmux.setCurrentCommand(liveOpencodeWorker.sessionName, liveOpencodeWorker.windowName, 'zsh');
     assert.strictEqual(manager.getStatus(opencodeWorker.terminalId), TerminalStatus.COMPLETED);
 
+    const geminiCollaboratorRootSessionId = '34343434343434343434343434343434';
+    const geminiCollaborator = await manager.createTerminal({
+      adapter: 'gemini-cli',
+      role: 'worker',
+      agentProfile: 'research_gemini-cli',
+      rootSessionId: geminiCollaboratorRootSessionId,
+      parentSessionId: geminiCollaboratorRootSessionId,
+      sessionKind: 'collaborator',
+      originClient: 'mcp',
+      externalSessionRef: 'codex:thread-gemini-collaborator',
+      sessionLabel: 'gemini-architect',
+      sessionMetadata: {
+        clientName: 'codex',
+        toolName: 'delegate_task',
+        collaborator: true,
+        sessionLabel: 'gemini-architect'
+      },
+      workDir: rootDir
+    });
+    await manager.sendInput(geminiCollaborator.terminalId, 'Research the first architectural option.');
+    const liveGeminiCollaborator = manager.terminals.get(geminiCollaborator.terminalId);
+    const firstGeminiCollaboratorHistory = fakeTmux.getHistory(
+      liveGeminiCollaborator.sessionName,
+      liveGeminiCollaborator.windowName
+    );
+    assert(
+      !firstGeminiCollaboratorHistory.includes('--session-id'),
+      `did not expect first Gemini collaborator send to resume a provider session, got: ${firstGeminiCollaboratorHistory}`
+    );
+
+    const geminiCollaboratorProviderThreadRef = '34343434-3434-3434-3434-343434343434';
+    fs.writeFileSync(
+      liveGeminiCollaborator.logPath,
+      [
+        liveGeminiCollaborator.activeRun.startMarker,
+        `__CLIAGENTS_PROVIDER_SESSION__${geminiCollaboratorProviderThreadRef}`,
+        `{"session_id":"${geminiCollaboratorProviderThreadRef}"}`,
+        '{"result":"Gemini collaborator completed."}',
+        `${liveGeminiCollaborator.activeRun.exitMarkerPrefix}0`
+      ].join('\n'),
+      'utf8'
+    );
+    fakeTmux.setHistory(
+      liveGeminiCollaborator.sessionName,
+      liveGeminiCollaborator.windowName,
+      `__CLIAGENTS_PROVIDER_SESSION__${geminiCollaboratorProviderThreadRef}\n{"session_id":"${geminiCollaboratorProviderThreadRef}"}\n{"result":"Gemini collaborator completed."}\n`
+    );
+    fakeTmux.setCurrentCommand(liveGeminiCollaborator.sessionName, liveGeminiCollaborator.windowName, 'zsh');
+    assert.strictEqual(manager.getStatus(geminiCollaborator.terminalId), TerminalStatus.COMPLETED);
+    assert.strictEqual(liveGeminiCollaborator.providerThreadRef, geminiCollaboratorProviderThreadRef);
+
+    const reusedGeminiCollaborator = await manager.createTerminal({
+      adapter: 'gemini-cli',
+      role: 'worker',
+      agentProfile: 'research_gemini-cli',
+      rootSessionId: geminiCollaboratorRootSessionId,
+      parentSessionId: geminiCollaboratorRootSessionId,
+      sessionKind: 'collaborator',
+      originClient: 'mcp',
+      externalSessionRef: 'codex:thread-gemini-collaborator',
+      sessionLabel: 'gemini-architect',
+      sessionMetadata: {
+        clientName: 'codex',
+        toolName: 'delegate_task',
+        collaborator: true,
+        sessionLabel: 'gemini-architect'
+      },
+      workDir: rootDir
+    });
+    assert.strictEqual(reusedGeminiCollaborator.reused, true);
+    assert.strictEqual(reusedGeminiCollaborator.terminalId, geminiCollaborator.terminalId);
+    assert.strictEqual(liveGeminiCollaborator.providerThreadRef, geminiCollaboratorProviderThreadRef);
+    assert.strictEqual(liveGeminiCollaborator.messageCount, 1);
+
+    const beforeGeminiCollaboratorResumeHistory = fakeTmux.getHistory(
+      liveGeminiCollaborator.sessionName,
+      liveGeminiCollaborator.windowName
+    );
+    await manager.sendInput(reusedGeminiCollaborator.terminalId, 'Continue from the same Gemini collaborator session.');
+    const resumedGeminiCollaboratorHistory = fakeTmux.getHistory(
+      liveGeminiCollaborator.sessionName,
+      liveGeminiCollaborator.windowName
+    ).slice(beforeGeminiCollaboratorResumeHistory.length);
+    const resumedGeminiCollaboratorScriptPath = liveGeminiCollaborator.activeRun?.wrapperScriptPath || null;
+    const resumedGeminiCollaboratorSource = resumedGeminiCollaboratorScriptPath
+      ? fs.readFileSync(resumedGeminiCollaboratorScriptPath, 'utf8')
+      : resumedGeminiCollaboratorHistory;
+    assert(
+      resumedGeminiCollaboratorSource.includes(`--session-id "${geminiCollaboratorProviderThreadRef}"`),
+      `expected Gemini collaborator reuse to preserve provider session continuity, got: ${resumedGeminiCollaboratorSource}`
+    );
+
     const opencodeFatalWorker = await manager.createTerminal({
       adapter: 'opencode-cli',
       role: 'worker',

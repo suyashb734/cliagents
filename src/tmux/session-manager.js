@@ -518,14 +518,18 @@ function deriveControlPlaneSessionKind(options = {}) {
     return explicitSessionKind;
   }
 
+  const metadata = options.sessionMetadata && typeof options.sessionMetadata === 'object'
+    ? options.sessionMetadata
+    : {};
+  if (metadata.collaborator === true) {
+    return 'collaborator';
+  }
+
   if (options.parentSessionId) {
     return 'subagent';
   }
 
   const role = String(options.role || '').trim().toLowerCase();
-  const metadata = options.sessionMetadata && typeof options.sessionMetadata === 'object'
-    ? options.sessionMetadata
-    : {};
 
   if (role === 'main' || metadata.managedLaunch === true) {
     return 'main';
@@ -539,7 +543,9 @@ function shouldResetProviderStateOnReuse(terminal) {
     return false;
   }
 
-  return terminal.role !== 'main' && terminal.sessionKind !== 'main';
+  return terminal.role !== 'main'
+    && terminal.sessionKind !== 'main'
+    && terminal.sessionKind !== 'collaborator';
 }
 
 function shouldPreserveRichTerminalUi(options = {}) {
@@ -2263,6 +2269,14 @@ class PersistentSessionManager extends EventEmitter {
   _reuseTerminal(terminal, options = {}) {
     const resetProviderState = options.resetProviderState === true || shouldResetProviderStateOnReuse(terminal);
 
+    if (resetProviderState) {
+      return this._reuseTerminalFresh(terminal, options);
+    }
+
+    return this._reuseTerminalContinue(terminal, options);
+  }
+
+  _prepareTerminalForReuse(terminal) {
     terminal.lastActive = new Date();
     terminal.status = TerminalStatus.IDLE;
     terminal.recovered = false;
@@ -2271,17 +2285,44 @@ class PersistentSessionManager extends EventEmitter {
     terminal.deferredProviderStart = false;
     terminal.providerStartState = 'started';
     terminal.pendingProviderCommand = null;
-    if (resetProviderState) {
-      terminal.providerThreadRef = null;
-      terminal.messageCount = 0;
-    }
+  }
+
+  _reuseTerminalFresh(terminal, options = {}) {
+    this._prepareTerminalForReuse(terminal);
+    terminal.providerThreadRef = null;
+    terminal.messageCount = 0;
     this._reserveTerminal(terminal);
-    if (this.db?.updateTerminalBinding && resetProviderState) {
+    if (this.db?.updateTerminalBinding) {
       this.db.updateTerminalBinding(terminal.terminalId, {
         providerThreadRef: null,
         status: TerminalStatus.IDLE
       });
     } else if (this.db) {
+      this.db.updateStatus(terminal.terminalId, terminal.status || TerminalStatus.IDLE);
+    }
+
+    const reuseReason = options.reuseReason || 'matching-root-session-shape';
+    this._recordSessionResumed(terminal, {
+      reuseReason,
+      metadata: options.sessionMetadata || terminal.sessionMetadata || null
+    });
+    this.emit('terminal-reused', {
+      terminalId: terminal.terminalId,
+      adapter: terminal.adapter,
+      rootSessionId: terminal.rootSessionId,
+      reuseReason
+    });
+
+    return this._buildTerminalResponse(terminal, {
+      reused: true,
+      reuseReason
+    });
+  }
+
+  _reuseTerminalContinue(terminal, options = {}) {
+    this._prepareTerminalForReuse(terminal);
+    this._reserveTerminal(terminal);
+    if (this.db) {
       this.db.updateStatus(terminal.terminalId, terminal.status || TerminalStatus.IDLE);
     }
 
@@ -2578,10 +2619,11 @@ class PersistentSessionManager extends EventEmitter {
       forceFreshSession
     });
     if (reusableTerminal) {
+      const preserveProviderStateOnReuse = resolvedSessionKind === 'main' || resolvedSessionKind === 'collaborator';
       return this._reuseTerminal(reusableTerminal, {
         reuseReason: 'matching-root-session-shape',
         sessionMetadata: Object.keys(resolvedSessionMetadata).length > 0 ? resolvedSessionMetadata : null,
-        resetProviderState: resolvedSessionKind !== 'main'
+        resetProviderState: !preserveProviderStateOnReuse
       });
     }
 
@@ -3179,13 +3221,27 @@ class PersistentSessionManager extends EventEmitter {
     const isCodexOrchestration = terminal.adapter === 'codex-cli' && terminal.role === 'worker';
     const isQwenOrchestration = terminal.adapter === 'qwen-cli' && terminal.role === 'worker';
     const isOpencodeOrchestration = terminal.adapter === 'opencode-cli' && terminal.role === 'worker';
+    const preservesProviderConversation = terminal.sessionKind === 'collaborator';
+
+    if (
+      (isGeminiOrchestration || isClaudeOrchestration || isQwenOrchestration || isOpencodeOrchestration)
+      && Number.isInteger(terminal.messageCount)
+      && terminal.messageCount > 0
+    ) {
+      const detector = this.statusDetectors.get(terminal.adapter);
+      const recentOutput = [
+        this.tmux?.getHistory ? this.tmux.getHistory(terminal.sessionName, terminal.windowName, 250) : '',
+        terminal.logPath ? this.readLogTail(terminal.terminalId, 12000) : ''
+      ].filter(Boolean).join('\n');
+      this._syncProviderThreadRefFromOutput(terminal, recentOutput, detector);
+    }
 
     if (isGeminiOrchestration) {
       // Run Gemini one-shot work through the helper so tmux workers get the same
       // model fallback behavior as the direct-session adapter path.
       const geminiCommand = buildGeminiOneShotRunnerCommand(message, {
         ...terminal,
-        disableSessionResume: true
+        disableSessionResume: !preservesProviderConversation
       });
       terminal.messageCount = Number.isInteger(terminal.messageCount) ? terminal.messageCount + 1 : 1;
 
@@ -3197,15 +3253,6 @@ class PersistentSessionManager extends EventEmitter {
         true
       );
     } else if (isClaudeOrchestration) {
-      if (Number.isInteger(terminal.messageCount) && terminal.messageCount > 0) {
-        const claudeDetector = this.statusDetectors.get(terminal.adapter);
-        const recentClaudeOutput = [
-          this.tmux?.getHistory ? this.tmux.getHistory(terminal.sessionName, terminal.windowName, 250) : '',
-          terminal.logPath ? this.readLogTail(terminal.terminalId, 12000) : ''
-        ].filter(Boolean).join('\n');
-        this._syncProviderThreadRefFromOutput(terminal, recentClaudeOutput, claudeDetector);
-      }
-
       const claudeCommand = buildClaudeOneShotCommand(message, terminal);
       if (claudeCommand.providerThreadRef && claudeCommand.providerThreadRef !== terminal.providerThreadRef) {
         this._updateProviderThreadRef(terminal, claudeCommand.providerThreadRef);

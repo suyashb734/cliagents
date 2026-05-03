@@ -74,6 +74,10 @@ class FakeTmuxClient {
     return this.histories.get(this._key(sessionName, windowName)) || '';
   }
 
+  setHistory(sessionName, windowName, content) {
+    this.histories.set(this._key(sessionName, windowName), content);
+  }
+
   getPaneCurrentCommand(sessionName, windowName) {
     return this.commands.get(this._key(sessionName, windowName)) || 'zsh';
   }
@@ -284,37 +288,63 @@ async function run() {
       forceRole: 'review',
       forceAdapter: 'claude-code',
       sessionLabel: 'claude-architect',
+      sessionKind: 'collaborator',
       rootSessionId: researchRootSessionId,
       parentSessionId: researchRootSessionId,
       originClient: 'mcp',
-      sessionMetadata: { clientName: 'codex', toolName: 'delegate_task' }
+      sessionMetadata: { clientName: 'codex', toolName: 'delegate_task', collaborator: true }
     });
     const claudeArchitectTerminal = manager.terminals.get(claudeArchitectFirst.terminalId);
+    const claudeArchitectProviderThreadRef = 'aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee';
     fs.writeFileSync(
       claudeArchitectTerminal.logPath,
       [
         claudeArchitectTerminal.activeRun.startMarker,
+        `{"type":"system","session_id":"${claudeArchitectProviderThreadRef}"}`,
         'Claude architect collaborator settled.',
         `${claudeArchitectTerminal.activeRun.exitMarkerPrefix}0`
       ].join('\n'),
       'utf8'
     );
+    fakeTmux.setHistory(
+      claudeArchitectTerminal.sessionName,
+      claudeArchitectTerminal.windowName,
+      `{"type":"system","session_id":"${claudeArchitectProviderThreadRef}"}\nClaude architect collaborator settled.\n`
+    );
     fakeTmux.setCurrentCommand(claudeArchitectTerminal.sessionName, claudeArchitectTerminal.windowName, 'zsh');
     assert.strictEqual(manager.getStatus(claudeArchitectFirst.terminalId), TerminalStatus.COMPLETED);
+    assert.strictEqual(claudeArchitectTerminal.providerThreadRef, claudeArchitectProviderThreadRef);
 
     const claudeArchitectSecond = await router.routeTask('Continue from the same Claude architect collaborator session.', {
       forceRole: 'review',
       forceAdapter: 'claude-code',
       sessionLabel: 'claude-architect',
+      sessionKind: 'collaborator',
       rootSessionId: researchRootSessionId,
       parentSessionId: researchRootSessionId,
       originClient: 'mcp',
-      sessionMetadata: { clientName: 'codex', toolName: 'delegate_task' }
+      sessionMetadata: { clientName: 'codex', toolName: 'delegate_task', collaborator: true }
     });
     assert.strictEqual(
       claudeArchitectSecond.terminalId,
       claudeArchitectFirst.terminalId,
       'same session label should intentionally reuse the same collaborator session'
+    );
+    assert.strictEqual(claudeArchitectSecond.reused, true);
+    assert.strictEqual(claudeArchitectTerminal.providerThreadRef, claudeArchitectProviderThreadRef);
+    assert.strictEqual(claudeArchitectTerminal.messageCount, 2);
+    const collaboratorFollowUpHistory = fakeTmux.getHistory(
+      claudeArchitectTerminal.sessionName,
+      claudeArchitectTerminal.windowName
+    );
+    const collaboratorFollowUpScriptPath = claudeArchitectTerminal.activeRun?.wrapperScriptPath || null;
+    const collaboratorFollowUpSource = collaboratorFollowUpScriptPath
+      ? fs.readFileSync(collaboratorFollowUpScriptPath, 'utf8')
+      : collaboratorFollowUpHistory;
+    assert.strictEqual(claudeArchitectTerminal.sessionKind, 'collaborator');
+    assert(
+      collaboratorFollowUpSource.includes(`--resume ${claudeArchitectProviderThreadRef}`),
+      `expected collaborator follow-up to preserve provider-thread continuity, got: ${collaboratorFollowUpSource}`
     );
 
     await assert.rejects(
