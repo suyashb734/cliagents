@@ -55,7 +55,8 @@ function runFreshSchemaAssertions() {
         '0005_usage_records.sql',
         '0006_memory_snapshots.sql',
         '0007_resume_linkage_and_recency.sql',
-        '0008_provider_sessions_and_rooms.sql'
+        '0008_provider_sessions_and_rooms.sql',
+        '0009_tasks_v1.sql'
       ],
       'schema_migrations'
     );
@@ -94,14 +95,55 @@ function runFreshSchemaAssertions() {
 
     assertContainsAll(
       getColumnNames(db, 'rooms'),
-      ['id', 'root_session_id', 'title', 'status', 'metadata', 'created_at', 'updated_at'],
+      ['id', 'root_session_id', 'task_id', 'title', 'status', 'metadata', 'created_at', 'updated_at'],
       'rooms columns'
     );
 
     assertContainsAll(
       getIndexNames(db, 'rooms'),
-      ['idx_rooms_updated_at', 'idx_rooms_status_updated'],
+      ['idx_rooms_updated_at', 'idx_rooms_status_updated', 'idx_rooms_task_updated'],
       'rooms indexes'
+    );
+
+    assertContainsAll(
+      getColumnNames(db, 'tasks'),
+      ['id', 'title', 'kind', 'brief', 'workspace_root', 'root_session_id', 'metadata', 'created_at', 'updated_at'],
+      'tasks columns'
+    );
+
+    assertContainsAll(
+      getIndexNames(db, 'tasks'),
+      ['idx_tasks_workspace_updated', 'idx_tasks_root_updated'],
+      'tasks indexes'
+    );
+
+    assertContainsAll(
+      getColumnNames(db, 'task_assignments'),
+      [
+        'id',
+        'task_id',
+        'terminal_id',
+        'role',
+        'instructions',
+        'adapter',
+        'model',
+        'status',
+        'worktree_path',
+        'worktree_branch',
+        'acceptance_criteria',
+        'metadata',
+        'started_at',
+        'completed_at',
+        'created_at',
+        'updated_at'
+      ],
+      'task_assignments columns'
+    );
+
+    assertContainsAll(
+      getIndexNames(db, 'task_assignments'),
+      ['idx_task_assignments_task_created', 'idx_task_assignments_task_status', 'idx_task_assignments_terminal'],
+      'task_assignments indexes'
     );
 
     assertContainsAll(

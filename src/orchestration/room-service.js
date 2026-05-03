@@ -154,6 +154,7 @@ class RoomService {
     const room = this.db.createRoom({
       id: input.roomId,
       rootSessionId: input.rootSessionId,
+      taskId: input.taskId || null,
       title: input.title || null,
       status: 'active',
       metadata: input.metadata || {}
@@ -698,7 +699,7 @@ class RoomService {
           roomId,
           turnId: turn.id
         },
-        taskId: `room:${roomId}`,
+        taskId: room.taskId || null,
         sink: discussionSink
       });
     } catch (error) {

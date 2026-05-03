@@ -2417,6 +2417,327 @@ class OrchestrationDB {
   }
 
   // =====================
+  // Task State
+  // =====================
+
+  _parseTaskRow(row) {
+    if (!row) {
+      return null;
+    }
+
+    return {
+      id: row.id,
+      title: row.title,
+      kind: row.kind || 'general',
+      brief: row.brief || null,
+      workspaceRoot: row.workspace_root || null,
+      rootSessionId: row.root_session_id || null,
+      metadata: parseJsonField(row.metadata) || {},
+      createdAt: row.created_at,
+      updatedAt: row.updated_at
+    };
+  }
+
+  _parseTaskAssignmentRow(row) {
+    if (!row) {
+      return null;
+    }
+
+    return {
+      id: row.id,
+      taskId: row.task_id,
+      terminalId: row.terminal_id || null,
+      role: row.role,
+      instructions: row.instructions,
+      adapter: row.adapter || null,
+      model: row.model || null,
+      status: row.status || 'queued',
+      worktreePath: row.worktree_path || null,
+      worktreeBranch: row.worktree_branch || null,
+      acceptanceCriteria: row.acceptance_criteria || null,
+      metadata: parseJsonField(row.metadata) || {},
+      startedAt: row.started_at || null,
+      completedAt: row.completed_at || null,
+      createdAt: row.created_at,
+      updatedAt: row.updated_at
+    };
+  }
+
+  createTask(input = {}) {
+    const id = String(input.id || `task_${generateId()}`).trim();
+    const title = String(input.title || '').trim();
+    const kind = String(input.kind || 'general').trim().toLowerCase() || 'general';
+    const brief = typeof input.brief === 'string' ? input.brief : null;
+    const workspaceRoot = String(input.workspaceRoot || '').trim() || null;
+    const rootSessionId = String(input.rootSessionId || '').trim() || null;
+    const metadata = input.metadata && typeof input.metadata === 'object' && !Array.isArray(input.metadata)
+      ? input.metadata
+      : {};
+    const now = Number.isFinite(input.createdAt) ? input.createdAt : Date.now();
+
+    if (!id) {
+      throw new Error('task id is required');
+    }
+    if (!title) {
+      throw new Error('title is required');
+    }
+
+    this.db.prepare(`
+      INSERT INTO tasks (
+        id, title, kind, brief, workspace_root, root_session_id, metadata, created_at, updated_at
+      ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+    `).run(
+      id,
+      title,
+      kind,
+      brief,
+      workspaceRoot,
+      rootSessionId,
+      JSON.stringify(metadata),
+      now,
+      now
+    );
+
+    return this.getTask(id);
+  }
+
+  getTask(taskId) {
+    const row = this.db.prepare('SELECT * FROM tasks WHERE id = ?').get(taskId);
+    return this._parseTaskRow(row);
+  }
+
+  listTasks(options = {}) {
+    const clauses = [];
+    const params = [];
+    if (options.workspaceRoot) {
+      clauses.push('workspace_root = ?');
+      params.push(String(options.workspaceRoot));
+    }
+    const whereSql = clauses.length ? `WHERE ${clauses.join(' AND ')}` : '';
+    const limit = clampLimit(options.limit, 50, 500);
+    return this.db.prepare(`
+      SELECT *
+      FROM tasks
+      ${whereSql}
+      ORDER BY updated_at DESC, created_at DESC, id DESC
+      LIMIT ?
+    `).all(...params, limit).map((row) => this._parseTaskRow(row));
+  }
+
+  updateTask(taskId, patch = {}) {
+    const updates = [];
+    const params = [];
+    if (patch.title !== undefined) {
+      updates.push('title = ?');
+      params.push(String(patch.title || '').trim());
+    }
+    if (patch.kind !== undefined) {
+      updates.push('kind = ?');
+      params.push(String(patch.kind || 'general').trim().toLowerCase() || 'general');
+    }
+    if (patch.brief !== undefined) {
+      updates.push('brief = ?');
+      params.push(typeof patch.brief === 'string' ? patch.brief : null);
+    }
+    if (patch.workspaceRoot !== undefined) {
+      updates.push('workspace_root = ?');
+      params.push(String(patch.workspaceRoot || '').trim() || null);
+    }
+    if (patch.rootSessionId !== undefined) {
+      updates.push('root_session_id = ?');
+      params.push(String(patch.rootSessionId || '').trim() || null);
+    }
+    if (patch.metadata !== undefined) {
+      const metadata = patch.metadata && typeof patch.metadata === 'object' && !Array.isArray(patch.metadata)
+        ? patch.metadata
+        : {};
+      updates.push('metadata = ?');
+      params.push(JSON.stringify(metadata));
+    }
+
+    const updatedAt = Number.isFinite(patch.updatedAt) ? patch.updatedAt : Date.now();
+    if (updates.length === 0) {
+      this.db.prepare(`
+        UPDATE tasks
+        SET updated_at = ?
+        WHERE id = ?
+      `).run(updatedAt, taskId);
+      return this.getTask(taskId);
+    }
+
+    updates.push('updated_at = ?');
+    params.push(updatedAt);
+    params.push(taskId);
+
+    this.db.prepare(`
+      UPDATE tasks
+      SET ${updates.join(', ')}
+      WHERE id = ?
+    `).run(...params);
+    return this.getTask(taskId);
+  }
+
+  createTaskAssignment(input = {}) {
+    const id = String(input.id || `assignment_${generateId()}`).trim();
+    const taskId = String(input.taskId || '').trim();
+    const terminalId = String(input.terminalId || '').trim() || null;
+    const role = String(input.role || '').trim().toLowerCase();
+    const instructions = String(input.instructions || '').trim();
+    const adapter = String(input.adapter || '').trim() || null;
+    const model = String(input.model || '').trim() || null;
+    const status = String(input.status || 'queued').trim().toLowerCase() || 'queued';
+    const worktreePath = String(input.worktreePath || '').trim() || null;
+    const worktreeBranch = String(input.worktreeBranch || '').trim() || null;
+    const acceptanceCriteria = typeof input.acceptanceCriteria === 'string' ? input.acceptanceCriteria : null;
+    const metadata = input.metadata && typeof input.metadata === 'object' && !Array.isArray(input.metadata)
+      ? input.metadata
+      : {};
+    const now = Number.isFinite(input.createdAt) ? input.createdAt : Date.now();
+    const startedAt = Number.isFinite(input.startedAt) ? input.startedAt : null;
+    const completedAt = Number.isFinite(input.completedAt) ? input.completedAt : null;
+
+    if (!taskId) {
+      throw new Error('taskId is required');
+    }
+    if (!role) {
+      throw new Error('role is required');
+    }
+    if (!instructions) {
+      throw new Error('instructions is required');
+    }
+
+    this.db.prepare(`
+      INSERT INTO task_assignments (
+        id, task_id, terminal_id, role, instructions, adapter, model, status,
+        worktree_path, worktree_branch, acceptance_criteria, metadata, started_at,
+        completed_at, created_at, updated_at
+      ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+    `).run(
+      id,
+      taskId,
+      terminalId,
+      role,
+      instructions,
+      adapter,
+      model,
+      status,
+      worktreePath,
+      worktreeBranch,
+      acceptanceCriteria,
+      JSON.stringify(metadata),
+      startedAt,
+      completedAt,
+      now,
+      now
+    );
+
+    return this.getTaskAssignment(id);
+  }
+
+  getTaskAssignment(assignmentId) {
+    const row = this.db.prepare('SELECT * FROM task_assignments WHERE id = ?').get(assignmentId);
+    return this._parseTaskAssignmentRow(row);
+  }
+
+  listTaskAssignments(taskId, options = {}) {
+    const clauses = ['task_id = ?'];
+    const params = [taskId];
+    if (options.status) {
+      clauses.push('status = ?');
+      params.push(String(options.status));
+    }
+    const limit = clampLimit(options.limit, 100, 500);
+    return this.db.prepare(`
+      SELECT *
+      FROM task_assignments
+      WHERE ${clauses.join(' AND ')}
+      ORDER BY created_at ASC, id ASC
+      LIMIT ?
+    `).all(...params, limit).map((row) => this._parseTaskAssignmentRow(row));
+  }
+
+  updateTaskAssignment(assignmentId, patch = {}) {
+    const updates = [];
+    const params = [];
+    if (patch.terminalId !== undefined) {
+      updates.push('terminal_id = ?');
+      params.push(String(patch.terminalId || '').trim() || null);
+    }
+    if (patch.role !== undefined) {
+      updates.push('role = ?');
+      params.push(String(patch.role || '').trim().toLowerCase());
+    }
+    if (patch.instructions !== undefined) {
+      updates.push('instructions = ?');
+      params.push(String(patch.instructions || '').trim());
+    }
+    if (patch.adapter !== undefined) {
+      updates.push('adapter = ?');
+      params.push(String(patch.adapter || '').trim() || null);
+    }
+    if (patch.model !== undefined) {
+      updates.push('model = ?');
+      params.push(String(patch.model || '').trim() || null);
+    }
+    if (patch.status !== undefined) {
+      updates.push('status = ?');
+      params.push(String(patch.status || '').trim().toLowerCase() || 'queued');
+    }
+    if (patch.worktreePath !== undefined) {
+      updates.push('worktree_path = ?');
+      params.push(String(patch.worktreePath || '').trim() || null);
+    }
+    if (patch.worktreeBranch !== undefined) {
+      updates.push('worktree_branch = ?');
+      params.push(String(patch.worktreeBranch || '').trim() || null);
+    }
+    if (patch.acceptanceCriteria !== undefined) {
+      updates.push('acceptance_criteria = ?');
+      params.push(typeof patch.acceptanceCriteria === 'string' ? patch.acceptanceCriteria : null);
+    }
+    if (patch.metadata !== undefined) {
+      const metadata = patch.metadata && typeof patch.metadata === 'object' && !Array.isArray(patch.metadata)
+        ? patch.metadata
+        : {};
+      updates.push('metadata = ?');
+      params.push(JSON.stringify(metadata));
+    }
+    if (patch.startedAt !== undefined) {
+      updates.push('started_at = ?');
+      params.push(Number.isFinite(patch.startedAt) ? patch.startedAt : null);
+    }
+    if (patch.completedAt !== undefined) {
+      updates.push('completed_at = ?');
+      params.push(Number.isFinite(patch.completedAt) ? patch.completedAt : null);
+    }
+
+    if (updates.length === 0) {
+      return this.getTaskAssignment(assignmentId);
+    }
+
+    const updatedAt = Number.isFinite(patch.updatedAt) ? patch.updatedAt : Date.now();
+    updates.push('updated_at = ?');
+    params.push(updatedAt);
+    params.push(assignmentId);
+
+    this.db.prepare(`
+      UPDATE task_assignments
+      SET ${updates.join(', ')}
+      WHERE id = ?
+    `).run(...params);
+    return this.getTaskAssignment(assignmentId);
+  }
+
+  getTaskLinkCounts(taskId) {
+    return {
+      runs: this.db.prepare('SELECT COUNT(*) AS count FROM runs WHERE task_id = ?').get(taskId)?.count || 0,
+      rooms: this.db.prepare('SELECT COUNT(*) AS count FROM rooms WHERE task_id = ?').get(taskId)?.count || 0,
+      discussions: this.db.prepare('SELECT COUNT(*) AS count FROM discussions WHERE task_id = ?').get(taskId)?.count || 0,
+      memorySnapshots: this.db.prepare('SELECT COUNT(*) AS count FROM memory_snapshots WHERE task_id = ?').get(taskId)?.count || 0
+    };
+  }
+
+  // =====================
   // Persistent Room State
   // =====================
 
@@ -2428,6 +2749,7 @@ class OrchestrationDB {
     return {
       id: row.id,
       rootSessionId: row.root_session_id,
+      taskId: row.task_id || null,
       title: row.title || null,
       status: row.status || 'active',
       metadata: parseJsonField(row.metadata) || {},
@@ -2504,6 +2826,7 @@ class OrchestrationDB {
   createRoom(input = {}) {
     const id = String(input.id || `room_${generateId()}`).trim();
     const rootSessionId = String(input.rootSessionId || '').trim();
+    const taskId = String(input.taskId || '').trim() || null;
     const title = String(input.title || '').trim() || null;
     const status = String(input.status || 'active').trim().toLowerCase() || 'active';
     const metadata = input.metadata && typeof input.metadata === 'object' && !Array.isArray(input.metadata)
@@ -2519,11 +2842,12 @@ class OrchestrationDB {
     }
 
     this.db.prepare(`
-      INSERT INTO rooms (id, root_session_id, title, status, metadata, created_at, updated_at)
-      VALUES (?, ?, ?, ?, ?, ?, ?)
+      INSERT INTO rooms (id, root_session_id, task_id, title, status, metadata, created_at, updated_at)
+      VALUES (?, ?, ?, ?, ?, ?, ?, ?)
     `).run(
       id,
       rootSessionId,
+      taskId,
       title,
       status,
       JSON.stringify(metadata),
@@ -2550,6 +2874,10 @@ class OrchestrationDB {
     if (patch.title !== undefined) {
       updates.push('title = ?');
       params.push(String(patch.title || '').trim() || null);
+    }
+    if (patch.taskId !== undefined) {
+      updates.push('task_id = ?');
+      params.push(String(patch.taskId || '').trim() || null);
     }
     if (patch.status !== undefined) {
       updates.push('status = ?');

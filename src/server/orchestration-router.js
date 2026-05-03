@@ -602,6 +602,154 @@ function createOrchestrationRouter(context) {
     };
   }
 
+  const TASK_ASSIGNMENT_TERMINAL_STATUS_MAP = new Map([
+    ['queued', 'queued'],
+    ['pending', 'queued'],
+    ['processing', 'running'],
+    ['running', 'running'],
+    ['waiting_permission', 'blocked'],
+    ['waiting_user_answer', 'blocked'],
+    ['blocked', 'blocked'],
+    ['completed', 'completed'],
+    ['idle', 'completed'],
+    ['failed', 'failed'],
+    ['error', 'failed']
+  ]);
+
+  const TASK_ASSIGNMENT_ROLE_MAP = new Map([
+    ['planner', 'plan'],
+    ['plan', 'plan'],
+    ['executor', 'implement'],
+    ['implement', 'implement'],
+    ['reviewer', 'review'],
+    ['review', 'review'],
+    ['judge', 'review']
+  ]);
+
+  function normalizeTaskAssignmentStatus(status, fallback = 'queued') {
+    const normalized = String(status || '').trim().toLowerCase();
+    return TASK_ASSIGNMENT_TERMINAL_STATUS_MAP.get(normalized) || fallback;
+  }
+
+  function resolveTaskAssignmentTerminalSnapshot(assignment) {
+    if (!assignment?.terminalId) {
+      return null;
+    }
+
+    const liveTerminal = typeof sessionManager?.getTerminal === 'function'
+      ? sessionManager.getTerminal(assignment.terminalId)
+      : null;
+    if (liveTerminal) {
+      return {
+        terminalId: assignment.terminalId,
+        status: liveTerminal.status || liveTerminal.taskState || assignment.status || 'queued',
+        adapter: liveTerminal.adapter || assignment.adapter || null,
+        model: liveTerminal.model || assignment.model || null,
+        role: liveTerminal.role || null
+      };
+    }
+
+    const persistedTerminal = typeof db?.getTerminal === 'function'
+      ? db.getTerminal(assignment.terminalId)
+      : null;
+    if (!persistedTerminal) {
+      return null;
+    }
+
+    return {
+      terminalId: assignment.terminalId,
+      status: persistedTerminal.status || assignment.status || 'queued',
+      adapter: persistedTerminal.adapter || assignment.adapter || null,
+      model: persistedTerminal.model || assignment.model || null,
+      role: persistedTerminal.role || null
+    };
+  }
+
+  function buildTaskAssignmentPayload(assignment) {
+    const terminal = resolveTaskAssignmentTerminalSnapshot(assignment);
+    const terminalStatus = terminal?.status || null;
+    const storedStatus = String(assignment?.status || 'queued').trim().toLowerCase() || 'queued';
+    const status = assignment?.terminalId
+      ? normalizeTaskAssignmentStatus(terminalStatus, normalizeTaskAssignmentStatus(storedStatus, 'queued'))
+      : normalizeTaskAssignmentStatus(storedStatus, 'queued');
+
+    return {
+      ...assignment,
+      status,
+      storedStatus,
+      terminalStatus,
+      adapter: assignment.adapter || terminal?.adapter || null,
+      model: assignment.model || terminal?.model || null,
+      terminal: terminal ? {
+        terminalId: terminal.terminalId,
+        status: terminal.status,
+        adapter: terminal.adapter,
+        model: terminal.model,
+        role: terminal.role
+      } : null
+    };
+  }
+
+  function summarizeTaskAssignmentStates(assignments) {
+    const counts = {
+      queued: 0,
+      running: 0,
+      blocked: 0,
+      failed: 0,
+      completed: 0
+    };
+
+    for (const assignment of assignments || []) {
+      const state = counts[assignment?.status] !== undefined ? assignment.status : 'queued';
+      counts[state] += 1;
+    }
+
+    return counts;
+  }
+
+  function deriveTaskStatus(assignments) {
+    if (!Array.isArray(assignments) || assignments.length === 0) {
+      return 'pending';
+    }
+    if (assignments.some((assignment) => assignment.status === 'blocked')) {
+      return 'blocked';
+    }
+    if (assignments.some((assignment) => assignment.status === 'running')) {
+      return 'running';
+    }
+    if (assignments.every((assignment) => assignment.status === 'completed')) {
+      return 'completed';
+    }
+    if (assignments.some((assignment) => assignment.status === 'failed')) {
+      return 'failed';
+    }
+    return 'pending';
+  }
+
+  function buildTaskPayload(taskId) {
+    if (!db?.getTask || !db?.listTaskAssignments || !db?.getTaskLinkCounts) {
+      return null;
+    }
+
+    const task = db.getTask(taskId);
+    if (!task) {
+      return null;
+    }
+
+    const assignments = db.listTaskAssignments(taskId, { limit: 500 }).map((assignment) => buildTaskAssignmentPayload(assignment));
+    return {
+      task,
+      status: deriveTaskStatus(assignments),
+      assignmentCounts: summarizeTaskAssignmentStates(assignments),
+      linkedCounts: db.getTaskLinkCounts(taskId)
+    };
+  }
+
+  function normalizeTaskAssignmentRoutingRole(role) {
+    const normalized = String(role || '').trim().toLowerCase();
+    return TASK_ASSIGNMENT_ROLE_MAP.get(normalized) || normalized;
+  }
+
   function extractRequestId(req, body = {}) {
     return readHeaderValue(req, 'idempotency-key')
       || readHeaderValue(req, 'x-idempotency-key')
@@ -613,6 +761,418 @@ function createOrchestrationRouter(context) {
   // Mount shared memory routes at /orchestration/memory
   const memoryRouter = createMemoryRouter({ db });
   router.use('/memory', memoryRouter);
+
+  /**
+   * POST /orchestration/tasks
+   * Create a first-class task.
+   */
+  router.post('/tasks', (req, res) => {
+    try {
+      if (!db?.createTask) {
+        return res.status(503).json({
+          error: { code: 'unavailable', message: 'task persistence is not configured' }
+        });
+      }
+
+      const title = String(req.body?.title || '').trim();
+      const workspaceRoot = String(req.body?.workspaceRoot || '').trim();
+      if (!title) {
+        return res.status(400).json({
+          error: { code: 'missing_parameter', message: 'title is required', param: 'title' }
+        });
+      }
+      if (!workspaceRoot) {
+        return res.status(400).json({
+          error: { code: 'missing_parameter', message: 'workspaceRoot is required', param: 'workspaceRoot' }
+        });
+      }
+
+      const created = db.createTask({
+        id: req.body?.taskId || req.body?.id || null,
+        title,
+        kind: req.body?.kind || 'general',
+        brief: req.body?.brief || null,
+        workspaceRoot,
+        rootSessionId: req.body?.rootSessionId || null,
+        metadata: req.body?.metadata || {}
+      });
+
+      res.json(buildTaskPayload(created.id));
+    } catch (error) {
+      if (error?.code === 'SQLITE_CONSTRAINT_PRIMARYKEY' || error?.code === 'SQLITE_CONSTRAINT_UNIQUE') {
+        return res.status(409).json({
+          error: { code: 'task_exists', message: error.message }
+        });
+      }
+      res.status(500).json({
+        error: { code: 'internal_error', message: error.message }
+      });
+    }
+  });
+
+  /**
+   * GET /orchestration/tasks
+   * List first-class tasks with derived summaries.
+   */
+  router.get('/tasks', (req, res) => {
+    try {
+      if (!db?.listTasks) {
+        return res.status(503).json({
+          error: { code: 'unavailable', message: 'task persistence is not configured' }
+        });
+      }
+
+      const limit = parseQueryInteger(req.query.limit, 50);
+      const workspaceRoot = req.query.workspace_root
+        ? String(req.query.workspace_root).trim()
+        : (req.query.workspaceRoot ? String(req.query.workspaceRoot).trim() : null);
+      const tasks = db.listTasks({
+        limit,
+        workspaceRoot: workspaceRoot || null
+      }).map((task) => buildTaskPayload(task.id));
+
+      res.json({ tasks });
+    } catch (error) {
+      res.status(500).json({
+        error: { code: 'internal_error', message: error.message }
+      });
+    }
+  });
+
+  /**
+   * GET /orchestration/tasks/:taskId
+   * Get a first-class task and its derived summary.
+   */
+  router.get('/tasks/:taskId', (req, res) => {
+    try {
+      if (!db?.getTask) {
+        return res.status(503).json({
+          error: { code: 'unavailable', message: 'task persistence is not configured' }
+        });
+      }
+
+      const payload = buildTaskPayload(req.params.taskId);
+      if (!payload) {
+        return res.status(404).json({
+          error: { code: 'task_not_found', message: `Task ${req.params.taskId} not found` }
+        });
+      }
+
+      res.json(payload);
+    } catch (error) {
+      res.status(500).json({
+        error: { code: 'internal_error', message: error.message }
+      });
+    }
+  });
+
+  /**
+   * POST /orchestration/tasks/:taskId/assignments
+   * Create a queued assignment for a task.
+   */
+  router.post('/tasks/:taskId/assignments', (req, res) => {
+    try {
+      if (!db?.getTask || !db?.createTaskAssignment) {
+        return res.status(503).json({
+          error: { code: 'unavailable', message: 'task assignments are not configured' }
+        });
+      }
+
+      const task = db.getTask(req.params.taskId);
+      if (!task) {
+        return res.status(404).json({
+          error: { code: 'task_not_found', message: `Task ${req.params.taskId} not found` }
+        });
+      }
+
+      const role = String(req.body?.role || '').trim().toLowerCase();
+      const instructions = String(req.body?.instructions || '').trim();
+      if (!role) {
+        return res.status(400).json({
+          error: { code: 'missing_parameter', message: 'role is required', param: 'role' }
+        });
+      }
+      if (!instructions) {
+        return res.status(400).json({
+          error: { code: 'missing_parameter', message: 'instructions are required', param: 'instructions' }
+        });
+      }
+
+      const now = Date.now();
+      const assignment = db.createTaskAssignment({
+        id: req.body?.assignmentId || req.body?.id || null,
+        taskId: task.id,
+        role,
+        instructions,
+        adapter: req.body?.adapter || null,
+        model: req.body?.model || null,
+        worktreePath: req.body?.worktreePath || null,
+        worktreeBranch: req.body?.worktreeBranch || null,
+        acceptanceCriteria: req.body?.acceptanceCriteria || null,
+        metadata: req.body?.metadata || {},
+        status: 'queued',
+        createdAt: now
+      });
+      db.updateTask(task.id, { updatedAt: now });
+
+      res.json({
+        task: buildTaskPayload(task.id),
+        assignment: buildTaskAssignmentPayload(assignment)
+      });
+    } catch (error) {
+      if (error?.code === 'SQLITE_CONSTRAINT_PRIMARYKEY' || error?.code === 'SQLITE_CONSTRAINT_UNIQUE') {
+        return res.status(409).json({
+          error: { code: 'task_assignment_exists', message: error.message }
+        });
+      }
+      res.status(500).json({
+        error: { code: 'internal_error', message: error.message }
+      });
+    }
+  });
+
+  /**
+   * GET /orchestration/tasks/:taskId/assignments
+   * List assignments for a task with effective statuses.
+   */
+  router.get('/tasks/:taskId/assignments', (req, res) => {
+    try {
+      if (!db?.getTask || !db?.listTaskAssignments) {
+        return res.status(503).json({
+          error: { code: 'unavailable', message: 'task assignments are not configured' }
+        });
+      }
+
+      const task = db.getTask(req.params.taskId);
+      if (!task) {
+        return res.status(404).json({
+          error: { code: 'task_not_found', message: `Task ${req.params.taskId} not found` }
+        });
+      }
+
+      const assignments = db.listTaskAssignments(task.id, {
+        limit: parseQueryInteger(req.query.limit, 100)
+      }).map((assignment) => buildTaskAssignmentPayload(assignment));
+
+      res.json({
+        task,
+        assignments
+      });
+    } catch (error) {
+      res.status(500).json({
+        error: { code: 'internal_error', message: error.message }
+      });
+    }
+  });
+
+  /**
+   * PATCH /orchestration/tasks/:taskId/assignments/:assignmentId
+   * Update a queued task assignment.
+   */
+  router.patch('/tasks/:taskId/assignments/:assignmentId', (req, res) => {
+    try {
+      if (!db?.getTask || !db?.getTaskAssignment || !db?.updateTaskAssignment) {
+        return res.status(503).json({
+          error: { code: 'unavailable', message: 'task assignments are not configured' }
+        });
+      }
+
+      const task = db.getTask(req.params.taskId);
+      if (!task) {
+        return res.status(404).json({
+          error: { code: 'task_not_found', message: `Task ${req.params.taskId} not found` }
+        });
+      }
+
+      const assignment = db.getTaskAssignment(req.params.assignmentId);
+      if (!assignment || assignment.taskId !== task.id) {
+        return res.status(404).json({
+          error: { code: 'task_assignment_not_found', message: `Assignment ${req.params.assignmentId} not found for task ${task.id}` }
+        });
+      }
+
+      if (assignment.terminalId || normalizeTaskAssignmentStatus(assignment.status, 'queued') !== 'queued') {
+        return res.status(409).json({
+          error: {
+            code: 'task_assignment_locked',
+            message: `Assignment ${assignment.id} has already started and can no longer be patched`
+          }
+        });
+      }
+
+      const patch = {};
+      if (req.body?.instructions !== undefined) {
+        patch.instructions = String(req.body.instructions || '').trim();
+      }
+      if (req.body?.adapter !== undefined) {
+        patch.adapter = req.body.adapter;
+      }
+      if (req.body?.model !== undefined) {
+        patch.model = req.body.model;
+      }
+      if (req.body?.worktreePath !== undefined) {
+        patch.worktreePath = req.body.worktreePath;
+      }
+      if (req.body?.worktreeBranch !== undefined) {
+        patch.worktreeBranch = req.body.worktreeBranch;
+      }
+      if (req.body?.acceptanceCriteria !== undefined) {
+        patch.acceptanceCriteria = req.body.acceptanceCriteria;
+      }
+      if (req.body?.metadata !== undefined) {
+        patch.metadata = req.body.metadata;
+      }
+
+      if (patch.instructions !== undefined && !patch.instructions) {
+        return res.status(400).json({
+          error: { code: 'invalid_parameter', message: 'instructions cannot be empty', param: 'instructions' }
+        });
+      }
+      if (Object.keys(patch).length === 0) {
+        return res.json({
+          task: buildTaskPayload(task.id),
+          assignment: buildTaskAssignmentPayload(assignment)
+        });
+      }
+
+      const now = Date.now();
+      const updated = db.updateTaskAssignment(assignment.id, {
+        ...patch,
+        updatedAt: now
+      });
+      db.updateTask(task.id, { updatedAt: now });
+
+      res.json({
+        task: buildTaskPayload(task.id),
+        assignment: buildTaskAssignmentPayload(updated)
+      });
+    } catch (error) {
+      res.status(500).json({
+        error: { code: 'internal_error', message: error.message }
+      });
+    }
+  });
+
+  /**
+   * POST /orchestration/tasks/:taskId/assignments/:assignmentId/start
+   * Launch a queued assignment via the broker task router.
+   */
+  router.post('/tasks/:taskId/assignments/:assignmentId/start', async (req, res) => {
+    try {
+      if (!db?.getTask || !db?.getTaskAssignment) {
+        return res.status(503).json({
+          error: { code: 'unavailable', message: 'task assignments are not configured' }
+        });
+      }
+
+      const task = db.getTask(req.params.taskId);
+      if (!task) {
+        return res.status(404).json({
+          error: { code: 'task_not_found', message: `Task ${req.params.taskId} not found` }
+        });
+      }
+
+      const assignment = db.getTaskAssignment(req.params.assignmentId);
+      if (!assignment || assignment.taskId !== task.id) {
+        return res.status(404).json({
+          error: { code: 'task_assignment_not_found', message: `Assignment ${req.params.assignmentId} not found for task ${task.id}` }
+        });
+      }
+
+      if (assignment.terminalId || normalizeTaskAssignmentStatus(assignment.status, 'queued') !== 'queued') {
+        return res.status(409).json({
+          error: {
+            code: 'task_assignment_locked',
+            message: `Assignment ${assignment.id} has already started and cannot be started again`
+          }
+        });
+      }
+
+      const resolvedControlPlane = resolveRequestControlPlaneContext(req, {
+        rootSessionId: req.body?.rootSessionId || task.rootSessionId || null,
+        parentSessionId: req.body?.parentSessionId || null,
+        sessionKind: req.body?.sessionKind || null,
+        originClient: req.body?.originClient || null,
+        externalSessionRef: req.body?.externalSessionRef || null,
+        lineageDepth: req.body?.lineageDepth,
+        sessionMetadata: req.body?.sessionMetadata
+      }, {
+        defaultParentToRoot: true
+      });
+
+      if (requireConsistentRootBinding(res, `/orchestration/tasks/${task.id}/assignments/${assignment.id}/start`, resolvedControlPlane)) {
+        return;
+      }
+      if (requireAttachedRoot(res, `/orchestration/tasks/${task.id}/assignments/${assignment.id}/start`, resolvedControlPlane)) {
+        return;
+      }
+      const executionControlPlane = projectExecutionControlPlane(resolvedControlPlane);
+      const router = getTaskRouter();
+      const workingDirectory = assignment.worktreePath || task.workspaceRoot || req.body?.workingDirectory || null;
+      const sessionMetadata = {
+        ...(executionControlPlane.sessionMetadata || {}),
+        taskId: task.id,
+        taskAssignmentId: assignment.id,
+        taskRole: assignment.role,
+        taskTitle: task.title
+      };
+      if (task.workspaceRoot && !sessionMetadata.workspaceRoot) {
+        sessionMetadata.workspaceRoot = task.workspaceRoot;
+      }
+
+      const result = await router.routeTask(assignment.instructions, {
+        forceRole: normalizeTaskAssignmentRoutingRole(assignment.role),
+        forceAdapter: assignment.adapter || undefined,
+        model: assignment.model || undefined,
+        systemPrompt: req.body?.systemPrompt || null,
+        workDir: workingDirectory || undefined,
+        sessionLabel: req.body?.sessionLabel || null,
+        rootSessionId: executionControlPlane.rootSessionId,
+        parentSessionId: executionControlPlane.parentSessionId,
+        sessionKind: executionControlPlane.sessionKind || null,
+        originClient: executionControlPlane.originClient,
+        externalSessionRef: executionControlPlane.externalSessionRef,
+        lineageDepth: executionControlPlane.lineageDepth,
+        sessionMetadata,
+        preferReuse: req.body?.preferReuse,
+        forceFreshSession: req.body?.forceFreshSession
+      });
+
+      const now = Date.now();
+      const updatedAssignment = db.updateTaskAssignment(assignment.id, {
+        terminalId: result.terminalId,
+        adapter: result.adapter || assignment.adapter || null,
+        model: result.model || assignment.model || null,
+        status: 'running',
+        startedAt: now,
+        updatedAt: now,
+        metadata: {
+          ...(assignment.metadata || {}),
+          routing: {
+            profile: result.profile || null,
+            taskType: result.taskType || null,
+            confidence: result.confidence ?? null
+          }
+        }
+      });
+      db.updateTask(task.id, {
+        rootSessionId: executionControlPlane.rootSessionId || task.rootSessionId || null,
+        updatedAt: now
+      });
+
+      res.json({
+        task: buildTaskPayload(task.id),
+        assignment: buildTaskAssignmentPayload(updatedAssignment),
+        route: result,
+        rootSessionId: resolvedControlPlane.rootSessionId || null,
+        parentSessionId: resolvedControlPlane.parentSessionId || null
+      });
+    } catch (error) {
+      res.status(500).json({
+        error: { code: 'task_assignment_start_failed', message: error.message }
+      });
+    }
+  });
 
   /**
    * GET /orchestration/provider-sessions
@@ -1409,6 +1969,7 @@ function createOrchestrationRouter(context) {
       });
 
       const rootSessionId = req.body?.rootSessionId || crypto.randomBytes(16).toString('hex');
+      const taskId = String(req.body?.taskId || '').trim() || null;
       const title = String(req.body?.title || req.body?.name || '').trim() || null;
       const originClient = String(req.body?.originClient || 'mcp').trim() || 'mcp';
       const externalSessionRef = String(req.body?.externalSessionRef || `room:${rootSessionId}`).trim();
@@ -1416,6 +1977,14 @@ function createOrchestrationRouter(context) {
       sessionMetadata.attachMode = 'room-root';
       sessionMetadata.room = true;
       sessionMetadata.roomTitle = title || null;
+      if (taskId) {
+        if (!db?.getTask || !db.getTask(taskId)) {
+          return res.status(404).json({
+            error: { code: 'task_not_found', message: `Task ${taskId} not found`, taskId }
+          });
+        }
+        sessionMetadata.taskId = taskId;
+      }
       if (req.body?.workDir && !sessionMetadata.workspaceRoot) {
         sessionMetadata.workspaceRoot = req.body.workDir;
       }
@@ -1454,6 +2023,7 @@ function createOrchestrationRouter(context) {
       const created = roomService.createRoom({
         roomId: req.body?.roomId || null,
         rootSessionId,
+        taskId,
         title,
         participants: normalizedParticipants,
         workDir: req.body?.workDir || null,

@@ -1665,6 +1665,177 @@ This calls cliagents' direct-session discussion route and returns the completed 
     }
   },
   {
+    name: 'create_task',
+    description: 'Create a first-class cliagents task anchored to one workspace.',
+    inputSchema: {
+      type: 'object',
+      properties: {
+        taskId: {
+          type: 'string',
+          description: 'Optional explicit task ID.'
+        },
+        title: {
+          type: 'string',
+          description: 'Task title.'
+        },
+        kind: {
+          type: 'string',
+          description: 'Optional task kind. Default: general.'
+        },
+        brief: {
+          type: 'string',
+          description: 'Optional task brief.'
+        },
+        workspaceRoot: {
+          type: 'string',
+          description: 'Primary workspace root for the task.'
+        },
+        rootSessionId: {
+          type: 'string',
+          description: 'Optional root session to associate with the task.'
+        },
+        metadata: {
+          type: 'object',
+          description: 'Optional task metadata.'
+        }
+      },
+      required: ['title', 'workspaceRoot']
+    }
+  },
+  {
+    name: 'list_tasks',
+    description: 'List first-class tasks with derived assignment and linkage summaries.',
+    inputSchema: {
+      type: 'object',
+      properties: {
+        limit: {
+          type: 'integer',
+          description: 'Maximum tasks to return (max 500). Default: 50'
+        },
+        workspaceRoot: {
+          type: 'string',
+          description: 'Optional workspace filter.'
+        }
+      }
+    }
+  },
+  {
+    name: 'get_task',
+    description: 'Get one first-class task with derived status, assignment counts, and linked object counts.',
+    inputSchema: {
+      type: 'object',
+      properties: {
+        taskId: {
+          type: 'string',
+          description: 'Task ID to inspect.'
+        }
+      },
+      required: ['taskId']
+    }
+  },
+  {
+    name: 'create_task_assignment',
+    description: 'Create a queued task assignment for a bounded worker or reviewer lane.',
+    inputSchema: {
+      type: 'object',
+      properties: {
+        taskId: {
+          type: 'string',
+          description: 'Task ID to attach the assignment to.'
+        },
+        assignmentId: {
+          type: 'string',
+          description: 'Optional explicit assignment ID.'
+        },
+        role: {
+          type: 'string',
+          description: 'Assignment role, such as planner, executor, reviewer, or judge.'
+        },
+        instructions: {
+          type: 'string',
+          description: 'Bounded instructions for the assignment.'
+        },
+        adapter: {
+          type: 'string',
+          description: 'Optional preferred adapter.'
+        },
+        model: {
+          type: 'string',
+          description: 'Optional preferred model.'
+        },
+        worktreePath: {
+          type: 'string',
+          description: 'Optional worktree path to use as the working directory override when started.'
+        },
+        worktreeBranch: {
+          type: 'string',
+          description: 'Optional worktree branch metadata.'
+        },
+        acceptanceCriteria: {
+          type: 'string',
+          description: 'Optional acceptance criteria for the assignment.'
+        },
+        metadata: {
+          type: 'object',
+          description: 'Optional assignment metadata.'
+        }
+      },
+      required: ['taskId', 'role', 'instructions']
+    }
+  },
+  {
+    name: 'list_task_assignments',
+    description: 'List task assignments with effective statuses and terminal linkage when available.',
+    inputSchema: {
+      type: 'object',
+      properties: {
+        taskId: {
+          type: 'string',
+          description: 'Task ID to inspect.'
+        },
+        limit: {
+          type: 'integer',
+          description: 'Maximum assignments to return (max 500). Default: 100'
+        }
+      },
+      required: ['taskId']
+    }
+  },
+  {
+    name: 'start_task_assignment',
+    description: 'Start a queued task assignment through the existing broker routing path.',
+    inputSchema: {
+      type: 'object',
+      properties: {
+        taskId: {
+          type: 'string',
+          description: 'Task ID that owns the assignment.'
+        },
+        assignmentId: {
+          type: 'string',
+          description: 'Assignment ID to launch.'
+        },
+        preferReuse: {
+          type: 'boolean',
+          description: 'Whether to prefer reusing a compatible child terminal.'
+        },
+        forceFreshSession: {
+          type: 'boolean',
+          description: 'Force a fresh child terminal instead of reuse.'
+        },
+        sessionLabel: {
+          type: 'string',
+          description: 'Optional stable session label for child-session reuse.'
+        },
+        systemPrompt: {
+          type: 'string',
+          description: 'Optional system prompt override at start time.'
+        }
+      },
+      required: ['taskId', 'assignmentId']
+    }
+  },
+  {
     name: 'create_room',
     description: 'Create a persistent group-chat room backed by direct-session participants.',
     inputSchema: {
@@ -1677,6 +1848,10 @@ This calls cliagents' direct-session discussion route and returns the completed 
         roomId: {
           type: 'string',
           description: 'Optional explicit room ID.'
+        },
+        taskId: {
+          type: 'string',
+          description: 'Optional first-class task ID to associate with the room.'
         },
         workDir: {
           type: 'string',
@@ -3414,9 +3589,229 @@ async function handleImportProviderSession(args) {
   };
 }
 
+function formatAssignmentCounts(counts = {}) {
+  return `queued=${counts.queued || 0} running=${counts.running || 0} blocked=${counts.blocked || 0} failed=${counts.failed || 0} completed=${counts.completed || 0}`;
+}
+
+async function handleCreateTask(args) {
+  const rootContext = getAttachedRootContext();
+  const res = await callCliagents('POST', '/orchestration/tasks', {
+    taskId: args?.taskId || null,
+    title: args?.title,
+    kind: args?.kind || 'general',
+    brief: args?.brief || null,
+    workspaceRoot: args?.workspaceRoot,
+    rootSessionId: args?.rootSessionId || rootContext?.rootSessionId || null,
+    metadata: args?.metadata || {}
+  });
+  if (res.status !== 200) {
+    throw new Error(`Failed to create task: ${JSON.stringify(res.data)}`);
+  }
+
+  const data = res.data || {};
+  return {
+    content: [{
+      type: 'text',
+      text: [
+        '## Task Created',
+        '',
+        `task_id: ${data.task?.id || 'n/a'}`,
+        `status: ${data.status || 'pending'}`,
+        `workspace_root: ${data.task?.workspaceRoot || 'n/a'}`,
+        data.task?.rootSessionId ? `root_session_id: ${data.task.rootSessionId}` : null,
+        `assignment_counts: ${formatAssignmentCounts(data.assignmentCounts)}`,
+        `linked_counts: runs=${data.linkedCounts?.runs || 0} rooms=${data.linkedCounts?.rooms || 0} discussions=${data.linkedCounts?.discussions || 0} memory_snapshots=${data.linkedCounts?.memorySnapshots || 0}`
+      ].filter(Boolean).join('\n')
+    }]
+  };
+}
+
+async function handleListTasks(args) {
+  const params = new URLSearchParams();
+  if (Number.isFinite(args?.limit)) {
+    params.set('limit', String(args.limit));
+  }
+  if (args?.workspaceRoot) {
+    params.set('workspace_root', String(args.workspaceRoot));
+  }
+  const qs = params.toString();
+  const res = await callCliagents('GET', `/orchestration/tasks${qs ? `?${qs}` : ''}`);
+  if (res.status !== 200) {
+    throw new Error(`Failed to list tasks: ${JSON.stringify(res.data)}`);
+  }
+
+  const tasks = Array.isArray(res.data?.tasks) ? res.data.tasks : [];
+  return {
+    content: [{
+      type: 'text',
+      text: [
+        '## Tasks',
+        '',
+        `returned: ${tasks.length}`,
+        '',
+        tasks.map((entry) => {
+          const task = entry.task || {};
+          return [
+            `${task.id || 'n/a'}${task.title ? ` (${task.title})` : ''}`,
+            `status=${entry.status || 'pending'}`,
+            `workspace=${task.workspaceRoot || 'n/a'}`,
+            `assignments=${formatAssignmentCounts(entry.assignmentCounts)}`
+          ].join(' • ');
+        }).join('\n')
+      ].filter(Boolean).join('\n')
+    }]
+  };
+}
+
+async function handleGetTask(args) {
+  const res = await callCliagents('GET', `/orchestration/tasks/${encodeURIComponent(args?.taskId || '')}`);
+  if (res.status !== 200) {
+    throw new Error(`Failed to get task: ${JSON.stringify(res.data)}`);
+  }
+
+  const data = res.data || {};
+  return {
+    content: [{
+      type: 'text',
+      text: [
+        '## Task',
+        '',
+        `task_id: ${data.task?.id || args?.taskId || 'n/a'}`,
+        data.task?.title ? `title: ${data.task.title}` : null,
+        `status: ${data.status || 'pending'}`,
+        `workspace_root: ${data.task?.workspaceRoot || 'n/a'}`,
+        data.task?.rootSessionId ? `root_session_id: ${data.task.rootSessionId}` : null,
+        `assignment_counts: ${formatAssignmentCounts(data.assignmentCounts)}`,
+        `linked_counts: runs=${data.linkedCounts?.runs || 0} rooms=${data.linkedCounts?.rooms || 0} discussions=${data.linkedCounts?.discussions || 0} memory_snapshots=${data.linkedCounts?.memorySnapshots || 0}`
+      ].filter(Boolean).join('\n')
+    }]
+  };
+}
+
+async function handleCreateTaskAssignment(args) {
+  const res = await callCliagents('POST', `/orchestration/tasks/${encodeURIComponent(args?.taskId || '')}/assignments`, {
+    assignmentId: args?.assignmentId || null,
+    role: args?.role,
+    instructions: args?.instructions,
+    adapter: args?.adapter || null,
+    model: args?.model || null,
+    worktreePath: args?.worktreePath || null,
+    worktreeBranch: args?.worktreeBranch || null,
+    acceptanceCriteria: args?.acceptanceCriteria || null,
+    metadata: args?.metadata || {}
+  });
+  if (res.status !== 200) {
+    throw new Error(`Failed to create task assignment: ${JSON.stringify(res.data)}`);
+  }
+
+  const data = res.data || {};
+  const assignment = data.assignment || {};
+  return {
+    content: [{
+      type: 'text',
+      text: [
+        '## Task Assignment Created',
+        '',
+        `task_id: ${data.task?.task?.id || data.task?.id || args?.taskId || 'n/a'}`,
+        `assignment_id: ${assignment.id || 'n/a'}`,
+        `role: ${assignment.role || args?.role || 'n/a'}`,
+        `status: ${assignment.status || 'queued'}`,
+        assignment.adapter ? `adapter: ${assignment.adapter}` : null,
+        assignment.model ? `model: ${assignment.model}` : null
+      ].filter(Boolean).join('\n')
+    }]
+  };
+}
+
+async function handleListTaskAssignments(args) {
+  const params = new URLSearchParams();
+  if (Number.isFinite(args?.limit)) {
+    params.set('limit', String(args.limit));
+  }
+  const qs = params.toString();
+  const res = await callCliagents('GET', `/orchestration/tasks/${encodeURIComponent(args?.taskId || '')}/assignments${qs ? `?${qs}` : ''}`);
+  if (res.status !== 200) {
+    throw new Error(`Failed to list task assignments: ${JSON.stringify(res.data)}`);
+  }
+
+  const data = res.data || {};
+  const assignments = Array.isArray(data.assignments) ? data.assignments : [];
+  return {
+    content: [{
+      type: 'text',
+      text: [
+        '## Task Assignments',
+        '',
+        `task_id: ${data.task?.id || args?.taskId || 'n/a'}`,
+        `returned: ${assignments.length}`,
+        '',
+        assignments.map((assignment) => [
+          `${assignment.id || 'n/a'} (${assignment.role || 'n/a'})`,
+          `status=${assignment.status || 'queued'}`,
+          assignment.terminalId ? `terminal=${assignment.terminalId}` : null,
+          assignment.adapter ? `adapter=${assignment.adapter}` : null
+        ].filter(Boolean).join(' • ')).join('\n')
+      ].filter(Boolean).join('\n')
+    }]
+  };
+}
+
+async function handleStartTaskAssignment(args) {
+  const rootContext = getAttachedRootContext();
+  if (!rootContext && REQUIRE_ROOT_ATTACH) {
+    throw new Error(buildRootAttachRequiredMessage('start_task_assignment'));
+  }
+
+  const res = await callCliagents(
+    'POST',
+    `/orchestration/tasks/${encodeURIComponent(args?.taskId || '')}/assignments/${encodeURIComponent(args?.assignmentId || '')}/start`,
+    {
+      rootSessionId: rootContext?.rootSessionId || null,
+      parentSessionId: rootContext?.rootSessionId || null,
+      sessionKind: 'subagent',
+      originClient: rootContext?.originClient || null,
+      externalSessionRef: rootContext?.externalSessionRef || null,
+      lineageDepth: 1,
+      sessionMetadata: rootContext ? {
+        ...rootContext.sessionMetadata,
+        toolName: 'start_task_assignment'
+      } : null,
+      preferReuse: typeof args?.preferReuse === 'boolean' ? args.preferReuse : undefined,
+      forceFreshSession: typeof args?.forceFreshSession === 'boolean' ? args.forceFreshSession : undefined,
+      sessionLabel: args?.sessionLabel || null,
+      systemPrompt: args?.systemPrompt || null
+    }
+  );
+
+  maybeThrowRootAttachError(res, 'start_task_assignment');
+  if (res.status !== 200) {
+    throw new Error(`Failed to start task assignment: ${JSON.stringify(res.data)}`);
+  }
+
+  const data = res.data || {};
+  const assignment = data.assignment || {};
+  const task = data.task?.task || data.task || {};
+  return {
+    content: [{
+      type: 'text',
+      text: [
+        '## Task Assignment Started',
+        '',
+        `task_id: ${task.id || args?.taskId || 'n/a'}`,
+        `assignment_id: ${assignment.id || args?.assignmentId || 'n/a'}`,
+        `terminal_id: ${assignment.terminalId || data.route?.terminalId || 'n/a'}`,
+        `status: ${assignment.status || 'running'}`,
+        `adapter: ${assignment.adapter || data.route?.adapter || 'n/a'}`,
+        `model: ${assignment.model || data.route?.model || 'n/a'}`
+      ].join('\n')
+    }]
+  };
+}
+
 async function handleCreateRoom(args) {
   const res = await callCliagents('POST', '/orchestration/rooms', {
     roomId: args?.roomId || null,
+    taskId: args?.taskId || null,
     title: args?.title || null,
     workDir: args?.workDir || null,
     participants: Array.isArray(args?.participants) ? args.participants : []
@@ -4314,6 +4709,24 @@ async function handleRequest(request) {
           case 'get_message_window':
             result = await handleGetMessageWindow(args);
             break;
+          case 'create_task':
+            result = await handleCreateTask(args);
+            break;
+          case 'list_tasks':
+            result = await handleListTasks(args);
+            break;
+          case 'get_task':
+            result = await handleGetTask(args);
+            break;
+          case 'create_task_assignment':
+            result = await handleCreateTaskAssignment(args);
+            break;
+          case 'list_task_assignments':
+            result = await handleListTaskAssignments(args);
+            break;
+          case 'start_task_assignment':
+            result = await handleStartTaskAssignment(args);
+            break;
           case 'create_room':
             result = await handleCreateRoom(args);
             break;
@@ -4419,6 +4832,12 @@ module.exports = {
   handleRecommendModel,
   handleListProviderSessions,
   handleImportProviderSession,
+  handleCreateTask,
+  handleListTasks,
+  handleGetTask,
+  handleCreateTaskAssignment,
+  handleListTaskAssignments,
+  handleStartTaskAssignment,
   handleCreateRoom,
   handleListRooms,
   handleSendRoomMessage,
