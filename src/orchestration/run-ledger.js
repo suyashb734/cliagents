@@ -491,6 +491,7 @@ class RunLedgerService {
           terminalId: input.participantId,
           rootSessionId: run?.rootSessionId || null,
           runId: input.runId,
+          taskId: run?.taskId || null,
           participantId: input.participantId,
           adapter: participant?.adapter || null,
           role: participant?.participant_role || null,

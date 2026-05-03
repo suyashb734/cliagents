@@ -159,6 +159,8 @@ function buildUsageRecordFromMetadata(context = {}, metadata = {}) {
 
   const usageMetadata = mergeUsageMetadata(metadata, {
     runId: context.runId || null,
+    taskId: context.taskId || null,
+    taskAssignmentId: context.taskAssignmentId || null,
     participantId: context.participantId || null,
     adapter: context.adapter || null,
     provider: context.provider || null,
@@ -178,6 +180,10 @@ function buildUsageRecordFromMetadata(context = {}, metadata = {}) {
   const provider = getFirstUsageValue(usageMetadata, ['provider']) || context.provider || null;
   const model = getFirstUsageValue(usageMetadata, ['model']) || context.model || null;
   const runId = getFirstUsageValue(usageMetadata, ['runId', 'run_id']) || context.runId || null;
+  const taskId = getFirstUsageValue(usageMetadata, ['taskId', 'task_id']) || context.taskId || null;
+  const taskAssignmentId = getFirstUsageValue(usageMetadata, ['taskAssignmentId', 'task_assignment_id'])
+    || context.taskAssignmentId
+    || null;
   const participantId = getFirstUsageValue(usageMetadata, ['participantId', 'participant_id']) || context.participantId || null;
   const usageEstimated = getFirstUsageValue(usageMetadata, ['usageEstimated', 'usage_estimated']);
   const sourceConfidence = getFirstUsageValue(usageMetadata, ['sourceConfidence', 'source_confidence'])
@@ -216,6 +222,8 @@ function buildUsageRecordFromMetadata(context = {}, metadata = {}) {
     rootSessionId: context.rootSessionId || null,
     terminalId,
     runId,
+    taskId,
+    taskAssignmentId,
     participantId,
     adapter,
     provider,
@@ -238,9 +246,13 @@ function buildUsageRecordFromMessage(terminalRow, terminalId, role, metadata = {
     return null;
   }
 
+  const sessionMetadata = parseJsonField(terminalRow?.session_metadata || terminalRow?.sessionMetadata) || {};
+
   return buildUsageRecordFromMetadata({
     rootSessionId: terminalRow?.root_session_id || terminalRow?.rootSessionId || terminalId,
     terminalId,
+    taskId: sessionMetadata.taskId || null,
+    taskAssignmentId: sessionMetadata.taskAssignmentId || null,
     adapter: terminalRow?.adapter || null,
     role: terminalRow?.role || null,
     createdAt: options.createdAt
@@ -262,6 +274,14 @@ function buildUsageWhereClause(options = {}) {
   if (options.runId) {
     clauses.push('usage_records.run_id = ?');
     params.push(options.runId);
+  }
+  if (options.taskId) {
+    clauses.push('usage_records.task_id = ?');
+    params.push(options.taskId);
+  }
+  if (options.taskAssignmentId) {
+    clauses.push('usage_records.task_assignment_id = ?');
+    params.push(options.taskAssignmentId);
   }
   if (options.participantId) {
     clauses.push('usage_records.participant_id = ?');
@@ -1809,6 +1829,8 @@ class OrchestrationDB {
         root_session_id,
         terminal_id,
         run_id,
+        task_id,
+        task_assignment_id,
         participant_id,
         adapter,
         provider,
@@ -1824,11 +1846,13 @@ class OrchestrationDB {
         metadata,
         created_at
       )
-      VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+      VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
     `,
     usage.rootSessionId || null,
     usage.terminalId,
     usage.runId || null,
+    usage.taskId || null,
+    usage.taskAssignmentId || null,
     usage.participantId || null,
     usage.adapter || null,
     usage.provider || null,
@@ -1866,6 +1890,8 @@ class OrchestrationDB {
       rootSessionId: usageInput.rootSessionId || null,
       terminalId,
       runId: usageInput.runId || null,
+      taskId: usageInput.taskId || null,
+      taskAssignmentId: usageInput.taskAssignmentId || null,
       participantId: usageInput.participantId || null,
       adapter: usageInput.adapter || null,
       provider: usageInput.provider || null,
@@ -1893,10 +1919,10 @@ class OrchestrationDB {
 
     const rows = this.db.all(`
       SELECT
-        usage_records.*,
-        rp.participant_role AS participant_role,
-        t.role AS terminal_role,
-        ${buildUsageRoleSql()} AS effective_role
+      usage_records.*,
+      rp.participant_role AS participant_role,
+      t.role AS terminal_role,
+      ${buildUsageRoleSql()} AS effective_role
       FROM usage_records
       LEFT JOIN run_participants rp ON rp.id = usage_records.participant_id
       LEFT JOIN terminals t ON t.terminal_id = usage_records.terminal_id
@@ -1908,6 +1934,8 @@ class OrchestrationDB {
     return rows.map((row) => ({
       ...row,
       metadata: parseJsonField(row.metadata),
+      taskId: row.task_id || null,
+      taskAssignmentId: row.task_assignment_id || null,
       effectiveRole: normalizeUsageRole(row.effective_role),
       roleGroup: classifyUsageRoleBucket(row.effective_role)
     }));

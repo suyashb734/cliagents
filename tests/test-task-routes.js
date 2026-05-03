@@ -210,6 +210,7 @@ async function runRouteAssertions() {
     dbPath: path.join(rootDir, 'cliagents.db'),
     dataDir: rootDir
   });
+  const ledger = new RunLedgerService(db);
   const sessionManager = createFakeSessionManager();
   const discussionCalls = [];
   let serverHandle = null;
@@ -260,6 +261,7 @@ async function runRouteAssertions() {
     assert.strictEqual(createTaskRes.status, 200);
     assert.strictEqual(createTaskRes.data.status, 'pending');
     const taskId = createTaskRes.data.task.id;
+    const worktreePath = path.join(rootDir, 'task-worktree');
 
     const missingRole = await request(serverHandle.baseUrl, 'POST', `/orchestration/tasks/${taskId}/assignments`, {
       instructions: 'Implement the feature.'
@@ -270,12 +272,12 @@ async function runRouteAssertions() {
     const createAssignmentRes = await request(serverHandle.baseUrl, 'POST', `/orchestration/tasks/${taskId}/assignments`, {
       role: 'executor',
       instructions: 'Implement the feature and add tests.',
-      worktreePath: '/tmp/task-worktree',
+      worktreePath,
       worktreeBranch: 'task/tasks-v1'
     });
     assert.strictEqual(createAssignmentRes.status, 200);
     assert.strictEqual(createAssignmentRes.data.assignment.status, 'queued');
-    assert.strictEqual(createAssignmentRes.data.assignment.worktreePath, '/tmp/task-worktree');
+    assert.strictEqual(createAssignmentRes.data.assignment.worktreePath, worktreePath);
     const assignmentId = createAssignmentRes.data.assignment.id;
 
     const patchAssignmentRes = await request(serverHandle.baseUrl, 'PATCH', `/orchestration/tasks/${taskId}/assignments/${assignmentId}`, {
@@ -285,6 +287,8 @@ async function runRouteAssertions() {
     assert.strictEqual(patchAssignmentRes.status, 200);
     assert.strictEqual(patchAssignmentRes.data.assignment.instructions, 'Implement the feature, add tests, and report status.');
     assert.strictEqual(patchAssignmentRes.data.assignment.worktreeBranch, 'task/tasks-v1-updated');
+
+    fs.mkdirSync(worktreePath, { recursive: true });
 
     const startAssignmentRes = await request(serverHandle.baseUrl, 'POST', `/orchestration/tasks/${taskId}/assignments/${assignmentId}/start`, {
       rootSessionId: 'root-task-routes',
@@ -297,23 +301,54 @@ async function runRouteAssertions() {
     assert(startAssignmentRes.data.assignment.terminalId, 'started assignment should be linked to a terminal');
     assert.strictEqual(sessionManager.state.createCalls.length, 1);
     assert.strictEqual(sessionManager.state.sendCalls.length, 1);
-    assert.strictEqual(sessionManager.state.createCalls[0].workDir, '/tmp/task-worktree');
+    assert.strictEqual(sessionManager.state.createCalls[0].workDir, worktreePath);
     assert.strictEqual(sessionManager.state.createCalls[0].sessionMetadata.taskId, taskId);
     assert.strictEqual(sessionManager.state.createCalls[0].sessionMetadata.taskAssignmentId, assignmentId);
     assert.strictEqual(sessionManager.state.sendCalls[0].message, 'Implement the feature, add tests, and report status.');
     assert.strictEqual(sessionManager.state.createCalls[0].rootSessionId, 'root-task-routes');
+
+    db.addUsageRecord({
+      rootSessionId: 'root-task-routes',
+      terminalId: startAssignmentRes.data.assignment.terminalId,
+      taskId,
+      taskAssignmentId: assignmentId,
+      adapter: 'codex-cli',
+      inputTokens: 10,
+      outputTokens: 5,
+      totalTokens: 15,
+      sourceConfidence: 'estimated',
+      metadata: {
+        taskId,
+        taskAssignmentId: assignmentId,
+        role: 'worker'
+      }
+    });
+    ledger.createRun({
+      id: 'run-task-route-1',
+      kind: 'discussion',
+      status: 'completed',
+      inputSummary: 'Task-linked run',
+      rootSessionId: 'root-task-routes',
+      taskId,
+      startedAt: Date.now(),
+      completedAt: Date.now()
+    });
 
     const getTaskRes = await request(serverHandle.baseUrl, 'GET', `/orchestration/tasks/${taskId}`);
     assert.strictEqual(getTaskRes.status, 200);
     assert.strictEqual(getTaskRes.data.status, 'running');
     assert.strictEqual(getTaskRes.data.assignmentCounts.running, 1);
     assert.strictEqual(getTaskRes.data.linkedCounts.rooms, 0);
+    assert.strictEqual(getTaskRes.data.usageSummary.totalTokens, 15);
+    assert.strictEqual(getTaskRes.data.usageAttribution.executionTokens, 15);
+    assert.strictEqual(getTaskRes.data.recentRuns[0].id, 'run-task-route-1');
 
     const listAssignmentsRes = await request(serverHandle.baseUrl, 'GET', `/orchestration/tasks/${taskId}/assignments`);
     assert.strictEqual(listAssignmentsRes.status, 200);
     assert.strictEqual(listAssignmentsRes.data.assignments.length, 1);
     assert.strictEqual(listAssignmentsRes.data.assignments[0].status, 'running');
     assert.strictEqual(listAssignmentsRes.data.assignments[0].terminalStatus, 'processing');
+    assert.strictEqual(listAssignmentsRes.data.assignments[0].usageSummary.totalTokens, 15);
 
     const createRoomWithTaskRes = await request(serverHandle.baseUrl, 'POST', '/orchestration/rooms', {
       title: 'Task-linked room',

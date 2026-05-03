@@ -26,6 +26,7 @@ const {
   composeManagedRootSystemPrompt
 } = require('../orchestration/managed-root-launch');
 const { getChildSessionSupport } = require('../orchestration/child-session-support');
+const { prepareTaskAssignmentWorktree } = require('../orchestration/task-worktree');
 const { sendMessage, broadcastMessage } = require('../orchestration/send-message');
 const { getAgentProfiles, resolveProfile } = require('../services/agent-profiles');
 const { createMemoryRouter } = require('../routes/memory');
@@ -674,12 +675,20 @@ function createOrchestrationRouter(context) {
     const status = assignment?.terminalId
       ? normalizeTaskAssignmentStatus(terminalStatus, normalizeTaskAssignmentStatus(storedStatus, 'queued'))
       : normalizeTaskAssignmentStatus(storedStatus, 'queued');
+    const usageSummary = typeof db?.summarizeUsage === 'function'
+      ? db.summarizeUsage({ taskAssignmentId: assignment?.id || null })
+      : null;
+    const usageAttribution = typeof db?.summarizeUsageAttribution === 'function'
+      ? db.summarizeUsageAttribution({ taskAssignmentId: assignment?.id || null })
+      : null;
 
     return {
       ...assignment,
       status,
       storedStatus,
       terminalStatus,
+      usageSummary,
+      usageAttribution,
       adapter: assignment.adapter || terminal?.adapter || null,
       model: assignment.model || terminal?.model || null,
       terminal: terminal ? {
@@ -728,7 +737,26 @@ function createOrchestrationRouter(context) {
     return 'pending';
   }
 
-  function buildTaskPayload(taskId) {
+  function mapTaskRunSummary(run) {
+    if (!run) {
+      return null;
+    }
+
+    return {
+      id: run.id,
+      kind: run.kind,
+      status: run.status,
+      inputSummary: run.inputSummary || null,
+      decisionSummary: run.decisionSummary || null,
+      discussionId: run.discussionId || null,
+      rootSessionId: run.rootSessionId || null,
+      startedAt: run.startedAt || null,
+      completedAt: run.completedAt || null,
+      durationMs: run.durationMs || null
+    };
+  }
+
+  function buildTaskPayload(taskId, options = {}) {
     if (!db?.getTask || !db?.listTaskAssignments || !db?.getTaskLinkCounts) {
       return null;
     }
@@ -739,11 +767,36 @@ function createOrchestrationRouter(context) {
     }
 
     const assignments = db.listTaskAssignments(taskId, { limit: 500 }).map((assignment) => buildTaskAssignmentPayload(assignment));
+    const recentRuns = typeof db?.getLatestRunsForTask === 'function' && options.includeRecentRuns !== false
+      ? db.getLatestRunsForTask(taskId, options.recentRunsLimit || 5).map((run) => mapTaskRunSummary(run)).filter(Boolean)
+      : [];
+    const usageSummary = typeof db?.summarizeUsage === 'function'
+      ? db.summarizeUsage({ taskId })
+      : null;
+    const usageAttribution = typeof db?.summarizeUsageAttribution === 'function'
+      ? db.summarizeUsageAttribution({ taskId })
+      : null;
+    const latestAssignmentAt = assignments.reduce((latest, assignment) => Math.max(
+      latest,
+      assignment?.completedAt || 0,
+      assignment?.startedAt || 0,
+      assignment?.updatedAt || 0,
+      assignment?.createdAt || 0
+    ), 0);
+    const latestRunAt = recentRuns.reduce((latest, run) => Math.max(
+      latest,
+      run?.completedAt || 0,
+      run?.startedAt || 0
+    ), 0);
     return {
       task,
       status: deriveTaskStatus(assignments),
       assignmentCounts: summarizeTaskAssignmentStates(assignments),
-      linkedCounts: db.getTaskLinkCounts(taskId)
+      linkedCounts: db.getTaskLinkCounts(taskId),
+      usageSummary,
+      usageAttribution,
+      latestActivityAt: Math.max(task.updatedAt || 0, latestAssignmentAt, latestRunAt) || null,
+      recentRuns
     };
   }
 
@@ -831,7 +884,7 @@ function createOrchestrationRouter(context) {
       const tasks = db.listTasks({
         limit,
         workspaceRoot: workspaceRoot || null
-      }).map((task) => buildTaskPayload(task.id));
+      }).map((task) => buildTaskPayload(task.id, { includeRecentRuns: false }));
 
       res.json({ tasks });
     } catch (error) {
@@ -853,7 +906,7 @@ function createOrchestrationRouter(context) {
         });
       }
 
-      const payload = buildTaskPayload(req.params.taskId);
+      const payload = buildTaskPayload(req.params.taskId, { includeRecentRuns: true, recentRunsLimit: 5 });
       if (!payload) {
         return res.status(404).json({
           error: { code: 'task_not_found', message: `Task ${req.params.taskId} not found` }
@@ -957,7 +1010,7 @@ function createOrchestrationRouter(context) {
       }).map((assignment) => buildTaskAssignmentPayload(assignment));
 
       res.json({
-        task,
+        task: buildTaskPayload(task.id, { includeRecentRuns: false }),
         assignments
       });
     } catch (error) {
@@ -1110,7 +1163,13 @@ function createOrchestrationRouter(context) {
       }
       const executionControlPlane = projectExecutionControlPlane(resolvedControlPlane);
       const router = getTaskRouter();
-      const workingDirectory = assignment.worktreePath || task.workspaceRoot || req.body?.workingDirectory || null;
+      const preparedWorktree = assignment.worktreePath
+        ? prepareTaskAssignmentWorktree(task, assignment)
+        : null;
+      const workingDirectory = preparedWorktree?.workingDirectory
+        || task.workspaceRoot
+        || req.body?.workingDirectory
+        || null;
       const sessionMetadata = {
         ...(executionControlPlane.sessionMetadata || {}),
         taskId: task.id,
@@ -1146,10 +1205,12 @@ function createOrchestrationRouter(context) {
         adapter: result.adapter || assignment.adapter || null,
         model: result.model || assignment.model || null,
         status: 'running',
+        worktreePath: preparedWorktree?.worktreePath || assignment.worktreePath || null,
+        worktreeBranch: preparedWorktree?.worktreeBranch || assignment.worktreeBranch || null,
         startedAt: now,
         updatedAt: now,
         metadata: {
-          ...(assignment.metadata || {}),
+          ...(preparedWorktree?.metadata || assignment.metadata || {}),
           routing: {
             profile: result.profile || null,
             taskType: result.taskType || null,
@@ -2398,6 +2459,88 @@ function createOrchestrationRouter(context) {
       });
       res.json({
         runId: req.params.runId,
+        ...payload
+      });
+    } catch (error) {
+      if (error.message.includes('not configured')) {
+        return res.status(503).json({
+          error: { code: 'unavailable', message: error.message }
+        });
+      }
+
+      res.status(500).json({
+        error: { code: 'internal_error', message: error.message }
+      });
+    }
+  });
+
+  /**
+   * GET /orchestration/usage/tasks/:taskId
+   * Aggregate usage for one first-class task.
+   */
+  router.get('/usage/tasks/:taskId', (req, res) => {
+    try {
+      if (!db?.getTask) {
+        return res.status(503).json({
+          error: { code: 'unavailable', message: 'task usage observability is not configured' }
+        });
+      }
+
+      const task = db.getTask(req.params.taskId);
+      if (!task) {
+        return res.status(404).json({
+          error: { code: 'task_not_found', message: `Task ${req.params.taskId} not found` }
+        });
+      }
+
+      const breakdowns = parseUsageBreakdownList(req.query.breakdown);
+      const payload = buildUsageResponse('taskId', req.params.taskId, {
+        breakdowns,
+        breakdownLimit: parseQueryInteger(req.query.breakdownLimit, 20)
+      });
+      res.json({
+        taskId: req.params.taskId,
+        ...payload
+      });
+    } catch (error) {
+      if (error.message.includes('not configured')) {
+        return res.status(503).json({
+          error: { code: 'unavailable', message: error.message }
+        });
+      }
+
+      res.status(500).json({
+        error: { code: 'internal_error', message: error.message }
+      });
+    }
+  });
+
+  /**
+   * GET /orchestration/usage/task-assignments/:assignmentId
+   * Aggregate usage for one task assignment.
+   */
+  router.get('/usage/task-assignments/:assignmentId', (req, res) => {
+    try {
+      if (!db?.getTaskAssignment) {
+        return res.status(503).json({
+          error: { code: 'unavailable', message: 'task assignment usage observability is not configured' }
+        });
+      }
+
+      const assignment = db.getTaskAssignment(req.params.assignmentId);
+      if (!assignment) {
+        return res.status(404).json({
+          error: { code: 'task_assignment_not_found', message: `Assignment ${req.params.assignmentId} not found` }
+        });
+      }
+
+      const breakdowns = parseUsageBreakdownList(req.query.breakdown);
+      const payload = buildUsageResponse('taskAssignmentId', req.params.assignmentId, {
+        breakdowns,
+        breakdownLimit: parseQueryInteger(req.query.breakdownLimit, 20)
+      });
+      res.json({
+        taskAssignmentId: req.params.assignmentId,
         ...payload
       });
     } catch (error) {

@@ -82,6 +82,43 @@ async function startFakeCliagentsServer() {
       });
     }
 
+    if (req.method === 'GET' && req.url.startsWith('/orchestration/usage/tasks/task-usage-v2')) {
+      return writeJson(200, {
+        taskId: 'task-usage-v2',
+        scope: 'taskId',
+        summary: {
+          recordCount: 3,
+          inputTokens: 70,
+          outputTokens: 20,
+          reasoningTokens: 0,
+          cachedInputTokens: 0,
+          totalTokens: 90,
+          costUsd: 0,
+          durationMs: 0
+        },
+        attribution: {
+          executionTokens: 50,
+          planningTokens: 40,
+          judgeTokens: 0,
+          supervisionTokens: 0,
+          unknownRoleTokens: 0,
+          brokerOverheadTokens: 40,
+          brokerOverheadShare: 0.4444444444,
+          executionShare: 0.5555555555,
+          roleBreakdown: [
+            { key: 'worker', totalTokens: 50, costUsd: 0 },
+            { key: 'plan', totalTokens: 40, costUsd: 0 }
+          ]
+        },
+        breakdowns: {
+          role: [
+            { key: 'worker', totalTokens: 50, costUsd: 0 },
+            { key: 'plan', totalTokens: 40, costUsd: 0 }
+          ]
+        }
+      });
+    }
+
     return writeJson(404, { error: { message: `Unhandled route ${req.method} ${req.url}` } });
   });
 
@@ -130,6 +167,15 @@ async function run() {
     const payload = JSON.parse(jsonResult.content[0].text);
     assert.strictEqual(payload.attribution.executionTokens, 90);
     assert(payload.breakdowns.role.some((entry) => entry.key === 'judge'));
+
+    const taskResult = await mod.handleGetUsageSummary({
+      taskId: 'task-usage-v2',
+      breakdown: 'role'
+    });
+    const taskText = taskResult.content[0].text;
+    assert(taskText.includes('## Usage Summary: task task-usage-v2'));
+    assert(taskText.includes('total_tokens: 90'));
+    assert(taskText.includes('worker: total_tokens=50'));
 
     console.log('✅ MCP usage summary includes role attribution');
   } finally {

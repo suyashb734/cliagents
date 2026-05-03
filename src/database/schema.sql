@@ -144,6 +144,8 @@ CREATE TABLE IF NOT EXISTS usage_records (
   root_session_id TEXT,
   terminal_id TEXT NOT NULL,
   run_id TEXT,
+  task_id TEXT,
+  task_assignment_id TEXT,
   participant_id TEXT,
   adapter TEXT,
   provider TEXT,
@@ -162,6 +164,8 @@ CREATE TABLE IF NOT EXISTS usage_records (
 
 CREATE INDEX IF NOT EXISTS idx_usage_records_root_created ON usage_records(root_session_id, created_at);
 CREATE INDEX IF NOT EXISTS idx_usage_records_run_created ON usage_records(run_id, created_at);
+CREATE INDEX IF NOT EXISTS idx_usage_records_task_created ON usage_records(task_id, created_at);
+CREATE INDEX IF NOT EXISTS idx_usage_records_task_assignment_created ON usage_records(task_assignment_id, created_at);
 CREATE INDEX IF NOT EXISTS idx_usage_records_terminal_created ON usage_records(terminal_id, created_at);
 
 -- ============================================================

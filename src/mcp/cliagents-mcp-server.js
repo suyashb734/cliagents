@@ -1570,7 +1570,7 @@ This calls cliagents' direct-session discussion route and returns the completed 
   },
   {
     name: 'get_usage_summary',
-    description: 'Read persisted usage totals for a root session, run, or terminal. Terminal scope also returns recent usage history.',
+    description: 'Read persisted usage totals for a root session, run, task, task assignment, or terminal. Terminal scope also returns recent usage history.',
     inputSchema: {
       type: 'object',
       properties: {
@@ -1581,6 +1581,14 @@ This calls cliagents' direct-session discussion route and returns the completed 
         runId: {
           type: 'string',
           description: 'Run ID to summarize.'
+        },
+        taskId: {
+          type: 'string',
+          description: 'Task ID to summarize.'
+        },
+        taskAssignmentId: {
+          type: 'string',
+          description: 'Task assignment ID to summarize.'
         },
         terminalId: {
           type: 'string',
@@ -3663,12 +3671,16 @@ async function handleListTasks(args) {
         '',
         tasks.map((entry) => {
           const task = entry.task || {};
-          return [
+          const parts = [
             `${task.id || 'n/a'}${task.title ? ` (${task.title})` : ''}`,
             `status=${entry.status || 'pending'}`,
             `workspace=${task.workspaceRoot || 'n/a'}`,
             `assignments=${formatAssignmentCounts(entry.assignmentCounts)}`
-          ].join(' • ');
+          ];
+          if (entry.usageSummary) {
+            parts.push(`total_tokens=${entry.usageSummary.totalTokens || 0}`);
+          }
+          return parts.join(' • ');
         }).join('\n')
       ].filter(Boolean).join('\n')
     }]
@@ -3694,7 +3706,12 @@ async function handleGetTask(args) {
         `workspace_root: ${data.task?.workspaceRoot || 'n/a'}`,
         data.task?.rootSessionId ? `root_session_id: ${data.task.rootSessionId}` : null,
         `assignment_counts: ${formatAssignmentCounts(data.assignmentCounts)}`,
-        `linked_counts: runs=${data.linkedCounts?.runs || 0} rooms=${data.linkedCounts?.rooms || 0} discussions=${data.linkedCounts?.discussions || 0} memory_snapshots=${data.linkedCounts?.memorySnapshots || 0}`
+        `linked_counts: runs=${data.linkedCounts?.runs || 0} rooms=${data.linkedCounts?.rooms || 0} discussions=${data.linkedCounts?.discussions || 0} memory_snapshots=${data.linkedCounts?.memorySnapshots || 0}`,
+        data.usageSummary ? `usage_total_tokens: ${data.usageSummary.totalTokens || 0}` : null,
+        data.usageAttribution ? `usage_execution_tokens: ${data.usageAttribution.executionTokens || 0}` : null,
+        Array.isArray(data.recentRuns) && data.recentRuns.length > 0
+          ? `recent_runs: ${data.recentRuns.map((run) => run.id).join(', ')}`
+          : null
       ].filter(Boolean).join('\n')
     }]
   };
@@ -3748,20 +3765,22 @@ async function handleListTaskAssignments(args) {
 
   const data = res.data || {};
   const assignments = Array.isArray(data.assignments) ? data.assignments : [];
+  const taskRecord = data.task?.task || data.task || {};
   return {
     content: [{
       type: 'text',
       text: [
         '## Task Assignments',
         '',
-        `task_id: ${data.task?.id || args?.taskId || 'n/a'}`,
+        `task_id: ${taskRecord.id || args?.taskId || 'n/a'}`,
         `returned: ${assignments.length}`,
         '',
         assignments.map((assignment) => [
           `${assignment.id || 'n/a'} (${assignment.role || 'n/a'})`,
           `status=${assignment.status || 'queued'}`,
           assignment.terminalId ? `terminal=${assignment.terminalId}` : null,
-          assignment.adapter ? `adapter=${assignment.adapter}` : null
+          assignment.adapter ? `adapter=${assignment.adapter}` : null,
+          assignment.usageSummary ? `total_tokens=${assignment.usageSummary.totalTokens || 0}` : null
         ].filter(Boolean).join(' • ')).join('\n')
       ].filter(Boolean).join('\n')
     }]
@@ -3814,8 +3833,10 @@ async function handleStartTaskAssignment(args) {
         `terminal_id: ${assignment.terminalId || data.route?.terminalId || 'n/a'}`,
         `status: ${assignment.status || 'running'}`,
         `adapter: ${assignment.adapter || data.route?.adapter || 'n/a'}`,
-        `model: ${assignment.model || data.route?.model || 'n/a'}`
-      ].join('\n')
+        `model: ${assignment.model || data.route?.model || 'n/a'}`,
+        assignment.worktreePath ? `worktree_path: ${assignment.worktreePath}` : null,
+        assignment.worktreeBranch ? `worktree_branch: ${assignment.worktreeBranch}` : null
+      ].filter(Boolean).join('\n')
     }]
   };
 }
@@ -4169,6 +4190,18 @@ async function handleGetUsageSummary(args) {
       'GET',
       `/orchestration/usage/runs/${encodeURIComponent(args.runId)}${breakdown ? `?breakdown=${encodeURIComponent(breakdown)}` : ''}`
     );
+  } else if (args?.taskId) {
+    scopeLabel = `task ${args.taskId}`;
+    res = await callCliagents(
+      'GET',
+      `/orchestration/usage/tasks/${encodeURIComponent(args.taskId)}${breakdown ? `?breakdown=${encodeURIComponent(breakdown)}` : ''}`
+    );
+  } else if (args?.taskAssignmentId) {
+    scopeLabel = `task assignment ${args.taskAssignmentId}`;
+    res = await callCliagents(
+      'GET',
+      `/orchestration/usage/task-assignments/${encodeURIComponent(args.taskAssignmentId)}${breakdown ? `?breakdown=${encodeURIComponent(breakdown)}` : ''}`
+    );
   } else if (args?.terminalId) {
     scopeLabel = `terminal ${args.terminalId}`;
     const params = new URLSearchParams();
@@ -4183,7 +4216,7 @@ async function handleGetUsageSummary(args) {
       `/orchestration/usage/terminals/${encodeURIComponent(args.terminalId)}${params.toString() ? `?${params.toString()}` : ''}`
     );
   } else {
-    throw new Error('One of rootSessionId, runId, or terminalId is required');
+    throw new Error('One of rootSessionId, runId, taskId, taskAssignmentId, or terminalId is required');
   }
 
   if (res.status !== 200) {

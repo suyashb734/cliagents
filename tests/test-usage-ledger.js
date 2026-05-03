@@ -73,6 +73,19 @@ async function run() {
 
   try {
     const ledger = new RunLedgerService(db);
+    const task = db.createTask({
+      id: 'task-usage-1',
+      title: 'Track task-linked usage',
+      workspaceRoot: rootDir,
+      rootSessionId: 'root-usage-1'
+    });
+    const assignment = db.createTaskAssignment({
+      id: 'assignment-usage-1',
+      taskId: task.id,
+      role: 'executor',
+      instructions: 'Implement the first slice.',
+      status: 'running'
+    });
 
     db.registerTerminal(
       'usage-root-main',
@@ -86,7 +99,10 @@ async function run() {
       {
         rootSessionId: 'root-usage-1',
         sessionKind: 'main',
-        originClient: 'codex'
+        originClient: 'codex',
+        sessionMetadata: {
+          taskId: task.id
+        }
       }
     );
     db.registerTerminal(
@@ -102,7 +118,11 @@ async function run() {
         rootSessionId: 'root-usage-1',
         parentSessionId: 'root-usage-1',
         sessionKind: 'subagent',
-        originClient: 'codex'
+        originClient: 'codex',
+        sessionMetadata: {
+          taskId: task.id,
+          taskAssignmentId: assignment.id
+        }
       }
     );
 
@@ -149,6 +169,7 @@ async function run() {
       status: 'completed',
       inputSummary: 'Validate direct-session usage capture.',
       rootSessionId: 'root-usage-2',
+      taskId: task.id,
       startedAt: Date.now(),
       completedAt: Date.now()
     });
@@ -241,6 +262,7 @@ async function run() {
     assert(directRunRecords.some((record) => record.participant_id === directJudgeId && record.terminal_id === directJudgeId));
     assert(directRunRecords.every((record) => record.run_id === directRunId));
     assert(directRunRecords.every((record) => record.root_session_id === 'root-usage-2'));
+    assert(directRunRecords.every((record) => record.task_id === task.id));
     assert(directRunRecords.some((record) => record.model === 'o4-mini'));
     assert(directRunRecords.some((record) => record.model === 'claude-sonnet-4'));
     const directRunRoleBreakdown = db.listUsageBreakdown({ runId: directRunId, groupBy: 'role' });
@@ -251,6 +273,23 @@ async function run() {
     assert.strictEqual(directRunAttribution.judgeTokens, 20);
     assert.strictEqual(directRunAttribution.brokerOverheadTokens, 20);
     assert.strictEqual(directRunAttribution.roleGroups.find((entry) => entry.key === 'execution').totalTokens, 45);
+
+    const taskRecords = db.listUsageRecords({ taskId: task.id });
+    assert.strictEqual(taskRecords.length, 4, 'Task usage should aggregate task-linked root, child, and run records');
+    assert(taskRecords.every((record) => record.task_id === task.id));
+    const taskSummary = db.summarizeUsage({ taskId: task.id });
+    assert.strictEqual(taskSummary.recordCount, 4);
+    assert.strictEqual(taskSummary.totalTokens, 375);
+    const taskAttribution = db.summarizeUsageAttribution({ taskId: task.id });
+    assert.strictEqual(taskAttribution.supervisionTokens, 170);
+    assert.strictEqual(taskAttribution.executionTokens, 185);
+    assert.strictEqual(taskAttribution.judgeTokens, 20);
+
+    const assignmentRecords = db.listUsageRecords({ taskAssignmentId: assignment.id });
+    assert.strictEqual(assignmentRecords.length, 1);
+    assert.strictEqual(assignmentRecords[0].task_assignment_id, assignment.id);
+    const assignmentSummary = db.summarizeUsage({ taskAssignmentId: assignment.id });
+    assert.strictEqual(assignmentSummary.totalTokens, 140);
 
     db.deleteTerminal('usage-root-main');
     db.deleteTerminal('usage-child-1');
@@ -319,6 +358,27 @@ async function run() {
     assert.strictEqual(directRunUsageRes.data.attribution.judgeTokens, 20);
     assert.strictEqual(directRunUsageRes.data.attribution.brokerOverheadTokens, 20);
 
+    const taskUsageRes = await request(
+      appHandle.baseUrl,
+      `/orchestration/usage/tasks/${task.id}?breakdown=role,model`
+    );
+    assert.strictEqual(taskUsageRes.status, 200);
+    assert.strictEqual(taskUsageRes.data.summary.totalTokens, 375);
+    assert.strictEqual(taskUsageRes.data.summary.recordCount, 4);
+    assert(taskUsageRes.data.breakdowns.role.some((entry) => entry.key === 'main' && entry.totalTokens === 170));
+    assert(taskUsageRes.data.breakdowns.role.some((entry) => entry.key === 'worker' && entry.totalTokens === 140));
+    assert(taskUsageRes.data.breakdowns.role.some((entry) => entry.key === 'participant' && entry.totalTokens === 45));
+    assert(taskUsageRes.data.breakdowns.role.some((entry) => entry.key === 'judge' && entry.totalTokens === 20));
+
+    const assignmentUsageRes = await request(
+      appHandle.baseUrl,
+      `/orchestration/usage/task-assignments/${assignment.id}?breakdown=role,model`
+    );
+    assert.strictEqual(assignmentUsageRes.status, 200);
+    assert.strictEqual(assignmentUsageRes.data.summary.totalTokens, 140);
+    assert.strictEqual(assignmentUsageRes.data.summary.recordCount, 1);
+    assert.strictEqual(assignmentUsageRes.data.breakdowns.role[0].key, 'worker');
+
     const terminalUsageRes = await request(
       appHandle.baseUrl,
       '/orchestration/usage/terminals/usage-child-1?breakdown=model,role'
@@ -331,7 +391,7 @@ async function run() {
     assert.strictEqual(terminalUsageRes.data.breakdowns.model[0].key, 'openrouter/qwen/qwen3.6-plus');
     assert.strictEqual(terminalUsageRes.data.breakdowns.role[0].key, 'worker');
 
-    console.log('✅ Usage ledger records assistant usage, aggregates by root/run/terminal, and survives terminal deletion');
+    console.log('✅ Usage ledger records assistant usage, aggregates by root/run/task/assignment/terminal, and survives terminal deletion');
   } finally {
     if (appHandle) {
       await stopApp(appHandle.server);

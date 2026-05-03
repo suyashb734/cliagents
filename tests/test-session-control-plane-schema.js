@@ -56,7 +56,8 @@ function runFreshSchemaAssertions() {
         '0006_memory_snapshots.sql',
         '0007_resume_linkage_and_recency.sql',
         '0008_provider_sessions_and_rooms.sql',
-        '0009_tasks_v1.sql'
+        '0009_tasks_v1.sql',
+        '0010_task_observability_usage_scope.sql'
       ],
       'schema_migrations'
     );
@@ -91,6 +92,18 @@ function runFreshSchemaAssertions() {
       getIndexNames(db, 'session_events'),
       ['idx_session_events_idempotency_key', 'idx_session_events_root_sequence', 'idx_session_events_session_id_occurred_at'],
       'session_events indexes'
+    );
+
+    assertContainsAll(
+      getColumnNames(db, 'usage_records'),
+      ['root_session_id', 'terminal_id', 'run_id', 'task_id', 'task_assignment_id', 'participant_id', 'adapter', 'provider', 'model', 'metadata', 'created_at'],
+      'usage_records columns'
+    );
+
+    assertContainsAll(
+      getIndexNames(db, 'usage_records'),
+      ['idx_usage_records_root_created', 'idx_usage_records_run_created', 'idx_usage_records_task_created', 'idx_usage_records_task_assignment_created', 'idx_usage_records_terminal_created'],
+      'usage_records indexes'
     );
 
     assertContainsAll(

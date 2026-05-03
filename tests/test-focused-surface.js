@@ -23,6 +23,7 @@ const TEST_FILES = [
   'test-session-control-plane-schema.js',
   'test-session-control-plane-runtime.js',
   'test-task-routes.js',
+  'test-task-worktree-isolation.js',
   'test-direct-session-control-plane.js',
   'test-session-manager-recovery.js',
   'test-server-orphan-prune.js',
