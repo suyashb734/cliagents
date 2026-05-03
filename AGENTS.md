@@ -7,6 +7,7 @@ Keep it short. Do not duplicate transient runtime configuration, MCP server list
 
 - Use this file for project-specific engineering guidance.
 - Use [`CLAUDE.md`](./CLAUDE.md) and the docs folder for architecture notes, API details, and user-facing documentation.
+- Use [`docs/research/CLIAGENTS-OPERATING-MODEL.md`](./docs/research/CLIAGENTS-OPERATING-MODEL.md) as the canonical operator policy for roots, child sessions, rooms, persistence, usage, and broker routing.
 - If guidance belongs to the current machine, shell session, or MCP profile, it does not belong here.
 
 ## Toolchain

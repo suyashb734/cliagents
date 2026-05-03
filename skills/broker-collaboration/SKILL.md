@@ -9,6 +9,22 @@ tags: [orchestration, root, supervision, workflow]
 
 Use this when you are the main supervised root coordinating child sessions through cliagents.
 
+The canonical shared operator policy lives in:
+
+- [`docs/research/CLIAGENTS-OPERATING-MODEL.md`](/Users/mojave/Documents/AI-projects/cliagents/docs/research/CLIAGENTS-OPERATING-MODEL.md)
+
+Use this skill as the compact workflow layer on top of that policy, not as a competing source of truth.
+
+## First Step
+
+Before delegating, align with the canonical operating model:
+
+- tracked top-level work should enter through broker-owned roots
+- MCP and HTTP are the default orchestration surfaces
+- stronger models should plan and review
+- cheaper models should execute bounded slices
+- usage and memory should be inspected through durable broker surfaces
+
 ## Goals
 
 - Keep the root prompt and state lean
