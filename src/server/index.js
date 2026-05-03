@@ -38,6 +38,7 @@ const { getDB, closeDB } = require('../database/db');
 const { RunLedgerService } = require('../orchestration/run-ledger');
 const { getMemoryMaintenanceService, resetMemoryMaintenanceService } = require('../orchestration/memory-maintenance-service');
 const { getMemorySnapshotService, resetMemorySnapshotService } = require('../orchestration/memory-snapshot-service');
+const { getChildSessionSupport } = require('../orchestration/child-session-support');
 const InboxService = require('../services/inbox-service');
 const { createOrchestrationRouter } = require('./orchestration-router');
 
@@ -337,12 +338,16 @@ class AgentServer {
           const adapter = this.sessionManager.getAdapter(name);
           const available = await adapter.isAvailable();
           const auth = isAdapterAuthenticated(name);
+          const capabilities = typeof adapter.getCapabilities === 'function'
+            ? adapter.getCapabilities()
+            : null;
           const adapterInfo = {
             name,
             ...adapter.getInfo(),
             available,
             authenticated: auth.authenticated,
-            authenticationReason: auth.reason
+            authenticationReason: auth.reason,
+            childSessionSupport: getChildSessionSupport(name, capabilities)
           };
           // Include available models if adapter supports them
           if (typeof adapter.getAvailableModels === 'function') {

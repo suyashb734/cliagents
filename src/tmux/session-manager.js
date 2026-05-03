@@ -13,6 +13,7 @@ const { EventEmitter } = require('events');
 const TmuxClient = require('./client');
 const { MANAGED_ROOT_ADAPTERS } = require('../adapters/active-surface');
 const GeminiCliAdapter = require('../adapters/gemini-cli');
+const { isCollaboratorReadyAdapter } = require('../orchestration/child-session-support');
 const { getModelRoutingService } = require('../services/model-routing');
 const { resolveClaudeCliPath } = require('../utils/claude-cli-path');
 const { extractOutput, stripAnsiCodes } = require('../utils/output-extractor');
@@ -2581,6 +2582,9 @@ class PersistentSessionManager extends EventEmitter {
           sessionMetadata: recoveryMetadata
         })
       : 'legacy';
+    if (resolvedSessionKind === 'collaborator' && !isCollaboratorReadyAdapter(adapter)) {
+      throw new Error(`Adapter '${adapter}' is not collaborator-ready in the current child-session runtime`);
+    }
     const shouldHonorProviderResumeSessionId = (
       recoveredManagedRoot
       || resolvedSessionKind === 'main'

@@ -13,6 +13,7 @@ const EventEmitter = require('events');
 const { getAgentProfiles, resolveProfile } = require('../services/agent-profiles');
 const { getModelRoutingService } = require('../services/model-routing');
 const { isAdapterAuthenticated } = require('../utils/adapter-auth');
+const { getChildSessionSupport } = require('./child-session-support');
 
 // Task types and their default agent mappings
 const TASK_TYPES = {
@@ -180,6 +181,8 @@ class TaskRouter extends EventEmitter {
       authenticated: false,
       reason: 'Adapter authentication could not be determined'
     };
+    const capabilities = typeof adapter.getCapabilities === 'function' ? adapter.getCapabilities() : null;
+    const childSessionSupport = getChildSessionSupport(adapterName, capabilities);
 
     return {
       registered: true,
@@ -188,7 +191,8 @@ class TaskRouter extends EventEmitter {
       authenticationReason: auth.reason,
       models: typeof adapter.getAvailableModels === 'function' ? adapter.getAvailableModels() : [],
       runtimeProviders: typeof adapter.getProviderSummary === 'function' ? adapter.getProviderSummary() : [],
-      capabilities: typeof adapter.getCapabilities === 'function' ? adapter.getCapabilities() : null,
+      capabilities,
+      childSessionSupport,
       contract: typeof adapter.getContract === 'function' ? adapter.getContract() : null
     };
   }
@@ -230,10 +234,11 @@ class TaskRouter extends EventEmitter {
     return ordered;
   }
 
-  _scoreRoleAdapterCandidate({ roleName, adapterName, preferredAdapter, runtimeAdapter, configuredAdapter }) {
+  _scoreRoleAdapterCandidate({ roleName, adapterName, preferredAdapter, runtimeAdapter, configuredAdapter, requireCollaboratorReady = false }) {
     let score = 0;
     const reasons = [];
     const capabilities = runtimeAdapter.capabilities || {};
+    const childSessionSupport = runtimeAdapter.childSessionSupport || getChildSessionSupport(adapterName, capabilities);
     const declaredCapabilities = new Set([
       ...(configuredAdapter?.capabilities || []),
       ...Object.entries(capabilities)
@@ -287,6 +292,13 @@ class TaskRouter extends EventEmitter {
       score += 20;
       reasons.push('supports-filesystem-write');
     }
+    if (childSessionSupport.collaboratorReady === true) {
+      score += 15;
+      reasons.push('collaborator-ready');
+    } else if (requireCollaboratorReady) {
+      score -= 8000;
+      reasons.push(`not-collaborator-ready:${childSessionSupport.reason || 'unsupported'}`);
+    }
 
     if ((roleName === TASK_TYPES.PLAN || roleName === TASK_TYPES.ARCHITECT) && declaredCapabilities.has('reasoning')) {
       score += 30;
@@ -338,7 +350,8 @@ class TaskRouter extends EventEmitter {
         adapterName,
         preferredAdapter,
         runtimeAdapter,
-        configuredAdapter
+        configuredAdapter,
+        requireCollaboratorReady: options.requireCollaboratorReady === true
       });
 
       candidates.push({
@@ -376,10 +389,20 @@ class TaskRouter extends EventEmitter {
         `Adapter '${preferredAdapter}' is not healthy for role '${roleName}': ${preferredCandidate.runtimeAdapter.authenticationReason || 'adapter unavailable'}`
       );
     }
+    if (preferredAdapter && preferredCandidate && options.requireCollaboratorReady === true) {
+      const support = preferredCandidate.runtimeAdapter.childSessionSupport
+        || getChildSessionSupport(preferredCandidate.adapter, preferredCandidate.runtimeAdapter.capabilities || {});
+      if (support.collaboratorReady !== true) {
+        throw new Error(
+          `Adapter '${preferredAdapter}' is not collaborator-ready: ${support.reason || 'continuity is not guaranteed'}`
+        );
+      }
+    }
 
     const selected = preferredCandidate || candidates.find((candidate) => (
       candidate.runtimeAdapter.available !== false &&
-      candidate.runtimeAdapter.authenticated !== false
+      candidate.runtimeAdapter.authenticated !== false &&
+      (options.requireCollaboratorReady !== true || candidate.runtimeAdapter.childSessionSupport?.collaboratorReady === true)
     )) || candidates[0];
 
     const role = this.profileService.getRole(roleName);
@@ -410,7 +433,8 @@ class TaskRouter extends EventEmitter {
           available: candidate.runtimeAdapter.available,
           authenticated: candidate.runtimeAdapter.authenticated,
           authenticationReason: candidate.runtimeAdapter.authenticationReason,
-          capabilities: candidate.runtimeAdapter.capabilities || null
+          capabilities: candidate.runtimeAdapter.capabilities || null,
+          childSessionSupport: candidate.runtimeAdapter.childSessionSupport || null
         }))
       }
     };
@@ -546,10 +570,15 @@ class TaskRouter extends EventEmitter {
     let routingDecision = null;
 
     const detectedRole = TASK_TO_ROLE[detection.type];
+    const resolvedSessionKind = this._deriveSessionKind({ sessionKind, forceRole }, detection.type);
+    const requireCollaboratorReady = resolvedSessionKind === 'collaborator';
 
     if (forceRole || (!forceProfile && detectedRole)) {
       const effectiveRole = forceRole || detectedRole;
-      const resolved = await this._resolveProfileForRole(effectiveRole, forceAdapter, { systemPrompt });
+      const resolved = await this._resolveProfileForRole(effectiveRole, forceAdapter, {
+        systemPrompt,
+        requireCollaboratorReady
+      });
       profile = resolved.profile;
       profileName = resolved.profileName;
       runtimeAdapter = resolved.runtimeAdapter;
@@ -567,6 +596,11 @@ class TaskRouter extends EventEmitter {
     runtimeAdapter = runtimeAdapter || await this._getRuntimeAdapterInfo(profile.adapter);
     if (runtimeAdapter.registered && runtimeAdapter.available === false) {
       throw new Error(`Adapter '${profile.adapter}' CLI not available`);
+    }
+    if (requireCollaboratorReady && runtimeAdapter.childSessionSupport?.collaboratorReady !== true) {
+      throw new Error(
+        `Adapter '${profile.adapter}' is not collaborator-ready: ${runtimeAdapter.childSessionSupport?.reason || 'continuity is not guaranteed'}`
+      );
     }
 
     this.emit('task-routed', {
@@ -604,7 +638,7 @@ class TaskRouter extends EventEmitter {
       workDir: workDir || undefined,
       rootSessionId,
       parentSessionId,
-      sessionKind: this._deriveSessionKind({ sessionKind, forceRole }, detection.type),
+      sessionKind: resolvedSessionKind,
       originClient,
       externalSessionRef,
       lineageDepth,
@@ -630,6 +664,7 @@ class TaskRouter extends EventEmitter {
       runtimeAuthenticated: runtimeAdapter.authenticated,
       authenticationReason: runtimeAdapter.authenticationReason,
       runtimeCapabilities: runtimeAdapter.capabilities,
+      runtimeChildSessionSupport: runtimeAdapter.childSessionSupport || null,
       runtimeContract: runtimeAdapter.contract,
       routingDecision
     };

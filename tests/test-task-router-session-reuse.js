@@ -136,12 +136,13 @@ async function run() {
             getCapabilities() {
               return {
                 supportsMultiTurn: true,
+                supportsResume: true,
                 supportsSystemPrompt: true,
                 supportsFilesystemWrite: true
               };
             },
             getContract() {
-              return { capabilities: { supportsMultiTurn: true } };
+              return { capabilities: { supportsMultiTurn: true, supportsResume: true } };
             }
           };
         }
@@ -345,6 +346,20 @@ async function run() {
     assert(
       collaboratorFollowUpSource.includes(`--resume ${claudeArchitectProviderThreadRef}`),
       `expected collaborator follow-up to preserve provider-thread continuity, got: ${collaboratorFollowUpSource}`
+    );
+
+    await assert.rejects(
+      router.routeTask('Try to route a Codex collaborator child.', {
+        forceRole: 'review',
+        forceAdapter: 'codex-cli',
+        sessionKind: 'collaborator',
+        sessionLabel: 'codex-collaborator',
+        rootSessionId: researchRootSessionId,
+        parentSessionId: researchRootSessionId,
+        originClient: 'mcp',
+        sessionMetadata: { clientName: 'codex', toolName: 'delegate_task', collaborator: true }
+      }),
+      /not collaborator-ready/
     );
 
     await assert.rejects(

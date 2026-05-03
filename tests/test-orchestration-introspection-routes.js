@@ -134,6 +134,7 @@ async function testAdaptersRouteIncludesRuntimeMetadata() {
       usesOfficialCli: true,
       executionMode: 'direct-session',
       supportsMultiTurn: true,
+      supportsResume: true,
       supportsStreaming: true
     }
   });
@@ -168,6 +169,7 @@ async function testAdaptersRouteIncludesRuntimeMetadata() {
     assert.strictEqual(res.data.adapters['runtime-only'].available, true);
     assert.strictEqual(res.data.adapters['runtime-only'].authenticated, false);
     assert.strictEqual(res.data.adapters['runtime-only'].runtimeCapabilities.executionMode, 'api');
+    assert.strictEqual(res.data.adapters['runtime-only'].childSessionSupport.collaboratorReady, false);
 
     assert(res.data.adapters['qwen-cli'], 'configured adapter should still be listed');
     assert.strictEqual(typeof res.data.adapters['qwen-cli'].configured, 'boolean');
@@ -175,6 +177,7 @@ async function testAdaptersRouteIncludesRuntimeMetadata() {
     assert.strictEqual(res.data.adapters['qwen-cli'].available, true);
     assert.strictEqual(typeof res.data.adapters['qwen-cli'].authenticated, 'boolean');
     assert.strictEqual(res.data.adapters['qwen-cli'].runtimeContract.executionMode, 'direct-session');
+    assert.strictEqual(res.data.adapters['qwen-cli'].childSessionSupport.collaboratorReady, true);
   } finally {
     await stopApp(server);
   }
@@ -208,6 +211,7 @@ async function testRouteResponseIncludesRuntimeAdapterMetadata() {
           usesOfficialCli: true,
           executionMode: 'direct-session',
           supportsMultiTurn: true,
+          supportsResume: true,
           supportsStreaming: true,
           supportsSystemPrompt: true
         },
@@ -252,6 +256,7 @@ async function testRouteResponseIncludesRuntimeAdapterMetadata() {
     assert.strictEqual(res.data.runtimeAvailable, true);
     assert.strictEqual(res.data.runtimeAuthenticated, true);
     assert.strictEqual(res.data.runtimeCapabilities.executionMode, 'direct-session');
+    assert.strictEqual(res.data.runtimeChildSessionSupport.collaboratorReady, true);
     assert.strictEqual(res.data.runtimeContract.version, '2026-04-11');
     assert.strictEqual(createCalls.length, 1);
     assert.strictEqual(sendCalls.length, 1);
@@ -777,7 +782,7 @@ async function testInputRouteAllowsAttachedRootChildBrokerWork() {
         parentSessionId: rootSessionId,
         sessionKind: index === 84 ? 'review' : 'worker',
         agentProfile: index === 84 ? null : 'researcher',
-        originClient: 'mcp'
+        originClient: 'codex'
       }
     );
   }
@@ -800,7 +805,7 @@ async function testInputRouteAllowsAttachedRootChildBrokerWork() {
             parentSessionId: rootSessionId,
             harnessSessionId: childTerminalId,
             sessionKind: 'review',
-            originClient: 'mcp'
+            originClient: 'codex'
           };
         }
         return null;

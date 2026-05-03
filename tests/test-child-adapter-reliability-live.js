@@ -122,7 +122,8 @@ async function attachRootSession(externalSessionRef, workspaceRoot) {
   return data.rootSessionId;
 }
 
-async function routeChildTask({ adapterName, workDir, rootSessionId, marker }) {
+async function routeChildTask({ adapterName, workDir, rootSessionId, marker, collaboratorReady = false }) {
+  const sessionLabel = collaboratorReady ? `reliability-${adapterName}` : null;
   const { status, data } = await request('POST', '/orchestration/route', {
     forceRole: 'research',
     forceAdapter: adapterName,
@@ -132,13 +133,15 @@ async function routeChildTask({ adapterName, workDir, rootSessionId, marker }) {
     parentSessionId: rootSessionId,
     originClient: 'codex',
     externalSessionRef: `codex:child-reliability:${adapterName}`,
-    sessionKind: 'subagent',
+    sessionKind: collaboratorReady ? 'collaborator' : 'subagent',
     sessionMetadata: {
       clientName: 'codex-cli',
       workspaceRoot: workDir,
       purpose: 'child-adapter-reliability-live',
-      sessionLabel: `reliability-${adapterName}`
+      sessionLabel: sessionLabel || `reliability-${adapterName}`,
+      ...(collaboratorReady ? { collaborator: true } : {})
     },
+    sessionLabel,
     preferReuse: false,
     forceFreshSession: true
   }, 180000);
@@ -291,11 +294,13 @@ async function runAdapterCheck(adapterName) {
     checks.available = true;
     checks.authenticated = true;
     details.push(`models=${Array.isArray(readiness.adapter.models) ? readiness.adapter.models.length : 0}`);
+    const collaboratorReady = readiness.adapter.childSessionSupport?.collaboratorReady === true;
+    details.push(`mode=${collaboratorReady ? 'collaborator' : 'subagent'}`);
 
     const rootSessionId = await attachRootSession(externalSessionRef, workDir);
     details.push(`root=${rootSessionId.slice(0, 8)}`);
 
-    const routed = await routeChildTask({ adapterName, workDir, rootSessionId, marker });
+    const routed = await routeChildTask({ adapterName, workDir, rootSessionId, marker, collaboratorReady });
     terminalId = routed.terminalId;
     checks.route_launch = Boolean(terminalId);
     details.push(`profile=${routed.profile}`);

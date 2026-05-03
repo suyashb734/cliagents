@@ -25,6 +25,7 @@ const {
   buildManagedRootExternalSessionRef,
   composeManagedRootSystemPrompt
 } = require('../orchestration/managed-root-launch');
+const { getChildSessionSupport } = require('../orchestration/child-session-support');
 const { sendMessage, broadcastMessage } = require('../orchestration/send-message');
 const { getAgentProfiles, resolveProfile } = require('../services/agent-profiles');
 const { createMemoryRouter } = require('../routes/memory');
@@ -2484,14 +2485,15 @@ function createOrchestrationRouter(context) {
         const liveOriginClient = String(liveTerminal?.originClient || liveTerminal?.origin_client || '').trim().toLowerCase();
         const dbSessionKind = String(terminalSession?.sessionKind || terminalSession?.session_kind || '').trim().toLowerCase();
         const liveSessionKind = String(liveTerminal?.sessionKind || liveTerminal?.session_kind || '').trim().toLowerCase();
+        const originClientsMatch = Boolean(dbOriginClient) && Boolean(liveOriginClient) && dbOriginClient === liveOriginClient;
         const hasBrokerChildRole = Boolean(terminalSession?.agentProfile || terminalSession?.agent_profile || liveTerminal?.agentProfile)
           || ATTACHED_ROOT_BROKER_CHILD_SESSION_KINDS.has(dbSessionKind || liveSessionKind);
         const isBrokerOwnedChild = Boolean(terminalSession && liveTerminal)
           && liveRootSessionId === rootSnapshot.rootSessionId
           && liveParentSessionId === rootSnapshot.rootSessionId
           && dbParentSessionId === rootSnapshot.rootSessionId
-          && dbOriginClient === 'mcp'
-          && liveOriginClient === 'mcp'
+          && originClientsMatch
+          && dbOriginClient !== 'legacy'
           && hasBrokerChildRole
           && (!dbSessionKind || !liveSessionKind || dbSessionKind === liveSessionKind);
 
@@ -2782,6 +2784,10 @@ function createOrchestrationRouter(context) {
         }
 
         const auth = isAdapterAuthenticated(name);
+        const runtimeCapabilities = typeof runtimeAdapter?.getCapabilities === 'function'
+          ? runtimeAdapter.getCapabilities()
+          : null;
+        const childSessionSupport = getChildSessionSupport(name, runtimeCapabilities);
 
         adapterDetails[name] = {
           description: configuredAdapter?.description || runtimeAdapter?.name || null,
@@ -2797,9 +2803,8 @@ function createOrchestrationRouter(context) {
             ? runtimeAdapter.getProviderSummary()
             : [],
           configuredCapabilities: configuredAdapter?.capabilities || [],
-          runtimeCapabilities: typeof runtimeAdapter?.getCapabilities === 'function'
-            ? runtimeAdapter.getCapabilities()
-            : null,
+          runtimeCapabilities,
+          childSessionSupport,
           runtimeContract: typeof runtimeAdapter?.getContract === 'function'
             ? runtimeAdapter.getContract()
             : null,
