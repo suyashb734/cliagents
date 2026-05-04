@@ -27,9 +27,10 @@ The goal is not to copy competitors blindly. The goal is to keep one canonical a
 
 1. `Maestro`
 2. `Multica`
-3. `Composio Agent Orchestrator`
-4. `AWS CLI Agent Orchestrator`
-5. `Gastown / Beads`
+3. `Paperclip`
+4. `Composio Agent Orchestrator`
+5. `AWS CLI Agent Orchestrator`
+6. `Gastown / Beads`
 
 These are not equivalent products.
 
@@ -37,6 +38,7 @@ They matter because they cover the major product gaps around:
 
 - room and moderator UX
 - task and workspace workflow
+- goal, budget, heartbeat, and governance orchestration
 - issue and PR reaction loops
 - tmux and control-plane orchestration
 - durable large-scale agent state
@@ -130,7 +132,51 @@ Multica is not the benchmark for broker semantics. It is the benchmark for what 
 - [Multica Docs](https://multica.ai/docs)
 - [Multica Changelog](https://multica.ai/changelog)
 
-### 3. Composio Agent Orchestrator
+### 3. Paperclip
+
+**Role in the benchmark set**
+
+`Paperclip` is the primary benchmark for:
+
+- goal hierarchy and task context inheritance
+- org-chart-style agent roles, reporting lines, and budgets
+- heartbeat-driven autonomous execution
+- governance, approvals, rollback, and audit trails
+- work products, comments, documents, attachments, and ticket surfaces
+
+**What it does better than `cliagents`**
+
+- product-level task, goal, and company operating model above raw agent sessions
+- budget and policy controls attached to agents and work
+- recurring heartbeat execution for autonomous work
+- broader governance model for approvals, pause, resume, termination, and rollback
+- multi-company isolation and portable company templates
+
+**What `cliagents` should import**
+
+- goal ancestry attached to tasks and assignments
+- scoped token and budget policies above usage attribution
+- heartbeat-style recurring task execution
+- governance gates and approval records for high-risk actions
+- work-product records above run output, artifacts, and findings
+
+**What not to copy**
+
+- broad zero-human-company product scope inside the broker core
+- treating org charts as the only task model for coding orchestration
+- duplicating agent runtimes when broker adapters and existing CLIs are sufficient
+- replacing `cliagents` root, child, room, run, and usage semantics with a business-OS abstraction
+
+**Why it matters**
+
+Paperclip is the strongest benchmark for the outer desktop or super-app layer around `cliagents`: goals, budgets, heartbeats, governance, and work products. It is not a better replacement for the broker substrate. It is a benchmark for the product layer that can sit above it.
+
+**Sources**
+
+- [Paperclip GitHub](https://github.com/paperclipai/paperclip)
+- [Paperclip Agent Adapters Overview](https://paperclip.inc/docs/adapters/overview/)
+
+### 4. Composio Agent Orchestrator
 
 **Role in the benchmark set**
 
@@ -165,7 +211,7 @@ This is the clearest benchmark for the branch that comes after first-class tasks
 
 - [Composio Agent Orchestrator](https://github.com/ComposioHQ/agent-orchestrator)
 
-### 4. AWS CLI Agent Orchestrator
+### 5. AWS CLI Agent Orchestrator
 
 **Role in the benchmark set**
 
@@ -202,7 +248,7 @@ Among current external systems, this is the strongest benchmark for the parts of
 
 - [AWS CLI Agent Orchestrator](https://github.com/awslabs/cli-agent-orchestrator)
 
-### 5. Gastown / Beads
+### 6. Gastown / Beads
 
 **Role in the benchmark set**
 
@@ -339,11 +385,13 @@ Use the benchmark set like this:
    - shapes the future room and moderator model
 2. `Multica`
    - shapes the future task and workspace operating model
-3. `Composio Agent Orchestrator`
+3. `Paperclip`
+   - shapes the later goal, budget, heartbeat, governance, and work-product layer
+4. `Composio Agent Orchestrator`
    - shapes the later PR and CI reaction-loop branch
-4. `AWS CLI Agent Orchestrator`
+5. `AWS CLI Agent Orchestrator`
    - shapes human-facing CLI orchestration and control-plane ergonomics
-5. `Gastown / Beads`
+6. `Gastown / Beads`
    - shapes later memory and durable coordination ideas
 
 ## Priority Guidance
@@ -352,6 +400,7 @@ If only one benchmark influence should be elevated next, it should be:
 
 1. `AWS CLI Agent Orchestrator` for broker and CLI control-plane comparison
 2. `Maestro` for room and moderator semantics
+3. `Paperclip` for the outer goal, governance, budget, and heartbeat layer
 
 If only one benchmark should be kept as explicitly secondary, it should be:
 
@@ -359,7 +408,7 @@ If only one benchmark should be kept as explicitly secondary, it should be:
 
 Reason:
 
-They are valuable, but they are farther from the immediate product surface than Maestro, Multica, Agent Orchestrator, or AWS CLI Agent Orchestrator.
+They are valuable, but they are farther from the immediate product surface than Maestro, Multica, Paperclip, Composio Agent Orchestrator, or AWS CLI Agent Orchestrator.
 
 ## Relationship To Existing Docs
 
