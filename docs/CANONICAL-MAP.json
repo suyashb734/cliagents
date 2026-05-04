@@ -1,0 +1,190 @@
+{
+  "version": 1,
+  "lastReviewed": "2026-05-04",
+  "allowedStatuses": [
+    "canonical",
+    "active-plan",
+    "draft",
+    "reference",
+    "archived"
+  ],
+  "entries": [
+    {
+      "path": "docs/INDEX.md",
+      "status": "canonical",
+      "type": "index",
+      "scope": ["documentation"],
+      "related_code": [],
+      "supersedes": [],
+      "last_reviewed": "2026-05-04"
+    },
+    {
+      "path": "docs/architecture/ARCHITECTURE.md",
+      "status": "canonical",
+      "type": "architecture",
+      "scope": ["roots", "children", "rooms", "runs", "tasks", "usage", "memory"],
+      "related_code": [
+        "src/tmux/session-manager.js",
+        "src/server/orchestration-router.js",
+        "src/orchestration/run-ledger.js"
+      ],
+      "supersedes": ["docs/architecture.md", "docs/research/architecture-analysis.md"],
+      "last_reviewed": "2026-05-04"
+    },
+    {
+      "path": "docs/architecture/STATE-MODEL.md",
+      "status": "canonical",
+      "type": "architecture",
+      "scope": ["session-status", "task-status", "assignment-status"],
+      "related_code": [
+        "src/models/terminal-status.js",
+        "src/tmux/session-manager.js",
+        "src/server/orchestration-router.js"
+      ],
+      "supersedes": ["docs/research/RUN-LEDGER-STATE-MACHINE.md"],
+      "last_reviewed": "2026-05-04"
+    },
+    {
+      "path": "docs/reference/ADAPTER-CONTRACT.md",
+      "status": "canonical",
+      "type": "reference",
+      "scope": ["adapters", "collaborator-readiness"],
+      "related_code": [
+        "src/adapters/contract.js",
+        "src/adapters/runtime-registry.js",
+        "src/orchestration/child-session-support.js"
+      ],
+      "supersedes": ["docs/ADAPTER-CONFORMANCE.md"],
+      "last_reviewed": "2026-05-04"
+    },
+    {
+      "path": "docs/reference/MCP-TOOLS.md",
+      "status": "reference",
+      "type": "reference",
+      "scope": ["mcp", "tools"],
+      "related_code": ["src/mcp/cliagents-mcp-server.js"],
+      "supersedes": [],
+      "last_reviewed": "2026-05-04"
+    },
+    {
+      "path": "docs/reference/KNOWLEDGE-GRAPH.md",
+      "status": "reference",
+      "type": "reference",
+      "scope": ["docs", "knowledge-graph", "agent-onboarding"],
+      "related_code": [],
+      "supersedes": [],
+      "last_reviewed": "2026-05-04"
+    },
+    {
+      "path": "docs/roadmap/ROADMAP.md",
+      "status": "canonical",
+      "type": "roadmap",
+      "scope": ["roadmap", "active-plans"],
+      "related_code": [],
+      "supersedes": ["docs/research/CLIAGENTS-BROKER-PLAN.md"],
+      "last_reviewed": "2026-05-04"
+    },
+    {
+      "path": "docs/adr/README.md",
+      "status": "canonical",
+      "type": "adr-index",
+      "scope": ["architecture-decisions"],
+      "related_code": [],
+      "supersedes": [],
+      "last_reviewed": "2026-05-04"
+    },
+    {
+      "path": "docs/research/CLIAGENTS-OPERATING-MODEL.md",
+      "status": "canonical",
+      "type": "operator-policy",
+      "scope": ["operator-workflow", "roots", "children", "rooms", "usage", "memory"],
+      "related_code": [],
+      "supersedes": [],
+      "last_reviewed": "2026-05-04"
+    },
+    {
+      "path": "docs/research/FEATURE-ACCEPTANCE-MATRIX.md",
+      "status": "canonical",
+      "type": "acceptance-matrix",
+      "scope": ["verification", "coverage"],
+      "related_code": ["tests/test-focused-surface.js"],
+      "supersedes": [],
+      "last_reviewed": "2026-05-04"
+    },
+    {
+      "path": "docs/research/CHILD-COLLABORATION-IMPLEMENTATION-PLAN.md",
+      "status": "active-plan",
+      "type": "plan",
+      "scope": ["child-sessions", "collaborators"],
+      "related_code": [
+        "src/tmux/session-manager.js",
+        "src/mcp/cliagents-mcp-server.js"
+      ],
+      "supersedes": [],
+      "last_reviewed": "2026-05-04"
+    },
+    {
+      "path": "docs/research/CHILD-ADAPTER-RELIABILITY.md",
+      "status": "active-plan",
+      "type": "plan",
+      "scope": ["adapters", "live-reliability"],
+      "related_code": ["tests/test-child-adapter-reliability-live.js"],
+      "supersedes": [],
+      "last_reviewed": "2026-05-04"
+    },
+    {
+      "path": "docs/research/BROKER-NATIVE-ORCHESTRATION-UX-PROPOSAL.md",
+      "status": "active-plan",
+      "type": "plan",
+      "scope": ["ui", "rooms", "operator-ux"],
+      "related_code": ["public/console.html"],
+      "supersedes": [],
+      "last_reviewed": "2026-05-04"
+    },
+    {
+      "path": "docs/research/CLIAGENTS-BROKER-PLAN.md",
+      "status": "reference",
+      "type": "strategy",
+      "scope": ["broker-thesis"],
+      "related_code": [],
+      "supersedes": [],
+      "last_reviewed": "2026-05-04"
+    },
+    {
+      "path": "docs/research/EXTERNAL-BENCHMARKS.md",
+      "status": "reference",
+      "type": "benchmark",
+      "scope": ["competitive-research"],
+      "related_code": [],
+      "supersedes": [],
+      "last_reviewed": "2026-05-04"
+    },
+    {
+      "path": "docs/architecture.md",
+      "status": "archived",
+      "type": "architecture",
+      "scope": ["legacy-architecture"],
+      "related_code": [],
+      "supersedes": [],
+      "last_reviewed": "2026-05-04"
+    },
+    {
+      "path": "docs/research/architecture-analysis.md",
+      "status": "archived",
+      "type": "research",
+      "scope": ["legacy-architecture"],
+      "related_code": [],
+      "supersedes": [],
+      "last_reviewed": "2026-05-04"
+    },
+    {
+      "path": "docs/research/LONG-HORIZON-ORCHESTRATION-V1-PLAN.md",
+      "status": "draft",
+      "type": "plan",
+      "scope": ["long-horizon-orchestration"],
+      "related_code": [],
+      "supersedes": [],
+      "last_reviewed": "2026-05-04"
+    }
+  ]
+}

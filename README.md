@@ -18,6 +18,7 @@ A Node.js server that brokers Codex CLI, Gemini CLI, Qwen CLI, OpenCode CLI, and
 - [Architecture](#architecture)
 - [Configuration](#configuration)
 - [Development](#development)
+- [Documentation](#documentation)
 - [License](#license)
 
 ## Why cliagents?
@@ -321,6 +322,9 @@ Full API documentation: [openapi.json](openapi.json)
 
 ## Architecture
 
+Canonical architecture and roadmap documentation starts at [docs/INDEX.md](docs/INDEX.md).
+Use that index to distinguish current source-of-truth docs from research notes.
+
 ```
 ┌─────────────────────────────────────────────────────────┐
 │                    Client Applications                   │
@@ -426,6 +430,12 @@ See [docs/adding-adapters.md](docs/adding-adapters.md) for the adapter developme
 ### Contributing
 
 See [CONTRIBUTING.md](CONTRIBUTING.md) for guidelines.
+
+## Documentation
+
+- [docs/INDEX.md](docs/INDEX.md) is the canonical documentation entrypoint.
+- [docs/CANONICAL-MAP.json](docs/CANONICAL-MAP.json) classifies docs for agents and humans.
+- Files in `docs/research/` are context unless the canonical map marks them as canonical or active.
 
 ## License
 

@@ -6,6 +6,7 @@ Keep it short. Do not duplicate transient runtime configuration, MCP server list
 ## Scope
 
 - Use this file for project-specific engineering guidance.
+- Start with [`docs/INDEX.md`](./docs/INDEX.md) for canonical architecture, roadmap, reference, and research status.
 - Use [`CLAUDE.md`](./CLAUDE.md) and the docs folder for architecture notes, API details, and user-facing documentation.
 - Use [`docs/research/CLIAGENTS-OPERATING-MODEL.md`](./docs/research/CLIAGENTS-OPERATING-MODEL.md) as the canonical operator policy for roots, child sessions, rooms, persistence, usage, and broker routing.
 - If guidance belongs to the current machine, shell session, or MCP profile, it does not belong here.
@@ -61,6 +62,7 @@ Keep it short. Do not duplicate transient runtime configuration, MCP server list
 ## Documentation Rules
 
 - Keep this file concise.
+- Use [`docs/CANONICAL-MAP.json`](./docs/CANONICAL-MAP.json) to decide whether a doc is canonical, active, draft, reference, or archived.
 - Do not paste MCP inventories, personal workstation paths, or temporary operational notes into this file.
 - When a rule becomes adapter-specific or user-facing, move it into the appropriate doc instead of growing this file.
 - Runtime and broad suites may skip provider-auth, token-expiry, provider-discontinuation, quota, capacity, or timeout failures when the broker contract itself is still behaving correctly.

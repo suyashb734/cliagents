@@ -15,6 +15,7 @@ const TEST_FILES = [
   'test-gemini-model-fallback.js',
   'test-qwen-cli.js',
   'test-opencode-cli.js',
+  'test-docs-canonical-map.js',
   'test-status-detection.js',
   'test-handoff-init-prompts.js',
   'test-db-migrations.js',
