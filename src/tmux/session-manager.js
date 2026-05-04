@@ -2730,6 +2730,9 @@ class PersistentSessionManager extends EventEmitter {
       width: launchGeometry?.width || null,
       height: launchGeometry?.height || null
     });
+    if (preserveRichTerminalUi && typeof this.tmux.setSessionStatusVisible === 'function') {
+      this.tmux.setSessionStatusVisible(sessionName, false);
+    }
     if (launchGeometry && typeof this.tmux.resizePane === 'function') {
       this.tmux.resizePane(sessionName, windowName, launchGeometry.width, launchGeometry.height);
     }

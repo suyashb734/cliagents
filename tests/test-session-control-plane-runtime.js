@@ -34,6 +34,7 @@ class FakeTmuxClient {
     this.commands = new Map();
     this.createCalls = [];
     this.resizeCalls = [];
+    this.statusVisibilityCalls = [];
     this.respawnCalls = [];
     this.specialKeys = [];
     this.existingSessions = new Set();
@@ -64,6 +65,11 @@ class FakeTmuxClient {
 
   resizePane(sessionName, windowName, width, height) {
     this.resizeCalls.push({ sessionName, windowName, width, height });
+    return true;
+  }
+
+  setSessionStatusVisible(sessionName, visible) {
+    this.statusVisibilityCalls.push({ sessionName, visible });
     return true;
   }
 
@@ -311,6 +317,13 @@ async function run() {
         && call.height === 48
       )),
       'expected managed root launch geometry to resize the tmux pane before CLI startup'
+    );
+    assert(
+      fakeTmux.statusVisibilityCalls.some((call) => (
+        call.sessionName === geometryRoot.sessionName
+        && call.visible === false
+      )),
+      'expected managed root launch to hide the tmux status bar so the provider owns the full pane'
     );
 
     const deferredRoot = await manager.createTerminal({

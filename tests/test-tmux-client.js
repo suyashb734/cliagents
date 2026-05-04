@@ -288,6 +288,39 @@ async function testRespawnPaneCommand() {
   console.log('  ✅ respawnPane builds the expected tmux command');
 }
 
+async function testSetSessionStatusVisible() {
+  console.log('\n📝 Test: setSessionStatusVisible toggles tmux session status');
+
+  const stubClient = Object.create(TmuxClient.prototype);
+  stubClient._validateName = () => {};
+
+  const executed = [];
+  stubClient._exec = (args) => {
+    executed.push(args);
+    return '';
+  };
+
+  stubClient.setSessionStatusVisible('status-session', false);
+  stubClient.setSessionStatusVisible('status-session', true);
+
+  assert.deepStrictEqual(executed[0], [
+    'set-option',
+    '-t',
+    'status-session',
+    'status',
+    'off'
+  ]);
+  assert.deepStrictEqual(executed[1], [
+    'set-option',
+    '-t',
+    'status-session',
+    'status',
+    'on'
+  ]);
+
+  console.log('  ✅ setSessionStatusVisible builds the expected tmux commands');
+}
+
 // Test: Dangerous session name rejected at creation
 async function testDangerousSessionCreation() {
   console.log('\n📝 Test: Dangerous session name rejected at creation');
@@ -461,6 +494,7 @@ async function runTests() {
     testPreferredServerOptionsBootstrap,
     testInlineBootstrapOnFirstSessionCreate,
     testRespawnPaneCommand,
+    testSetSessionStatusVisible,
     testDangerousSessionCreation,
     testIsMissingTargetError,
     testGetHistoryNoSpamOnMissingSession,

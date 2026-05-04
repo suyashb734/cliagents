@@ -383,6 +383,26 @@ class TmuxClient {
   }
 
   /**
+   * Enable or disable the tmux status bar for a specific session.
+   * User-facing managed roots use the provider's full-screen UI, so tmux's
+   * own status line should stay out of the way.
+   * @param {string} sessionName
+   * @param {boolean} visible
+   * @returns {boolean}
+   */
+  setSessionStatusVisible(sessionName, visible) {
+    this._validateName(sessionName, 'session');
+    this._exec([
+      'set-option',
+      '-t',
+      sessionName,
+      'status',
+      visible ? 'on' : 'off'
+    ]);
+    return true;
+  }
+
+  /**
    * Return true when a tmux error indicates the session or window simply no
    * longer exists (expected after cleanup).  These errors must NOT be logged
    * on every poll cycle; only unexpected failures should surface.
