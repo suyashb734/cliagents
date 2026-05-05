@@ -30,6 +30,7 @@ const MISSING_TARGET_PATTERNS = [
 const PREFERRED_DEFAULT_TERMINAL = 'tmux-256color';
 const PREFERRED_TERMINAL_FEATURES = ',xterm-256color:RGB,screen-256color:RGB,tmux-256color:RGB,wezterm:RGB,kitty:RGB,alacritty:RGB,foot:RGB,st-256color:RGB';
 const PREFERRED_TERMINAL_OVERRIDES = ',*:Tc';
+const PREFERRED_ASSUME_PASTE_TIME = '10';
 
 class TmuxClient {
   constructor(options = {}) {
@@ -119,6 +120,10 @@ class TmuxClient {
       ignoreErrors: true,
       silent: true
     });
+    this._exec(['set-option', '-g', 'assume-paste-time', PREFERRED_ASSUME_PASTE_TIME], {
+      ignoreErrors: true,
+      silent: true
+    });
 
     TMUX_SERVER_BOOTSTRAP_STATE.add(bootstrapKey);
     return true;
@@ -130,7 +135,8 @@ class TmuxClient {
       'set-option', '-ag', 'terminal-features', PREFERRED_TERMINAL_FEATURES, ';',
       'set-option', '-ag', 'terminal-overrides', PREFERRED_TERMINAL_OVERRIDES, ';',
       'set-option', '-g', 'focus-events', 'on', ';',
-      'set-option', '-g', 'extended-keys', 'on'
+      'set-option', '-g', 'extended-keys', 'on', ';',
+      'set-option', '-g', 'assume-paste-time', PREFERRED_ASSUME_PASTE_TIME
     ];
   }
 
@@ -311,10 +317,10 @@ class TmuxClient {
 
     const target = `${sessionName}:${windowName}`;
 
-    // For long messages (>200 chars), use load-buffer + paste-buffer
-    // to avoid tmux send-keys truncation issues with large inputs.
-    // Short messages use send-keys -l directly for simplicity.
-    if (keys.length > 200) {
+    // Use load-buffer + paste-buffer for large or multiline input. The -p flag
+    // preserves bracketed paste semantics for TUIs such as Codex when requested.
+    const usePasteBuffer = keys.length > 200 || keys.includes('\n');
+    if (usePasteBuffer) {
       // Write to a temp file, load into tmux buffer, paste into pane
       const tmpFile = path.join(this.logDir, `.tmux-input-${Date.now()}-${crypto.randomBytes(4).toString('hex')}`);
       const bufferName = `cli-${Date.now()}-${crypto.randomBytes(4).toString('hex')}`;
@@ -334,7 +340,7 @@ class TmuxClient {
     if (pressEnter) {
       // Add delay to ensure text is fully processed before pressing Enter
       // Longer delay for longer messages to allow terminal processing
-      const delay = keys.length > 200 ? 0.5 : 0.1;
+      const delay = usePasteBuffer ? 0.5 : 0.1;
       spawnSync('sleep', [String(delay)]);
       this._exec(['send-keys', '-t', target, 'Enter']);
     }
