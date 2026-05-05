@@ -15,6 +15,7 @@ const {
   normalizeManagedRootResumeCandidate,
   normalizeManagedRootRecoveryCandidate,
   createManagedRootSelectionPrompt,
+  createProviderSessionSelectionPrompt,
   listOperatorRootSessions,
   getOperatorRootSession,
   listManagedRootLaunchCandidates,
@@ -559,6 +560,29 @@ async function run() {
     assert(prompt.text.includes('recover'));
     assert(prompt.text.includes('workdir: /tmp/project-beta'));
     assert(prompt.text.includes('summary: Gemini exited after finishing the last task and can likely be recovered.'));
+  });
+
+  await test('Provider session selection prompt includes transcript summary context', async () => {
+    const prompt = createProviderSessionSelectionPrompt([{
+      providerSessionId: '019df324-64ff-7192-aff1-b0684cd57387',
+      title: 'Analyze disk storage',
+      updatedAt: new Date().toISOString(),
+      cwd: '/tmp/disk-analysis',
+      model: 'gpt-5.4',
+      messageCount: 7,
+      summary: 'Last user: Check which folders are using the most disk and propose cleanup steps.',
+      lastAssistantMessage: 'Found that node_modules and video renders dominate disk usage.'
+    }], {
+      adapter: 'codex-cli'
+    });
+
+    assert(prompt.text.includes('Analyze disk storage'));
+    assert(prompt.text.includes('dir=disk-analysis'));
+    assert(prompt.text.includes('messages=7'));
+    assert(prompt.text.includes('summary: Last user: Check which folders are using the most disk and propose cleanup steps.'));
+    assert(prompt.text.includes('last assistant: Found that node_modules and video renders dominate disk usage.'));
+    assert(prompt.text.includes('Open native Codex resume picker'));
+    assert(prompt.text.includes('Start a fresh provider session'));
   });
 
   await test('List managed recovery candidates returns only recoverable roots', async () => {

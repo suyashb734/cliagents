@@ -272,7 +272,7 @@ function printLaunchUsage() {
   console.log('  --recover-root <id>           Recover a specific stale or shell-only managed root');
   console.log('  --recover-latest              Recover the most recent stale, interrupted, or shell-only root');
   console.log('  --resume-provider-session <id> Exact-resume a provider-local session into a new managed root');
-  console.log('  --resume-provider-picker      Start Codex in its native provider-session picker');
+  console.log('  --resume-provider-picker      Show cliagents provider-session summaries before native picker fallback');
   console.log('  --fresh-provider-session      Start Codex with a fresh provider session, bypassing the picker default');
   console.log('  --allow-tool <tool>           Restrict allowed tools (repeatable)');
   console.log('  --detach                      Create the terminal without attaching');
@@ -1649,6 +1649,73 @@ function createManagedRootSelectionPrompt(candidates, options = {}) {
   };
 }
 
+function formatProviderSessionCandidateAge(session) {
+  const timestamp = Date.parse(session?.updatedAt || 0);
+  if (!Number.isFinite(timestamp)) {
+    return 'recent';
+  }
+  const diffMs = Math.max(0, Date.now() - timestamp);
+  const diffMinutes = Math.floor(diffMs / 60000);
+  if (diffMinutes < 1) {
+    return 'just now';
+  }
+  if (diffMinutes < 60) {
+    return `${diffMinutes}m ago`;
+  }
+  const diffHours = Math.floor(diffMinutes / 60);
+  if (diffHours < 24) {
+    return `${diffHours}h ago`;
+  }
+  const diffDays = Math.floor(diffHours / 24);
+  return `${diffDays}d ago`;
+}
+
+function createProviderSessionSelectionPrompt(sessions, options = {}) {
+  const adapter = options.adapter || 'codex-cli';
+  const lines = [
+    `Recent ${adapter} provider sessions:`
+  ];
+  const selectionEntries = [];
+  let selectionIndex = 1;
+
+  for (const session of Array.isArray(sessions) ? sessions : []) {
+    const workDir = session.cwd ? resolveLaunchWorkDir(session.cwd) : null;
+    const workDirName = workDir ? (path.basename(workDir) || workDir) : null;
+    const metadata = [
+      formatProviderSessionCandidateAge(session),
+      workDirName ? `dir=${workDirName}` : null,
+      session.model ? `model=${session.model}` : null,
+      session.messageCount ? `messages=${session.messageCount}` : null
+    ].filter(Boolean).join(' • ');
+    const title = truncateManagedRootPromptText(session.title || session.providerSessionId || 'session', 96);
+    const summary = truncateManagedRootPromptText(session.summary || session.lastUserMessage || session.preview || '', 180);
+    const lastAssistant = truncateManagedRootPromptText(session.lastAssistantMessage || '', 160);
+
+    lines.push(`  ${selectionIndex}. ${title}${metadata ? ` (${metadata})` : ''}`);
+    lines.push(`     id: ${session.providerSessionId}`);
+    if (workDir) {
+      lines.push(`     workdir: ${workDir}`);
+    }
+    if (summary) {
+      lines.push(`     summary: ${summary}`);
+    }
+    if (lastAssistant && lastAssistant !== summary) {
+      lines.push(`     last assistant: ${lastAssistant}`);
+    }
+    selectionEntries.push({ selectionIndex, session });
+    selectionIndex += 1;
+  }
+
+  lines.push('  Enter  Open native Codex resume picker');
+  lines.push('  f      Start a fresh provider session');
+  lines.push('');
+  lines.push('Select a provider session number, press Enter for native picker, or type f for fresh: ');
+  return {
+    text: lines.join('\n'),
+    selectionEntries
+  };
+}
+
 async function promptForManagedRootSelection(candidates, options = {}) {
   const { resumeCandidates, recoverCandidates } = normalizeManagedRootSelectionGroups(candidates);
   if (resumeCandidates.length === 0 && recoverCandidates.length === 0) {
@@ -1677,6 +1744,54 @@ async function promptForManagedRootSelection(candidates, options = {}) {
       const selectedEntry = prompt.selectionEntries.find((entry) => entry.selectionIndex === selectedIndex);
       if (Number.isInteger(selectedIndex) && selectedEntry) {
         return selectedEntry.candidate;
+      }
+
+      output.write(`Invalid selection: ${trimmed}\n`);
+    }
+  } finally {
+    rl.close();
+  }
+}
+
+async function listProviderSessionsForLaunch(options = {}, dependencies = {}) {
+  const callJson = dependencies.callCliagentsJson || callCliagentsJson;
+  const params = new URLSearchParams();
+  params.set('adapter', options.adapter || 'codex-cli');
+  params.set('limit', String(options.limit || 12));
+  const result = await callJson(`/orchestration/provider-sessions?${params.toString()}`);
+  return Array.isArray(result?.sessions) ? result.sessions : [];
+}
+
+async function promptForProviderSessionSelection(sessions, options = {}) {
+  if (!Array.isArray(sessions) || sessions.length === 0) {
+    return null;
+  }
+
+  const input = options.input || process.stdin;
+  const output = options.output || process.stdout;
+  if (!input.isTTY || !output.isTTY) {
+    return null;
+  }
+
+  const rl = readline.createInterface({ input, output });
+  try {
+    for (;;) {
+      const prompt = createProviderSessionSelectionPrompt(sessions, options);
+      const answer = await new Promise((resolve) => {
+        rl.question(prompt.text, resolve);
+      });
+      const trimmed = String(answer || '').trim();
+      if (!trimmed) {
+        return null;
+      }
+      if (trimmed.toLowerCase() === 'f') {
+        return { freshProviderSession: true };
+      }
+
+      const selectedIndex = Number.parseInt(trimmed, 10);
+      const selectedEntry = prompt.selectionEntries.find((entry) => entry.selectionIndex === selectedIndex);
+      if (Number.isInteger(selectedIndex) && selectedEntry) {
+        return selectedEntry.session;
       }
 
       output.write(`Invalid selection: ${trimmed}\n`);
@@ -1842,6 +1957,9 @@ function printManagedRootLaunchResult(result, launchOptions) {
   }
   if (launchOptions.providerResumePicker) {
     console.log(`  provider_resume: picker${launchOptions.providerResumePickerDefaulted ? ' (default)' : ''}`);
+  }
+  if (launchOptions.providerSessionId) {
+    console.log(`  provider_session_id: ${launchOptions.providerSessionId}`);
   }
   console.log(`  external_session_ref: ${result.externalSessionRef || 'n/a'}`);
   console.log(`  workdir: ${result.workDir || launchOptions.workDir || 'n/a'}`);
@@ -2091,7 +2209,7 @@ async function handleLaunchCommand(rawArgs = []) {
   }
 
   const launchTarget = await resolveManagedRootLaunchTarget(launchOptions);
-  const effectiveLaunchOptions = applyCodexProviderResumePickerDefault(launchOptions, launchTarget, {
+  let effectiveLaunchOptions = applyCodexProviderResumePickerDefault(launchOptions, launchTarget, {
     interactive: deferProviderStartUntilAttached
   });
   if (launchTarget.action === 'resume') {
@@ -2123,6 +2241,43 @@ async function handleLaunchCommand(rawArgs = []) {
       attachToManagedSession(result);
     }
     return;
+  }
+
+  if (launchTarget.action === 'launch' && effectiveLaunchOptions.providerResumePicker === true && deferProviderStartUntilAttached) {
+    try {
+      const providerSessions = await listProviderSessionsForLaunch({
+        adapter: effectiveLaunchOptions.adapter,
+        limit: 12
+      });
+      const providerSelection = await promptForProviderSessionSelection(providerSessions, {
+        adapter: effectiveLaunchOptions.adapter
+      });
+      if (providerSelection?.freshProviderSession === true) {
+        effectiveLaunchOptions = {
+          ...effectiveLaunchOptions,
+          providerResumePicker: false,
+          providerResumePickerDefaulted: false,
+          freshProviderSession: true
+        };
+      } else if (providerSelection?.providerSessionId) {
+        const exactOptions = {
+          ...effectiveLaunchOptions,
+          providerSessionId: providerSelection.providerSessionId,
+          providerResumePicker: false,
+          providerResumePickerDefaulted: false,
+          resumeMode: 'exact',
+          deferProviderStartUntilAttached
+        };
+        const result = await launchManagedRootSession(exactOptions);
+        printManagedRootLaunchResult(result, exactOptions);
+        if (!launchOptions.detach && process.stdout.isTTY) {
+          attachToManagedSession(result);
+        }
+        return;
+      }
+    } catch (error) {
+      console.warn(`[cliagents] Provider-session summary picker unavailable; falling back to native Codex picker: ${error.message}`);
+    }
   }
 
   const result = await launchManagedRootSession({
@@ -2197,6 +2352,9 @@ module.exports = {
   normalizeManagedRootResumeCandidate,
   normalizeManagedRootRecoveryCandidate,
   createManagedRootSelectionPrompt,
+  createProviderSessionSelectionPrompt,
+  listProviderSessionsForLaunch,
+  promptForProviderSessionSelection,
   listManagedRootLaunchCandidates,
   listManagedRootResumeCandidates,
   listManagedRootRecoveryCandidates,

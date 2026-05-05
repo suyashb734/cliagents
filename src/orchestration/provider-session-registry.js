@@ -15,6 +15,83 @@ function normalizeIsoTimestamp(value) {
   return normalized || null;
 }
 
+function normalizePreviewText(value, maxLength = 280) {
+  const text = String(value || '').replace(/\s+/g, ' ').trim();
+  if (!text) {
+    return '';
+  }
+  if (text.length <= maxLength) {
+    return text;
+  }
+  return `${text.slice(0, Math.max(0, maxLength - 1)).trimEnd()}…`;
+}
+
+function isUsefulUserMessage(text) {
+  const normalized = String(text || '').trim();
+  if (!normalized) {
+    return false;
+  }
+  return !normalized.startsWith('<environment_context>')
+    && !normalized.startsWith('# AGENTS.md instructions')
+    && !normalized.startsWith('<INSTRUCTIONS>')
+    && !normalized.startsWith('<turn_aborted>');
+}
+
+function extractContentText(content) {
+  if (typeof content === 'string') {
+    return content;
+  }
+  if (!Array.isArray(content)) {
+    return '';
+  }
+  return content
+    .map((entry) => {
+      if (!entry || typeof entry !== 'object') {
+        return '';
+      }
+      return entry.text || entry.message || entry.content || '';
+    })
+    .filter(Boolean)
+    .join('\n');
+}
+
+function extractMessageFromCodexRow(row) {
+  if (!row || typeof row !== 'object') {
+    return null;
+  }
+
+  const payload = row.payload && typeof row.payload === 'object' ? row.payload : null;
+  if (row.type === 'response_item' && payload?.type === 'message') {
+    return {
+      role: String(payload.role || '').trim(),
+      text: extractContentText(payload.content)
+    };
+  }
+
+  if (row.type === 'message') {
+    return {
+      role: String(row.role || '').trim(),
+      text: extractContentText(row.content)
+    };
+  }
+
+  if (row.type === 'event_msg' && payload?.type === 'user_message') {
+    return {
+      role: 'user',
+      text: payload.message || ''
+    };
+  }
+
+  if (row.type === 'event_msg' && payload?.type === 'agent_message') {
+    return {
+      role: 'assistant',
+      text: payload.message || ''
+    };
+  }
+
+  return null;
+}
+
 function sortByUpdatedAtDescending(left, right) {
   const leftTs = Date.parse(left?.updatedAt || 0) || 0;
   const rightTs = Date.parse(right?.updatedAt || 0) || 0;
@@ -87,6 +164,11 @@ class CodexProviderSessionBackend {
       cwd: metadata.cwd || null,
       model: metadata.model || null,
       preview: metadata.preview || metadata.title || `Codex session ${normalizedId.slice(0, 12)}`,
+      summary: metadata.summary || metadata.preview || metadata.title || `Codex session ${normalizedId.slice(0, 12)}`,
+      firstUserMessage: metadata.firstUserMessage || null,
+      lastUserMessage: metadata.lastUserMessage || null,
+      lastAssistantMessage: metadata.lastAssistantMessage || null,
+      messageCount: metadata.messageCount || 0,
       archived: Boolean(metadata.archived),
       resumeCapability: 'exact',
       metadata: {
@@ -133,7 +215,12 @@ class CodexProviderSessionBackend {
       updatedAt,
       cwd: metadata.cwd || null,
       model: metadata.model || null,
-      preview: title || metadata.preview || `Codex session ${providerSessionId.slice(0, 12)}`,
+      preview: metadata.preview || title || `Codex session ${providerSessionId.slice(0, 12)}`,
+      summary: metadata.summary || metadata.preview || title || `Codex session ${providerSessionId.slice(0, 12)}`,
+      firstUserMessage: metadata.firstUserMessage || null,
+      lastUserMessage: metadata.lastUserMessage || null,
+      lastAssistantMessage: metadata.lastAssistantMessage || null,
+      messageCount: metadata.messageCount || 0,
       archived,
       resumeCapability: 'exact',
       metadata: {
@@ -193,7 +280,7 @@ class CodexProviderSessionBackend {
             continue;
           }
 
-          const match = entry.name.match(/-([0-9a-f-]{8,})\.jsonl$/i);
+          const match = entry.name.match(/([0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12})\.jsonl$/i);
           if (match) {
             this.sessionFileMap.set(match[1], fullPath);
           }
@@ -205,20 +292,19 @@ class CodexProviderSessionBackend {
   }
 
   _readSessionMeta(sessionFile) {
-    let content = '';
+    let lines = [];
     try {
-      const fd = fs.openSync(sessionFile, 'r');
-      const buffer = Buffer.alloc(65536);
-      const bytesRead = fs.readSync(fd, buffer, 0, buffer.length, 0);
-      fs.closeSync(fd);
-      content = buffer.slice(0, bytesRead).toString('utf8');
+      lines = this._readSessionSampleLines(sessionFile);
     } catch {
       return {};
     }
 
-    const lines = content.split('\n').slice(0, 32);
     let sessionMeta = null;
-    let preview = null;
+    let firstUserMessage = null;
+    let lastUserMessage = null;
+    let lastAssistantMessage = null;
+    let userMessageCount = 0;
+    let assistantMessageCount = 0;
 
     for (const line of lines) {
       const parsed = parseJsonLine(line);
@@ -230,25 +316,70 @@ class CodexProviderSessionBackend {
         sessionMeta = parsed.payload;
       }
 
-      if (!preview && parsed.type === 'message' && parsed.role === 'user' && Array.isArray(parsed.content)) {
-        const textEntry = parsed.content.find((entry) => entry?.type === 'input_text' && typeof entry.text === 'string');
-        const text = String(textEntry?.text || '').replace(/\s+/g, ' ').trim();
-        if (text && !text.startsWith('<environment_context>')) {
-          preview = text.slice(0, 180);
+      const message = extractMessageFromCodexRow(parsed);
+      const text = normalizePreviewText(message?.text || '', 360);
+      if (!message?.role || !text) {
+        continue;
+      }
+
+      if (message.role === 'user' && isUsefulUserMessage(text)) {
+        userMessageCount += 1;
+        if (!firstUserMessage) {
+          firstUserMessage = text;
         }
+        lastUserMessage = text;
+      } else if (message.role === 'assistant') {
+        assistantMessageCount += 1;
+        lastAssistantMessage = text;
       }
     }
+
+    const summary = lastUserMessage
+      ? `Last user: ${normalizePreviewText(lastUserMessage, 220)}`
+      : (firstUserMessage ? `Started with: ${normalizePreviewText(firstUserMessage, 220)}` : null);
 
     return {
       title: sessionMeta?.title || null,
       updatedAt: normalizeIsoTimestamp(sessionMeta?.timestamp || null),
       cwd: sessionMeta?.cwd || null,
       model: sessionMeta?.model || null,
-      preview,
+      preview: lastUserMessage || firstUserMessage || null,
+      summary,
+      firstUserMessage,
+      lastUserMessage,
+      lastAssistantMessage,
+      messageCount: userMessageCount + assistantMessageCount,
       originator: sessionMeta?.originator || null,
       modelProvider: sessionMeta?.model_provider || null,
       archived: false
     };
+  }
+
+  _readSessionSampleLines(sessionFile) {
+    const stat = fs.statSync(sessionFile);
+    const headBytes = Math.min(stat.size, 128 * 1024);
+    const tailBytes = Math.min(stat.size, 256 * 1024);
+    const fd = fs.openSync(sessionFile, 'r');
+    try {
+      const headBuffer = Buffer.alloc(headBytes);
+      fs.readSync(fd, headBuffer, 0, headBytes, 0);
+      const headText = headBuffer.toString('utf8');
+
+      if (stat.size <= headBytes) {
+        return headText.split('\n');
+      }
+
+      const tailStart = Math.max(0, stat.size - tailBytes);
+      const tailBuffer = Buffer.alloc(tailBytes);
+      fs.readSync(fd, tailBuffer, 0, tailBytes, tailStart);
+      const tailLines = tailBuffer.toString('utf8').split('\n');
+      if (tailStart > 0) {
+        tailLines.shift();
+      }
+      return [...headText.split('\n'), ...tailLines];
+    } finally {
+      fs.closeSync(fd);
+    }
   }
 }
 

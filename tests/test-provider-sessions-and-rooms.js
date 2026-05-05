@@ -56,6 +56,16 @@ function seedCodexHome(homeDir) {
       type: 'message',
       role: 'user',
       content: [{ type: 'input_text', text: 'Build a finance tracker with durable summaries.' }]
+    },
+    {
+      type: 'message',
+      role: 'assistant',
+      content: [{ type: 'output_text', text: 'Implemented the finance tracker and added summary persistence notes.' }]
+    },
+    {
+      type: 'message',
+      role: 'user',
+      content: [{ type: 'input_text', text: 'Add a resume picker summary so I can choose the right session.' }]
     }
   ]);
 
@@ -202,7 +212,12 @@ async function runProviderRegistryAssertions(homeDir) {
   });
   assert(activeSession, 'expected active provider session descriptor');
   assert.strictEqual(activeSession.title, 'Finance tracker');
-  assert.strictEqual(activeSession.preview, 'Finance tracker');
+  assert.strictEqual(activeSession.preview, 'Add a resume picker summary so I can choose the right session.');
+  assert.strictEqual(activeSession.summary, 'Last user: Add a resume picker summary so I can choose the right session.');
+  assert.strictEqual(activeSession.firstUserMessage, 'Build a finance tracker with durable summaries.');
+  assert.strictEqual(activeSession.lastUserMessage, 'Add a resume picker summary so I can choose the right session.');
+  assert.strictEqual(activeSession.lastAssistantMessage, 'Implemented the finance tracker and added summary persistence notes.');
+  assert.strictEqual(activeSession.messageCount, 3);
 
   const unsupported = registry.listSessions({ adapter: 'claude-code' });
   assert.strictEqual(unsupported.supported, false);

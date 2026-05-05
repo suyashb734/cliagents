@@ -1452,7 +1452,7 @@ This calls cliagents' direct-session discussion route and returns the completed 
         },
         providerResumePicker: {
           type: 'boolean',
-          description: 'For Codex managed roots, start the native provider-session resume picker in the launched terminal.'
+          description: 'For Codex managed roots, request provider-session resume picker behavior when no exact providerSessionId is supplied.'
         },
         sourceRootSessionId: {
           type: 'string',
@@ -3699,7 +3699,11 @@ async function handleListProviderSessions(args) {
         `## Provider Sessions (${adapter})`,
         '',
         sessions.map((session) => (
-          `- ${session.providerSessionId} title="${truncateText(session.title || session.preview || 'session', 80)}"${session.updatedAt ? ` updated=${session.updatedAt}` : ''}${session.cwd ? ` cwd=${session.cwd}` : ''}${session.resumeCapability ? ` resume=${session.resumeCapability}` : ''}`
+          [
+            `- ${session.providerSessionId} title="${truncateText(session.title || session.preview || 'session', 80)}"${session.updatedAt ? ` updated=${session.updatedAt}` : ''}${session.cwd ? ` cwd=${session.cwd}` : ''}${session.resumeCapability ? ` resume=${session.resumeCapability}` : ''}${session.messageCount ? ` messages=${session.messageCount}` : ''}`,
+            session.summary ? `  summary: ${truncateText(session.summary, 180)}` : null,
+            session.lastAssistantMessage ? `  last_assistant: ${truncateText(session.lastAssistantMessage, 160)}` : null
+          ].filter(Boolean).join('\n')
         )).join('\n')
       ].join('\n')
     }]
