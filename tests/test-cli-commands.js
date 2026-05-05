@@ -60,6 +60,14 @@ function assertManagedRootUiEnvPrefix(cmd) {
   assert(cmd.includes('CLICOLOR_FORCE=1'), `Expected CLICOLOR_FORCE in rich-UI env prefix, got: ${cmd}`);
 }
 
+function assertCodexNativeRootCommand(cmd) {
+  assert(cmd.startsWith('exec codex'), `Expected native Codex managed-root command, got: ${cmd}`);
+  assert(!cmd.includes('FORCE_COLOR'), `Codex native TUI should not force color through wrapper env, got: ${cmd}`);
+  assert(!cmd.includes('CLICOLOR_FORCE'), `Codex native TUI should not force color through wrapper env, got: ${cmd}`);
+  assert(!cmd.includes('TERM="${TERM:-tmux-256color}"'), `Codex native TUI should inherit tmux pane TERM, got: ${cmd}`);
+  assert(!cmd.includes('CI=true'), `Codex native TUI should not use CI mode, got: ${cmd}`);
+}
+
 console.log('\n📋 Supported CLI Command Construction Tests\n');
 
 console.log('--- Gemini CLI ---');
@@ -89,10 +97,20 @@ console.log('\n--- Codex CLI ---');
 test('Codex interactive command bypasses approvals by default', () => {
   const cmd = CLI_COMMANDS['codex-cli']({ role: 'main', model: 'o4-mini' });
 
-  assertManagedRootUiEnvPrefix(cmd);
+  assertCodexNativeRootCommand(cmd);
   assert(cmd.includes('exec codex'), `Expected managed root exec prefix, got: ${cmd}`);
   assert(cmd.includes('--dangerously-bypass-approvals-and-sandbox'), `Expected bypass flag, got: ${cmd}`);
   assert(cmd.includes('--model o4-mini'), `Expected model flag, got: ${cmd}`);
+});
+
+test('Codex guarded root command preserves native UI without bypass wrapper', () => {
+  const cmd = CLI_COMMANDS['codex-cli']({
+    role: 'main',
+    permissionMode: 'default'
+  });
+
+  assertCodexNativeRootCommand(cmd);
+  assert.strictEqual(cmd, 'exec codex');
 });
 
 test('Codex interactive command can start by resuming a prior session', () => {
@@ -102,7 +120,7 @@ test('Codex interactive command can start by resuming a prior session', () => {
     resumeSessionId: '019d94a6-2cd8-7742-8e4e-123456789abc'
   });
 
-  assertManagedRootUiEnvPrefix(cmd);
+  assertCodexNativeRootCommand(cmd);
   assert(cmd.includes('exec codex resume 019d94a6-2cd8-7742-8e4e-123456789abc'), `Expected codex resume prefix, got: ${cmd}`);
   assert(cmd.includes('--dangerously-bypass-approvals-and-sandbox'), `Expected bypass flag, got: ${cmd}`);
   assert(cmd.includes('--model o4-mini'), `Expected model flag, got: ${cmd}`);
@@ -115,7 +133,7 @@ test('Codex orchestration command uses ready marker', () => {
 
 test('Codex recovered root can resume the latest provider session automatically', () => {
   const cmd = CLI_COMMANDS['codex-cli']({ role: 'main', resumeLatest: true });
-  assertManagedRootUiEnvPrefix(cmd);
+  assertCodexNativeRootCommand(cmd);
   assert(cmd.includes('exec codex resume --last'), `Expected codex latest resume prefix, got: ${cmd}`);
   assert(cmd.includes('--dangerously-bypass-approvals-and-sandbox'), `Expected bypass flag, got: ${cmd}`);
 });

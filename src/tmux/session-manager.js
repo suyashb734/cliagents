@@ -591,6 +591,9 @@ function buildManagedRootProviderEnvironmentPrefix(options = {}) {
   if (!shouldPreserveRichTerminalUi(options)) {
     return '';
   }
+  if (options.providerNativeEnvironment === true) {
+    return '';
+  }
 
   return [
     'unset NO_COLOR CLICOLOR; ',
@@ -863,7 +866,10 @@ const CLI_COMMANDS = {
       args.push('--model', options.model);
     }
 
-    return wrapManagedRootProviderCommand(args.join(' '), options);
+    return wrapManagedRootProviderCommand(args.join(' '), {
+      ...options,
+      providerNativeEnvironment: true
+    });
   },
 
   'qwen-cli': (options = {}) => {
