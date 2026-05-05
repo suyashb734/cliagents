@@ -3323,6 +3323,7 @@ function createOrchestrationRouter(context) {
       const sessionMetadata = normalizeSessionMetadata(req.body?.sessionMetadata);
       const launchEnvironment = normalizeLaunchEnvironment(req.body?.launchEnvironment || sessionMetadata.launchEnvironment);
       const deferProviderStartUntilAttached = req.body?.deferProviderStartUntilAttached === true;
+      const providerResumePicker = adapter === 'codex-cli' && req.body?.providerResumePicker === true;
       if (!sessionMetadata.launchProfile) {
         sessionMetadata.launchProfile = String(req.body?.profile || 'guarded-root').trim() || 'guarded-root';
       }
@@ -3355,6 +3356,9 @@ function createOrchestrationRouter(context) {
       if (providerSessionId) {
         sessionMetadata.providerResumeSessionId = providerSessionId;
         sessionMetadata.providerResumeLatest = false;
+      }
+      if (providerResumePicker) {
+        sessionMetadata.providerResumePicker = true;
       }
       if (sourceRootSessionId) {
         sessionMetadata.sourceRootSessionId = sourceRootSessionId;

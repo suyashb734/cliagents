@@ -113,6 +113,17 @@ test('Codex guarded root command preserves native UI without bypass wrapper', ()
   assert.strictEqual(cmd, 'exec codex');
 });
 
+test('Codex managed root can start the native resume picker', () => {
+  const cmd = CLI_COMMANDS['codex-cli']({
+    role: 'main',
+    permissionMode: 'default',
+    resumePicker: true
+  });
+
+  assertCodexNativeRootCommand(cmd);
+  assert.strictEqual(cmd, 'exec codex resume');
+});
+
 test('Codex interactive command can start by resuming a prior session', () => {
   const cmd = CLI_COMMANDS['codex-cli']({
     role: 'main',

@@ -146,7 +146,9 @@ function parseLaunchArgs(rawArgs = []) {
     detach: false,
     profileExplicit: false,
     modelExplicit: false,
-    permissionModeExplicit: false
+    permissionModeExplicit: false,
+    providerResumePicker: false,
+    freshProviderSession: false
   };
 
   if (args[0] && !args[0].startsWith('-')) {
@@ -200,6 +202,13 @@ function parseLaunchArgs(rawArgs = []) {
       case '--resume-provider-session':
         parsed.providerSessionId = args.shift();
         break;
+      case '--resume-provider-picker':
+      case '--provider-resume-picker':
+        parsed.providerResumePicker = true;
+        break;
+      case '--fresh-provider-session':
+        parsed.freshProviderSession = true;
+        break;
       case '--allow-tool':
         parsed.allowedTools.push(args.shift());
         break;
@@ -220,11 +229,21 @@ function parseLaunchArgs(rawArgs = []) {
   const hasResumeFlag = Boolean(parsed.resumeRootSessionId || parsed.resumeLatest);
   const hasRecoverFlag = Boolean(parsed.recoverRootSessionId || parsed.recoverLatest);
   const hasProviderResume = Boolean(parsed.providerSessionId);
+  const hasProviderPicker = parsed.providerResumePicker === true;
   if (parsed.forceNewRoot && (hasResumeFlag || hasRecoverFlag)) {
     throw new Error('Cannot combine --new-root with resume or recover flags');
   }
   if (hasProviderResume && (hasResumeFlag || hasRecoverFlag)) {
     throw new Error('Cannot combine --resume-provider-session with resume or recover flags');
+  }
+  if (hasProviderResume && hasProviderPicker) {
+    throw new Error('Cannot combine --resume-provider-session with --resume-provider-picker');
+  }
+  if (parsed.freshProviderSession && (hasProviderResume || hasProviderPicker)) {
+    throw new Error('Cannot combine --fresh-provider-session with provider resume options');
+  }
+  if (hasProviderPicker && parsed.adapter !== 'codex-cli') {
+    throw new Error('--resume-provider-picker is currently supported only for Codex managed roots');
   }
   if (parsed.externalSessionRef && (hasResumeFlag || hasRecoverFlag)) {
     throw new Error('Cannot combine --external-session-ref with resume or recover flags');
@@ -253,6 +272,8 @@ function printLaunchUsage() {
   console.log('  --recover-root <id>           Recover a specific stale or shell-only managed root');
   console.log('  --recover-latest              Recover the most recent stale, interrupted, or shell-only root');
   console.log('  --resume-provider-session <id> Exact-resume a provider-local session into a new managed root');
+  console.log('  --resume-provider-picker      Start Codex in its native provider-session picker');
+  console.log('  --fresh-provider-session      Start Codex with a fresh provider session, bypassing the picker default');
   console.log('  --allow-tool <tool>           Restrict allowed tools (repeatable)');
   console.log('  --detach                      Create the terminal without attaching');
   console.log('');
@@ -750,6 +771,29 @@ function canRecoverManagedRootExactly(launchOptions = {}, candidate = null) {
     && hasExactManagedRootProviderResume(candidate);
 }
 
+function shouldDefaultCodexProviderResumePicker(launchOptions = {}, launchTarget = null, options = {}) {
+  const interactive = options.interactive ?? Boolean(process.stdin.isTTY && process.stdout.isTTY);
+  return Boolean(
+    interactive
+    && launchOptions.adapter === 'codex-cli'
+    && launchTarget?.action === 'launch'
+    && launchOptions.providerResumePicker !== true
+    && launchOptions.freshProviderSession !== true
+    && !launchOptions.providerSessionId
+  );
+}
+
+function applyCodexProviderResumePickerDefault(launchOptions = {}, launchTarget = null, options = {}) {
+  if (!shouldDefaultCodexProviderResumePicker(launchOptions, launchTarget, options)) {
+    return launchOptions;
+  }
+  return {
+    ...launchOptions,
+    providerResumePicker: true,
+    providerResumePickerDefaulted: true
+  };
+}
+
 async function buildManagedRootContextLaunchOptions(launchOptions, candidate, dependencies = {}) {
   if (!candidate) {
     throw new Error('Context resume requires a managed root candidate');
@@ -801,6 +845,7 @@ async function buildManagedRootContextLaunchOptions(launchOptions, candidate, de
       previousProviderThreadRef: candidate.providerThreadRef || null,
       previousRecoveryCapability: candidate.recoveryCapability || null,
       recoveryReason: candidate.recoveryReason || null,
+      providerResumePicker: launchOptions.providerResumePicker === true,
       modelSwitch,
       carriedContextSource: 'root-bundle+message-window',
       carriedContextMessageCount: messageList.length,
@@ -1795,6 +1840,9 @@ function printManagedRootLaunchResult(result, launchOptions) {
   if (result.providerStartMode) {
     console.log(`  provider_start: ${result.providerStartMode}`);
   }
+  if (launchOptions.providerResumePicker) {
+    console.log(`  provider_resume: picker${launchOptions.providerResumePickerDefaulted ? ' (default)' : ''}`);
+  }
   console.log(`  external_session_ref: ${result.externalSessionRef || 'n/a'}`);
   console.log(`  workdir: ${result.workDir || launchOptions.workDir || 'n/a'}`);
   console.log(`  console_url: ${new URL(result.consoleUrl || '/console', getCliagentsBaseUrl()).toString()}`);
@@ -1837,6 +1885,8 @@ function printManagedRootRecoveryResult(result, previousCandidate, launchOptions
   console.log(`  external_session_ref: ${result.externalSessionRef || previousCandidate.externalSessionRef || 'n/a'}`);
   if (automaticProviderResumeCommand) {
     console.log(`  provider_resume: automatic (${automaticProviderResumeCommand})`);
+  } else if (launchOptions.providerResumePicker) {
+    console.log('  provider_resume: picker');
   } else {
     console.log('  provider_resume: none (exact provider session unavailable; a fresh provider session was started)');
   }
@@ -1859,6 +1909,9 @@ function printManagedRootContextResult(result, previousCandidate, launchOptions)
   }
   console.log('  resume_mode: context');
   console.log(`  context_reason: ${launchOptions.sessionMetadata?.modelSwitch ? 'model-switch' : (previousCandidate.recoveryReason || 'stale-root')}`);
+  if (launchOptions.providerResumePicker) {
+    console.log('  provider_resume: picker');
+  }
   console.log(`  external_session_ref: ${result.externalSessionRef || previousCandidate.externalSessionRef || 'n/a'}`);
   console.log(`  console_url: ${new URL(result.consoleUrl || '/console', getCliagentsBaseUrl()).toString()}`);
   if (result.attachCommand) {
@@ -1960,6 +2013,7 @@ async function launchManagedRootSession(options = {}) {
   const extraSessionMetadata = options.sessionMetadata && typeof options.sessionMetadata === 'object'
     ? options.sessionMetadata
     : {};
+  const providerResumePicker = options.providerResumePicker === true || extraSessionMetadata.providerResumePicker === true;
   return callCliagentsJson('/orchestration/root-sessions/launch', {
     method: 'POST',
     body: {
@@ -1972,11 +2026,13 @@ async function launchManagedRootSession(options = {}) {
       sessionMetadata: {
         ...extraSessionMetadata,
         launchProfile: profile.id,
-        launchEnvironment
+        launchEnvironment,
+        providerResumePicker
       },
       resumeMode: options.resumeMode || 'new',
       providerSessionId: options.providerSessionId || null,
       sourceRootSessionId: options.sourceRootSessionId || null,
+      providerResumePicker,
       launchEnvironment,
       deferProviderStartUntilAttached: options.deferProviderStartUntilAttached === true,
       allowedTools: Array.isArray(options.allowedTools) && options.allowedTools.length > 0
@@ -2007,6 +2063,7 @@ function buildManagedRootRecoveryLaunchOptions(launchOptions, candidate) {
       previousCurrentCommand: candidate.currentCommand || null,
       providerResumeCommand: candidate.resumeCommand || null,
       providerResumeSessionId,
+      providerResumePicker: launchOptions.providerResumePicker === true && !providerResumeSessionId,
       providerResumeLatest: false
     }
   };
@@ -2034,6 +2091,9 @@ async function handleLaunchCommand(rawArgs = []) {
   }
 
   const launchTarget = await resolveManagedRootLaunchTarget(launchOptions);
+  const effectiveLaunchOptions = applyCodexProviderResumePickerDefault(launchOptions, launchTarget, {
+    interactive: deferProviderStartUntilAttached
+  });
   if (launchTarget.action === 'resume') {
     const candidate = launchTarget.candidate;
     printManagedRootResumeResult(candidate);
@@ -2044,7 +2104,7 @@ async function handleLaunchCommand(rawArgs = []) {
   }
 
   if (launchTarget.action === 'recover') {
-    const recoveryOptions = buildManagedRootRecoveryLaunchOptions(launchOptions, launchTarget.candidate);
+    const recoveryOptions = buildManagedRootRecoveryLaunchOptions(effectiveLaunchOptions, launchTarget.candidate);
     recoveryOptions.deferProviderStartUntilAttached = deferProviderStartUntilAttached;
     const result = await launchManagedRootSession(recoveryOptions);
     printManagedRootRecoveryResult(result, launchTarget.candidate, recoveryOptions);
@@ -2055,7 +2115,7 @@ async function handleLaunchCommand(rawArgs = []) {
   }
 
   if (launchTarget.action === 'context') {
-    const contextOptions = await buildManagedRootContextLaunchOptions(launchOptions, launchTarget.candidate);
+    const contextOptions = await buildManagedRootContextLaunchOptions(effectiveLaunchOptions, launchTarget.candidate);
     contextOptions.deferProviderStartUntilAttached = deferProviderStartUntilAttached;
     const result = await launchManagedRootSession(contextOptions);
     printManagedRootContextResult(result, launchTarget.candidate, contextOptions);
@@ -2066,10 +2126,10 @@ async function handleLaunchCommand(rawArgs = []) {
   }
 
   const result = await launchManagedRootSession({
-    ...launchOptions,
+    ...effectiveLaunchOptions,
     deferProviderStartUntilAttached
   });
-  printManagedRootLaunchResult(result, launchOptions);
+  printManagedRootLaunchResult(result, effectiveLaunchOptions);
   if (!launchOptions.detach && process.stdout.isTTY) {
     attachToManagedSession(result);
   }
@@ -2147,6 +2207,8 @@ module.exports = {
   launchManagedRootSession,
   buildManagedRootRecoveryLaunchOptions,
   buildManagedRootContextLaunchOptions,
+  shouldDefaultCodexProviderResumePicker,
+  applyCodexProviderResumePickerDefault,
   attachToManagedSession,
   handleLaunchCommand,
   handleListRootsCommand,

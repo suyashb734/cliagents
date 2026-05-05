@@ -847,7 +847,7 @@ const CLI_COMMANDS = {
     const resumeSessionId = resolveCodexResumeSessionId(options);
     const args = resumeSessionId
       ? ['codex', 'resume', resumeSessionId]
-      : (options.resumeLatest ? ['codex', 'resume', '--last'] : ['codex']);
+      : (options.resumePicker ? ['codex', 'resume'] : (options.resumeLatest ? ['codex', 'resume', '--last'] : ['codex']));
 
     // Permission mode handling:
     // - 'auto' (default) or 'bypassPermissions': Use bypass mode (auto-approve all)
@@ -2789,6 +2789,10 @@ class PersistentSessionManager extends EventEmitter {
       providerSessionId: derivedManagedRootProviderSessionId,
       resumeSessionId: providerResumeSessionId,
       resumeCommand: providerResumeCommand,
+      resumePicker: adapter === 'codex-cli'
+        && recoveryMetadata.providerResumePicker === true
+        && !providerResumeSessionId
+        && !shouldResumeLatestProviderSession,
       resumeLatest: shouldResumeLatestProviderSession,
       // Pass permissionMode if not 'auto', otherwise use legacy skip behavior
       permissionMode: effectivePermissionMode !== 'auto' ? effectivePermissionMode : null,

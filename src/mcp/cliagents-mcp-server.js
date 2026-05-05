@@ -1450,6 +1450,10 @@ This calls cliagents' direct-session discussion route and returns the completed 
           type: 'string',
           description: 'Provider-native session ID to exact-resume into a new managed root.'
         },
+        providerResumePicker: {
+          type: 'boolean',
+          description: 'For Codex managed roots, start the native provider-session resume picker in the launched terminal.'
+        },
         sourceRootSessionId: {
           type: 'string',
           description: 'Optional source root session ID to link or carry context from when using exact or context resume.'
@@ -3441,6 +3445,7 @@ async function handleLaunchRootSession(args) {
     recoverLatest: args?.recoverLatest === true,
     resumeMode: args?.resumeMode || null,
     providerSessionId: args?.providerSessionId || null,
+    providerResumePicker: args?.providerResumePicker === true,
     sourceRootSessionId: args?.sourceRootSessionId || null,
     detach: true
   };
@@ -3450,6 +3455,12 @@ async function handleLaunchRootSession(args) {
   const hasExplicitResumeMode = Boolean(launchOptions.resumeMode);
   if (launchOptions.forceNewRoot && (hasResumeFlag || hasRecoverFlag)) {
     throw new Error('Cannot combine forceNewRoot with resume or recover options');
+  }
+  if (launchOptions.providerSessionId && launchOptions.providerResumePicker) {
+    throw new Error('Cannot combine providerSessionId with providerResumePicker');
+  }
+  if (launchOptions.providerResumePicker && launchOptions.adapter !== 'codex-cli') {
+    throw new Error('providerResumePicker is currently supported only for Codex managed roots');
   }
   if (launchOptions.externalSessionRef && (hasResumeFlag || hasRecoverFlag)) {
     throw new Error('Cannot combine externalSessionRef with resume or recover options');
@@ -3476,6 +3487,7 @@ async function handleLaunchRootSession(args) {
       allowedTools: launchOptions.allowedTools,
       resumeMode: launchOptions.resumeMode,
       providerSessionId: launchOptions.providerSessionId || null,
+      providerResumePicker: launchOptions.providerResumePicker === true,
       sourceRootSessionId: launchOptions.sourceRootSessionId || null
     });
     if (res.status !== 200) {
@@ -3495,6 +3507,7 @@ async function handleLaunchRootSession(args) {
           `terminal_id: ${data.terminalId || 'n/a'}`,
           `session_name: ${data.sessionName || 'n/a'}`,
           launchOptions.resumeMode === 'exact' ? `provider_session_id: ${launchOptions.providerSessionId}` : null,
+          launchOptions.providerResumePicker ? 'provider_resume: picker' : null,
           launchOptions.sourceRootSessionId ? `source_root_session_id: ${launchOptions.sourceRootSessionId}` : null,
           `external_session_ref: ${data.externalSessionRef || launchOptions.externalSessionRef || 'n/a'}`,
           `console_url: ${data.consoleUrl || 'n/a'}`,
@@ -3549,7 +3562,10 @@ async function handleLaunchRootSession(args) {
           `profile: ${recoveryOptions.profile}`,
           `recovery_reason: ${previousCandidate.recoveryReason || 'stale-root'}`,
           `external_session_ref: ${result.externalSessionRef || previousCandidate.externalSessionRef || 'n/a'}`,
-          `provider_resume_session_id: ${recoveryOptions.sessionMetadata?.providerResumeSessionId || 'latest'}`,
+          recoveryOptions.sessionMetadata?.providerResumePicker ? 'provider_resume: picker' : null,
+          recoveryOptions.sessionMetadata?.providerResumeSessionId
+            ? `provider_resume_session_id: ${recoveryOptions.sessionMetadata.providerResumeSessionId}`
+            : null,
           `console_url: ${result.consoleUrl || 'n/a'}`,
           result.attachCommand ? `attach_command: ${result.attachCommand}` : null
         ].filter(Boolean).join('\n')
@@ -3576,6 +3592,7 @@ async function handleLaunchRootSession(args) {
           `profile: ${contextOptions.profile}`,
           'resume_mode: context',
           `context_reason: ${contextOptions.sessionMetadata?.modelSwitch ? 'model-switch' : (previousCandidate.recoveryReason || 'stale-root')}`,
+          contextOptions.providerResumePicker ? 'provider_resume: picker' : null,
           `external_session_ref: ${result.externalSessionRef || previousCandidate.externalSessionRef || 'n/a'}`,
           `console_url: ${result.consoleUrl || 'n/a'}`,
           result.attachCommand ? `attach_command: ${result.attachCommand}` : null
@@ -3596,6 +3613,7 @@ async function handleLaunchRootSession(args) {
         `terminal_id: ${result.terminalId}`,
         `session_name: ${result.sessionName}`,
         `profile: ${launchOptions.profile}`,
+        launchOptions.providerResumePicker ? 'provider_resume: picker' : null,
         `external_session_ref: ${result.externalSessionRef || 'n/a'}`,
         `console_url: ${result.consoleUrl || 'n/a'}`,
         result.attachCommand ? `attach_command: ${result.attachCommand}` : null

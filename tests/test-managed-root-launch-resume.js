@@ -22,7 +22,9 @@ const {
   listManagedRootRecoveryCandidates,
   resolveManagedRootLaunchTarget,
   buildManagedRootRecoveryLaunchOptions,
-  buildManagedRootContextLaunchOptions
+  buildManagedRootContextLaunchOptions,
+  shouldDefaultCodexProviderResumePicker,
+  applyCodexProviderResumePickerDefault
 } = require('../src/index');
 
 let passed = 0;
@@ -95,6 +97,12 @@ async function run() {
 
     const exactProviderResume = parseLaunchArgs(['codex', '--resume-provider-session', 'session-123']);
     assert.strictEqual(exactProviderResume.providerSessionId, 'session-123');
+
+    const providerPicker = parseLaunchArgs(['codex', '--resume-provider-picker']);
+    assert.strictEqual(providerPicker.providerResumePicker, true);
+
+    const freshProvider = parseLaunchArgs(['codex', '--fresh-provider-session']);
+    assert.strictEqual(freshProvider.freshProviderSession, true);
   });
 
   await test('Launch args reject mixed resume and recover combinations', async () => {
@@ -109,6 +117,18 @@ async function run() {
     assert.throws(
       () => parseLaunchArgs(['codex', '--resume-provider-session', 'session-123', '--resume-latest']),
       /Cannot combine --resume-provider-session with resume or recover flags/
+    );
+    assert.throws(
+      () => parseLaunchArgs(['codex', '--resume-provider-session', 'session-123', '--resume-provider-picker']),
+      /Cannot combine --resume-provider-session with --resume-provider-picker/
+    );
+    assert.throws(
+      () => parseLaunchArgs(['codex', '--fresh-provider-session', '--resume-provider-picker']),
+      /Cannot combine --fresh-provider-session with provider resume options/
+    );
+    assert.throws(
+      () => parseLaunchArgs(['claude', '--resume-provider-picker']),
+      /currently supported only for Codex/
     );
   });
 
@@ -938,6 +958,40 @@ async function run() {
     });
     assert.strictEqual(fresh.action, 'launch');
     assert.strictEqual(fresh.reason, 'interactive-new-root');
+  });
+
+  await test('Interactive fresh Codex launch defaults to native provider resume picker', async () => {
+    const launchOptions = parseLaunchArgs(['codex']);
+    const launchTarget = {
+      action: 'launch',
+      reason: 'interactive-new-root'
+    };
+
+    assert.strictEqual(
+      shouldDefaultCodexProviderResumePicker(launchOptions, launchTarget, { interactive: true }),
+      true
+    );
+
+    const defaulted = applyCodexProviderResumePickerDefault(launchOptions, launchTarget, { interactive: true });
+    assert.strictEqual(defaulted.providerResumePicker, true);
+    assert.strictEqual(defaulted.providerResumePickerDefaulted, true);
+
+    const nonInteractive = applyCodexProviderResumePickerDefault(launchOptions, launchTarget, { interactive: false });
+    assert.strictEqual(nonInteractive.providerResumePicker, false);
+
+    const freshProvider = applyCodexProviderResumePickerDefault(
+      parseLaunchArgs(['codex', '--fresh-provider-session']),
+      launchTarget,
+      { interactive: true }
+    );
+    assert.strictEqual(freshProvider.providerResumePicker, false);
+
+    const attachedRoot = applyCodexProviderResumePickerDefault(
+      launchOptions,
+      { action: 'resume', reason: 'interactive-selection' },
+      { interactive: true }
+    );
+    assert.strictEqual(attachedRoot.providerResumePicker, false);
   });
 
   await test('Context launch options carry root memory and preserve sticky identity', async () => {

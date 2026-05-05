@@ -413,6 +413,25 @@ async function run() {
     const recoveredCodexFreshHistory = fakeTmux.getHistory(recoveredCodexFreshRoot.sessionName, recoveredCodexFreshRoot.windowName);
     assert(!recoveredCodexFreshHistory.includes('resume --last'), 'did not expect recovered Codex root without an exact handle to resume the latest provider session');
 
+    const codexProviderPickerRoot = await manager.createTerminal({
+      adapter: 'codex-cli',
+      role: 'main',
+      workDir: rootDir,
+      originClient: 'codex',
+      externalSessionRef: 'codex:managed:provider-picker-test',
+      sessionKind: 'main',
+      permissionMode: 'default',
+      sessionMetadata: {
+        clientName: 'codex',
+        attachMode: 'managed-root-launch',
+        managedLaunch: true,
+        providerResumePicker: true
+      }
+    });
+    const codexProviderPickerHistory = fakeTmux.getHistory(codexProviderPickerRoot.sessionName, codexProviderPickerRoot.windowName);
+    assert(codexProviderPickerHistory.includes('codex resume'), 'expected Codex provider resume picker launch to run codex resume');
+    assert(!codexProviderPickerHistory.includes('resume --last'), 'did not expect provider picker launch to skip the native picker');
+
     const recoveredClaudeRoot = await manager.createTerminal({
       adapter: 'claude-code',
       role: 'main',
