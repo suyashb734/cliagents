@@ -7,6 +7,7 @@ const assert = require('assert');
 const {
   parseArgs,
   isAssignmentEligible,
+  resolveActivePolicy,
   runOnce,
   main
 } = require('../scripts/task-supervisor-harness');
@@ -108,6 +109,12 @@ async function assertParseDefaults() {
   assert.strictEqual(explicit.loop, true);
   assert.strictEqual(explicit.once, false);
   assert.strictEqual(explicit.concurrency, 3);
+
+  const auto = parseArgs(['--task-id', 'task-1', '--auto', '--policy-sequence', 'review,implement']);
+  assert.strictEqual(auto.auto, true);
+  assert.strictEqual(auto.loop, true);
+  assert.strictEqual(auto.once, false);
+  assert.deepStrictEqual(auto.policySequence, ['review', 'implement']);
 
   assert.strictEqual(parseArgs(['--', '--task-id', 'task-1']).taskId, 'task-1');
 
@@ -232,6 +239,101 @@ async function assertPhaseGate() {
   console.log('✅ task supervisor applies phase gates');
 }
 
+async function assertAutoPolicyAdvancesByCompletedStages() {
+  const assignments = [
+    { id: 'a1', role: 'review', status: 'completed', metadata: { startPolicy: 'start-before-implementation' } },
+    { id: 'a2', role: 'implement', status: 'queued', metadata: { startPolicy: 'after-phase0-contract' } },
+    { id: 'a3', role: 'implement', status: 'queued', metadata: { startPolicy: 'after-phase1-contract-or-integration' } }
+  ];
+  const resolution = resolveActivePolicy(parseArgs(['--task-id', 'task-1', '--auto']), assignments);
+  assert.strictEqual(resolution.activePolicy, 'after-phase0-contract');
+  assert.deepStrictEqual(resolution.allowedStartPolicies, ['after-phase0-contract']);
+
+  const fetchImpl = createFakeFetch({
+    taskPayload: createTaskPayload(),
+    assignments
+  });
+  const output = captureOutput();
+  const result = await runOnce(parseArgs([
+    '--task-id',
+    'task-1',
+    '--base-url',
+    'http://fake.local',
+    '--root-session-id',
+    'root-1',
+    '--auto',
+    '--start',
+    '--concurrency',
+    '5'
+  ]), { fetchImpl, output: output.output });
+
+  const postCalls = fetchImpl.calls.filter((call) => call.method === 'POST');
+  assert.strictEqual(postCalls.length, 1);
+  assert.strictEqual(postCalls[0].path, '/orchestration/tasks/task-1/assignments/a2/start');
+  assert.strictEqual(result.auto.activePolicy, 'after-phase0-contract');
+  assert.deepStrictEqual(result.started.map((item) => item.assignmentId), ['a2']);
+
+  console.log('✅ task supervisor auto mode advances to the next unfinished policy stage');
+}
+
+async function assertAutoPolicyWaitsForRunningStage() {
+  const assignments = [
+    { id: 'a1', role: 'review', status: 'running', terminalId: 'term-a1', metadata: { startPolicy: 'start-before-implementation' } },
+    { id: 'a2', role: 'implement', status: 'queued', metadata: { startPolicy: 'after-phase0-contract' } }
+  ];
+  const fetchImpl = createFakeFetch({
+    taskPayload: createTaskPayload(),
+    assignments
+  });
+  const output = captureOutput();
+  const result = await runOnce(parseArgs([
+    '--task-id',
+    'task-1',
+    '--base-url',
+    'http://fake.local',
+    '--root-session-id',
+    'root-1',
+    '--auto',
+    '--start',
+    '--concurrency',
+    '5'
+  ]), { fetchImpl, output: output.output });
+
+  assert.strictEqual(fetchImpl.calls.filter((call) => call.method === 'POST').length, 0);
+  assert.strictEqual(result.auto.activePolicy, 'start-before-implementation');
+  assert.strictEqual(result.done, false);
+
+  console.log('✅ task supervisor auto mode waits for the current running stage');
+}
+
+async function assertAutoPolicyStallsOnUnknownQueuedWork() {
+  const assignments = [
+    { id: 'a1', role: 'implement', status: 'queued', metadata: { startPolicy: 'custom-later-policy' } }
+  ];
+  const fetchImpl = createFakeFetch({
+    taskPayload: createTaskPayload(),
+    assignments
+  });
+  const output = captureOutput();
+  const result = await runOnce(parseArgs([
+    '--task-id',
+    'task-1',
+    '--base-url',
+    'http://fake.local',
+    '--root-session-id',
+    'root-1',
+    '--auto',
+    '--start'
+  ]), { fetchImpl, output: output.output });
+
+  assert.strictEqual(result.exitCode, 4);
+  assert.strictEqual(result.done, true);
+  assert.strictEqual(result.stalledReason, 'unfinished-policy:custom-later-policy');
+  assert.strictEqual(fetchImpl.calls.filter((call) => call.method === 'POST').length, 0);
+
+  console.log('✅ task supervisor auto mode surfaces unknown policy stalls');
+}
+
 async function assertStartRequiresRootContext() {
   const assignments = [
     { id: 'a1', role: 'review', status: 'queued', metadata: { startPolicy: 'start-now' } }
@@ -266,6 +368,9 @@ async function mainTest() {
   await assertDryRunDoesNotPostStart();
   await assertStartPostsRootContextAndRespectsConcurrency();
   await assertPhaseGate();
+  await assertAutoPolicyAdvancesByCompletedStages();
+  await assertAutoPolicyWaitsForRunningStage();
+  await assertAutoPolicyStallsOnUnknownQueuedWork();
   await assertStartRequiresRootContext();
 }
 

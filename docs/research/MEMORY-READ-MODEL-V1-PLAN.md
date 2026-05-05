@@ -207,20 +207,32 @@ Default behavior is safe:
 - starts only queued assignments whose `metadata.startPolicy` is allowed
 - respects `metadata.dependsOn`, `metadata.phase`, and `metadata.manualHold`
 - caps parallel starts with `--concurrency`
+- `--auto` advances through an ordered policy sequence only after the current
+  policy stage completes
 
-Phase 0 example:
+Autonomous execution example:
 
 ```bash
 pnpm supervise:task -- --task-id task_memory_read_model_v1 \
   --root-session-id d4541c1eaabde31194ac0c082ab98f34 \
-  --allow-start-policy start-before-implementation \
+  --auto \
   --concurrency 2 \
   --start \
   --loop
 ```
 
-Later implementation phases should be started by widening the allowed
-`startPolicy` only after the supervisor has reconciled Phase 0 review output.
+The default auto policy order is:
+
+1. `start-before-implementation`
+2. `after-phase0-contract`
+3. `after-phase1-contract-or-integration`
+4. `after-phase0-contract-and-db-helpers`
+5. `after-phase3-api`
+6. `after-integration`
+
+If this task needs a different order, pass `--policy-sequence` explicitly.
+The harness stops on failed, blocked, or stalled work unless an operator
+chooses an explicit `--continue-on-*` override.
 
 ## Model Routing
 

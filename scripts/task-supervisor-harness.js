@@ -8,6 +8,15 @@ const DEFAULT_ALLOWED_START_POLICIES = [
   'start-before-implementation',
   'immediate'
 ];
+const DEFAULT_POLICY_SEQUENCE = [
+  'start-before-implementation',
+  'after-phase0-contract',
+  'after-phase1-contract-or-integration',
+  'after-phase0-contract-and-db-helpers',
+  'after-phase3-api',
+  'after-integration'
+];
+const STALLED_EXIT_CODE = 4;
 
 function printUsage(output = console.log) {
   output(`Usage:
@@ -26,6 +35,8 @@ Options:
   --poll-ms <n>                  Loop polling interval. Defaults to 30000.
   --max-iterations <n>           Stop after this many loop iterations.
   --allow-start-policy <policy>  Start only matching metadata.startPolicy values. Repeatable or comma-separated.
+  --auto                         Select the next unfinished policy stage automatically and keep looping.
+  --policy-sequence <policies>   Ordered policy gates for --auto. Repeatable or comma-separated.
   --all-policies                 Disable startPolicy gating.
   --allow-phase <phase>          Start only matching metadata.phase values. Repeatable or comma-separated.
   --adapter <adapter>            Start only queued assignments for this adapter.
@@ -34,6 +45,7 @@ Options:
   --loop                         Keep polling until all assignments settle or a failure stops the loop.
   --once                         Run one pass. This is the default.
   --continue-on-failure          Keep looping even when assignments have failed.
+  --continue-on-stalled          Keep looping when queued work cannot be safely started.
   --stop-on-blocked              Return non-zero when any assignment is blocked.
   --ignore-manual-hold           Allow assignments with metadata.manualHold or hold/manual policies.
   --prefer-reuse                 Ask the broker to prefer reusable child sessions.
@@ -100,6 +112,8 @@ function parseArgs(rawArgs = []) {
     pollMs: 30_000,
     maxIterations: null,
     allowedStartPolicies: null,
+    auto: false,
+    policySequence: [],
     allowAllPolicies: false,
     allowedPhases: [],
     adapter: null,
@@ -108,6 +122,7 @@ function parseArgs(rawArgs = []) {
     loop: false,
     once: true,
     continueOnFailure: false,
+    continueOnStalled: false,
     stopOnBlocked: false,
     ignoreManualHold: false,
     preferReuse: undefined,
@@ -218,6 +233,17 @@ function parseArgs(rawArgs = []) {
         index = read.nextIndex;
         break;
       }
+      case '--auto':
+        options.auto = true;
+        options.loop = true;
+        options.once = false;
+        break;
+      case '--policy-sequence': {
+        const read = readOptionValue(rawArgs, index, flag);
+        options.policySequence.push(...splitList(read.value));
+        index = read.nextIndex;
+        break;
+      }
       case '--all-policies':
         options.allowAllPolicies = true;
         break;
@@ -255,6 +281,9 @@ function parseArgs(rawArgs = []) {
         break;
       case '--continue-on-failure':
         options.continueOnFailure = true;
+        break;
+      case '--continue-on-stalled':
+        options.continueOnStalled = true;
         break;
       case '--stop-on-blocked':
         options.stopOnBlocked = true;
@@ -298,6 +327,7 @@ function parseArgs(rawArgs = []) {
   options.allowedStartPolicies = explicitPolicies.length > 0
     ? explicitPolicies.map(normalizeKey)
     : [...DEFAULT_ALLOWED_START_POLICIES];
+  options.policySequence = options.policySequence.map(normalizeKey);
   options.allowedPhases = options.allowedPhases.map(normalizeKey);
   options.adapter = normalizeKey(options.adapter) || null;
   options.role = normalizeKey(options.role) || null;
@@ -386,6 +416,64 @@ function getAssignmentStatus(assignment = {}) {
 
 function isTerminalStatus(status) {
   return status === 'completed' || status === 'failed' || status === 'cancelled' || status === 'abandoned';
+}
+
+function getPolicySequence(options = {}) {
+  if (options.policySequence?.length > 0) {
+    return options.policySequence;
+  }
+  if (options.auto) {
+    return [...DEFAULT_POLICY_SEQUENCE];
+  }
+  return options.allowedStartPolicies || [];
+}
+
+function resolveActivePolicy(options, assignments = []) {
+  if (!options.auto) {
+    return {
+      activePolicy: null,
+      allowedStartPolicies: options.allowedStartPolicies,
+      autoDone: false,
+      stalledReason: null,
+      policySequence: options.allowedStartPolicies || []
+    };
+  }
+
+  const policySequence = getPolicySequence(options);
+  const knownPolicies = new Set(policySequence);
+  for (const policy of policySequence) {
+    const matching = assignments.filter((assignment) => getStartPolicy(getAssignmentMetadata(assignment)) === policy);
+    if (matching.length === 0) {
+      continue;
+    }
+    if (matching.every((assignment) => getAssignmentStatus(assignment) === 'completed')) {
+      continue;
+    }
+    return {
+      activePolicy: policy,
+      allowedStartPolicies: [policy],
+      autoDone: false,
+      stalledReason: null,
+      policySequence
+    };
+  }
+
+  const unfinished = assignments.filter((assignment) => !isTerminalStatus(getAssignmentStatus(assignment)));
+  const unknownUnfinishedPolicies = [...new Set(
+    unfinished
+      .map((assignment) => getStartPolicy(getAssignmentMetadata(assignment)))
+      .filter((policy) => !knownPolicies.has(policy))
+  )];
+
+  return {
+    activePolicy: null,
+    allowedStartPolicies: [],
+    autoDone: unfinished.length === 0,
+    stalledReason: unknownUnfinishedPolicies.length > 0
+      ? `unfinished-policy:${unknownUnfinishedPolicies.join(',')}`
+      : null,
+    policySequence
+  };
 }
 
 function summarizeAssignments(assignments = []) {
@@ -522,6 +610,13 @@ function writeHumanSummary(output, result, options) {
   if (result.started.length > 0) {
     output(`[supervisor] started=${result.started.map((item) => `${item.assignmentId}:${item.terminalId || 'unknown-terminal'}`).join(', ')}`);
   }
+  if (result.auto?.enabled) {
+    output(
+      `[supervisor] auto active_policy=${result.auto.activePolicy || 'none'} `
+      + `auto_done=${result.auto.done ? 'yes' : 'no'}`
+      + `${result.stalledReason ? ` stalled=${result.stalledReason}` : ''}`
+    );
+  }
 }
 
 async function startAssignment(options, taskPayload, assignment, eligibility, deps = {}) {
@@ -585,9 +680,15 @@ async function runOnce(options, deps = {}) {
   );
   const assignments = Array.isArray(assignmentsPayload?.assignments) ? assignmentsPayload.assignments : [];
   const counts = summarizeAssignments(assignments);
+  const policyResolution = resolveActivePolicy(options, assignments);
+  const eligibilityOptions = {
+    ...options,
+    allowedStartPolicies: policyResolution.allowedStartPolicies,
+    allowAllPolicies: options.auto ? false : options.allowAllPolicies
+  };
   const classified = assignments.map((assignment) => ({
     assignment,
-    ...isAssignmentEligible(assignment, assignments, options)
+    ...isAssignmentEligible(assignment, assignments, eligibilityOptions)
   }));
   const eligible = classified.filter((item) => item.eligible);
   const skipped = classified.filter((item) => !item.eligible && getAssignmentStatus(item.assignment) === 'queued');
@@ -606,9 +707,13 @@ async function runOnce(options, deps = {}) {
     || assignments.every((assignment) => isTerminalStatus(getAssignmentStatus(assignment)));
   const failed = counts.failed > 0;
   const blocked = counts.blocked > 0;
+  const stalledReason = policyResolution.stalledReason
+    || (options.auto && !policyResolution.autoDone && counts.running === 0 && counts.blocked === 0 && counts.failed === 0 && eligible.length === 0 && counts.queued > 0
+      ? 'no-eligible-queued-work'
+      : null);
   const exitCode = failed && !options.continueOnFailure
     ? 2
-    : (blocked && options.stopOnBlocked ? 3 : 0);
+    : (blocked && options.stopOnBlocked ? 3 : (stalledReason && !options.continueOnStalled ? STALLED_EXIT_CODE : 0));
 
   const result = {
     taskId: options.taskId,
@@ -633,8 +738,15 @@ async function runOnce(options, deps = {}) {
     })),
     started,
     dryRun: !options.start,
-    done: allAssignmentsSettled || exitCode !== 0,
-    exitCode
+    done: allAssignmentsSettled || policyResolution.autoDone || exitCode !== 0,
+    exitCode,
+    stalledReason,
+    auto: {
+      enabled: options.auto,
+      activePolicy: policyResolution.activePolicy,
+      policySequence: policyResolution.policySequence,
+      done: policyResolution.autoDone
+    }
   };
 
   writeHumanSummary(output, result, options);
@@ -685,12 +797,16 @@ if (require.main === module) {
 
 module.exports = {
   DEFAULT_ALLOWED_START_POLICIES,
+  DEFAULT_POLICY_SEQUENCE,
+  STALLED_EXIT_CODE,
   parseArgs,
   getAssignmentMetadata,
   getDependencyIds,
   getStartPolicy,
   getAssignmentPhase,
   getAssignmentStatus,
+  getPolicySequence,
+  resolveActivePolicy,
   isAssignmentEligible,
   summarizeAssignments,
   runOnce,
