@@ -61,7 +61,10 @@ function pathExists(targetPath) {
 function safeRealpath(targetPath) {
   try {
     return fs.realpathSync(targetPath);
-  } catch {
+  } catch (error) {
+    if (error?.code !== 'ENOENT') {
+      throw error;
+    }
     return path.resolve(targetPath);
   }
 }
@@ -71,13 +74,20 @@ function resolvePhysicalPath(targetPath) {
   const parts = resolved.split(path.sep).filter(Boolean);
   let cursor = path.isAbsolute(resolved) ? path.sep : '';
   const missingParts = [];
+  let foundMissing = false;
 
   for (const part of parts) {
+    if (foundMissing) {
+      missingParts.push(part);
+      continue;
+    }
+
     const next = path.join(cursor, part);
     if (pathExists(next)) {
       cursor = next;
       continue;
     }
+    foundMissing = true;
     missingParts.push(part);
   }
 
