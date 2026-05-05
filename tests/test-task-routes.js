@@ -255,7 +255,7 @@ async function runRouteAssertions() {
 
     const createTaskRes = await request(serverHandle.baseUrl, 'POST', '/orchestration/tasks', {
       title: 'Implement Tasks V1',
-      workspaceRoot: '/tmp/tasks-v1',
+      workspaceRoot: rootDir,
       brief: 'Create the first task object.'
     });
     assert.strictEqual(createTaskRes.status, 200);

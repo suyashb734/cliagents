@@ -127,7 +127,8 @@ function initRepo(repoDir) {
 async function run() {
   const rootDir = makeTempDir('cliagents-task-worktree-');
   const repoDir = path.join(rootDir, 'repo');
-  const worktreeDir = path.join(rootDir, 'worktrees', 'task-exec');
+  const worktreeDir = path.join(rootDir, 'repo-worktrees', 'task-exec');
+  const escapedWorktreeDir = path.join(rootDir, 'escaped-worktrees', 'task-exec');
   const branchName = 'task/task-exec';
   initRepo(repoDir);
 
@@ -151,6 +152,29 @@ async function run() {
     });
     assert.strictEqual(createTaskRes.status, 200);
     const taskId = createTaskRes.data.task.id;
+
+    const escapedAssignmentRes = await request(serverHandle.baseUrl, 'POST', `/orchestration/tasks/${taskId}/assignments`, {
+      role: 'executor',
+      instructions: 'Attempt to escape the allowed worktree root.',
+      worktreePath: escapedWorktreeDir,
+      worktreeBranch: 'task/escape'
+    });
+    assert.strictEqual(escapedAssignmentRes.status, 200);
+    const escapedStartRes = await request(
+      serverHandle.baseUrl,
+      'POST',
+      `/orchestration/tasks/${taskId}/assignments/${escapedAssignmentRes.data.assignment.id}/start`,
+      {
+        rootSessionId: 'root-task-isolation',
+        parentSessionId: 'root-task-isolation',
+        originClient: 'test',
+        externalSessionRef: 'test:task-isolation'
+      }
+    );
+    assert.strictEqual(escapedStartRes.status, 500);
+    assert.strictEqual(escapedStartRes.data.error.code, 'task_assignment_start_failed');
+    assert.match(escapedStartRes.data.error.message, /allowed worktree root/);
+    assert.strictEqual(sessionManager.state.createCalls.length, 0);
 
     const createAssignmentRes = await request(serverHandle.baseUrl, 'POST', `/orchestration/tasks/${taskId}/assignments`, {
       role: 'executor',

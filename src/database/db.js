@@ -1305,7 +1305,7 @@ class OrchestrationDB {
       return this.db.get('SELECT * FROM session_events WHERE id = ?', id);
     });
 
-    const row = insertEvent();
+    const row = insertEvent.immediate();
     if (!row) {
       return null;
     }
