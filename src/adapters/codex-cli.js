@@ -14,6 +14,8 @@ const BaseLLMAdapter = require('../core/base-llm-adapter');
 const { createAdapterContract, defineAdapterCapabilities, EXECUTION_MODES } = require('./contract');
 const { logConversation, logSessionStart } = require('../utils/conversation-logger');
 
+const DEFAULT_CODEX_EXEC_MODEL = process.env.CLIAGENTS_CODEX_EXEC_MODEL || 'gpt-5.4';
+
 class CodexCliAdapter extends BaseLLMAdapter {
   constructor(config = {}) {
     super({
@@ -21,7 +23,7 @@ class CodexCliAdapter extends BaseLLMAdapter {
       workDir: '/tmp/agent',
       skipPermissions: true,  // Use --dangerously-skip-permissions equivalent
       maxResponseSize: 10 * 1024 * 1024, // 10MB max response buffer
-      model: null,  // null = use default, or specify model like 'o3-mini', 'gpt-4o'
+      model: DEFAULT_CODEX_EXEC_MODEL,  // Pin non-interactive runs away from unsupported user CLI defaults.
       ...config
     });
 
@@ -68,7 +70,8 @@ class CodexCliAdapter extends BaseLLMAdapter {
 
     // Available models for Codex CLI
     this.availableModels = [
-      { id: 'default', name: 'Default', description: 'Uses Codex default model' },
+      { id: 'default', name: 'Default', description: 'Uses the broker-safe Codex execution default' },
+      { id: 'gpt-5.4', name: 'GPT-5.4', description: 'Supported high-capability Codex model' },
       { id: 'o3-mini', name: 'o3-mini', description: 'Fast and efficient reasoning model' },
       { id: 'o4-mini', name: 'o4-mini', description: 'Latest efficient model' },
       { id: 'gpt-4o', name: 'GPT-4o', description: 'Most capable GPT-4 model' },

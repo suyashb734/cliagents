@@ -276,6 +276,19 @@ async function assertAutoPolicyAdvancesByCompletedStages() {
   console.log('✅ task supervisor auto mode advances to the next unfinished policy stage');
 }
 
+async function assertAutoPolicyTreatsSupersededAsSatisfied() {
+  const assignments = [
+    { id: 'a1', role: 'implement', status: 'superseded', metadata: { startPolicy: 'after-phase0-contract' } },
+    { id: 'a2', role: 'implement', status: 'completed', metadata: { startPolicy: 'after-phase0-contract' } },
+    { id: 'a3', role: 'implement', status: 'queued', metadata: { startPolicy: 'after-phase1-contract-or-integration' } }
+  ];
+  const resolution = resolveActivePolicy(parseArgs(['--task-id', 'task-1', '--auto']), assignments);
+  assert.strictEqual(resolution.activePolicy, 'after-phase1-contract-or-integration');
+  assert.deepStrictEqual(resolution.allowedStartPolicies, ['after-phase1-contract-or-integration']);
+
+  console.log('✅ task supervisor auto mode treats superseded assignments as satisfied gates');
+}
+
 async function assertAutoPolicyWaitsForRunningStage() {
   const assignments = [
     { id: 'a1', role: 'review', status: 'running', terminalId: 'term-a1', metadata: { startPolicy: 'start-before-implementation' } },
@@ -369,6 +382,7 @@ async function mainTest() {
   await assertStartPostsRootContextAndRespectsConcurrency();
   await assertPhaseGate();
   await assertAutoPolicyAdvancesByCompletedStages();
+  await assertAutoPolicyTreatsSupersededAsSatisfied();
   await assertAutoPolicyWaitsForRunningStage();
   await assertAutoPolicyStallsOnUnknownQueuedWork();
   await assertStartRequiresRootContext();

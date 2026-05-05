@@ -96,6 +96,7 @@ const DEFAULT_WORKER_STARTUP_DELAY_MS = 250;
 const DEFAULT_DEFERRED_PROVIDER_ATTACH_TIMEOUT_MS = 20000;
 const DEFERRED_PROVIDER_ATTACH_POLL_INTERVAL_MS = 150;
 const DEFAULT_POST_ATTACH_PROVIDER_START_DELAY_MS = 120;
+const DEFAULT_CODEX_ORCHESTRATION_MODEL = process.env.CLIAGENTS_CODEX_ORCHESTRATION_MODEL || 'gpt-5.4';
 const ENABLE_STATUS_DEBUG_LOGS = process.env.CLIAGENTS_STATUS_DEBUG === '1';
 
 function hashSessionShape(value) {
@@ -180,6 +181,20 @@ function resolveGeminiCommandModel(model) {
     return model;
   }
   return inferGeminiBrokerDefaultModel() || null;
+}
+
+function resolveCodexOneShotModel(model) {
+  if (model && model !== 'default') {
+    return model;
+  }
+  return DEFAULT_CODEX_ORCHESTRATION_MODEL || null;
+}
+
+function resolveTerminalModel(adapter, role, sessionKind, model) {
+  if (adapter === 'codex-cli' && (role === 'worker' || sessionKind === 'child')) {
+    return resolveCodexOneShotModel(model);
+  }
+  return model || null;
 }
 
 function normalizeUuid(value) {
@@ -458,8 +473,9 @@ function buildCodexOneShotCommand(message, terminal) {
   const escapedPrompt = escapeForSingleQuotes(prompt);
   const args = ['CI=true', 'codex', 'exec'];
 
-  if (terminal.model && terminal.model !== 'default') {
-    args.push('-m', terminal.model);
+  const resolvedModel = resolveCodexOneShotModel(terminal.model);
+  if (resolvedModel) {
+    args.push('-m', resolvedModel);
   }
   args.push('--full-auto', '--json', '--skip-git-repo-check');
   args.push(`'${escapedPrompt}'`);
@@ -2619,6 +2635,7 @@ class PersistentSessionManager extends EventEmitter {
     if (resolvedSessionKind === 'collaborator' && !isCollaboratorReadyAdapter(adapter)) {
       throw new Error(`Adapter '${adapter}' is not collaborator-ready in the current child-session runtime`);
     }
+    const effectiveModel = resolveTerminalModel(adapter, role, resolvedSessionKind, model);
     const shouldHonorProviderResumeSessionId = (
       recoveredManagedRoot
       || resolvedSessionKind === 'main'
@@ -2646,7 +2663,7 @@ class PersistentSessionManager extends EventEmitter {
       role,
       workDir,
       systemPrompt,
-      model,
+      model: effectiveModel,
       allowedTools,
       sessionLabel: resolvedSessionLabel,
       permissionMode,
@@ -2784,7 +2801,7 @@ class PersistentSessionManager extends EventEmitter {
     const cliCommand = CLI_COMMANDS[adapter]({
       role,              // CRITICAL: needed for orchestration mode detection
       systemPrompt,
-      model,
+      model: effectiveModel,
       allowedTools,
       providerSessionId: derivedManagedRootProviderSessionId,
       resumeSessionId: providerResumeSessionId,
@@ -2810,7 +2827,7 @@ class PersistentSessionManager extends EventEmitter {
       agentProfile,
       role,
       workDir,
-      model,
+      model: effectiveModel,
       systemPrompt,
       allowedTools: Array.isArray(allowedTools) ? [...allowedTools] : null,
       permissionMode: effectivePermissionMode,
@@ -2845,7 +2862,7 @@ class PersistentSessionManager extends EventEmitter {
       role,
       workDir,
       systemPrompt,
-      model,
+      model: effectiveModel,
       allowedTools,
       sessionLabel: resolvedSessionLabel,
       permissionMode: effectivePermissionMode,

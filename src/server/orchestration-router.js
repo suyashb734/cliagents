@@ -653,7 +653,10 @@ function createOrchestrationRouter(context) {
     ['completed', 'completed'],
     ['idle', 'completed'],
     ['failed', 'failed'],
-    ['error', 'failed']
+    ['error', 'failed'],
+    ['cancelled', 'cancelled'],
+    ['canceled', 'cancelled'],
+    ['superseded', 'superseded']
   ]);
 
   const TASK_ASSIGNMENT_ROLE_MAP = new Map([
@@ -709,9 +712,12 @@ function createOrchestrationRouter(context) {
     const terminal = resolveTaskAssignmentTerminalSnapshot(assignment);
     const terminalStatus = terminal?.status || null;
     const storedStatus = String(assignment?.status || 'queued').trim().toLowerCase() || 'queued';
-    const status = assignment?.terminalId
+    const storedStatusOverridesTerminal = storedStatus === 'cancelled' || storedStatus === 'superseded';
+    const status = storedStatusOverridesTerminal
+      ? normalizeTaskAssignmentStatus(storedStatus, 'queued')
+      : (assignment?.terminalId
       ? normalizeTaskAssignmentStatus(terminalStatus, normalizeTaskAssignmentStatus(storedStatus, 'queued'))
-      : normalizeTaskAssignmentStatus(storedStatus, 'queued');
+      : normalizeTaskAssignmentStatus(storedStatus, 'queued'));
     const usageSummary = typeof db?.summarizeUsage === 'function'
       ? db.summarizeUsage({ taskAssignmentId: assignment?.id || null })
       : null;
@@ -744,7 +750,9 @@ function createOrchestrationRouter(context) {
       running: 0,
       blocked: 0,
       failed: 0,
-      completed: 0
+      completed: 0,
+      cancelled: 0,
+      superseded: 0
     };
 
     for (const assignment of assignments || []) {
@@ -759,16 +767,22 @@ function createOrchestrationRouter(context) {
     if (!Array.isArray(assignments) || assignments.length === 0) {
       return 'pending';
     }
-    if (assignments.some((assignment) => assignment.status === 'blocked')) {
+    const effectiveAssignments = assignments.filter((assignment) => (
+      assignment.status !== 'cancelled' && assignment.status !== 'superseded'
+    ));
+    if (effectiveAssignments.length === 0) {
+      return 'pending';
+    }
+    if (effectiveAssignments.some((assignment) => assignment.status === 'blocked')) {
       return 'blocked';
     }
-    if (assignments.some((assignment) => assignment.status === 'running')) {
+    if (effectiveAssignments.some((assignment) => assignment.status === 'running')) {
       return 'running';
     }
-    if (assignments.every((assignment) => assignment.status === 'completed')) {
+    if (effectiveAssignments.every((assignment) => assignment.status === 'completed')) {
       return 'completed';
     }
-    if (assignments.some((assignment) => assignment.status === 'failed')) {
+    if (effectiveAssignments.some((assignment) => assignment.status === 'failed')) {
       return 'failed';
     }
     return 'pending';
@@ -1141,6 +1155,96 @@ function createOrchestrationRouter(context) {
     } catch (error) {
       res.status(500).json({
         error: { code: 'internal_error', message: error.message }
+      });
+    }
+  });
+
+  /**
+   * POST /orchestration/tasks/:taskId/assignments/:assignmentId/supersede
+   * Mark an assignment as superseded and optionally create a queued replacement.
+   */
+  router.post('/tasks/:taskId/assignments/:assignmentId/supersede', (req, res) => {
+    try {
+      if (!db?.getTask || !db?.getTaskAssignment || !db?.updateTaskAssignment || !db?.createTaskAssignment) {
+        return res.status(503).json({
+          error: { code: 'unavailable', message: 'task assignments are not configured' }
+        });
+      }
+
+      const task = db.getTask(req.params.taskId);
+      if (!task) {
+        return res.status(404).json({
+          error: { code: 'task_not_found', message: `Task ${req.params.taskId} not found` }
+        });
+      }
+
+      const assignment = db.getTaskAssignment(req.params.assignmentId);
+      if (!assignment || assignment.taskId !== task.id) {
+        return res.status(404).json({
+          error: { code: 'task_assignment_not_found', message: `Assignment ${req.params.assignmentId} not found for task ${task.id}` }
+        });
+      }
+
+      const storedStatus = normalizeTaskAssignmentStatus(assignment.status, 'queued');
+      if (storedStatus === 'cancelled' || storedStatus === 'superseded') {
+        return res.status(409).json({
+          error: {
+            code: 'task_assignment_already_terminal',
+            message: `Assignment ${assignment.id} is already ${storedStatus}`
+          }
+        });
+      }
+
+      const now = Date.now();
+      const reason = String(req.body?.reason || '').trim() || null;
+      const replacementSpec = req.body?.replacement === false ? null : (req.body?.replacement || {});
+      let replacement = null;
+      if (replacementSpec) {
+        replacement = db.createTaskAssignment({
+          id: replacementSpec.id,
+          taskId: task.id,
+          role: replacementSpec.role || assignment.role,
+          instructions: replacementSpec.instructions || assignment.instructions,
+          adapter: replacementSpec.adapter !== undefined ? replacementSpec.adapter : assignment.adapter,
+          model: replacementSpec.model !== undefined ? replacementSpec.model : assignment.model,
+          worktreePath: replacementSpec.worktreePath !== undefined ? replacementSpec.worktreePath : assignment.worktreePath,
+          worktreeBranch: replacementSpec.worktreeBranch !== undefined ? replacementSpec.worktreeBranch : assignment.worktreeBranch,
+          acceptanceCriteria: replacementSpec.acceptanceCriteria !== undefined ? replacementSpec.acceptanceCriteria : assignment.acceptanceCriteria,
+          metadata: {
+            ...(assignment.metadata || {}),
+            ...(replacementSpec.metadata && typeof replacementSpec.metadata === 'object' && !Array.isArray(replacementSpec.metadata)
+              ? replacementSpec.metadata
+              : {}),
+            supersedes: assignment.id,
+            retryOf: assignment.id,
+            supersedeReason: reason,
+            supersededAt: now
+          },
+          createdAt: now
+        });
+      }
+
+      const superseded = db.updateTaskAssignment(assignment.id, {
+        status: 'superseded',
+        completedAt: now,
+        metadata: {
+          ...(assignment.metadata || {}),
+          supersededAt: now,
+          supersededBy: replacement?.id || null,
+          supersedeReason: reason
+        },
+        updatedAt: now
+      });
+      db.updateTask(task.id, { updatedAt: now });
+
+      res.json({
+        task: buildTaskPayload(task.id),
+        assignment: buildTaskAssignmentPayload(superseded),
+        replacement: replacement ? buildTaskAssignmentPayload(replacement) : null
+      });
+    } catch (error) {
+      res.status(500).json({
+        error: { code: 'task_assignment_supersede_failed', message: error.message }
       });
     }
   });

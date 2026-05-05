@@ -407,6 +407,9 @@ function normalizeAssignmentStatus(status) {
   if (normalized === 'error' || normalized === 'failed') {
     return 'failed';
   }
+  if (normalized === 'superseded' || normalized === 'cancelled' || normalized === 'canceled') {
+    return normalized === 'canceled' ? 'cancelled' : normalized;
+  }
   return normalized;
 }
 
@@ -415,7 +418,11 @@ function getAssignmentStatus(assignment = {}) {
 }
 
 function isTerminalStatus(status) {
-  return status === 'completed' || status === 'failed' || status === 'cancelled' || status === 'abandoned';
+  return status === 'completed' || status === 'failed' || status === 'cancelled' || status === 'superseded' || status === 'abandoned';
+}
+
+function isPolicySatisfiedStatus(status) {
+  return status === 'completed' || status === 'cancelled' || status === 'superseded';
 }
 
 function getPolicySequence(options = {}) {
@@ -446,7 +453,7 @@ function resolveActivePolicy(options, assignments = []) {
     if (matching.length === 0) {
       continue;
     }
-    if (matching.every((assignment) => getAssignmentStatus(assignment) === 'completed')) {
+    if (matching.every((assignment) => isPolicySatisfiedStatus(getAssignmentStatus(assignment)))) {
       continue;
     }
     return {

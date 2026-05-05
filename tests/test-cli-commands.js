@@ -259,6 +259,15 @@ test('Codex one-shot builder stays stateless and preserves JSON mode', () => {
   assert(!cmd.includes('019d94a6-2cd8-7742-8e4e-123456789abc'), `Did not expect worker thread id in command, got: ${cmd}`);
 });
 
+test('Codex one-shot builder pins a broker-safe default model', () => {
+  const cmd = buildCodexOneShotCommand('Continue review.', {
+    model: null,
+    messageCount: 0
+  });
+
+  assert(cmd.includes('-m gpt-5.4'), `Expected safe Codex worker model, got: ${cmd}`);
+});
+
 test('Qwen one-shot builder resumes provider thread and preserves allowed tools', () => {
   const cmd = buildQwenOneShotCommand('Continue review.', {
     model: 'qwen-max',

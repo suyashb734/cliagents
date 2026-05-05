@@ -29,6 +29,7 @@ const TEST_FILES = [
   'test-task-supervisor-harness.js',
   'test-adapter-readiness.js',
   'test-task-router-readiness.js',
+  'test-model-routing-service.js',
   'test-direct-session-control-plane.js',
   'test-session-manager-recovery.js',
   'test-server-orphan-prune.js',

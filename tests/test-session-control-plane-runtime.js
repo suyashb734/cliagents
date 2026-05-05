@@ -788,7 +788,7 @@ async function run() {
     const beforeCodexResumeHistory = fakeTmux.getHistory(liveTerminal.sessionName, liveTerminal.windowName);
     await manager.sendInput(terminal.terminalId, 'Continue the same implementation review.');
     const resumedCodexWorkerHistory = fakeTmux.getHistory(liveTerminal.sessionName, liveTerminal.windowName).slice(beforeCodexResumeHistory.length);
-    assert(resumedCodexWorkerHistory.includes('codex exec --full-auto --json --skip-git-repo-check'), `expected stateless Codex worker command, got: ${resumedCodexWorkerHistory}`);
+    assert(resumedCodexWorkerHistory.includes('codex exec -m gpt-5.4 --full-auto --json --skip-git-repo-check'), `expected stateless Codex worker command with broker-safe model, got: ${resumedCodexWorkerHistory}`);
     assert(!resumedCodexWorkerHistory.includes('codex exec resume'), `did not expect resumed Codex worker command, got: ${resumedCodexWorkerHistory}`);
     assert(!resumedCodexWorkerHistory.includes(codexWorkerThreadRef), `did not expect Codex worker command to inject provider thread ref, got: ${resumedCodexWorkerHistory}`);
 
@@ -867,8 +867,8 @@ async function run() {
     await manager.sendInput(resumedCodexWorker.terminalId, 'Resume the interrupted codex worker session.');
     const recoveredCodexWorkerHistory = fakeTmux.getHistory(resumedCodexWorker.sessionName, resumedCodexWorker.windowName);
     assert(
-      recoveredCodexWorkerHistory.includes("codex exec --full-auto --json --skip-git-repo-check 'Resume the interrupted codex worker session.'"),
-      `expected codex worker recovery metadata to keep one-shot execution, got: ${recoveredCodexWorkerHistory}`
+      recoveredCodexWorkerHistory.includes("codex exec -m gpt-5.4 --full-auto --json --skip-git-repo-check 'Resume the interrupted codex worker session.'"),
+      `expected codex worker recovery metadata to keep broker-safe one-shot execution, got: ${recoveredCodexWorkerHistory}`
     );
     assert(
       !recoveredCodexWorkerHistory.includes('codex exec resume'),
