@@ -25,6 +25,8 @@ const TEST_FILES = [
   'test-session-control-plane-runtime.js',
   'test-task-routes.js',
   'test-task-worktree-isolation.js',
+  'test-adapter-readiness.js',
+  'test-task-router-readiness.js',
   'test-direct-session-control-plane.js',
   'test-session-manager-recovery.js',
   'test-server-orphan-prune.js',
@@ -53,6 +55,7 @@ const TEST_FILES = [
   'test-mcp-usage-summary.js',
   'test-mcp-run-ledger-tools.js',
   'test-mcp-root-session-tools.js',
+  'test-mcp-adapter-readiness-tools.js',
   'test-orchestration-introspection-routes.js',
   'test-runtime-consistency.js',
   'test-tmux-client.js'

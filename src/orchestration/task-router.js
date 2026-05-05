@@ -14,6 +14,7 @@ const { getAgentProfiles, resolveProfile } = require('../services/agent-profiles
 const { getModelRoutingService } = require('../services/model-routing');
 const { isAdapterAuthenticated } = require('../utils/adapter-auth');
 const { getChildSessionSupport } = require('./child-session-support');
+const { AdapterReadinessService } = require('./adapter-readiness');
 
 // Task types and their default agent mappings
 const TASK_TYPES = {
@@ -143,6 +144,12 @@ class TaskRouter extends EventEmitter {
     this.modelRoutingPath = options.modelRoutingPath || path.join(process.cwd(), 'config', 'model-routing.json');
     this.profileService = getAgentProfiles({ configPath: this.profilesPath });
     this.modelRoutingService = getModelRoutingService({ configPath: this.modelRoutingPath });
+    this.adapterReadinessService = options.adapterReadinessService || new AdapterReadinessService({
+      db: options.db || null,
+      apiSessionManager: this.apiSessionManager,
+      adapterAuthInspector: this.adapterAuthInspector,
+      profileService: this.profileService
+    });
     this.activeWorkflows = new Map();
   }
 
@@ -154,6 +161,7 @@ class TaskRouter extends EventEmitter {
         authenticated: null,
         authenticationReason: null,
         capabilities: null,
+        childSessionSupport: getChildSessionSupport(adapterName, null),
         contract: null
       };
     }
@@ -166,6 +174,7 @@ class TaskRouter extends EventEmitter {
         authenticated: null,
         authenticationReason: null,
         capabilities: null,
+        childSessionSupport: getChildSessionSupport(adapterName, null),
         contract: null
       };
     }
@@ -182,17 +191,34 @@ class TaskRouter extends EventEmitter {
       reason: 'Adapter authentication could not be determined'
     };
     const capabilities = typeof adapter.getCapabilities === 'function' ? adapter.getCapabilities() : null;
-    const childSessionSupport = getChildSessionSupport(adapterName, capabilities);
+    const staticChildSessionSupport = getChildSessionSupport(adapterName, capabilities);
+    let adapterReadiness = null;
+    let childSessionSupport = staticChildSessionSupport;
+    try {
+      if (this.adapterReadinessService?.getAdapterReadiness) {
+        adapterReadiness = await this.adapterReadinessService.getAdapterReadiness(adapterName);
+        childSessionSupport = adapterReadiness.childSessionSupport || staticChildSessionSupport;
+      }
+    } catch (error) {
+      adapterReadiness = {
+        warnings: [{
+          code: 'readiness_store_unavailable',
+          message: error.message
+        }]
+      };
+    }
+    const effectiveReadiness = adapterReadiness?.effective || null;
 
     return {
       registered: true,
-      available,
-      authenticated: auth.authenticated,
-      authenticationReason: auth.reason,
+      available: effectiveReadiness?.available ?? available,
+      authenticated: effectiveReadiness?.authenticated ?? auth.authenticated,
+      authenticationReason: effectiveReadiness?.authReason ?? auth.reason,
       models: typeof adapter.getAvailableModels === 'function' ? adapter.getAvailableModels() : [],
       runtimeProviders: typeof adapter.getProviderSummary === 'function' ? adapter.getProviderSummary() : [],
       capabilities,
       childSessionSupport,
+      adapterReadiness,
       contract: typeof adapter.getContract === 'function' ? adapter.getContract() : null
     };
   }
@@ -237,11 +263,12 @@ class TaskRouter extends EventEmitter {
   _scoreRoleAdapterCandidate({ roleName, adapterName, preferredAdapter, runtimeAdapter, configuredAdapter, requireCollaboratorReady = false }) {
     let score = 0;
     const reasons = [];
-    const capabilities = runtimeAdapter.capabilities || {};
+    const capabilities = runtimeAdapter.capabilities || null;
+    const capabilityObject = capabilities || {};
     const childSessionSupport = runtimeAdapter.childSessionSupport || getChildSessionSupport(adapterName, capabilities);
     const declaredCapabilities = new Set([
       ...(configuredAdapter?.capabilities || []),
-      ...Object.entries(capabilities)
+      ...Object.entries(capabilityObject)
         .filter(([, value]) => value === true)
         .map(([key]) => key)
     ]);
@@ -276,21 +303,28 @@ class TaskRouter extends EventEmitter {
       reasons.push('not-authenticated');
     }
 
-    if (capabilities.executionMode === 'direct-session') {
+    if (capabilityObject.executionMode === 'direct-session') {
       score += 25;
       reasons.push('direct-session');
     }
-    if (capabilities.supportsSystemPrompt) {
+    if (capabilityObject.supportsSystemPrompt) {
       score += 25;
       reasons.push('supports-system-prompt');
     }
-    if (capabilities.supportsMultiTurn) {
+    if (capabilityObject.supportsMultiTurn) {
       score += 20;
       reasons.push('supports-multi-turn');
     }
-    if (capabilities.supportsFilesystemWrite) {
+    if (capabilityObject.supportsFilesystemWrite) {
       score += 20;
       reasons.push('supports-filesystem-write');
+    }
+    if (childSessionSupport.ephemeralReady === true) {
+      score += 30;
+      reasons.push('ephemeral-ready');
+    } else {
+      score -= 8000;
+      reasons.push(`not-ephemeral-ready:${childSessionSupport.reason || 'unsupported'}`);
     }
     if (childSessionSupport.collaboratorReady === true) {
       score += 15;
@@ -389,6 +423,11 @@ class TaskRouter extends EventEmitter {
         `Adapter '${preferredAdapter}' is not healthy for role '${roleName}': ${preferredCandidate.runtimeAdapter.authenticationReason || 'adapter unavailable'}`
       );
     }
+    if (preferredAdapter && preferredCandidate && preferredCandidate.runtimeAdapter.childSessionSupport?.ephemeralReady !== true) {
+      throw new Error(
+        `Adapter '${preferredAdapter}' is not child-session ready: ${preferredCandidate.runtimeAdapter.childSessionSupport?.reason || 'ephemeral child execution is not verified'}`
+      );
+    }
     if (preferredAdapter && preferredCandidate && options.requireCollaboratorReady === true) {
       const support = preferredCandidate.runtimeAdapter.childSessionSupport
         || getChildSessionSupport(preferredCandidate.adapter, preferredCandidate.runtimeAdapter.capabilities || {});
@@ -402,6 +441,7 @@ class TaskRouter extends EventEmitter {
     const selected = preferredCandidate || candidates.find((candidate) => (
       candidate.runtimeAdapter.available !== false &&
       candidate.runtimeAdapter.authenticated !== false &&
+      candidate.runtimeAdapter.childSessionSupport?.ephemeralReady === true &&
       (options.requireCollaboratorReady !== true || candidate.runtimeAdapter.childSessionSupport?.collaboratorReady === true)
     )) || candidates[0];
 
@@ -597,6 +637,11 @@ class TaskRouter extends EventEmitter {
     if (runtimeAdapter.registered && runtimeAdapter.available === false) {
       throw new Error(`Adapter '${profile.adapter}' CLI not available`);
     }
+    if (runtimeAdapter.childSessionSupport?.ephemeralReady === false) {
+      throw new Error(
+        `Adapter '${profile.adapter}' is not child-session ready: ${runtimeAdapter.childSessionSupport?.reason || 'ephemeral child execution is not verified'}`
+      );
+    }
     if (requireCollaboratorReady && runtimeAdapter.childSessionSupport?.collaboratorReady !== true) {
       throw new Error(
         `Adapter '${profile.adapter}' is not collaborator-ready: ${runtimeAdapter.childSessionSupport?.reason || 'continuity is not guaranteed'}`
@@ -665,6 +710,7 @@ class TaskRouter extends EventEmitter {
       authenticationReason: runtimeAdapter.authenticationReason,
       runtimeCapabilities: runtimeAdapter.capabilities,
       runtimeChildSessionSupport: runtimeAdapter.childSessionSupport || null,
+      adapterReadiness: runtimeAdapter.adapterReadiness || null,
       runtimeContract: runtimeAdapter.contract,
       routingDecision
     };

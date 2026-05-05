@@ -30,6 +30,33 @@ function parseJsonField(value) {
   }
 }
 
+function normalizeNullableBoolean(value) {
+  if (value === null || value === undefined || value === '') {
+    return null;
+  }
+  if (typeof value === 'boolean') {
+    return value ? 1 : 0;
+  }
+  if (typeof value === 'number') {
+    return value ? 1 : 0;
+  }
+  const normalized = String(value).trim().toLowerCase();
+  if (['1', 'true', 'yes', 'on'].includes(normalized)) {
+    return 1;
+  }
+  if (['0', 'false', 'no', 'off'].includes(normalized)) {
+    return 0;
+  }
+  return null;
+}
+
+function parseNullableBoolean(value) {
+  if (value === null || value === undefined) {
+    return null;
+  }
+  return Number(value) === 1;
+}
+
 function normalizeInteger(value, fallback = 0) {
   const parsed = Number(value);
   return Number.isFinite(parsed) ? Math.max(0, Math.round(parsed)) : fallback;
@@ -2442,6 +2469,116 @@ class OrchestrationDB {
       ...r,
       metadata: r.metadata ? JSON.parse(r.metadata) : {}
     }));
+  }
+
+  // =====================
+  // Adapter Readiness
+  // =====================
+
+  _parseAdapterReadinessReportRow(row) {
+    if (!row) {
+      return null;
+    }
+
+    return {
+      adapter: row.adapter,
+      available: parseNullableBoolean(row.available),
+      authenticated: parseNullableBoolean(row.authenticated),
+      authReason: row.auth_reason || null,
+      ephemeralReady: parseNullableBoolean(row.ephemeral_ready),
+      collaboratorReady: parseNullableBoolean(row.collaborator_ready),
+      continuityMode: row.continuity_mode || null,
+      overall: row.overall || null,
+      reasonCode: row.reason_code || null,
+      reason: row.reason || null,
+      checks: parseJsonField(row.checks) || {},
+      details: parseJsonField(row.details) || [],
+      source: row.source || 'live',
+      staleAfterMs: Number.isFinite(row.stale_after_ms) ? row.stale_after_ms : null,
+      verifiedAt: row.verified_at || null,
+      createdAt: row.created_at,
+      updatedAt: row.updated_at
+    };
+  }
+
+  upsertAdapterReadinessReport(input = {}) {
+    const adapter = String(input.adapter || '').trim();
+    if (!adapter) {
+      throw new Error('adapter is required');
+    }
+
+    const now = Number.isFinite(input.updatedAt) ? input.updatedAt : Date.now();
+    const createdAt = Number.isFinite(input.createdAt) ? input.createdAt : now;
+    const verifiedAt = Number.isFinite(input.verifiedAt) ? input.verifiedAt : now;
+    const staleAfterMs = Number.isFinite(input.staleAfterMs) ? input.staleAfterMs : null;
+    const source = String(input.source || 'live').trim().toLowerCase() || 'live';
+    const checks = input.checks && typeof input.checks === 'object' && !Array.isArray(input.checks)
+      ? input.checks
+      : {};
+    const details = Array.isArray(input.details)
+      ? input.details
+      : input.details ? [String(input.details)] : [];
+
+    this.db.prepare(`
+      INSERT INTO adapter_readiness_reports (
+        adapter, available, authenticated, auth_reason, ephemeral_ready,
+        collaborator_ready, continuity_mode, overall, reason_code, reason,
+        checks, details, source, stale_after_ms, verified_at, created_at, updated_at
+      ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+      ON CONFLICT(adapter) DO UPDATE SET
+        available = excluded.available,
+        authenticated = excluded.authenticated,
+        auth_reason = excluded.auth_reason,
+        ephemeral_ready = excluded.ephemeral_ready,
+        collaborator_ready = excluded.collaborator_ready,
+        continuity_mode = excluded.continuity_mode,
+        overall = excluded.overall,
+        reason_code = excluded.reason_code,
+        reason = excluded.reason,
+        checks = excluded.checks,
+        details = excluded.details,
+        source = excluded.source,
+        stale_after_ms = excluded.stale_after_ms,
+        verified_at = excluded.verified_at,
+        updated_at = excluded.updated_at
+    `).run(
+      adapter,
+      normalizeNullableBoolean(input.available),
+      normalizeNullableBoolean(input.authenticated),
+      input.authReason || input.auth_reason || null,
+      normalizeNullableBoolean(input.ephemeralReady ?? input.ephemeral_ready),
+      normalizeNullableBoolean(input.collaboratorReady ?? input.collaborator_ready),
+      input.continuityMode || input.continuity_mode || null,
+      input.overall || null,
+      input.reasonCode || input.reason_code || null,
+      input.reason || null,
+      JSON.stringify(checks),
+      JSON.stringify(details),
+      source,
+      staleAfterMs,
+      verifiedAt,
+      createdAt,
+      now
+    );
+
+    return this.getAdapterReadinessReport(adapter);
+  }
+
+  getAdapterReadinessReport(adapter) {
+    const adapterName = String(adapter || '').trim();
+    if (!adapterName) {
+      return null;
+    }
+    const row = this.db.prepare('SELECT * FROM adapter_readiness_reports WHERE adapter = ?').get(adapterName);
+    return this._parseAdapterReadinessReportRow(row);
+  }
+
+  listAdapterReadinessReports() {
+    return this.db.prepare(`
+      SELECT *
+      FROM adapter_readiness_reports
+      ORDER BY adapter ASC
+    `).all().map((row) => this._parseAdapterReadinessReportRow(row));
   }
 
   // =====================

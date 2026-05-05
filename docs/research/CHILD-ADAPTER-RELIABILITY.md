@@ -83,3 +83,33 @@ This is an environment-dependent test. Results depend on:
 - local authentication state
 - provider health / quotas / rate limits
 - current broker runtime behavior
+
+## Structured Readiness Output
+
+The live matrix can emit a machine-readable readiness payload:
+
+```bash
+CLIAGENTS_READINESS_JSON=1 node scripts/run-with-supported-node.js tests/test-child-adapter-reliability-live.js
+```
+
+The JSON payload is shaped as:
+
+- `results[]`
+- `adapter`
+- `overall`: `ready`, `partial`, `not-ready`, or `skipped`
+- `checks`: per-check booleans from the matrix
+- `details`: human-readable notes
+- `reasonCode`: `binary_not_found`, `auth_failed`, `quota_exceeded`,
+  `rate_limited`, `timeout`, `live_test_failed`, `live_test_partial`, or
+  `unknown`
+- `verifiedAt`
+- `staleAfterMs`
+
+To record the latest results into the broker readiness store while the test
+server is still running:
+
+```bash
+CLIAGENTS_POST_READINESS_RESULTS=1 node scripts/run-with-supported-node.js tests/test-child-adapter-reliability-live.js
+```
+
+Recording failures warn but do not change the matrix exit code.

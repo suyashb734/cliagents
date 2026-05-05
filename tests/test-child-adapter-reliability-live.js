@@ -17,6 +17,7 @@ const { isAdapterAuthenticated } = require('../src/utils/adapter-auth');
 const { extractOutput } = require('../src/utils/output-extractor');
 
 const RESULTS = [];
+const DEFAULT_READINESS_TTL_MS = 24 * 60 * 60 * 1000;
 const PROVIDER_SKIP_PATTERNS = [
   'not authenticated',
   'authentication failed',
@@ -63,6 +64,26 @@ function short(value, max = 180) {
 function isSkippableProviderFailure(message = '') {
   const text = String(message).toLowerCase();
   return PROVIDER_SKIP_PATTERNS.some((pattern) => text.includes(pattern));
+}
+
+function classifyReasonCode(message = '') {
+  const text = String(message || '').toLowerCase();
+  if (text.includes('not installed') || text.includes('not registered') || text.includes('binary') || text.includes('command not found')) {
+    return 'binary_not_found';
+  }
+  if (text.includes('not authenticated') || text.includes('authentication failed') || text.includes('please log in') || text.includes('please login') || text.includes('login required') || text.includes('api key')) {
+    return 'auth_failed';
+  }
+  if (text.includes('quota') || text.includes('usage limit') || text.includes('resourceexhausted') || text.includes('capacity on this model')) {
+    return 'quota_exceeded';
+  }
+  if (text.includes('rate limit')) {
+    return 'rate_limited';
+  }
+  if (text.includes('timeout') || text.includes('timed out') || text.includes('status: 504')) {
+    return 'timeout';
+  }
+  return 'unknown';
 }
 
 async function request(method, route, body = null, timeoutMs = 180000) {
@@ -354,11 +375,22 @@ async function runAdapterCheck(adapterName) {
     }
 
     const overall = summarizeOverall(checks);
+    const reason = details.join(' | ') || null;
     return {
       adapter: adapterName,
       overall,
       checks,
       details,
+      available: checks.available,
+      authenticated: checks.authenticated,
+      ephemeralReady: overall === 'ready' || overall === 'partial',
+      collaboratorReady: overall === 'ready',
+      continuityMode: overall === 'ready' ? 'provider_resume' : 'stateless',
+      reasonCode: overall === 'ready' ? null : overall === 'partial' ? 'live_test_partial' : classifyReasonCode(reason || secondOutput),
+      reason,
+      source: 'live',
+      verifiedAt: Date.now(),
+      staleAfterMs: DEFAULT_READINESS_TTL_MS,
       firstOutput: short(firstTurn.output.extracted || firstTurn.output.raw, 160),
       secondOutput: short(secondOutput, 160)
     };
@@ -383,7 +415,17 @@ async function recordResult(adapterName, fn) {
         status: 'skipped',
         overall: 'skipped',
         checks: {},
-        details: [message.slice('SKIP:'.length).trim()]
+        details: [message.slice('SKIP:'.length).trim()],
+        available: message.includes('not installed') || message.includes('not registered') ? false : null,
+        authenticated: classifyReasonCode(message) === 'auth_failed' ? false : null,
+        ephemeralReady: false,
+        collaboratorReady: false,
+        continuityMode: 'stateless',
+        reasonCode: classifyReasonCode(message),
+        reason: message.slice('SKIP:'.length).trim(),
+        source: 'live',
+        verifiedAt: Date.now(),
+        staleAfterMs: DEFAULT_READINESS_TTL_MS
       });
       console.log(`  ⏭️  ${adapterName}: ${message.slice('SKIP:'.length).trim()}`);
       return;
@@ -394,10 +436,65 @@ async function recordResult(adapterName, fn) {
       status: 'failed',
       overall: 'not-ready',
       checks: {},
-      details: [message]
+      details: [message],
+      available: null,
+      authenticated: null,
+      ephemeralReady: false,
+      collaboratorReady: false,
+      continuityMode: 'stateless',
+      reasonCode: classifyReasonCode(message) === 'unknown' ? 'live_test_failed' : classifyReasonCode(message),
+      reason: message,
+      source: 'live',
+      verifiedAt: Date.now(),
+      staleAfterMs: DEFAULT_READINESS_TTL_MS
     });
     console.log(`  ❌ ${adapterName}: ${message}`);
   }
+}
+
+function buildReadinessPayload() {
+  return {
+    results: RESULTS.map((result) => ({
+      adapter: result.adapter,
+      available: result.available,
+      authenticated: result.authenticated,
+      ephemeralReady: result.ephemeralReady,
+      collaboratorReady: result.collaboratorReady,
+      continuityMode: result.continuityMode,
+      overall: result.overall,
+      reasonCode: result.reasonCode,
+      reason: result.reason || (result.details || []).join(' | ') || null,
+      checks: result.checks || {},
+      details: result.details || [],
+      source: 'live',
+      verifiedAt: result.verifiedAt || Date.now(),
+      staleAfterMs: result.staleAfterMs || DEFAULT_READINESS_TTL_MS
+    }))
+  };
+}
+
+async function maybePostReadinessResults() {
+  if (process.env.CLIAGENTS_POST_READINESS_RESULTS !== '1') {
+    return;
+  }
+  try {
+    const { status, data } = await request('POST', '/orchestration/adapters/readiness', buildReadinessPayload(), 30000);
+    if (status !== 200) {
+      console.warn(`\n⚠️  Failed to record readiness results: ${status} ${JSON.stringify(data)}`);
+      return;
+    }
+    console.log(`\nRecorded readiness results: accepted=${data.accepted || 0}, rejected=${data.rejected || 0}`);
+  } catch (error) {
+    console.warn(`\n⚠️  Failed to record readiness results: ${error.message}`);
+  }
+}
+
+function maybePrintJsonResults() {
+  if (process.env.CLIAGENTS_READINESS_JSON !== '1') {
+    return;
+  }
+  console.log('\nReadiness JSON\n');
+  console.log(JSON.stringify(buildReadinessPayload(), null, 2));
 }
 
 function printSummary() {
@@ -443,11 +540,12 @@ async function main() {
     for (const adapterName of ACTIVE_BROKER_ADAPTERS) {
       await recordResult(adapterName, async () => runAdapterCheck(adapterName));
     }
+    printSummary();
+    maybePrintJsonResults();
+    await maybePostReadinessResults();
   } finally {
     await stopTestServer(testServer);
   }
-
-  printSummary();
 
   const hardFailures = RESULTS.filter((result) => result.status === 'failed');
   if (hardFailures.length > 0) {

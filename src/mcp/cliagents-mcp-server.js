@@ -1153,6 +1153,41 @@ This calls cliagents' direct-session discussion route and returns the completed 
     }
   },
   {
+    name: 'list_adapter_readiness',
+    description: 'List effective child-session and collaborator readiness for all known broker adapters.',
+    inputSchema: {
+      type: 'object',
+      properties: {
+        format: {
+          type: 'string',
+          enum: ['summary', 'json'],
+          description: 'Return a readable summary or raw JSON. Default: summary',
+          default: 'summary'
+        }
+      }
+    }
+  },
+  {
+    name: 'get_adapter_readiness',
+    description: 'Get effective child-session and collaborator readiness for one adapter.',
+    inputSchema: {
+      type: 'object',
+      properties: {
+        adapter: {
+          type: 'string',
+          description: 'Adapter name such as codex-cli, claude-code, gemini-cli, qwen-cli, or opencode-cli.'
+        },
+        format: {
+          type: 'string',
+          enum: ['summary', 'json'],
+          description: 'Return a readable summary or raw JSON. Default: summary',
+          default: 'summary'
+        }
+      },
+      required: ['adapter']
+    }
+  },
+  {
     name: 'list_models',
     description: 'List available models for broker adapters. Pass an adapter for the full catalog, or omit it for a compact cross-adapter summary.',
     inputSchema: {
@@ -2514,9 +2549,17 @@ async function handleListAgents() {
     const adapters = adaptersRes.data.adapters;
     output += '## Adapters (WHO does it)\n\n';
     output += Object.entries(adapters)
-      .map(([name, config]) =>
-        `- **${name}**: ${config.description || ''}\n  Capabilities: ${(config.capabilities || []).join(', ')}`
-      ).join('\n');
+      .map(([name, config]) => {
+        const readiness = config.adapterReadiness?.effective || null;
+        const readinessLine = readiness
+          ? `  Readiness: ephemeral=${readiness.ephemeralReady ? 'yes' : 'no'}, collaborator=${readiness.collaboratorReady ? 'yes' : 'no'}, verified=${readiness.verified ? 'yes' : 'no'}, source=${readiness.source || 'unknown'}${readiness.reason ? `, reason=${readiness.reason}` : ''}`
+          : null;
+        return [
+          `- **${name}**: ${config.description || ''}`,
+          `  Capabilities: ${(config.capabilities || config.configuredCapabilities || []).join(', ')}`,
+          readinessLine
+        ].filter(Boolean).join('\n');
+      }).join('\n');
     output += '\n\n';
   }
 
@@ -2531,6 +2574,71 @@ async function handleListAgents() {
     content: [{
       type: 'text',
       text: output
+    }]
+  };
+}
+
+function formatReadinessEntry(name, readiness) {
+  const effective = readiness?.effective || readiness?.adapterReadiness?.effective || null;
+  const live = readiness?.live || readiness?.adapterReadiness?.live || null;
+  const warnings = readiness?.warnings || readiness?.adapterReadiness?.warnings || [];
+  if (!effective) {
+    return `- ${name}: no readiness reported`;
+  }
+  return [
+    `- ${name}: overall=${effective.overall || 'unknown'}, ephemeral=${effective.ephemeralReady ? 'yes' : 'no'}, collaborator=${effective.collaboratorReady ? 'yes' : 'no'}, verified=${effective.verified ? 'yes' : 'no'}, source=${effective.source || 'unknown'}`,
+    effective.reason ? `  reason: ${effective.reason}` : null,
+    live?.verifiedAt ? `  live_verified_at: ${new Date(live.verifiedAt).toISOString()}${live.stale ? ' (stale)' : ''}` : null,
+    warnings.length > 0 ? `  warnings: ${warnings.map((warning) => warning.code || warning.message).join(', ')}` : null
+  ].filter(Boolean).join('\n');
+}
+
+async function handleListAdapterReadiness(args = {}) {
+  const format = args?.format || 'summary';
+  const res = await callCliagents('GET', '/orchestration/adapters/readiness?details=1');
+  if (res.status !== 200) {
+    throw new Error(`Failed to list adapter readiness: ${JSON.stringify(res.data)}`);
+  }
+  if (format === 'json') {
+    return {
+      content: [{
+        type: 'text',
+        text: JSON.stringify(res.data, null, 2)
+      }]
+    };
+  }
+  const adapters = res.data?.adapters || {};
+  const lines = Object.entries(adapters).map(([name, readiness]) => formatReadinessEntry(name, readiness));
+  return {
+    content: [{
+      type: 'text',
+      text: ['## Adapter Readiness', '', ...lines].join('\n')
+    }]
+  };
+}
+
+async function handleGetAdapterReadiness(args = {}) {
+  const adapter = String(args?.adapter || '').trim();
+  if (!adapter) {
+    throw new Error('adapter is required');
+  }
+  const format = args?.format || 'summary';
+  const res = await callCliagents('GET', `/orchestration/adapters/${encodeURIComponent(adapter)}/readiness`);
+  if (res.status !== 200) {
+    throw new Error(`Failed to get adapter readiness: ${JSON.stringify(res.data)}`);
+  }
+  if (format === 'json') {
+    return {
+      content: [{
+        type: 'text',
+        text: JSON.stringify(res.data, null, 2)
+      }]
+    };
+  }
+  return {
+    content: [{
+      type: 'text',
+      text: ['## Adapter Readiness', '', formatReadinessEntry(adapter, res.data)].join('\n')
     }]
   };
 }
@@ -4694,6 +4802,12 @@ async function handleRequest(request) {
           case 'list_agents':
             result = await handleListAgents();
             break;
+          case 'list_adapter_readiness':
+            result = await handleListAdapterReadiness(args);
+            break;
+          case 'get_adapter_readiness':
+            result = await handleGetAdapterReadiness(args);
+            break;
           case 'list_models':
             result = await handleListModels(args);
             break;
@@ -4873,6 +4987,8 @@ module.exports = {
   handleGetRootSessionStatus,
   handleListChildSessions,
   handleGetUsageSummary,
+  handleListAdapterReadiness,
+  handleGetAdapterReadiness,
   handleListModels,
   handleRecommendModel,
   handleListProviderSessions,

@@ -26,6 +26,7 @@ const {
   composeManagedRootSystemPrompt
 } = require('../orchestration/managed-root-launch');
 const { getChildSessionSupport } = require('../orchestration/child-session-support');
+const { AdapterReadinessService } = require('../orchestration/adapter-readiness');
 const { prepareTaskAssignmentWorktree } = require('../orchestration/task-worktree');
 const { sendMessage, broadcastMessage } = require('../orchestration/send-message');
 const { getAgentProfiles, resolveProfile } = require('../services/agent-profiles');
@@ -47,6 +48,11 @@ function createOrchestrationRouter(context) {
   const requireRootAttach = process.env.CLIAGENTS_REQUIRE_ROOT_ATTACH === '1';
   const runLedger = runLedgerWritesEnabled || runLedgerReadsEnabled ? new RunLedgerService(db) : null;
   const providerSessionRegistry = getProviderSessionRegistry();
+  const adapterReadinessService = new AdapterReadinessService({
+    db,
+    apiSessionManager,
+    adapterAuthInspector: adapterAuthInspector || isAdapterAuthenticated
+  });
   const roomService = db
     ? new RoomService({
         db,
@@ -138,6 +144,37 @@ function createOrchestrationRouter(context) {
       attribution: typeof db.summarizeUsageAttribution === 'function'
         ? db.summarizeUsageAttribution(filters)
         : null
+    };
+  }
+
+  function summarizeAdapterReadiness(readiness) {
+    if (!readiness) {
+      return null;
+    }
+    return {
+      adapter: readiness.adapter,
+      effective: readiness.effective || null,
+      advertised: readiness.advertised
+        ? {
+            ephemeralReady: readiness.advertised.ephemeralReady === true,
+            collaboratorReady: readiness.advertised.collaboratorReady === true,
+            continuityMode: readiness.advertised.continuityMode || 'stateless',
+            reason: readiness.advertised.reason || null
+          }
+        : null,
+      live: readiness.live
+        ? {
+            overall: readiness.live.overall || null,
+            reasonCode: readiness.live.reasonCode || null,
+            reason: readiness.live.reason || null,
+            source: readiness.live.source || 'live',
+            verifiedAt: readiness.live.verifiedAt || null,
+            staleAfterMs: readiness.live.staleAfterMs || null,
+            stale: readiness.live.stale === true,
+            ageMs: readiness.live.ageMs || null
+          }
+        : null,
+      warnings: readiness.warnings || []
     };
   }
 
@@ -2898,6 +2935,91 @@ function createOrchestrationRouter(context) {
   });
 
   /**
+   * GET /orchestration/adapters/readiness
+   * List effective readiness for all known adapters.
+   */
+  router.get('/adapters/readiness', async (req, res) => {
+    try {
+      const readiness = await adapterReadinessService.listAdapterReadiness();
+      const detailed = parseQueryBoolean(req.query?.details, false);
+      const adapters = {};
+      for (const [name, entry] of Object.entries(readiness)) {
+        adapters[name] = detailed ? entry : summarizeAdapterReadiness(entry);
+      }
+      res.json({
+        count: Object.keys(adapters).length,
+        adapters
+      });
+    } catch (error) {
+      res.status(500).json({
+        error: { code: 'internal_error', message: error.message }
+      });
+    }
+  });
+
+  /**
+   * GET /orchestration/adapters/:adapter/readiness
+   * Get effective readiness for one adapter.
+   */
+  router.get('/adapters/:adapter/readiness', async (req, res) => {
+    try {
+      const adapter = String(req.params.adapter || '').trim();
+      if (!adapterReadinessService.isKnownAdapter(adapter)) {
+        return res.status(404).json({
+          error: { code: 'adapter_not_found', message: `Adapter ${adapter} is not configured or runtime-registered` }
+        });
+      }
+      const readiness = await adapterReadinessService.getAdapterReadiness(adapter);
+      res.json(readiness);
+    } catch (error) {
+      res.status(500).json({
+        error: { code: 'internal_error', message: error.message }
+      });
+    }
+  });
+
+  /**
+   * POST /orchestration/adapters/readiness
+   * Record latest live readiness reports from the reliability matrix.
+   */
+  router.post('/adapters/readiness', (req, res) => {
+    try {
+      const results = Array.isArray(req.body?.results) ? req.body.results : null;
+      if (!results) {
+        return res.status(400).json({
+          error: {
+            code: 'invalid_request',
+            param: 'results',
+            message: 'results must be an array'
+          }
+        });
+      }
+
+      const { accepted, rejected } = adapterReadinessService.recordLiveReports(results);
+      res.json({
+        accepted: accepted.length,
+        rejected: rejected.length,
+        results: [
+          ...accepted.map((report) => ({
+            adapter: report.adapter,
+            status: 'accepted',
+            report
+          })),
+          ...rejected.map((entry) => ({
+            adapter: entry.adapter,
+            status: 'rejected',
+            error: entry.error
+          }))
+        ]
+      });
+    } catch (error) {
+      res.status(500).json({
+        error: { code: 'internal_error', message: error.message }
+      });
+    }
+  });
+
+  /**
    * GET /orchestration/adapters
    * List available adapters (v3 config)
    */
@@ -2930,7 +3052,11 @@ function createOrchestrationRouter(context) {
         const runtimeCapabilities = typeof runtimeAdapter?.getCapabilities === 'function'
           ? runtimeAdapter.getCapabilities()
           : null;
-        const childSessionSupport = getChildSessionSupport(name, runtimeCapabilities);
+        let readiness = null;
+        try {
+          readiness = await adapterReadinessService.getAdapterReadiness(name);
+        } catch {}
+        const childSessionSupport = readiness?.childSessionSupport || getChildSessionSupport(name, runtimeCapabilities);
 
         adapterDetails[name] = {
           description: configuredAdapter?.description || runtimeAdapter?.name || null,
@@ -2948,6 +3074,7 @@ function createOrchestrationRouter(context) {
           configuredCapabilities: configuredAdapter?.capabilities || [],
           runtimeCapabilities,
           childSessionSupport,
+          adapterReadiness: summarizeAdapterReadiness(readiness),
           runtimeContract: typeof runtimeAdapter?.getContract === 'function'
             ? runtimeAdapter.getContract()
             : null,
@@ -3572,7 +3699,11 @@ function createOrchestrationRouter(context) {
   const getTaskRouter = () => {
     if (!taskRouter) {
       const { TaskRouter } = require('../orchestration/task-router');
-      taskRouter = new TaskRouter(sessionManager, { apiSessionManager, adapterAuthInspector });
+      taskRouter = new TaskRouter(sessionManager, {
+        apiSessionManager,
+        adapterAuthInspector,
+        adapterReadinessService
+      });
     }
     return taskRouter;
   };

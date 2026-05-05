@@ -13,6 +13,8 @@ The MCP server is the primary agent-facing control surface for `cliagents`.
   persisted execution records.
 - **Tasks**: create tasks, create assignments, start assignments, list tasks,
   and inspect task state.
+- **Adapter readiness**: list or inspect effective child and collaborator
+  readiness before delegating.
 - **Usage**: summarize usage by root, terminal, run, task, or assignment.
 - **Memory**: retrieve memory bundles and message windows.
 

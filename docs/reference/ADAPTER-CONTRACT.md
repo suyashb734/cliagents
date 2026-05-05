@@ -42,4 +42,6 @@ thread state across compatible reuse.
 ## Current Reliability Source
 
 Use [Child Adapter Reliability](../research/CHILD-ADAPTER-RELIABILITY.md) for
-the live readiness checklist and active adapter ratings.
+the live readiness checklist. Runtime routing should use the broker's effective
+adapter readiness surface, which combines advertised capabilities, runtime
+availability/auth checks, and the latest fresh live readiness report.
