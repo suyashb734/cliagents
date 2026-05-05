@@ -562,6 +562,46 @@ async function run() {
     assert(prompt.text.includes('summary: Gemini exited after finishing the last task and can likely be recovered.'));
   });
 
+  await test('Managed root selection prompt suppresses Codex TUI noise', async () => {
+    const prompt = createManagedRootSelectionPrompt({
+      resumeCandidates: [{
+        rootSessionId: 'root-noisy-1234567890',
+        status: 'idle',
+        workDir: '/tmp/project-alpha',
+        launchProfile: 'guarded-root',
+        processState: 'alive',
+        currentCommand: 'node',
+        latestSummary: '› daf',
+        activityExcerpt: 'https://developers.openai.com/codex/hooks. › daf gpt-5.5 xhigh · ~/Documents/AI-projects'
+      }, {
+        rootSessionId: 'root-review-abcdef1234',
+        status: 'processing',
+        workDir: '/tmp/project-alpha',
+        launchProfile: 'supervised-root',
+        processState: 'alive',
+        currentCommand: 'node',
+        latestSummary: '• Working (28m 17s • esc to interrupt) · 2 background terminals run…',
+        activityExcerpt: '• Working (28m 17s • esc to interrupt) · 2 background terminals run… › Run /review on my current changes gpt-5.4 xhigh · ~/Documents/AI-projects'
+      }, {
+        rootSessionId: 'root-prompt-fedcba9876',
+        status: 'idle',
+        workDir: '/tmp/project-alpha',
+        launchProfile: 'guarded-root',
+        processState: 'alive',
+        currentCommand: 'node',
+        latestSummary: '› Explain this codebase gpt-5.4 xhigh · ~/Documents/AI-projects'
+      }]
+    }, {
+      adapter: 'codex-cli',
+      workDir: '/tmp/project-alpha'
+    });
+
+    assert(!prompt.text.includes('summary: › daf'));
+    assert(!prompt.text.includes('excerpt: https://developers.openai.com/codex/hooks.'));
+    assert(prompt.text.includes('summary: Run /review on my current changes'));
+    assert(prompt.text.includes('summary: Explain this codebase'));
+  });
+
   await test('Provider session selection prompt includes transcript summary context', async () => {
     const prompt = createProviderSessionSelectionPrompt([{
       providerSessionId: '019df324-64ff-7192-aff1-b0684cd57387',

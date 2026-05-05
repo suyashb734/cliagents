@@ -1547,6 +1547,119 @@ function truncateManagedRootPromptText(value, maxLength = 140) {
   return `${normalized.slice(0, Math.max(0, maxLength - 1)).trimEnd()}…`;
 }
 
+function stripTerminalAnsi(value) {
+  return String(value || '').replace(/\u001b\[[0-9;?]*[ -/]*[@-~]/g, '');
+}
+
+function normalizeManagedRootDisplayText(value) {
+  let normalized = stripTerminalAnsi(value)
+    .replace(/\r/g, '\n')
+    .replace(/\s+/g, ' ')
+    .trim();
+  if (!normalized) {
+    return '';
+  }
+
+  normalized = normalized.replace(
+    /^[•◦]\s*Working\s*\([^)]*\)(?:\s*·\s*[^›\n\r]+)?\s*/i,
+    ''
+  ).trim();
+  normalized = normalized.replace(/^[›>]\s*/, '').trim();
+  normalized = normalized.replace(
+    /\s+[\w.-]+(?:\s+(?:none|minimal|low|medium|high|xhigh))?\s+·\s+(?:~|\/)[^\n\r]*$/i,
+    ''
+  ).trim();
+  normalized = normalized.replace(/\s+·\s+(?:~|\/)[^\n\r]*$/i, '').trim();
+  return normalized;
+}
+
+function isUsefulManagedRootDisplayText(value) {
+  const normalized = normalizeManagedRootDisplayText(value);
+  if (!normalized || !/[A-Za-z0-9]/.test(normalized)) {
+    return false;
+  }
+  if (/^[•◦]?\s*(?:Working|Processing|Thinking|Running)\b/i.test(normalized)) {
+    return false;
+  }
+  if (/^https?:\/\//i.test(normalized)) {
+    return false;
+  }
+
+  const words = normalized.split(/\s+/).filter(Boolean);
+  if (words.length === 1 && normalized.length < 8 && !/^[/@#]/.test(normalized)) {
+    return false;
+  }
+
+  return true;
+}
+
+function extractManagedRootPromptCandidates(value) {
+  const raw = stripTerminalAnsi(value).replace(/\r/g, '\n');
+  const candidates = [];
+  const markerPattern = /(?:^|\s)›\s*([^›\n\r]+)/g;
+  let match;
+  while ((match = markerPattern.exec(raw)) !== null) {
+    const candidate = normalizeManagedRootDisplayText(match[1]);
+    if (isUsefulManagedRootDisplayText(candidate)) {
+      candidates.push(candidate);
+    }
+  }
+  return candidates;
+}
+
+function chooseManagedRootDisplaySummary(candidate) {
+  const directSources = [
+    candidate.latestSummary
+  ];
+
+  for (const source of directSources) {
+    const normalized = normalizeManagedRootDisplayText(source);
+    if (isUsefulManagedRootDisplayText(normalized)) {
+      return normalized;
+    }
+  }
+
+  const promptSources = [
+    candidate.latestSummary,
+    candidate.activityExcerpt
+  ];
+  for (const source of promptSources) {
+    const prompts = extractManagedRootPromptCandidates(source);
+    if (prompts.length > 0) {
+      return prompts[prompts.length - 1];
+    }
+  }
+
+  const attention = normalizeManagedRootDisplayText(candidate.attentionMessage);
+  if (isUsefulManagedRootDisplayText(attention)) {
+    return attention;
+  }
+
+  return '';
+}
+
+function chooseManagedRootDisplayExcerpt(candidate, summary) {
+  const directSources = [
+    candidate.activityExcerpt
+  ];
+  for (const source of directSources) {
+    const normalized = normalizeManagedRootDisplayText(source);
+    if (isUsefulManagedRootDisplayText(normalized) && normalized !== summary) {
+      return normalized;
+    }
+
+    const prompts = extractManagedRootPromptCandidates(source);
+    if (prompts.length > 0) {
+      const prompt = prompts[prompts.length - 1];
+      if (prompt !== summary) {
+        return prompt;
+      }
+    }
+  }
+
+  return '';
+}
+
 function describeManagedRootSelectionCandidate(candidate) {
   const workDir = candidate.workDir ? resolveLaunchWorkDir(candidate.workDir) : null;
   const workDirName = workDir ? (path.basename(workDir) || workDir) : null;
@@ -1559,8 +1672,9 @@ function describeManagedRootSelectionCandidate(candidate) {
     candidate.recoveryReason ? `recovery=${candidate.recoveryReason}` : null,
     candidate.externalSessionRef ? candidate.externalSessionRef : null
   ].filter(Boolean).join(' • ');
-  const summary = truncateManagedRootPromptText(candidate.latestSummary || candidate.attentionMessage || '');
-  const excerpt = truncateManagedRootPromptText(candidate.activityExcerpt || '', 120);
+  const displaySummary = chooseManagedRootDisplaySummary(candidate);
+  const summary = truncateManagedRootPromptText(displaySummary);
+  const excerpt = truncateManagedRootPromptText(chooseManagedRootDisplayExcerpt(candidate, displaySummary), 120);
 
   return {
     age: formatManagedRootCandidateAge(candidate),
