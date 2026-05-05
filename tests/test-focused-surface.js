@@ -26,6 +26,7 @@ const TEST_FILES = [
   'test-session-control-plane-runtime.js',
   'test-task-routes.js',
   'test-task-worktree-isolation.js',
+  'test-task-supervisor-harness.js',
   'test-adapter-readiness.js',
   'test-task-router-readiness.js',
   'test-direct-session-control-plane.js',

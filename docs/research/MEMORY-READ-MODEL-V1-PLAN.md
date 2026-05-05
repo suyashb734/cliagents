@@ -195,6 +195,33 @@ Recommended worktrees:
 
 Do not run multiple workers against the same write scope.
 
+## Supervisor Harness
+
+Use `scripts/task-supervisor-harness.js` to run the assignment loop for this
+task instead of manually starting each worker.
+
+Default behavior is safe:
+
+- one pass only
+- dry-run only
+- starts only queued assignments whose `metadata.startPolicy` is allowed
+- respects `metadata.dependsOn`, `metadata.phase`, and `metadata.manualHold`
+- caps parallel starts with `--concurrency`
+
+Phase 0 example:
+
+```bash
+pnpm supervise:task -- --task-id task_memory_read_model_v1 \
+  --root-session-id d4541c1eaabde31194ac0c082ab98f34 \
+  --allow-start-policy start-before-implementation \
+  --concurrency 2 \
+  --start \
+  --loop
+```
+
+Later implementation phases should be started by widening the allowed
+`startPolicy` only after the supervisor has reconciled Phase 0 review output.
+
 ## Model Routing
 
 - Strong Codex/Claude: migrations, DB contract, integration, final review.
