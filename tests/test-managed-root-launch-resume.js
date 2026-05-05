@@ -558,9 +558,8 @@ async function run() {
     assert(prompt.text.includes('workdir: /tmp/project-alpha'));
     assert(prompt.text.includes('summary: Fixing the browser console so the current root view shows child terminals inline.'));
     assert(prompt.text.includes('recover'));
-    assert(prompt.text.includes('Enter  Start a new managed root and choose a Codex session'));
-    assert(prompt.text.includes('f      Start a new managed root with a fresh Codex session'));
-    assert(prompt.text.includes('press Enter to choose a Codex session for a new root, or type f for fresh'));
+    assert(prompt.text.includes('Enter  Start a new root'));
+    assert(prompt.text.includes('Select a root number to resume or recover, or press Enter for a new root:'));
     assert(prompt.text.includes('workdir: /tmp/project-beta'));
     assert(prompt.text.includes('summary: Gemini exited after finishing the last task and can likely be recovered.'));
   });
@@ -1025,24 +1024,9 @@ async function run() {
     });
     assert.strictEqual(fresh.action, 'launch');
     assert.strictEqual(fresh.reason, 'interactive-new-root');
-
-    const freshProvider = await resolveManagedRootLaunchTarget({
-      adapter: 'codex-cli',
-      workDir: '/tmp/project'
-    }, {
-      interactive: true,
-      listManagedRootLaunchCandidates: async () => ({
-        resumeCandidates: [candidate],
-        recoverCandidates: []
-      }),
-      promptForManagedRootSelection: async () => ({ launchAction: 'fresh_provider_session' })
-    });
-    assert.strictEqual(freshProvider.action, 'launch');
-    assert.strictEqual(freshProvider.reason, 'interactive-fresh-provider-session');
-    assert.strictEqual(freshProvider.freshProviderSession, true);
   });
 
-  await test('Interactive fresh Codex launch defaults to native provider resume picker', async () => {
+  await test('Interactive fresh Codex launch does not default to provider resume picker', async () => {
     const launchOptions = parseLaunchArgs(['codex']);
     const launchTarget = {
       action: 'launch',
@@ -1051,20 +1035,20 @@ async function run() {
 
     assert.strictEqual(
       shouldDefaultCodexProviderResumePicker(launchOptions, launchTarget, { interactive: true }),
-      true
+      false
     );
 
     const defaulted = applyCodexProviderResumePickerDefault(launchOptions, launchTarget, { interactive: true });
-    assert.strictEqual(defaulted.providerResumePicker, true);
-    assert.strictEqual(defaulted.providerResumePickerDefaulted, true);
+    assert.strictEqual(defaulted.providerResumePicker, false);
+    assert.strictEqual(defaulted.providerResumePickerDefaulted, undefined);
 
-    const rootFreshProvider = applyCodexProviderResumePickerDefault(
-      launchOptions,
-      { action: 'launch', reason: 'interactive-fresh-provider-session', freshProviderSession: true },
+    const explicitProviderPicker = applyCodexProviderResumePickerDefault(
+      parseLaunchArgs(['codex', '--resume-provider-picker']),
+      launchTarget,
       { interactive: true }
     );
-    assert.strictEqual(rootFreshProvider.providerResumePicker, false);
-    assert.strictEqual(rootFreshProvider.freshProviderSession, true);
+    assert.strictEqual(explicitProviderPicker.providerResumePicker, true);
+    assert.strictEqual(explicitProviderPicker.providerResumePickerDefaulted, undefined);
 
     const nonInteractive = applyCodexProviderResumePickerDefault(launchOptions, launchTarget, { interactive: false });
     assert.strictEqual(nonInteractive.providerResumePicker, false);
