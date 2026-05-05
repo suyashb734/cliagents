@@ -21,6 +21,7 @@ const TEST_FILES = [
   'test-db-migrations.js',
   'test-usage-ledger.js',
   'test-run-ledger-schema.js',
+  'test-phase1a-blocked-state.js',
   'test-session-control-plane-schema.js',
   'test-session-control-plane-runtime.js',
   'test-task-routes.js',

@@ -426,6 +426,7 @@ class OrchestrationDB {
 
     // Initialize database pragmas
     this.db.pragma('journal_mode = WAL');
+    this.db.pragma('foreign_keys = ON');
 
     // Run migrations
     this._runMigrations(schemaPath, migrationsDir);
@@ -4149,6 +4150,256 @@ class OrchestrationDB {
       ...row,
       metadata: row.metadata ? JSON.parse(row.metadata) : {}
     }));
+  }
+
+  _requireRun(runId) {
+    const normalizedRunId = String(runId || '').trim();
+    if (!normalizedRunId) {
+      throw new Error('runId is required');
+    }
+    const run = this.getRunById(normalizedRunId);
+    if (!run) {
+      throw new Error(`Run not found: ${normalizedRunId}`);
+    }
+    return run;
+  }
+
+  // =====================
+  // Operator Actions (Phase 1A)
+  // =====================
+  // Durable record of operator replies, overrides, and interventions linked to runs.
+  // Enables replay of operator decisions after broker restart.
+
+  _parseOperatorActionRow(row) {
+    if (!row) {
+      return null;
+    }
+    return {
+      actionId: row.action_id,
+      runId: row.run_id,
+      terminalId: row.terminal_id || null,
+      actionKind: row.action_kind,
+      payload: parseJsonField(row.payload_json),
+      createdAt: row.created_at
+    };
+  }
+
+  appendOperatorAction(input = {}) {
+    const runId = String(input.runId || '').trim();
+    const actionKind = String(input.actionKind || '').trim();
+    const terminalId = input.terminalId ? String(input.terminalId).trim() : null;
+    const payload = input.payload;
+    const now = Number.isFinite(input.createdAt) ? input.createdAt : Date.now();
+
+    if (!runId) {
+      throw new Error('runId is required');
+    }
+    if (!actionKind) {
+      throw new Error('actionKind is required');
+    }
+    this._requireRun(runId);
+
+    const validKinds = [
+      'operator_reply',
+      'operator_override',
+      'operator_unblock',
+      'operator_cancel',
+      'operator_retry',
+      'operator_escalate',
+      'operator_resume'
+    ];
+    if (!validKinds.includes(actionKind)) {
+      throw new Error(`Invalid actionKind: ${actionKind}`);
+    }
+
+    const id = input.actionId || `opact_${generateId()}`;
+    const payloadJson = payload == null ? null : JSON.stringify(payload);
+
+    this.db.prepare(`
+      INSERT INTO operator_actions (action_id, run_id, terminal_id, action_kind, payload_json, created_at)
+      VALUES (?, ?, ?, ?, ?, ?)
+    `).run(id, runId, terminalId, actionKind, payloadJson, now);
+
+    return this.getOperatorAction(id);
+  }
+
+  getOperatorAction(actionId) {
+    const row = this.db.prepare('SELECT * FROM operator_actions WHERE action_id = ?').get(actionId);
+    return this._parseOperatorActionRow(row);
+  }
+
+  listOperatorActions(runId, options = {}) {
+    const normalizedRunId = String(runId || '').trim();
+    if (!normalizedRunId) {
+      return [];
+    }
+
+    const clauses = ['run_id = ?'];
+    const params = [normalizedRunId];
+
+    if (options.actionKind) {
+      clauses.push('action_kind = ?');
+      params.push(String(options.actionKind).trim());
+    }
+
+    if (options.terminalId) {
+      clauses.push('terminal_id = ?');
+      params.push(String(options.terminalId).trim());
+    }
+
+    const whereSql = `WHERE ${clauses.join(' AND ')}`;
+    const limit = clampLimit(options.limit, 50, 200);
+
+    const rows = this.db.prepare(`
+      SELECT * FROM operator_actions ${whereSql}
+      ORDER BY created_at ASC, action_id ASC
+      LIMIT ?
+    `).all(...params, limit);
+
+    return rows.map((row) => this._parseOperatorActionRow(row));
+  }
+
+  // =====================
+  // Run Blocked States (Phase 1A)
+  // =====================
+  // First-class blocked-state representation for runs.
+  // Tracks when runs become blocked, why they are blocked, and when they unblock.
+
+  _parseRunBlockedStateRow(row) {
+    if (!row) {
+      return null;
+    }
+    return {
+      id: row.id,
+      runId: row.run_id,
+      blockedReason: row.blocked_reason,
+      blockingDetail: row.blocking_detail || null,
+      unblockedAt: row.unblocked_at ?? null,
+      unblockReason: row.unblock_reason || null,
+      metadata: parseJsonField(row.metadata),
+      createdAt: row.created_at
+    };
+  }
+
+  appendRunBlockedState(input = {}) {
+    const runId = String(input.runId || '').trim();
+    const blockedReason = String(input.blockedReason || '').trim();
+    const blockingDetail = input.blockingDetail != null ? String(input.blockingDetail).trim() : null;
+    const now = Number.isFinite(input.createdAt) ? input.createdAt : Date.now();
+
+    if (!runId) {
+      throw new Error('runId is required');
+    }
+    if (!blockedReason) {
+      throw new Error('blockedReason is required');
+    }
+    this._requireRun(runId);
+
+    const validReasons = [
+      'waiting_for_input',
+      'waiting_for_approval',
+      'waiting_for_handoff',
+      'waiting_for_resource',
+      'waiting_for_dependency',
+      'blocked_by_gate',
+      'blocked_by_operator',
+      'internal_block'
+    ];
+    if (!validReasons.includes(blockedReason)) {
+      throw new Error(`Invalid blockedReason: ${blockedReason}`);
+    }
+    if (this.getActiveBlockedState(runId)) {
+      throw new Error(`Run already has an active blocked state: ${runId}`);
+    }
+
+    const id = input.id || `rbs_${generateId()}`;
+    const metadata = input.metadata && typeof input.metadata === 'object' && !Array.isArray(input.metadata)
+      ? input.metadata
+      : {};
+
+    this.db.prepare(`
+      INSERT INTO run_blocked_states (id, run_id, blocked_reason, blocking_detail, metadata, created_at)
+      VALUES (?, ?, ?, ?, ?, ?)
+    `).run(id, runId, blockedReason, blockingDetail, JSON.stringify(metadata), now);
+
+    return this.getRunBlockedState(id);
+  }
+
+  getRunBlockedState(id) {
+    const row = this.db.prepare('SELECT * FROM run_blocked_states WHERE id = ?').get(id);
+    return this._parseRunBlockedStateRow(row);
+  }
+
+  getActiveBlockedState(runId) {
+    const normalizedRunId = String(runId || '').trim();
+    if (!normalizedRunId) {
+      return null;
+    }
+    const row = this.db.prepare(`
+      SELECT * FROM run_blocked_states
+      WHERE run_id = ? AND unblocked_at IS NULL
+      ORDER BY created_at DESC
+      LIMIT 1
+    `).get(normalizedRunId);
+    return this._parseRunBlockedStateRow(row);
+  }
+
+  listRunBlockedStates(runId, options = {}) {
+    const normalizedRunId = String(runId || '').trim();
+    if (!normalizedRunId) {
+      return [];
+    }
+
+    const clauses = ['run_id = ?'];
+    const params = [normalizedRunId];
+
+    if (options.blockedReason) {
+      clauses.push('blocked_reason = ?');
+      params.push(String(options.blockedReason).trim());
+    }
+
+    if (options.activeOnly) {
+      clauses.push('unblocked_at IS NULL');
+    }
+
+    const whereSql = `WHERE ${clauses.join(' AND ')}`;
+    const limit = clampLimit(options.limit, 50, 200);
+
+    const rows = this.db.prepare(`
+      SELECT * FROM run_blocked_states ${whereSql}
+      ORDER BY created_at ASC, id ASC
+      LIMIT ?
+    `).all(...params, limit);
+
+    return rows.map((row) => this._parseRunBlockedStateRow(row));
+  }
+
+  unblockRun(runId, input = {}) {
+    const normalizedRunId = String(runId || '').trim();
+    if (!normalizedRunId) {
+      throw new Error('runId is required');
+    }
+    this._requireRun(normalizedRunId);
+
+    const now = Number.isFinite(input.unblockedAt) ? input.unblockedAt : Date.now();
+    const unblockReason = input.unblockReason != null ? String(input.unblockReason).trim() : null;
+
+    const result = this.db.prepare(`
+      UPDATE run_blocked_states
+      SET unblocked_at = ?, unblock_reason = ?
+      WHERE run_id = ? AND unblocked_at IS NULL
+    `).run(now, unblockReason, normalizedRunId);
+
+    if (result.changes === 0) {
+      throw new Error(`No active blocked state found for run: ${normalizedRunId}`);
+    }
+
+    return {
+      runId: normalizedRunId,
+      unblockedAt: now,
+      unblockReason,
+      unblockedCount: result.changes
+    };
   }
 
   _buildRunMemoryBundle(scopeId, options = {}) {

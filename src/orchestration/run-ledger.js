@@ -827,6 +827,15 @@ class RunLedgerService {
     const discussionMessages = discussionId && typeof this.db.getDiscussionMessages === 'function'
       ? this.db.getDiscussionMessages(discussionId)
       : [];
+    const blockedStates = typeof this.db.listRunBlockedStates === 'function'
+      ? this.db.listRunBlockedStates(runId)
+      : [];
+    const activeBlockedState = typeof this.db.getActiveBlockedState === 'function'
+      ? this.db.getActiveBlockedState(runId)
+      : null;
+    const operatorActions = typeof this.db.listOperatorActions === 'function'
+      ? this.db.listOperatorActions(runId)
+      : [];
 
     return {
       run: this._mapRunRow(run),
@@ -836,7 +845,11 @@ class RunLedgerService {
       steps,
       inputs,
       outputs,
-      toolEvents
+      toolEvents,
+      blockedStates,
+      activeBlockedState,
+      isBlocked: Boolean(activeBlockedState),
+      operatorActions
     };
   }
 
@@ -970,6 +983,58 @@ class RunLedgerService {
       completedAt: row.completed_at,
       metadata: parseJson(row.metadata)
     };
+  }
+
+  appendOperatorAction(input) {
+    return this.db.appendOperatorAction({
+      actionId: input.actionId,
+      runId: input.runId,
+      terminalId: input.terminalId || null,
+      actionKind: input.actionKind,
+      payload: input.payload,
+      createdAt: input.createdAt
+    });
+  }
+
+  getOperatorAction(actionId) {
+    return this.db.getOperatorAction(actionId);
+  }
+
+  listOperatorActions(runId, options = {}) {
+    return this.db.listOperatorActions(runId, options);
+  }
+
+  getActiveBlockedState(runId) {
+    return this.db.getActiveBlockedState(runId);
+  }
+
+  getRunBlockedState(id) {
+    return this.db.getRunBlockedState(id);
+  }
+
+  listRunBlockedStates(runId, options = {}) {
+    return this.db.listRunBlockedStates(runId, options);
+  }
+
+  appendRunBlockedState(input) {
+    // Blocked state is a run-ledger overlay, not a runs.status value. Existing
+    // statuses continue to describe execution lifecycle while this side channel
+    // carries operator-facing blockage details.
+    return this.db.appendRunBlockedState({
+      id: input.id,
+      runId: input.runId,
+      blockedReason: input.blockedReason,
+      blockingDetail: input.blockingDetail || null,
+      metadata: input.metadata || {},
+      createdAt: input.createdAt
+    });
+  }
+
+  unblockRun(runId, input = {}) {
+    return this.db.unblockRun(runId, {
+      unblockedAt: input.unblockedAt,
+      unblockReason: input.unblockReason || null
+    });
   }
 }
 

@@ -169,6 +169,61 @@ CREATE INDEX IF NOT EXISTS idx_usage_records_task_assignment_created ON usage_re
 CREATE INDEX IF NOT EXISTS idx_usage_records_terminal_created ON usage_records(terminal_id, created_at);
 
 -- ============================================================
+-- RUN BLOCKED STATE / OPERATOR ACTIONS
+-- ============================================================
+-- Blocked state is an overlay on top of runs.status. A blocked run may still
+-- have status='running'; callers that need operator-facing disposition must
+-- inspect run_blocked_states via the run-ledger helpers or getRunDetail().
+
+CREATE TABLE IF NOT EXISTS operator_actions (
+  action_id TEXT PRIMARY KEY,
+  run_id TEXT NOT NULL,
+  terminal_id TEXT,
+  action_kind TEXT NOT NULL CHECK (action_kind IN (
+    'operator_reply',
+    'operator_override',
+    'operator_unblock',
+    'operator_cancel',
+    'operator_retry',
+    'operator_escalate',
+    'operator_resume'
+  )),
+  payload_json TEXT,
+  created_at INTEGER NOT NULL DEFAULT (strftime('%s', 'now') * 1000),
+  FOREIGN KEY (run_id) REFERENCES runs(id) ON DELETE CASCADE
+);
+
+CREATE INDEX IF NOT EXISTS idx_operator_actions_run_id ON operator_actions(run_id);
+CREATE INDEX IF NOT EXISTS idx_operator_actions_terminal_id ON operator_actions(terminal_id);
+CREATE INDEX IF NOT EXISTS idx_operator_actions_created_at ON operator_actions(created_at);
+
+CREATE TABLE IF NOT EXISTS run_blocked_states (
+  id TEXT PRIMARY KEY,
+  run_id TEXT NOT NULL,
+  blocked_reason TEXT NOT NULL CHECK (blocked_reason IN (
+    'waiting_for_input',
+    'waiting_for_approval',
+    'waiting_for_handoff',
+    'waiting_for_resource',
+    'waiting_for_dependency',
+    'blocked_by_gate',
+    'blocked_by_operator',
+    'internal_block'
+  )),
+  blocking_detail TEXT,
+  unblocked_at INTEGER,
+  unblock_reason TEXT,
+  metadata TEXT,
+  created_at INTEGER NOT NULL DEFAULT (strftime('%s', 'now') * 1000),
+  FOREIGN KEY (run_id) REFERENCES runs(id) ON DELETE CASCADE
+);
+
+CREATE INDEX IF NOT EXISTS idx_run_blocked_states_run_id ON run_blocked_states(run_id);
+CREATE INDEX IF NOT EXISTS idx_run_blocked_states_created_at ON run_blocked_states(created_at);
+CREATE UNIQUE INDEX IF NOT EXISTS idx_run_blocked_states_active ON run_blocked_states(run_id)
+  WHERE unblocked_at IS NULL;
+
+-- ============================================================
 -- ADAPTER READINESS REPORTS
 -- ============================================================
 -- Latest live child-session readiness report per adapter. Historical readiness
