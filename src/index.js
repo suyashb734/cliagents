@@ -761,7 +761,8 @@ function createManagedRootLaunchTarget(action, reason, options = {}) {
     resumeMode: resumeModeByAction[action] || 'new',
     reason,
     ...(options.candidate ? { candidate: options.candidate } : {}),
-    ...(options.candidates ? { candidates: options.candidates } : {})
+    ...(options.candidates ? { candidates: options.candidates } : {}),
+    ...(options.freshProviderSession ? { freshProviderSession: true } : {})
   };
 }
 
@@ -771,12 +772,21 @@ function canRecoverManagedRootExactly(launchOptions = {}, candidate = null) {
     && hasExactManagedRootProviderResume(candidate);
 }
 
+function isCodexManagedRootAdapter(adapter) {
+  try {
+    return normalizeManagedRootAdapter(adapter) === 'codex-cli';
+  } catch {
+    return String(adapter || '').trim().toLowerCase() === 'codex-cli';
+  }
+}
+
 function shouldDefaultCodexProviderResumePicker(launchOptions = {}, launchTarget = null, options = {}) {
   const interactive = options.interactive ?? Boolean(process.stdin.isTTY && process.stdout.isTTY);
   return Boolean(
     interactive
     && launchOptions.adapter === 'codex-cli'
     && launchTarget?.action === 'launch'
+    && launchTarget?.freshProviderSession !== true
     && launchOptions.providerResumePicker !== true
     && launchOptions.freshProviderSession !== true
     && !launchOptions.providerSessionId
@@ -784,6 +794,15 @@ function shouldDefaultCodexProviderResumePicker(launchOptions = {}, launchTarget
 }
 
 function applyCodexProviderResumePickerDefault(launchOptions = {}, launchTarget = null, options = {}) {
+  if (launchTarget?.freshProviderSession === true) {
+    return {
+      ...launchOptions,
+      providerResumePicker: false,
+      providerResumePickerDefaulted: false,
+      freshProviderSession: true
+    };
+  }
+
   if (!shouldDefaultCodexProviderResumePicker(launchOptions, launchTarget, options)) {
     return launchOptions;
   }
@@ -1702,6 +1721,7 @@ function normalizeManagedRootSelectionGroups(candidates) {
 function createManagedRootSelectionPrompt(candidates, options = {}) {
   const adapter = options.adapter || 'codex-cli';
   const workDir = options.workDir || null;
+  const showCodexProviderChoices = isCodexManagedRootAdapter(adapter);
   const { resumeCandidates, recoverCandidates } = normalizeManagedRootSelectionGroups(candidates);
   const lines = [
     `Recent ${adapter} roots${workDir ? ` in ${workDir}` : ''}:`
@@ -1754,9 +1774,16 @@ function createManagedRootSelectionPrompt(candidates, options = {}) {
     }
   }
 
-  lines.push('  Enter  Start a new root');
+  if (showCodexProviderChoices) {
+    lines.push('  Enter  Start a new managed root and choose a Codex session');
+    lines.push('  f      Start a new managed root with a fresh Codex session');
+  } else {
+    lines.push('  Enter  Start a new root');
+  }
   lines.push('');
-  lines.push('Select a root number to resume or recover, or press Enter for a new root: ');
+  lines.push(showCodexProviderChoices
+    ? 'Select a root number to resume or recover, press Enter to choose a Codex session for a new root, or type f for fresh: '
+    : 'Select a root number to resume or recover, or press Enter for a new root: ');
   return {
     text: lines.join('\n'),
     selectionEntries
@@ -1852,6 +1879,9 @@ async function promptForManagedRootSelection(candidates, options = {}) {
       const trimmed = String(answer || '').trim();
       if (!trimmed) {
         return null;
+      }
+      if (isCodexManagedRootAdapter(options.adapter) && trimmed.toLowerCase() === 'f') {
+        return { launchAction: 'fresh_provider_session' };
       }
 
       const selectedIndex = Number.parseInt(trimmed, 10);
@@ -2031,6 +2061,13 @@ async function resolveManagedRootLaunchTarget(launchOptions, dependencies = {}) 
   });
   if (!selectedCandidate) {
     return createManagedRootLaunchTarget('launch', 'interactive-new-root', { candidates });
+  }
+
+  if (selectedCandidate.launchAction === 'fresh_provider_session') {
+    return createManagedRootLaunchTarget('launch', 'interactive-fresh-provider-session', {
+      candidates,
+      freshProviderSession: true
+    });
   }
 
   if (selectedCandidate.launchAction === 'recover') {
