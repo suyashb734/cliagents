@@ -133,6 +133,19 @@
       "last_reviewed": "2026-05-04"
     },
     {
+      "path": "docs/research/MEMORY-READ-MODEL-V1-PLAN.md",
+      "status": "active-plan",
+      "type": "plan",
+      "scope": ["memory", "persistence", "usage", "tasks", "rooms", "projects"],
+      "related_code": [
+        "src/database/db.js",
+        "src/routes/memory.js",
+        "src/mcp/cliagents-mcp-server.js"
+      ],
+      "supersedes": [],
+      "last_reviewed": "2026-05-05"
+    },
+    {
       "path": "docs/research/BROKER-NATIVE-ORCHESTRATION-UX-PROPOSAL.md",
       "status": "active-plan",
       "type": "plan",

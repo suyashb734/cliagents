@@ -12,6 +12,8 @@ docs remain useful context, but this file is the current entrypoint.
 
 2. **Task-linked observability follow-through**
    - Keep task, assignment, run, usage, and memory linkage coherent.
+   - Execute [Memory Read Model V1](../research/MEMORY-READ-MODEL-V1-PLAN.md)
+     as the concrete persistence/query branch.
    - Improve live metadata completeness for model, duration, and cost where
      providers expose it.
 

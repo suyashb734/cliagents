@@ -19,6 +19,7 @@ older planning notes in `docs/research/`.
 
 - [Child Collaboration Implementation Plan](./research/CHILD-COLLABORATION-IMPLEMENTATION-PLAN.md)
 - [Child Adapter Reliability](./research/CHILD-ADAPTER-RELIABILITY.md)
+- [Memory Read Model V1 Plan](./research/MEMORY-READ-MODEL-V1-PLAN.md)
 - [Broker Native Orchestration UX Proposal](./research/BROKER-NATIVE-ORCHESTRATION-UX-PROPOSAL.md)
 
 ## Reference And How-To
