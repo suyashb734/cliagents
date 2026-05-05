@@ -2288,15 +2288,37 @@ class PersistentSessionManager extends EventEmitter {
     terminal.pendingProviderCommand = null;
   }
 
+  _refreshReuseSessionMetadata(terminal, sessionMetadata) {
+    const nextMetadata = sessionMetadata && typeof sessionMetadata === 'object' && !Array.isArray(sessionMetadata)
+      ? { ...sessionMetadata }
+      : {};
+    const sessionLabel = String(
+      nextMetadata.sessionLabel
+      || terminal.sessionLabel
+      || terminal.sessionMetadata?.sessionLabel
+      || ''
+    ).trim();
+
+    if (sessionLabel) {
+      nextMetadata.sessionLabel = sessionLabel;
+    }
+
+    terminal.sessionMetadata = Object.keys(nextMetadata).length > 0 ? nextMetadata : null;
+    terminal.sessionLabel = sessionLabel || null;
+    return terminal.sessionMetadata;
+  }
+
   _reuseTerminalFresh(terminal, options = {}) {
     this._prepareTerminalForReuse(terminal);
+    const sessionMetadata = this._refreshReuseSessionMetadata(terminal, options.sessionMetadata);
     terminal.providerThreadRef = null;
     terminal.messageCount = 0;
     this._reserveTerminal(terminal);
     if (this.db?.updateTerminalBinding) {
       this.db.updateTerminalBinding(terminal.terminalId, {
         providerThreadRef: null,
-        status: TerminalStatus.IDLE
+        status: TerminalStatus.IDLE,
+        sessionMetadata: sessionMetadata || {}
       });
     } else if (this.db) {
       this.db.updateStatus(terminal.terminalId, terminal.status || TerminalStatus.IDLE);
@@ -2322,8 +2344,14 @@ class PersistentSessionManager extends EventEmitter {
 
   _reuseTerminalContinue(terminal, options = {}) {
     this._prepareTerminalForReuse(terminal);
+    const sessionMetadata = this._refreshReuseSessionMetadata(terminal, options.sessionMetadata);
     this._reserveTerminal(terminal);
-    if (this.db) {
+    if (this.db?.updateTerminalBinding) {
+      this.db.updateTerminalBinding(terminal.terminalId, {
+        status: terminal.status || TerminalStatus.IDLE,
+        sessionMetadata: sessionMetadata || {}
+      });
+    } else if (this.db) {
       this.db.updateStatus(terminal.terminalId, terminal.status || TerminalStatus.IDLE);
     }
 

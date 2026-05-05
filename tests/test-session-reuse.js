@@ -124,7 +124,12 @@ async function run() {
       ...baseOptions,
       rootSessionId: reusableRoot,
       parentSessionId: reusableRoot,
-      sessionKind: 'reviewer'
+      sessionKind: 'reviewer',
+      sessionMetadata: {
+        ...baseOptions.sessionMetadata,
+        taskId: 'task-reuse-a',
+        taskAssignmentId: 'assignment-reuse-a'
+      }
     });
     await manager.sendInput(first.terminalId, 'Review the implementation.');
     const firstLiveTerminal = manager.terminals.get(first.terminalId);
@@ -144,13 +149,36 @@ async function run() {
       ...baseOptions,
       rootSessionId: reusableRoot,
       parentSessionId: reusableRoot,
-      sessionKind: 'reviewer'
+      sessionKind: 'reviewer',
+      sessionMetadata: {
+        ...baseOptions.sessionMetadata,
+        taskId: 'task-reuse-b',
+        taskAssignmentId: 'assignment-reuse-b'
+      }
     });
 
     assert.strictEqual(second.terminalId, first.terminalId);
     assert.strictEqual(second.reused, true);
     assert.strictEqual(fakeTmux.createCalls.length, 1);
     assert.strictEqual(db.listTerminals({ rootSessionId: reusableRoot }).length, 1);
+    const reusedLiveTerminal = manager.terminals.get(second.terminalId);
+    assert.strictEqual(reusedLiveTerminal.sessionMetadata.taskId, 'task-reuse-b');
+    assert.strictEqual(reusedLiveTerminal.sessionMetadata.taskAssignmentId, 'assignment-reuse-b');
+    const reusedDbTerminal = db.getTerminal(second.terminalId);
+    const reusedDbMetadata = JSON.parse(reusedDbTerminal.session_metadata);
+    assert.strictEqual(reusedDbMetadata.taskId, 'task-reuse-b');
+    assert.strictEqual(reusedDbMetadata.taskAssignmentId, 'assignment-reuse-b');
+    db.addMessage(second.terminalId, 'assistant', 'Second assignment usage.', {
+      metadata: {
+        inputTokens: 11,
+        outputTokens: 7,
+        totalTokens: 18,
+        sourceConfidence: 'provider_reported'
+      }
+    });
+    const reuseUsageRecords = db.listUsageRecords({ terminalId: second.terminalId });
+    assert.strictEqual(reuseUsageRecords[0].task_id, 'task-reuse-b');
+    assert.strictEqual(reuseUsageRecords[0].task_assignment_id, 'assignment-reuse-b');
     const reuseEvents = db.listSessionEvents({ rootSessionId: reusableRoot });
     assert(reuseEvents.some((event) => event.event_type === 'session_resumed'));
 
