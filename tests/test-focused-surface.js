@@ -19,6 +19,8 @@ const TEST_FILES = [
   'test-status-detection.js',
   'test-handoff-init-prompts.js',
   'test-db-migrations.js',
+  'test-memory-read-model-projections.js',
+  'test-memory-query-insights.js',
   'test-usage-ledger.js',
   'test-run-ledger-schema.js',
   'test-phase1a-blocked-state.js',

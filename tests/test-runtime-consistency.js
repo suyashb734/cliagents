@@ -33,6 +33,7 @@ function isSkippableProviderFailure(message = '') {
     'resourceexhausted',
     'no active subscription',
     'billing',
+    'participant timed out',
     'request timed out',
     'qwen oauth was discontinued',
     'status: 504'

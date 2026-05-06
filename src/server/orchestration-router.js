@@ -654,6 +654,7 @@ function createOrchestrationRouter(context) {
     ['idle', 'completed'],
     ['failed', 'failed'],
     ['error', 'failed'],
+    ['terminal_missing', 'failed'],
     ['cancelled', 'cancelled'],
     ['canceled', 'cancelled'],
     ['superseded', 'superseded']
@@ -696,7 +697,14 @@ function createOrchestrationRouter(context) {
       ? db.getTerminal(assignment.terminalId)
       : null;
     if (!persistedTerminal) {
-      return null;
+      return {
+        terminalId: assignment.terminalId,
+        status: 'terminal_missing',
+        adapter: assignment.adapter || null,
+        model: assignment.model || null,
+        role: null,
+        missing: true
+      };
     }
 
     return {
@@ -739,8 +747,10 @@ function createOrchestrationRouter(context) {
         status: terminal.status,
         adapter: terminal.adapter,
         model: terminal.model,
-        role: terminal.role
-      } : null
+        role: terminal.role,
+        missing: terminal.missing === true
+      } : null,
+      terminalMissing: terminal?.missing === true
     };
   }
 

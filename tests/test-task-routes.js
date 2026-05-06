@@ -351,6 +351,19 @@ async function runRouteAssertions() {
     assert.strictEqual(listAssignmentsRes.data.assignments[0].usageSummary.totalTokens, 15);
 
     const liveTerminal = sessionManager.state.terminals.get(startAssignmentRes.data.assignment.terminalId);
+    sessionManager.state.terminals.delete(startAssignmentRes.data.assignment.terminalId);
+    const missingTerminalTaskRes = await request(serverHandle.baseUrl, 'GET', `/orchestration/tasks/${taskId}`);
+    assert.strictEqual(missingTerminalTaskRes.status, 200);
+    assert.strictEqual(missingTerminalTaskRes.data.status, 'failed');
+    assert.strictEqual(missingTerminalTaskRes.data.assignmentCounts.failed, 1);
+    assert(missingTerminalTaskRes.data.task.projectId, 'new workspace-backed tasks should be linked to a project');
+    const missingTerminalAssignmentsRes = await request(serverHandle.baseUrl, 'GET', `/orchestration/tasks/${taskId}/assignments`);
+    assert.strictEqual(missingTerminalAssignmentsRes.status, 200);
+    assert.strictEqual(missingTerminalAssignmentsRes.data.assignments[0].status, 'failed');
+    assert.strictEqual(missingTerminalAssignmentsRes.data.assignments[0].terminalStatus, 'terminal_missing');
+    assert.strictEqual(missingTerminalAssignmentsRes.data.assignments[0].terminalMissing, true);
+    sessionManager.state.terminals.set(startAssignmentRes.data.assignment.terminalId, liveTerminal);
+
     liveTerminal.status = 'error';
     liveTerminal.taskState = 'error';
     const failedTaskRes = await request(serverHandle.baseUrl, 'GET', `/orchestration/tasks/${taskId}`);
