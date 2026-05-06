@@ -483,6 +483,22 @@ async function run() {
       latestConclusion: {
         summary: 'Proceed with async-first delegation.'
       },
+      normalizedEvents: [
+        { type: 'session_started', sourceEventId: 'se_1' },
+        { type: 'permission_requested', sourceEventId: 'se_2' }
+      ],
+      eventNormalization: {
+        inputCount: 3,
+        normalizedCount: 2,
+        skippedCount: 1,
+        gaps: [
+          {
+            sourceEventId: 'se_3',
+            sourceEventType: 'consensus_recorded',
+            gap: 'unmapped_session_event:consensus_recorded'
+          }
+        ]
+      },
       sessions: [
         {
           sessionId: 'root-123',
@@ -509,6 +525,8 @@ async function run() {
     assert(detailText.includes('activity_summary: Waiting for operator approval before continuing.'));
     assert(detailText.includes('reuse_events: 2'));
     assert(detailText.includes('reused_sessions: 1'));
+    assert(detailText.includes('normalized_events: 2'));
+    assert(detailText.includes('event_normalization_skipped: 1'));
     assert(detailText.includes('latest_conclusion: Proceed with async-first delegation.'));
     assert(detailText.includes('child-review-1 status=blocked'));
 

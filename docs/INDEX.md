@@ -8,6 +8,7 @@ older planning notes in `docs/research/`.
 - [Architecture](./architecture/ARCHITECTURE.md): core broker objects and how they fit together.
 - [State Model](./architecture/STATE-MODEL.md): session kinds, statuses, and task rollups.
 - [Adapter Contract](./reference/ADAPTER-CONTRACT.md): adapter lifecycle and collaborator readiness.
+- [Event Normalization](./reference/EVENT-NORMALIZATION.md): normalized broker event contract and adapter gaps.
 - [MCP Tools](./reference/MCP-TOOLS.md): broker tool surface overview.
 - [Roadmap](./roadmap/ROADMAP.md): active implementation order.
 - [ADR Index](./adr/README.md): durable architecture decision record rules.
@@ -26,6 +27,7 @@ older planning notes in `docs/research/`.
 ## Reference And How-To
 
 - [Knowledge Graph Guidance](./reference/KNOWLEDGE-GRAPH.md)
+- [Event Normalization](./reference/EVENT-NORMALIZATION.md)
 - [Troubleshooting](./TROUBLESHOOTING.md)
 - [Adding Adapters](./adding-adapters.md)
 - [Historical Adapter Notes](./adapters.md)

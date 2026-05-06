@@ -58,6 +58,20 @@
       "last_reviewed": "2026-05-04"
     },
     {
+      "path": "docs/reference/EVENT-NORMALIZATION.md",
+      "status": "reference",
+      "type": "reference",
+      "scope": ["events", "adapters", "runtime-hosts", "observability"],
+      "related_code": [
+        "src/orchestration/event-normalizer.js",
+        "src/orchestration/root-session-monitor.js",
+        "src/server/orchestration-router.js",
+        "src/mcp/cliagents-mcp-server.js"
+      ],
+      "supersedes": [],
+      "last_reviewed": "2026-05-06"
+    },
+    {
       "path": "docs/reference/MCP-TOOLS.md",
       "status": "reference",
       "type": "reference",

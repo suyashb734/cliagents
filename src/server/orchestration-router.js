@@ -17,6 +17,7 @@ const { runDiscussion } = require('../orchestration/discussion-runner');
 const { runPlanReview, runPrReview } = require('../orchestration/review-protocols');
 const { RunLedgerService } = require('../orchestration/run-ledger');
 const { buildRootSessionSnapshot, listRootSessionSummaries } = require('../orchestration/root-session-monitor');
+const { normalizeSessionEvents } = require('../orchestration/event-normalizer');
 const { getProviderSessionRegistry } = require('../orchestration/provider-session-registry');
 const { RoomService } = require('../orchestration/room-service');
 const {
@@ -3383,7 +3384,18 @@ function createOrchestrationRouter(context) {
         limit: Number.isFinite(limit) ? limit : 200
       });
 
-      res.json({ events });
+      const normalized = parseQueryBoolean(req.query.normalized, false)
+        || String(req.query.format || '').trim().toLowerCase() === 'normalized';
+      if (!normalized) {
+        return res.json({ events });
+      }
+
+      const projection = normalizeSessionEvents(events);
+      res.json({
+        events,
+        normalizedEvents: projection.events,
+        eventNormalization: projection.diagnostics
+      });
     } catch (error) {
       res.status(500).json({
         error: { code: 'internal_error', message: error.message }

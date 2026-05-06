@@ -17,6 +17,7 @@ const TEST_FILES = [
   'test-opencode-cli.js',
   'test-docs-canonical-map.js',
   'test-status-detection.js',
+  'test-event-normalizer.js',
   'test-handoff-init-prompts.js',
   'test-db-migrations.js',
   'test-memory-read-model-projections.js',

@@ -1,6 +1,7 @@
 'use strict';
 
 const { resolveRuntimeHostMetadata } = require('../runtime/host-model');
+const { normalizeSessionEvents } = require('./event-normalizer');
 
 const BUSY_TERMINAL_STATUSES = new Set(['processing', 'queued', 'running']);
 const ACTIVE_ROOT_STATUSES = new Set(['running', 'processing', 'pending', 'partial', 'blocked', 'needs_attention']);
@@ -1043,6 +1044,7 @@ function buildRootSessionSnapshot({
     liveOutputResolver,
     interactiveTerminalId
   });
+  const normalizedEventProjection = normalizeSessionEvents(events);
 
   return {
     rootSessionId,
@@ -1077,6 +1079,8 @@ function buildRootSessionSnapshot({
     attention,
     latestConclusion: summarizeConclusionEvent(latestConclusionEvent),
     events,
+    normalizedEvents: normalizedEventProjection.events,
+    eventNormalization: normalizedEventProjection.diagnostics,
     terminals,
     sessions: sessionList
   };

@@ -1403,6 +1403,39 @@ async function testSessionEventsRouteReturnsReplayOrderedEvents() {
     idempotencyKey: `${rootSessionId}:cccccccccccccccccccccccccccccccc:session_started:child`,
     payloadSummary: 'child started'
   });
+  db.addSessionEvent({
+    rootSessionId,
+    sessionId: rootSessionId,
+    eventType: 'message_sent',
+    originClient: 'mcp',
+    idempotencyKey: `${rootSessionId}:${rootSessionId}:message_sent:1`,
+    payloadSummary: 'user requested implementation',
+    payloadJson: {
+      content: 'implement event normalization'
+    }
+  });
+  db.addSessionEvent({
+    rootSessionId,
+    sessionId: 'cccccccccccccccccccccccccccccccc',
+    parentSessionId: rootSessionId,
+    eventType: 'user_input_requested',
+    originClient: 'mcp',
+    idempotencyKey: `${rootSessionId}:cccccccccccccccccccccccccccccccc:user_input_requested:1`,
+    payloadSummary: 'approval required',
+    payloadJson: {
+      kind: 'permission',
+      question: 'Approve write?'
+    }
+  });
+  db.addSessionEvent({
+    rootSessionId,
+    sessionId: 'cccccccccccccccccccccccccccccccc',
+    parentSessionId: rootSessionId,
+    eventType: 'consensus_recorded',
+    originClient: 'mcp',
+    idempotencyKey: `${rootSessionId}:cccccccccccccccccccccccccccccccc:consensus_recorded:1`,
+    payloadSummary: 'discussion conclusion'
+  });
 
   const { server, baseUrl } = await startApp({
     sessionManager: {
@@ -1420,7 +1453,7 @@ async function testSessionEventsRouteReturnsReplayOrderedEvents() {
   try {
     const res = await request(baseUrl, 'GET', `/orchestration/session-events?rootSessionId=${rootSessionId}`);
     assert.strictEqual(res.status, 200);
-    assert.strictEqual(res.data.events.length, 2);
+    assert.strictEqual(res.data.events.length, 5);
     assert.strictEqual(res.data.events[0].sequence_no, 1);
     assert.strictEqual(res.data.events[0].payload_summary, 'root attached');
     assert.strictEqual(res.data.events[1].sequence_no, 2);
@@ -1428,9 +1461,28 @@ async function testSessionEventsRouteReturnsReplayOrderedEvents() {
 
     const cursorRes = await request(baseUrl, 'GET', `/orchestration/session-events?rootSessionId=${rootSessionId}&after_sequence_no=1`);
     assert.strictEqual(cursorRes.status, 200);
-    assert.strictEqual(cursorRes.data.events.length, 1);
+    assert.strictEqual(cursorRes.data.events.length, 4);
     assert.strictEqual(cursorRes.data.events[0].sequence_no, 2);
     assert.strictEqual(cursorRes.data.events[0].payload_summary, 'child started');
+
+    const normalizedRes = await request(baseUrl, 'GET', `/orchestration/session-events?rootSessionId=${rootSessionId}&normalized=1`);
+    assert.strictEqual(normalizedRes.status, 200);
+    assert.strictEqual(normalizedRes.data.events.length, 5);
+    assert.deepStrictEqual(
+      normalizedRes.data.normalizedEvents.map((event) => event.type),
+      ['session_started', 'session_started', 'prompt_submitted', 'permission_requested']
+    );
+    assert.strictEqual(normalizedRes.data.eventNormalization.inputCount, 5);
+    assert.strictEqual(normalizedRes.data.eventNormalization.normalizedCount, 4);
+    assert.strictEqual(normalizedRes.data.eventNormalization.skippedCount, 1);
+    assert(
+      normalizedRes.data.eventNormalization.gaps.some((entry) => entry.gap === 'unmapped_session_event:consensus_recorded')
+    );
+
+    const snapshotRes = await request(baseUrl, 'GET', `/orchestration/root-sessions/${rootSessionId}?eventLimit=10&terminalLimit=10`);
+    assert.strictEqual(snapshotRes.status, 200);
+    assert(snapshotRes.data.normalizedEvents.some((event) => event.type === 'prompt_submitted'));
+    assert.strictEqual(snapshotRes.data.eventNormalization.skippedCount, 1);
   } finally {
     await stopApp(server);
     db.close();

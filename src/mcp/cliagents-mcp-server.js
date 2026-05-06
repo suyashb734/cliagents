@@ -4220,6 +4220,10 @@ async function handleGetRootSessionStatus(args) {
         `runtime_fidelity: ${snapshot.runtimeFidelity || 'n/a'}`,
         `interactive_terminal_id: ${snapshot.interactiveTerminalId || 'n/a'}`,
         `sessions: ${snapshot.counts?.sessions || 0}`,
+        `normalized_events: ${snapshot.normalizedEvents?.length || 0}`,
+        snapshot.eventNormalization?.skippedCount
+          ? `event_normalization_skipped: ${snapshot.eventNormalization.skippedCount}`
+          : null,
         `running: ${snapshot.counts?.running || 0}`,
         `blocked: ${snapshot.counts?.blocked || 0}`,
         `stale: ${snapshot.counts?.stale || 0}`,

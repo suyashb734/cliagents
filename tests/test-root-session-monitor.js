@@ -257,6 +257,11 @@ async function run() {
     assert.strictEqual(snapshot.userFacing, true);
     assert.strictEqual(snapshot.activitySource, 'conclusion');
     assert.strictEqual(snapshot.runtimeHost, null);
+    assert(snapshot.normalizedEvents.some((event) => event.type === 'permission_requested'));
+    assert.strictEqual(snapshot.eventNormalization.skippedCount, 1);
+    assert(
+      snapshot.eventNormalization.gaps.some((entry) => entry.gap === 'unmapped_session_event:consensus_recorded')
+    );
 
     const managedMainSnapshot = buildRootSessionSnapshot({
       db,

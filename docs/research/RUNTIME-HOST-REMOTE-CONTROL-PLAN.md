@@ -211,6 +211,22 @@ import slice:
 - do not add remote write control, PTY ownership, provider lifecycle management,
   or tunnel support in this milestone
 
+## Milestone 3 Execution Brief
+
+Implement Event Normalization V1 as a runtime-neutral observability read model:
+
+- add a single normalized event contract for broker session events and adapter
+  event fixtures
+- expose normalized events on session-event replay and root-session snapshots
+- include normalization diagnostics so unmapped historical events and adapter
+  fidelity gaps are visible instead of silently ignored
+- cover Codex, Gemini, Claude, OpenCode, and Qwen fixture shapes without
+  depending on live Qwen availability
+- document provider-specific gaps, especially Codex notification and token
+  reporting limits
+- do not add a DB migration, remote input handling, approval state machines,
+  web UI, tunnels, or direct PTY ownership in this milestone
+
 ## Rejected Alternative
 
 Do not follow Warp by building a native terminal renderer inside `cliagents`.
