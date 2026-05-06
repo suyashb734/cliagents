@@ -10,6 +10,10 @@ const BetterSqlite3 = require('better-sqlite3');
 const path = require('path');
 const fs = require('fs');
 const crypto = require('crypto');
+const {
+  resolveRuntimeHostMetadata,
+  serializeRuntimeCapabilities
+} = require('../runtime/host-model');
 
 /**
  * Generate a unique ID for shared memory entries
@@ -1682,6 +1686,17 @@ class OrchestrationDB {
     const captureMode = terminalOptions.captureMode || 'raw-tty';
     const model = terminalOptions.model || null;
     const lastMessageAt = Number.isFinite(terminalOptions.lastMessageAt) ? terminalOptions.lastMessageAt : null;
+    const runtimeMetadata = resolveRuntimeHostMetadata({
+      terminalId,
+      sessionName,
+      windowName,
+      sessionMetadata: sessionMetadataObject,
+      adoptedAt,
+      runtimeHost: terminalOptions.runtimeHost,
+      runtimeId: terminalOptions.runtimeId,
+      runtimeCapabilities: terminalOptions.runtimeCapabilities,
+      runtimeFidelity: terminalOptions.runtimeFidelity
+    });
     const hasProjectColumn = this._hasColumn('terminals', 'project_id');
     const projectId = hasProjectColumn
       ? this._resolveProjectIdForTerminalContext(workDir, sessionMetadataObject, {
@@ -1738,6 +1753,22 @@ class OrchestrationDB {
     if (hasProjectColumn) {
       columns.push('project_id');
       values.push(projectId);
+    }
+    if (this._hasColumn('terminals', 'runtime_host')) {
+      columns.push('runtime_host');
+      values.push(runtimeMetadata.runtimeHost);
+    }
+    if (this._hasColumn('terminals', 'runtime_id')) {
+      columns.push('runtime_id');
+      values.push(runtimeMetadata.runtimeId);
+    }
+    if (this._hasColumn('terminals', 'runtime_capabilities')) {
+      columns.push('runtime_capabilities');
+      values.push(serializeRuntimeCapabilities(runtimeMetadata.runtimeCapabilities, runtimeMetadata.runtimeHost));
+    }
+    if (this._hasColumn('terminals', 'runtime_fidelity')) {
+      columns.push('runtime_fidelity');
+      values.push(runtimeMetadata.runtimeFidelity);
     }
 
     this.db.run(`
@@ -1832,6 +1863,53 @@ class OrchestrationDB {
     Number.isFinite(terminalOptions.lastMessageAt) ? terminalOptions.lastMessageAt : null,
     terminalOptions.status || null,
     terminalId);
+
+    const runtimeUpdates = [];
+    const runtimeValues = [];
+    const hasRuntimeInput = (
+      terminalOptions.runtimeHost !== undefined
+      || terminalOptions.runtimeId !== undefined
+      || terminalOptions.runtimeCapabilities !== undefined
+      || terminalOptions.runtimeFidelity !== undefined
+    );
+    if (hasRuntimeInput) {
+      const current = this.getTerminal(terminalId) || {};
+      const runtimeMetadata = resolveRuntimeHostMetadata({
+        ...current,
+        terminalId,
+        sessionName: current.session_name,
+        windowName: current.window_name,
+        sessionMetadata: parseJsonField(current.session_metadata),
+        adoptedAt: terminalOptions.adoptedAt || current.adopted_at,
+        runtimeHost: terminalOptions.runtimeHost ?? current.runtime_host,
+        runtimeId: terminalOptions.runtimeId ?? current.runtime_id,
+        runtimeCapabilities: terminalOptions.runtimeCapabilities ?? current.runtime_capabilities,
+        runtimeFidelity: terminalOptions.runtimeFidelity ?? current.runtime_fidelity
+      });
+      if (this._hasColumn('terminals', 'runtime_host')) {
+        runtimeUpdates.push('runtime_host = ?');
+        runtimeValues.push(runtimeMetadata.runtimeHost);
+      }
+      if (this._hasColumn('terminals', 'runtime_id')) {
+        runtimeUpdates.push('runtime_id = ?');
+        runtimeValues.push(runtimeMetadata.runtimeId);
+      }
+      if (this._hasColumn('terminals', 'runtime_capabilities')) {
+        runtimeUpdates.push('runtime_capabilities = ?');
+        runtimeValues.push(serializeRuntimeCapabilities(runtimeMetadata.runtimeCapabilities, runtimeMetadata.runtimeHost));
+      }
+      if (this._hasColumn('terminals', 'runtime_fidelity')) {
+        runtimeUpdates.push('runtime_fidelity = ?');
+        runtimeValues.push(runtimeMetadata.runtimeFidelity);
+      }
+    }
+    if (runtimeUpdates.length > 0) {
+      this.db.run(`
+        UPDATE terminals
+        SET ${runtimeUpdates.join(', ')}, last_active = CURRENT_TIMESTAMP
+        WHERE terminal_id = ?
+      `, ...runtimeValues, terminalId);
+    }
   }
 
   /**

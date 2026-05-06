@@ -17,6 +17,11 @@ const { isCollaboratorReadyAdapter } = require('../orchestration/child-session-s
 const { getModelRoutingService } = require('../services/model-routing');
 const { resolveClaudeCliPath } = require('../utils/claude-cli-path');
 const { extractOutput, stripAnsiCodes } = require('../utils/output-extractor');
+const {
+  RUNTIME_HOSTS,
+  RUNTIME_FIDELITY,
+  resolveRuntimeHostMetadata
+} = require('../runtime/host-model');
 
 const inferGeminiBrokerDefaultModel = GeminiCliAdapter.inferGeminiBrokerDefaultModel;
 const TRACKED_RUN_INLINE_COMMAND_MAX_LENGTH = 400;
@@ -1023,6 +1028,14 @@ class PersistentSessionManager extends EventEmitter {
         const providerThreadRef = dbTerminal.providerThreadRef || dbTerminal.provider_thread_ref || null;
         const adoptedAt = dbTerminal.adoptedAt || dbTerminal.adopted_at || null;
         const captureMode = dbTerminal.captureMode || dbTerminal.capture_mode || 'raw-tty';
+        const runtimeMetadata = resolveRuntimeHostMetadata({
+          ...dbTerminal,
+          terminalId,
+          sessionName,
+          windowName,
+          sessionMetadata,
+          adoptedAt
+        });
 
         if (!terminalId || !sessionName || !windowName || !adapter) {
           continue;
@@ -1059,6 +1072,10 @@ class PersistentSessionManager extends EventEmitter {
             providerThreadRef,
             adoptedAt,
             captureMode,
+            runtimeHost: runtimeMetadata.runtimeHost,
+            runtimeId: runtimeMetadata.runtimeId,
+            runtimeCapabilities: runtimeMetadata.runtimeCapabilities,
+            runtimeFidelity: runtimeMetadata.runtimeFidelity,
             recovered: true
           };
           this._attachReuseInternals(recoveredTerminal, this._buildReuseContext({
@@ -2253,6 +2270,7 @@ class PersistentSessionManager extends EventEmitter {
     const processState = this._getProcessState(terminal);
     const attention = this._getTerminalAttention(terminal);
     const currentCommand = this._getCurrentCommand(terminal);
+    const runtimeMetadata = resolveRuntimeHostMetadata(terminal);
     return {
       terminalId: terminal.terminalId,
       sessionName: terminal.sessionName,
@@ -2269,6 +2287,11 @@ class PersistentSessionManager extends EventEmitter {
       providerThreadRef: terminal.providerThreadRef || null,
       adoptedAt: terminal.adoptedAt || null,
       captureMode: terminal.captureMode || 'raw-tty',
+      runtimeHost: runtimeMetadata.runtimeHost,
+      runtimeId: runtimeMetadata.runtimeId,
+      runtimeCapabilities: runtimeMetadata.runtimeCapabilities,
+      runtimeFidelity: runtimeMetadata.runtimeFidelity,
+      runtime: runtimeMetadata.runtime,
       workDir: terminal.workDir || null,
       model: terminal.model || null,
       sessionLabel: terminal.sessionMetadata?.sessionLabel || terminal.sessionLabel || null,
@@ -2851,6 +2874,13 @@ class PersistentSessionManager extends EventEmitter {
       providerThreadRef: resolvedProviderThreadRef,
       adoptedAt: null,
       captureMode: 'raw-tty',
+      ...resolveRuntimeHostMetadata({
+        terminalId,
+        sessionName,
+        windowName,
+        runtimeHost: RUNTIME_HOSTS.TMUX,
+        runtimeFidelity: RUNTIME_FIDELITY.MANAGED
+      }),
       deferredProviderStart: shouldDeferProviderStart,
       providerStartState: shouldDeferProviderStart ? 'pending_attach' : 'immediate',
       pendingProviderCommand: shouldDeferProviderStart ? cliCommand : null
@@ -2898,7 +2928,11 @@ class PersistentSessionManager extends EventEmitter {
           model: terminal.model || null,
           providerThreadRef: terminal.providerThreadRef,
           adoptedAt: terminal.adoptedAt,
-          captureMode: terminal.captureMode
+          captureMode: terminal.captureMode,
+          runtimeHost: terminal.runtimeHost,
+          runtimeId: terminal.runtimeId,
+          runtimeCapabilities: terminal.runtimeCapabilities,
+          runtimeFidelity: terminal.runtimeFidelity
         }
       );
     }
@@ -2990,6 +3024,14 @@ class PersistentSessionManager extends EventEmitter {
     const adoptedAt = options.adoptedAt || new Date().toISOString();
     const captureMode = options.captureMode || 'raw-tty';
     const providerThreadRef = options.providerThreadRef || null;
+    const runtimeMetadata = resolveRuntimeHostMetadata({
+      sessionName,
+      windowName,
+      adoptedAt,
+      runtimeHost: options.runtimeHost || RUNTIME_HOSTS.TMUX,
+      runtimeFidelity: options.runtimeFidelity || RUNTIME_FIDELITY.ADOPTED_PARTIAL,
+      runtimeCapabilities: options.runtimeCapabilities || null
+    });
 
     const logPath = path.join(this.logDir, `${(existingTerminal?.terminalId || dbTerminal?.terminal_id || generateTerminalId())}.log`);
 
@@ -3021,7 +3063,11 @@ class PersistentSessionManager extends EventEmitter {
           harnessSessionId: options.harnessSessionId || dbTerminal.harness_session_id || terminalId,
           providerThreadRef,
           adoptedAt,
-          captureMode
+          captureMode,
+          runtimeHost: runtimeMetadata.runtimeHost,
+          runtimeId: runtimeMetadata.runtimeId,
+          runtimeCapabilities: runtimeMetadata.runtimeCapabilities,
+          runtimeFidelity: runtimeMetadata.runtimeFidelity
         };
         this._attachReuseInternals(terminal, this._buildReuseContext({
           adapter: terminal.adapter,
@@ -3062,7 +3108,11 @@ class PersistentSessionManager extends EventEmitter {
           harnessSessionId: options.harnessSessionId || terminalId,
           providerThreadRef,
           adoptedAt,
-          captureMode
+          captureMode,
+          runtimeHost: runtimeMetadata.runtimeHost,
+          runtimeId: runtimeMetadata.runtimeId || `${sessionName}:${windowName}`,
+          runtimeCapabilities: runtimeMetadata.runtimeCapabilities,
+          runtimeFidelity: runtimeMetadata.runtimeFidelity
         };
         this._attachReuseInternals(terminal, this._buildReuseContext({
           adapter: terminal.adapter,
@@ -3094,6 +3144,10 @@ class PersistentSessionManager extends EventEmitter {
       terminal.providerThreadRef = providerThreadRef;
       terminal.adoptedAt = adoptedAt;
       terminal.captureMode = captureMode;
+      terminal.runtimeHost = runtimeMetadata.runtimeHost;
+      terminal.runtimeId = runtimeMetadata.runtimeId || `${sessionName}:${windowName}`;
+      terminal.runtimeCapabilities = runtimeMetadata.runtimeCapabilities;
+      terminal.runtimeFidelity = runtimeMetadata.runtimeFidelity;
       terminal.lastActive = new Date();
     }
 
@@ -3118,6 +3172,10 @@ class PersistentSessionManager extends EventEmitter {
           providerThreadRef: terminal.providerThreadRef,
           adoptedAt: terminal.adoptedAt,
           captureMode: terminal.captureMode,
+          runtimeHost: terminal.runtimeHost,
+          runtimeId: terminal.runtimeId,
+          runtimeCapabilities: terminal.runtimeCapabilities,
+          runtimeFidelity: terminal.runtimeFidelity,
           status: terminal.status
         });
       } else {
@@ -3142,7 +3200,11 @@ class PersistentSessionManager extends EventEmitter {
             model: terminal.model || null,
             providerThreadRef: terminal.providerThreadRef,
             adoptedAt: terminal.adoptedAt,
-            captureMode: terminal.captureMode
+            captureMode: terminal.captureMode,
+            runtimeHost: terminal.runtimeHost,
+            runtimeId: terminal.runtimeId,
+            runtimeCapabilities: terminal.runtimeCapabilities,
+            runtimeFidelity: terminal.runtimeFidelity
           }
         );
       }
@@ -3763,8 +3825,10 @@ class PersistentSessionManager extends EventEmitter {
 
     const taskState = this.getStatus(terminalId);
     const attention = this._getTerminalAttention(reconciledTerminal);
+    const runtimeMetadata = resolveRuntimeHostMetadata(reconciledTerminal);
     return {
       ...reconciledTerminal,
+      ...runtimeMetadata,
       status: taskState,
       taskState,
       processState: this._getProcessState(reconciledTerminal),
@@ -3784,8 +3848,10 @@ class PersistentSessionManager extends EventEmitter {
       .map((terminal) => {
         const taskState = this.getStatus(terminal.terminalId);
         const attention = this._getTerminalAttention(terminal);
+        const runtimeMetadata = resolveRuntimeHostMetadata(terminal);
         return {
           ...terminal,
+          ...runtimeMetadata,
           status: taskState,
           taskState,
           processState: this._getProcessState(terminal),

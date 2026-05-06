@@ -32,6 +32,11 @@ const { sendMessage, broadcastMessage } = require('../orchestration/send-message
 const { getAgentProfiles, resolveProfile } = require('../services/agent-profiles');
 const { createMemoryRouter } = require('../routes/memory');
 const { isAdapterAuthenticated } = require('../utils/adapter-auth');
+const {
+  RUNTIME_HOSTS,
+  RUNTIME_FIDELITY,
+  resolveRuntimeHostMetadata
+} = require('../runtime/host-model');
 
 /**
  * Create the orchestration router
@@ -186,6 +191,10 @@ function createOrchestrationRouter(context) {
       || terminalRow?.provider_thread_ref
       || terminalRow?.providerThreadRef
       || null;
+    const runtimeMetadata = resolveRuntimeHostMetadata(liveTerminal || {
+      ...terminalRow,
+      sessionMetadata: metadata
+    });
 
     return {
       terminalId: terminalRow?.terminal_id || terminalRow?.terminalId || null,
@@ -197,7 +206,12 @@ function createOrchestrationRouter(context) {
       agentProfile: terminalRow?.agent_profile || terminalRow?.agentProfile || null,
       status: liveTerminal?.taskState || liveTerminal?.status || terminalRow?.status || null,
       lastActive: liveTerminal?.lastActive || terminalRow?.last_active || terminalRow?.lastActive || null,
-      providerThreadRefPresent: Boolean(providerThreadRef)
+      providerThreadRefPresent: Boolean(providerThreadRef),
+      runtimeHost: runtimeMetadata.runtimeHost,
+      runtimeId: runtimeMetadata.runtimeId,
+      runtimeCapabilities: runtimeMetadata.runtimeCapabilities,
+      runtimeFidelity: runtimeMetadata.runtimeFidelity,
+      runtime: runtimeMetadata.runtime
     };
   }
 
@@ -561,6 +575,8 @@ function createOrchestrationRouter(context) {
       harnessSessionId: rootSessionId,
       providerThreadRef,
       captureMode: 'raw-tty',
+      runtimeHost: RUNTIME_HOSTS.ADOPTED,
+      runtimeFidelity: RUNTIME_FIDELITY.ADOPTED_PARTIAL,
       model: model || normalizedMetadata.model || null,
       status: 'idle'
     };
@@ -2445,7 +2461,12 @@ function createOrchestrationRouter(context) {
           taskState: t.taskState || t.status,
           processState: t.processState || null,
           createdAt: t.createdAt,
-          lastActive: t.lastActive
+          lastActive: t.lastActive,
+          runtimeHost: t.runtimeHost || null,
+          runtimeId: t.runtimeId || null,
+          runtimeCapabilities: t.runtimeCapabilities || [],
+          runtimeFidelity: t.runtimeFidelity || null,
+          runtime: t.runtime || null
         }))
       });
 
@@ -3611,7 +3632,9 @@ function createOrchestrationRouter(context) {
         sessionMetadata,
         harnessSessionId: req.body?.harnessSessionId || null,
         providerThreadRef: req.body?.providerThreadRef || null,
-        captureMode: req.body?.captureMode || 'raw-tty'
+        captureMode: req.body?.captureMode || 'raw-tty',
+        runtimeHost: RUNTIME_HOSTS.TMUX,
+        runtimeFidelity: RUNTIME_FIDELITY.ADOPTED_PARTIAL
       });
 
       res.json({

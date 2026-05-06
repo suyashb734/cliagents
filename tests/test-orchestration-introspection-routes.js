@@ -1098,6 +1098,7 @@ async function testRootSessionRoutesExposeAttentionSummary() {
     assert.strictEqual(detailRes.data.sessionKind, 'attached');
     assert.strictEqual(detailRes.data.visibility, 'read-only');
     assert.strictEqual(detailRes.data.replyCapability, 'partial');
+    assert.strictEqual(detailRes.data.runtimeHost, null);
     assert(detailRes.data.lastMessageAt, 'detail snapshot should expose message recency');
     assert.strictEqual(detailRes.data.messageCount, 1);
     assert.strictEqual(detailRes.data.recoveryCapability, 'exact_provider_resume');
@@ -1133,6 +1134,10 @@ async function testRootSessionRoutesExposeAttentionSummary() {
     assert.strictEqual(childrenRes.data.children[0].sessionKind, 'reviewer');
     assert.strictEqual(childrenRes.data.children[0].status, 'waiting_user_answer');
     assert.strictEqual(childrenRes.data.children[0].providerThreadRefPresent, true);
+    assert.strictEqual(childrenRes.data.children[0].runtimeHost, 'tmux');
+    assert.strictEqual(childrenRes.data.children[0].runtimeId, 'cliagents-root:0');
+    assert.strictEqual(childrenRes.data.children[0].runtimeFidelity, 'managed');
+    assert(childrenRes.data.children[0].runtimeCapabilities.includes('send_input'));
     assert(!childrenRes.data.children.some((child) => child.terminalId === 'child-monitor-other-root'));
 
     const missingRes = await request(baseUrl, 'GET', '/orchestration/root-sessions/does-not-exist');
@@ -1664,6 +1669,10 @@ async function testRootSessionAttachRouteCreatesAndReusesClientRoot() {
     assert.strictEqual(first.data.reusedAttachedRoot, false);
     assert.strictEqual(first.data.originClient, 'mcp');
     assert.strictEqual(first.data.sessionMetadata.attachMode, 'explicit-http-attach');
+    const attachedRootTerminal = db.getTerminal(first.data.rootSessionId);
+    assert.strictEqual(attachedRootTerminal.runtime_host, 'adopted');
+    assert.strictEqual(attachedRootTerminal.runtime_fidelity, 'adopted-partial');
+    assert(JSON.parse(attachedRootTerminal.runtime_capabilities).includes('inspect_history'));
 
     const second = await request(appHandle.baseUrl, 'POST', '/orchestration/root-sessions/attach', attachBody);
     assert.strictEqual(second.status, 200);

@@ -1,5 +1,7 @@
 'use strict';
 
+const { resolveRuntimeHostMetadata } = require('../runtime/host-model');
+
 const BUSY_TERMINAL_STATUSES = new Set(['processing', 'queued', 'running']);
 const ACTIVE_ROOT_STATUSES = new Set(['running', 'processing', 'pending', 'partial', 'blocked', 'needs_attention']);
 const DEFAULT_ARCHIVE_LEGACY_AFTER_MS = 30 * 60 * 1000;
@@ -218,6 +220,11 @@ function buildSessionMap(events, terminals, rootSessionId) {
         attentionMessage: null,
         resumeCommand: null,
         providerThreadRef: null,
+        runtimeHost: null,
+        runtimeId: null,
+        runtimeCapabilities: [],
+        runtimeFidelity: null,
+        runtime: null,
         latestConclusion: null,
         resumeCount: 0,
         wasReused: false,
@@ -284,6 +291,11 @@ function buildSessionMap(events, terminals, rootSessionId) {
 
   for (const terminal of terminals) {
     const node = ensureSession(terminal.terminal_id);
+    const terminalSessionMetadata = parseMetadataField(terminal.session_metadata);
+    const runtimeMetadata = resolveRuntimeHostMetadata({
+      ...terminal,
+      sessionMetadata: terminalSessionMetadata
+    });
     node.terminalId = terminal.terminal_id;
     node.parentSessionId = terminal.parent_session_id || node.parentSessionId;
     node.sessionKind = terminal.session_kind || node.sessionKind;
@@ -295,7 +307,7 @@ function buildSessionMap(events, terminals, rootSessionId) {
     node.originClient = terminal.origin_client || node.originClient;
     node.externalSessionRef = terminal.external_session_ref || node.externalSessionRef;
     node.lineageDepth = terminal.lineage_depth ?? node.lineageDepth;
-    node.sessionMetadata = parseMetadataField(terminal.session_metadata) || node.sessionMetadata;
+    node.sessionMetadata = terminalSessionMetadata || node.sessionMetadata;
     node.terminalStatus = terminal.status || node.terminalStatus;
     node.taskState = terminal.task_state || terminal.taskState || terminal.status || node.taskState;
     node.processState = terminal.process_state || terminal.processState || node.processState;
@@ -304,6 +316,11 @@ function buildSessionMap(events, terminals, rootSessionId) {
     node.attentionMessage = terminal.attention_message || node.attentionMessage;
     node.resumeCommand = terminal.resume_command || node.resumeCommand;
     node.providerThreadRef = terminal.provider_thread_ref || terminal.providerThreadRef || node.providerThreadRef;
+    node.runtimeHost = runtimeMetadata.runtimeHost;
+    node.runtimeId = runtimeMetadata.runtimeId;
+    node.runtimeCapabilities = runtimeMetadata.runtimeCapabilities;
+    node.runtimeFidelity = runtimeMetadata.runtimeFidelity;
+    node.runtime = runtimeMetadata.runtime;
     node.createdAt = terminal.created_at || node.createdAt;
     node.lastActiveAt = terminal.last_active || node.lastActiveAt;
 
@@ -875,6 +892,12 @@ function buildRootSessionSnapshot({
         attention_message: liveTerminal.attention?.message || null,
         resume_command: liveTerminal.attention?.resumeCommand || null,
         provider_thread_ref: liveTerminal.providerThreadRef || terminal.provider_thread_ref || null,
+        runtime_host: liveTerminal.runtimeHost || terminal.runtime_host || null,
+        runtime_id: liveTerminal.runtimeId || terminal.runtime_id || null,
+        runtime_capabilities: liveTerminal.runtimeCapabilities
+          ? JSON.stringify(liveTerminal.runtimeCapabilities)
+          : terminal.runtime_capabilities,
+        runtime_fidelity: liveTerminal.runtimeFidelity || terminal.runtime_fidelity || null,
         last_active: liveTerminal.lastActive || terminal.last_active,
         work_dir: liveTerminal.workDir || terminal.work_dir,
         adapter: liveTerminal.adapter || terminal.adapter,
@@ -923,6 +946,13 @@ function buildRootSessionSnapshot({
     const terminalRootSessionId = terminal?.root_session_id || terminal?.rootSessionId || terminal?.terminal_id || terminal?.terminalId;
     return terminalRootSessionId === rootSessionId;
   }) || null;
+  const rootRuntimeTerminal = terminals.find((terminal) => (
+    String(terminal?.role || '').trim().toLowerCase() === 'main'
+    && String(terminal?.session_kind || '').trim().toLowerCase() === 'main'
+  )) || terminals.find((terminal) => {
+    const terminalId = terminal?.terminal_id || terminal?.terminalId;
+    return terminalId === rootSessionId;
+  }) || null;
   const lastMessageAtMs = terminals.reduce((max, terminal) => (
     Math.max(max, normalizeTimestamp(terminal?.last_message_at || terminal?.lastMessageAt))
   ), 0);
@@ -954,6 +984,18 @@ function buildRootSessionSnapshot({
   const rootMode = deriveRootMode(classification, rootSession);
   const interactiveTerminalId = resolveInteractiveTerminalId(rootSessionId, sessionList, rootMode);
   const rootStatus = deriveRootStatus(sessionList, attention);
+  const hasRootRuntimeMetadata = Boolean(
+    rootSession.runtimeHost
+    || rootSession.runtime_host
+    || rootRuntimeTerminal?.runtime_host
+    || rootRuntimeTerminal?.runtimeHost
+  );
+  const rootRuntime = hasRootRuntimeMetadata
+    ? resolveRuntimeHostMetadata({
+      ...rootRuntimeTerminal,
+      ...rootSession
+    })
+    : null;
   const recoveryCapability = deriveRecoveryCapability({
     rootMode,
     sessions: sessionList,
@@ -980,6 +1022,11 @@ function buildRootSessionSnapshot({
       lastMessageAt,
       messageCount
     },
+    runtimeHost: rootRuntime?.runtimeHost || null,
+    runtimeId: rootRuntime?.runtimeId || null,
+    runtimeCapabilities: rootRuntime?.runtimeCapabilities || [],
+    runtimeFidelity: rootRuntime?.runtimeFidelity || null,
+    runtime: rootRuntime?.runtime || null,
     rootType: classification.rootType,
     rootMode,
     sessionKind: capabilities.sessionKind,
@@ -1078,6 +1125,11 @@ function listRootSessionSummaries({
       externalSessionRef: snapshot?.externalSessionRef || null,
       clientName: snapshot?.clientName || null,
       model: snapshot?.rootSession?.model || null,
+      runtimeHost: snapshot?.runtimeHost || null,
+      runtimeId: snapshot?.runtimeId || null,
+      runtimeCapabilities: snapshot?.runtimeCapabilities || [],
+      runtimeFidelity: snapshot?.runtimeFidelity || null,
+      runtime: snapshot?.runtime || null,
       latestConclusion: snapshot?.latestConclusion || null,
       attention: snapshot?.attention || { requiresAttention: false, reasons: [] },
       counts: snapshot?.counts || null,

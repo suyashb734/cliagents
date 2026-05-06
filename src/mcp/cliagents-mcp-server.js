@@ -3298,8 +3298,10 @@ async function handleListRootSessions(args) {
       : '';
     const modeSuffix = root.rootMode ? ` mode=${root.rootMode}` : '';
     const interactiveSuffix = root.interactiveTerminalId ? ` interactive=${root.interactiveTerminalId}` : '';
+    const runtimeSuffix = root.runtimeHost ? ` runtime=${root.runtimeHost}` : '';
+    const fidelitySuffix = root.runtimeFidelity ? ` fidelity=${root.runtimeFidelity}` : '';
     const activitySuffix = root.activitySummary ? ` summary="${truncateText(root.activitySummary, 100)}"` : '';
-    return `- ${root.rootSessionId} status=${root.status} events=${root.eventCount}${modeSuffix}${interactiveSuffix}${attentionSuffix}${activitySuffix}`;
+    return `- ${root.rootSessionId} status=${root.status} events=${root.eventCount}${modeSuffix}${interactiveSuffix}${runtimeSuffix}${fidelitySuffix}${attentionSuffix}${activitySuffix}`;
   });
 
   return {
@@ -4193,7 +4195,9 @@ async function handleGetRootSessionStatus(args) {
     const adapter = session.adapter ? ` [${session.adapter}]` : '';
     const kind = session.sessionKind ? ` kind=${session.sessionKind}` : '';
     const profile = session.agentProfile ? ` profile=${session.agentProfile}` : '';
-    return `- ${session.sessionId} status=${session.status}${adapter}${kind}${profile}`;
+    const runtime = session.runtimeHost ? ` runtime=${session.runtimeHost}` : '';
+    const fidelity = session.runtimeFidelity ? ` fidelity=${session.runtimeFidelity}` : '';
+    return `- ${session.sessionId} status=${session.status}${adapter}${kind}${profile}${runtime}${fidelity}`;
   });
 
   return {
@@ -4204,6 +4208,8 @@ async function handleGetRootSessionStatus(args) {
         '',
         `status: ${snapshot.status}`,
         `root_mode: ${snapshot.rootMode || 'n/a'}`,
+        `runtime_host: ${snapshot.runtimeHost || 'n/a'}`,
+        `runtime_fidelity: ${snapshot.runtimeFidelity || 'n/a'}`,
         `interactive_terminal_id: ${snapshot.interactiveTerminalId || 'n/a'}`,
         `sessions: ${snapshot.counts?.sessions || 0}`,
         `running: ${snapshot.counts?.running || 0}`,
@@ -4268,7 +4274,10 @@ async function handleListChildSessions(args) {
         agentProfile: session.agentProfile || null,
         status: session.status || null,
         lastActive: session.lastActive || null,
-        providerThreadRefPresent: Boolean(session.providerThreadRef)
+        providerThreadRefPresent: Boolean(session.providerThreadRef),
+        runtimeHost: session.runtimeHost || session.runtime?.host || null,
+        runtimeId: session.runtimeId || session.runtime?.id || null,
+        runtimeFidelity: session.runtimeFidelity || session.runtime?.fidelity || null
       }));
   } else {
     throw new Error(`Failed to list child sessions: ${JSON.stringify(childRouteRes.data)}`);
@@ -4290,8 +4299,10 @@ async function handleListChildSessions(args) {
     const profile = session.agentProfile ? ` profile=${session.agentProfile}` : '';
     const role = session.role ? ` role=${session.role}` : '';
     const providerThread = session.providerThreadRefPresent ? ' providerThread=present' : '';
+    const runtime = session.runtimeHost ? ` runtime=${session.runtimeHost}` : '';
+    const fidelity = session.runtimeFidelity ? ` fidelity=${session.runtimeFidelity}` : '';
     const lastActive = session.lastActive ? ` lastActive=${session.lastActive}` : '';
-    return `- ${session.terminalId} status=${session.status}${adapter}${kind}${label}${profile}${role}${providerThread}${lastActive}`;
+    return `- ${session.terminalId} status=${session.status}${adapter}${kind}${label}${profile}${role}${providerThread}${runtime}${fidelity}${lastActive}`;
   });
 
   return {

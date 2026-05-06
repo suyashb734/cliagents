@@ -57,14 +57,29 @@ function runFreshSchemaAssertions() {
         '0007_resume_linkage_and_recency.sql',
         '0008_provider_sessions_and_rooms.sql',
         '0009_tasks_v1.sql',
-        '0010_task_observability_usage_scope.sql'
+        '0010_task_observability_usage_scope.sql',
+        '0015_runtime_host_model.sql'
       ],
       'schema_migrations'
     );
 
     assertContainsAll(
       getColumnNames(db, 'terminals'),
-      ['root_session_id', 'parent_session_id', 'session_kind', 'origin_client', 'external_session_ref', 'lineage_depth', 'session_metadata', 'model', 'last_message_at'],
+      [
+        'root_session_id',
+        'parent_session_id',
+        'session_kind',
+        'origin_client',
+        'external_session_ref',
+        'lineage_depth',
+        'session_metadata',
+        'model',
+        'last_message_at',
+        'runtime_host',
+        'runtime_id',
+        'runtime_capabilities',
+        'runtime_fidelity'
+      ],
       'terminals columns'
     );
 
@@ -83,7 +98,9 @@ function runFreshSchemaAssertions() {
         'idx_terminals_origin_client',
         'idx_terminals_external_session_ref',
         'idx_terminals_last_message_at',
-        'idx_terminals_root_last_message'
+        'idx_terminals_root_last_message',
+        'idx_terminals_runtime_host',
+        'idx_terminals_runtime_id'
       ],
       'terminals indexes'
     );
@@ -245,8 +262,12 @@ function runFreshSchemaAssertions() {
     assert.strictEqual(terminal.session_kind, 'legacy');
     assert.strictEqual(terminal.origin_client, 'legacy');
     assert.strictEqual(terminal.lineage_depth, 0);
+    assert.strictEqual(terminal.runtime_host, 'tmux');
+    assert.strictEqual(terminal.runtime_id, 'session-fresh:window-0');
+    assert.strictEqual(terminal.runtime_fidelity, 'managed');
+    assert(JSON.parse(terminal.runtime_capabilities).includes('send_input'));
 
-    console.log('✅ Fresh DB includes session graph scaffold and default terminal metadata');
+    console.log('✅ Fresh DB includes session graph scaffold, runtime host columns, and default terminal metadata');
   } finally {
     db.close();
   }
@@ -302,8 +323,12 @@ function runPopulatedMigrationAssertions() {
     assert.strictEqual(migratedTerminal.session_kind, 'legacy');
     assert.strictEqual(migratedTerminal.origin_client, 'legacy');
     assert.strictEqual(migratedTerminal.lineage_depth, 0);
+    assert.strictEqual(migratedTerminal.runtime_host, 'tmux');
+    assert.strictEqual(migratedTerminal.runtime_id, 'session-existing:window-0');
+    assert.strictEqual(migratedTerminal.runtime_fidelity, 'managed');
+    assert(JSON.parse(migratedTerminal.runtime_capabilities).includes('multi_viewer'));
 
-    console.log('✅ Existing terminal rows backfill cleanly through the session control-plane scaffold migration');
+    console.log('✅ Existing terminal rows backfill cleanly through the session control-plane and runtime host migrations');
   } finally {
     db.close();
   }
