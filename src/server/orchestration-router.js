@@ -720,7 +720,7 @@ function createOrchestrationRouter(context) {
     const terminal = resolveTaskAssignmentTerminalSnapshot(assignment);
     const terminalStatus = terminal?.status || null;
     const storedStatus = String(assignment?.status || 'queued').trim().toLowerCase() || 'queued';
-    const storedStatusOverridesTerminal = storedStatus === 'cancelled' || storedStatus === 'superseded';
+    const storedStatusOverridesTerminal = ['completed', 'failed', 'cancelled', 'superseded'].includes(storedStatus);
     const status = storedStatusOverridesTerminal
       ? normalizeTaskAssignmentStatus(storedStatus, 'queued')
       : (assignment?.terminalId

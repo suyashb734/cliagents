@@ -362,6 +362,12 @@ async function runRouteAssertions() {
     assert.strictEqual(missingTerminalAssignmentsRes.data.assignments[0].status, 'failed');
     assert.strictEqual(missingTerminalAssignmentsRes.data.assignments[0].terminalStatus, 'terminal_missing');
     assert.strictEqual(missingTerminalAssignmentsRes.data.assignments[0].terminalMissing, true);
+
+    db.updateTaskAssignment(assignmentId, { status: 'completed', completedAt: Date.now() });
+    const reconciledAssignmentRes = await request(serverHandle.baseUrl, 'GET', `/orchestration/tasks/${taskId}/assignments`);
+    assert.strictEqual(reconciledAssignmentRes.status, 200);
+    assert.strictEqual(reconciledAssignmentRes.data.assignments[0].status, 'completed');
+    db.updateTaskAssignment(assignmentId, { status: 'running', completedAt: null });
     sessionManager.state.terminals.set(startAssignmentRes.data.assignment.terminalId, liveTerminal);
 
     liveTerminal.status = 'error';
