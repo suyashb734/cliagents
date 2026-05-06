@@ -40,6 +40,7 @@ const CLIAGENTS_URL = process.env.CLIAGENTS_URL || 'http://localhost:4001';
 const CLIAGENTS_API_KEY = process.env.CLIAGENTS_API_KEY || process.env.CLI_AGENTS_API_KEY || null;
 const MCP_POLL_INTERVAL_MS = parseInt(process.env.CLIAGENTS_MCP_POLL_MS || '3000', 10);
 const MCP_SYNC_WAIT_MS = parseInt(process.env.CLIAGENTS_MCP_SYNC_WAIT_MS || '25000', 10);
+const MCP_ROOM_DISCUSSION_TIMEOUT_MS = parseInt(process.env.CLIAGENTS_MCP_ROOM_DISCUSSION_TIMEOUT_MS || '90000', 10);
 const MCP_STATUS_RETRY_AFTER_MS = parseInt(process.env.CLIAGENTS_MCP_RETRY_AFTER_MS || String(Math.max(MCP_POLL_INTERVAL_MS * 2, 8000)), 10);
 const SESSION_GRAPH_WRITES_ENABLED = process.env.SESSION_GRAPH_WRITES_ENABLED === '1';
 const REQUIRE_ROOT_ATTACH = process.env.CLIAGENTS_REQUIRE_ROOT_ATTACH === '1';
@@ -2046,6 +2047,10 @@ This calls cliagents' direct-session discussion route and returns the completed 
         judge: {
           type: ['object', 'null'],
           description: 'Optional final judge config. Pass null to skip judge synthesis.'
+        },
+        timeout: {
+          type: 'number',
+          description: 'Maximum server-side discussion time in milliseconds. Default for MCP calls is CLIAGENTS_MCP_ROOM_DISCUSSION_TIMEOUT_MS.'
         },
         writebackMode: {
           type: 'string',
@@ -4125,6 +4130,7 @@ async function handleDiscussRoom(args) {
     requestId: args?.requestId || null,
     rounds: Array.isArray(args?.rounds) ? args.rounds : undefined,
     judge: Object.prototype.hasOwnProperty.call(args || {}, 'judge') ? args.judge : null,
+    timeout: Number.isFinite(Number(args?.timeout)) ? Number(args.timeout) : MCP_ROOM_DISCUSSION_TIMEOUT_MS,
     writebackMode: args?.writebackMode || null
   });
   if (res.status !== 200) {

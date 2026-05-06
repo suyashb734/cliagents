@@ -107,6 +107,23 @@ function buildDiscussionContext(room, bundle, recentMessages) {
 
 const ROOM_ARTIFACT_MODES = new Set(['exclude', 'include', 'only']);
 const ROOM_DISCUSSION_WRITEBACK_MODES = new Set(['summary', 'curated_transcript']);
+const DEFAULT_ROOM_DISCUSSION_TIMEOUT_MS = 10 * 60 * 1000;
+const ROOM_DISCUSSION_TIMEOUT_GRACE_MS = 5000;
+
+function parsePositiveInteger(value, fallback = null) {
+  const parsed = Number.parseInt(value, 10);
+  return Number.isFinite(parsed) && parsed > 0 ? parsed : fallback;
+}
+
+function resolveDiscussionTimeoutMs(value, fallback) {
+  if (value === 0 || value === '0') {
+    return null;
+  }
+  if (value === undefined || value === null || value === '') {
+    return fallback;
+  }
+  return parsePositiveInteger(value, fallback);
+}
 
 function normalizeArtifactMode(value, fallback = 'exclude') {
   const normalized = String(value || '').trim().toLowerCase();
@@ -125,6 +142,57 @@ function buildDiscussionArtifactMetadata(baseMetadata = {}, patch = {}) {
     mode: patch.mode || baseMetadata.mode || 'discussion',
     discussionArtifact: true
   };
+}
+
+function extractDiscussionIdentifiers(events = []) {
+  const identifiers = {
+    runId: null,
+    discussionId: null
+  };
+  for (const event of Array.isArray(events) ? events : []) {
+    if (event?.runId) {
+      identifiers.runId = event.runId;
+    }
+    if (event?.discussionId) {
+      identifiers.discussionId = event.discussionId;
+    }
+  }
+  return identifiers;
+}
+
+async function withTimeout(promise, timeoutMs, errorMessage) {
+  if (!Number.isFinite(timeoutMs) || timeoutMs <= 0) {
+    return promise;
+  }
+
+  let timeoutId = null;
+  try {
+    return await Promise.race([
+      promise,
+      new Promise((_, reject) => {
+        timeoutId = setTimeout(() => {
+          const error = new Error(errorMessage);
+          error.code = 'room_discussion_timeout';
+          reject(error);
+        }, timeoutMs);
+      })
+    ]);
+  } finally {
+    if (timeoutId) {
+      clearTimeout(timeoutId);
+    }
+  }
+}
+
+function computeDiscussionGuardTimeoutMs(discussionTimeoutMs) {
+  if (!Number.isFinite(discussionTimeoutMs) || discussionTimeoutMs <= 0) {
+    return null;
+  }
+  const graceMs = Math.min(
+    ROOM_DISCUSSION_TIMEOUT_GRACE_MS,
+    Math.max(50, discussionTimeoutMs)
+  );
+  return discussionTimeoutMs + graceMs;
 }
 
 function computeTurnStatus(results) {
@@ -148,6 +216,10 @@ class RoomService {
     this.runDiscussion = typeof options.runDiscussion === 'function'
       ? options.runDiscussion
       : runDiscussion;
+    this.defaultDiscussionTimeoutMs = parsePositiveInteger(
+      options.discussionTimeoutMs || process.env.CLIAGENTS_ROOM_DISCUSSION_TIMEOUT_MS,
+      DEFAULT_ROOM_DISCUSSION_TIMEOUT_MS
+    );
   }
 
   createRoom(input = {}) {
@@ -664,6 +736,7 @@ class RoomService {
       discussionEvents.push(event);
     };
     try {
+      const discussionTimeoutMs = resolveDiscussionTimeoutMs(input.timeout, this.defaultDiscussionTimeoutMs);
       const bundle = this.db.getMemoryBundle(room.rootSessionId, 'root', {
         recentRunsLimit: 3,
         includeRawPointers: true
@@ -672,7 +745,7 @@ class RoomService {
         console.debug(`[RoomService] No root memory bundle available yet for room discussion ${roomId} (${room.rootSessionId})`);
       }
       const recentMessages = this.db.getRecentRoomMessages(roomId, 12, { artifactMode: 'exclude' });
-      result = await this.runDiscussion(this.sessionManager, input.message, {
+      const discussionPromise = Promise.resolve().then(() => this.runDiscussion(this.sessionManager, input.message, {
         participants: participants.map((participant) => ({
           participantRef: participant.id,
           name: formatParticipantLabel(participant),
@@ -701,8 +774,25 @@ class RoomService {
         },
         taskId: room.taskId || null,
         sink: discussionSink
-      });
+      }));
+      // If the outer timeout wins, consume a late runner rejection so the process
+      // does not emit an unhandled rejection after the room turn has settled.
+      discussionPromise.catch(() => {});
+      result = await withTimeout(
+        discussionPromise,
+        computeDiscussionGuardTimeoutMs(discussionTimeoutMs),
+        `Room discussion timed out after ${discussionTimeoutMs}ms`
+      );
     } catch (error) {
+      const failedAt = Date.now();
+      const identifiers = extractDiscussionIdentifiers(discussionEvents);
+      discussionEvents.push({
+        type: 'discussion_failed',
+        runId: identifiers.runId,
+        discussionId: identifiers.discussionId,
+        error: error.message,
+        failedAt
+      });
       if (writebackMode === 'curated_transcript') {
         const participantIndex = new Map(participants.map((participant) => [participant.id, participant]));
         for (const artifact of this._collectDiscussionArtifacts(discussionEvents, participantIndex)) {
@@ -717,10 +807,32 @@ class RoomService {
           });
         }
       }
+      this.db.addRoomMessage({
+        roomId,
+        turnId: turn.id,
+        role: 'system',
+        content: `Room discussion failed: ${error.message}`,
+        metadata: {
+          mode: 'discussion-summary',
+          writebackMode,
+          runId: identifiers.runId,
+          discussionId: identifiers.discussionId,
+          failure: true
+        },
+        createdAt: failedAt
+      });
       this.db.updateRoomTurn(turn.id, {
         status: 'failed',
         error: error.message,
-        completedAt: Date.now()
+        completedAt: failedAt,
+        metadata: {
+          ...(turn.metadata || {}),
+          mode: 'discussion',
+          writebackMode,
+          runId: identifiers.runId,
+          discussionId: identifiers.discussionId,
+          participantIds: participants.map((participant) => participant.id)
+        }
       });
       this.refreshRoomSnapshot(roomId);
       throw error;
