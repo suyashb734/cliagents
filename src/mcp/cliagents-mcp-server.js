@@ -3740,6 +3740,14 @@ async function handleImportProviderSession(args) {
         `root_session_id: ${data.rootSessionId || 'n/a'}`,
         `reused: ${data.reusedImportedRoot ? 'yes' : 'no'}`,
         `external_session_ref: ${data.externalSessionRef || 'n/a'}`,
+        `runtime_host: ${data.runtimeHost || data.runtime?.host || 'n/a'}`,
+        `runtime_fidelity: ${data.runtimeFidelity || data.runtime?.fidelity || 'n/a'}`,
+        Array.isArray(data.runtimeCapabilities)
+          ? `runtime_capabilities: ${data.runtimeCapabilities.join(',') || 'none'}`
+          : null,
+        Array.isArray(data.controlLimitations) && data.controlLimitations.length > 0
+          ? `control_limitations: ${data.controlLimitations.join(',')}`
+          : null,
         data.descriptor?.title ? `title: ${data.descriptor.title}` : null
       ].filter(Boolean).join('\n')
     }]

@@ -1202,6 +1202,12 @@ function buildManagedRootLaunchCandidate(summary, snapshot, options = {}) {
   const processState = String(mainTerminal?.process_state || rootSession.processState || '').trim().toLowerCase() || null;
   const terminalStatus = String(mainTerminal?.status || rootSession.terminalStatus || '').trim().toLowerCase() || null;
   const currentCommand = normalizeManagedRootCurrentCommand(mainTerminal?.current_command || mainTerminal?.currentCommand || null);
+  const runtimeCapabilities = Array.isArray(snapshot?.runtimeCapabilities)
+    ? snapshot.runtimeCapabilities
+    : (Array.isArray(summary?.runtimeCapabilities)
+      ? summary.runtimeCapabilities
+      : (Array.isArray(rootSession.runtimeCapabilities) ? rootSession.runtimeCapabilities : []));
+  const runtimeInputCapable = runtimeCapabilities.length === 0 || runtimeCapabilities.includes('send_input');
   const recoveryHint = extractManagedRootRecoveryHint(snapshot, rootSessionId);
   const providerThreadRef = recoveryHint.providerThreadRef
     || rootSession.providerThreadRef
@@ -1215,6 +1221,7 @@ function buildManagedRootLaunchCandidate(summary, snapshot, options = {}) {
   const rootDestroyed = Boolean(mainSession?.destroyed || rootSession.destroyed);
   const rootTerminatedWithError = String(mainSession?.terminationStatus || rootSession.terminationStatus || '').trim().toLowerCase() === 'error';
   const hasLiveTerminal = Boolean(sessionName)
+    && runtimeInputCapable
     && processState !== 'exited'
     && terminalStatus !== 'orphaned';
   const providerInterrupted = hasExactProviderResume

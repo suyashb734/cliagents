@@ -2220,6 +2220,8 @@ async function testRootAdoptRouteCreatesManagedRootFromExistingTmuxTarget() {
     assert.strictEqual(adoptCalls[0].sessionMetadata.launchSource, 'http-root-adopt');
     assert.strictEqual(adoptCalls[0].sessionMetadata.clientName, 'claude');
     assert.strictEqual(adoptCalls[0].sessionMetadata.tmuxTarget, 'workspace:agent');
+    assert.strictEqual(adoptCalls[0].runtimeHost, 'tmux');
+    assert.strictEqual(adoptCalls[0].runtimeFidelity, 'adopted-partial');
     assert.strictEqual(sessionEvents.length, 1);
     assert.strictEqual(sessionEvents[0].eventType, 'session_started');
     assert.strictEqual(response.data.adoptedRoot, true);

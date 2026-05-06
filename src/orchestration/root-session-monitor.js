@@ -395,9 +395,16 @@ function isPromptIdleRootSession(session) {
 }
 
 function isLiveOperatorSession(session) {
+  const runtimeCapabilities = Array.isArray(session?.runtimeCapabilities)
+    ? session.runtimeCapabilities
+    : [];
+  const runtimeIsControllable = runtimeCapabilities.length === 0
+    || runtimeCapabilities.includes('send_input')
+    || runtimeCapabilities.includes('read_output');
   return Boolean(
     session
     && session.terminalId
+    && runtimeIsControllable
     && session.processState !== 'exited'
     && session.status !== 'stale'
     && session.status !== 'destroyed'
@@ -509,8 +516,27 @@ function classifyRootSession(snapshot) {
 function deriveRootCapabilities(classification, rootSession) {
   const rootType = classification?.rootType || 'workflow_root';
   const sessionKind = String(rootSession?.sessionKind || '').trim().toLowerCase();
+  const metadata = rootSession?.sessionMetadata && typeof rootSession.sessionMetadata === 'object'
+    ? rootSession.sessionMetadata
+    : {};
+  const attachMode = String(metadata.attachMode || '').trim().toLowerCase();
+  const adopted = attachMode === 'root-adopt'
+    || attachMode === 'provider-session-import'
+    || metadata.adoptedRoot === true
+    || metadata.importedProviderSession === true;
+  const runtimeCapabilities = Array.isArray(rootSession?.runtimeCapabilities)
+    ? rootSession.runtimeCapabilities
+    : [];
 
   if (rootType === 'attached_client_root') {
+    if (adopted) {
+      return {
+        sessionKind: 'adopted',
+        visibility: runtimeCapabilities.includes('send_input') ? 'interactive' : 'read-only',
+        replyCapability: runtimeCapabilities.includes('send_input') ? 'full' : 'partial'
+      };
+    }
+
     if (sessionKind === 'main') {
       return {
         sessionKind: 'managed',
@@ -559,7 +585,12 @@ function deriveRootMode(classification, rootSession) {
     ? rootSession.sessionMetadata
     : {};
   const attachMode = String(metadata.attachMode || '').trim().toLowerCase();
-  if (attachMode === 'root-adopt' || metadata.adoptedRoot === true) {
+  if (
+    attachMode === 'root-adopt'
+    || attachMode === 'provider-session-import'
+    || metadata.adoptedRoot === true
+    || metadata.importedProviderSession === true
+  ) {
     return 'adopted';
   }
 

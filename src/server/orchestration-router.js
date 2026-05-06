@@ -35,6 +35,7 @@ const { isAdapterAuthenticated } = require('../utils/adapter-auth');
 const {
   RUNTIME_HOSTS,
   RUNTIME_FIDELITY,
+  normalizeRuntimeCapabilities,
   resolveRuntimeHostMetadata
 } = require('../runtime/host-model');
 
@@ -227,6 +228,16 @@ function createOrchestrationRouter(context) {
       return null;
     }
     return sessionManager.getTerminal(terminalId);
+  }
+
+  function getTerminalRuntimeMetadata(terminalId) {
+    const liveTerminal = getLiveTerminal(terminalId);
+    const terminalRow = liveTerminal || (typeof db?.getTerminal === 'function' ? db.getTerminal(terminalId) : null);
+    if (!terminalRow) {
+      return null;
+    }
+
+    return resolveRuntimeHostMetadata(terminalRow);
   }
 
   function getLiveOutput(terminalId, options = {}) {
@@ -1477,6 +1488,9 @@ function createOrchestrationRouter(context) {
       sessionMetadata.importedProviderSessionId = providerSessionId;
       sessionMetadata.importedProviderSessionTitle = descriptor.title || null;
       sessionMetadata.providerResumeCapability = descriptor.resumeCapability || 'exact';
+      sessionMetadata.runtimeHost = RUNTIME_HOSTS.ADOPTED;
+      sessionMetadata.runtimeFidelity = RUNTIME_FIDELITY.ADOPTED_PARTIAL;
+      sessionMetadata.runtimeCapabilities = normalizeRuntimeCapabilities(null, RUNTIME_HOSTS.ADOPTED);
       if (descriptor.cwd && !sessionMetadata.workspaceRoot) {
         sessionMetadata.workspaceRoot = descriptor.cwd;
       }
@@ -1503,6 +1517,20 @@ function createOrchestrationRouter(context) {
         workDir: descriptor.cwd || null
       });
 
+      const importedTerminal = typeof db.getTerminal === 'function'
+        ? db.getTerminal(rootSessionId)
+        : null;
+      const runtimeMetadata = resolveRuntimeHostMetadata(importedTerminal || {
+        terminalId: rootSessionId,
+        runtimeHost: RUNTIME_HOSTS.ADOPTED,
+        runtimeFidelity: RUNTIME_FIDELITY.ADOPTED_PARTIAL,
+        runtimeCapabilities: normalizeRuntimeCapabilities(null, RUNTIME_HOSTS.ADOPTED),
+        sessionMetadata
+      });
+      const controlLimitations = runtimeMetadata.runtimeCapabilities.includes('send_input')
+        ? []
+        : ['read_only_import', 'remote_input_unavailable'];
+
       res.json({
         importedRoot: true,
         reusedImportedRoot: Boolean(existingRootTerminal),
@@ -1510,6 +1538,12 @@ function createOrchestrationRouter(context) {
         adapter,
         providerSessionId,
         externalSessionRef,
+        runtimeHost: runtimeMetadata.runtimeHost,
+        runtimeId: runtimeMetadata.runtimeId,
+        runtimeCapabilities: runtimeMetadata.runtimeCapabilities,
+        runtimeFidelity: runtimeMetadata.runtimeFidelity,
+        runtime: runtimeMetadata.runtime,
+        controlLimitations,
         descriptor
       });
     } catch (error) {
@@ -2789,6 +2823,19 @@ function createOrchestrationRouter(context) {
       }
 
       const rootSnapshot = resolveTerminalRootAccess(req.params.id);
+      const runtimeMetadata = getTerminalRuntimeMetadata(req.params.id);
+      if (runtimeMetadata && !runtimeMetadata.runtimeCapabilities.includes('send_input')) {
+        return res.status(403).json({
+          error: {
+            code: 'runtime_capability_unsupported',
+            message: `Runtime host ${runtimeMetadata.runtimeHost} does not support remote input for terminal ${req.params.id}.`,
+            terminalId: req.params.id,
+            runtimeHost: runtimeMetadata.runtimeHost,
+            runtimeCapabilities: runtimeMetadata.runtimeCapabilities
+          }
+        });
+      }
+
       if (rootSnapshot?.rootMode === 'attached') {
         const terminalSession = (rootSnapshot.sessions || []).find(s => s.sessionId === req.params.id);
         const liveTerminal = getLiveTerminal(req.params.id);

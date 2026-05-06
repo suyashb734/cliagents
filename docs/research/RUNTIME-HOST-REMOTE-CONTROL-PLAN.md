@@ -195,6 +195,22 @@ Implement Runtime Host Model V1 as the next remote/control-plane foundation:
 - do not add remote write controls, web UI, tunnels, or direct PTY ownership in
   this milestone
 
+## Milestone 2 Execution Brief
+
+Implement Adopted Native Session Host V1 as an inspection-first provider-session
+import slice:
+
+- model provider-session imports as `runtime_host = adopted`
+- expose adopted runtime fidelity and control limitations in HTTP and MCP output
+- classify imported provider sessions as adopted roots, not generic attached
+  roots
+- keep imported provider sessions read-only unless their runtime explicitly
+  advertises `send_input`
+- make root liveness and resume selection respect runtime capabilities so
+  inspect-only imports are not mistaken for live controllable tmux roots
+- do not add remote write control, PTY ownership, provider lifecycle management,
+  or tunnel support in this milestone
+
 ## Rejected Alternative
 
 Do not follow Warp by building a native terminal renderer inside `cliagents`.

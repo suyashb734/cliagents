@@ -230,6 +230,10 @@ async function startFakeCliagentsServer() {
             adapter: body.adapter || 'codex-cli',
             providerSessionId: body.providerSessionId,
             externalSessionRef: body.externalSessionRef || `provider-import:${body.adapter || 'codex-cli'}:${body.providerSessionId}`,
+            runtimeHost: 'adopted',
+            runtimeFidelity: 'adopted-partial',
+            runtimeCapabilities: ['inspect_history', 'stream_events'],
+            controlLimitations: ['read_only_import', 'remote_input_unavailable'],
             descriptor: {
               title: 'Imported provider session'
             }
@@ -565,6 +569,10 @@ async function run() {
         adapter: 'codex-cli',
         providerSessionId: 'session-abc',
         externalSessionRef: 'provider-import:codex-cli:session-abc',
+        runtimeHost: 'adopted',
+        runtimeFidelity: 'adopted-partial',
+        runtimeCapabilities: ['inspect_history', 'stream_events'],
+        controlLimitations: ['read_only_import', 'remote_input_unavailable'],
         descriptor: {
           title: 'Finance tracker'
         }
@@ -577,6 +585,9 @@ async function run() {
     const importProviderText = importProviderResult.content[0].text;
     assert(importProviderText.includes('Provider Session Imported'));
     assert(importProviderText.includes('provider_session_id: session-abc'));
+    assert(importProviderText.includes('runtime_host: adopted'));
+    assert(importProviderText.includes('runtime_fidelity: adopted-partial'));
+    assert(importProviderText.includes('control_limitations: read_only_import,remote_input_unavailable'));
     assert.strictEqual(fakeServer.state.providerSessionImportBodies.at(-1).adapter, 'codex-cli');
     assert.strictEqual(fakeServer.state.providerSessionImportBodies.at(-1).providerSessionId, 'session-abc');
 
