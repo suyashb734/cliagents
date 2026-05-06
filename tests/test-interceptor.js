@@ -200,6 +200,23 @@ async function testPermissionInterceptorUnit() {
     assert(stats.promptsAllowed === 0, 'Should reset prompts allowed');
     assert(stats.promptsDenied === 0, 'Should reset prompts denied');
   });
+
+  await test('Prompt hash is stable for object key order', async () => {
+    const mockSessionManager = { getTerminal: () => ({ adapter: 'claude-code' }) };
+    const pm = new PermissionManager();
+    const interceptor = new PermissionInterceptor({ sessionManager: mockSessionManager, permissionManager: pm });
+
+    const first = interceptor._hashPrompt({
+      toolName: 'Bash',
+      args: { command: 'ls', description: 'list files' }
+    });
+    const second = interceptor._hashPrompt({
+      toolName: 'Bash',
+      args: { description: 'list files', command: 'ls' }
+    });
+
+    assert(first === second, 'Equivalent prompt args should hash identically');
+  });
 }
 
 async function testPermissionManagerFromProfile() {

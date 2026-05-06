@@ -192,9 +192,9 @@ class PermissionManager extends EventEmitter {
   _checkBashCommand(command, toolName) {
     if (!command || typeof command !== 'string') return { allowed: true };
 
-    // Block command substitution
-    if (/\$\(|`/.test(command)) {
-      return this._deny('Shell command substitution not allowed in restricted mode', toolName);
+    // Block command substitution and other dangerous constructs
+    if (/\$\(|`|\$\{[^}]*:-|\$?\(\(|\\[xX][0-9a-fA-F]{2}|\\u[0-9a-fA-F]{4}|;|\&|\!/i.test(command)) {
+      return this._deny('Potentially malicious command substitution or construct detected', toolName);
     }
 
     // 1. Split on command separators (;, &&, ||)
