@@ -72,6 +72,20 @@
       "last_reviewed": "2026-05-06"
     },
     {
+      "path": "docs/reference/REMOTE-API.md",
+      "status": "reference",
+      "type": "reference",
+      "scope": ["remote-api", "runtime-hosts", "mobile", "mcp"],
+      "related_code": [
+        "src/server/orchestration-router.js",
+        "src/mcp/cliagents-mcp-server.js",
+        "src/index.js",
+        "src/server/index.js"
+      ],
+      "supersedes": [],
+      "last_reviewed": "2026-05-06"
+    },
+    {
       "path": "docs/reference/MCP-TOOLS.md",
       "status": "reference",
       "type": "reference",

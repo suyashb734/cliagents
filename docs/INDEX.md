@@ -9,6 +9,7 @@ older planning notes in `docs/research/`.
 - [State Model](./architecture/STATE-MODEL.md): session kinds, statuses, and task rollups.
 - [Adapter Contract](./reference/ADAPTER-CONTRACT.md): adapter lifecycle and collaborator readiness.
 - [Event Normalization](./reference/EVENT-NORMALIZATION.md): normalized broker event contract and adapter gaps.
+- [Remote API](./reference/REMOTE-API.md): runtime-neutral snapshot and remote access rules.
 - [MCP Tools](./reference/MCP-TOOLS.md): broker tool surface overview.
 - [Roadmap](./roadmap/ROADMAP.md): active implementation order.
 - [ADR Index](./adr/README.md): durable architecture decision record rules.
@@ -28,6 +29,7 @@ older planning notes in `docs/research/`.
 
 - [Knowledge Graph Guidance](./reference/KNOWLEDGE-GRAPH.md)
 - [Event Normalization](./reference/EVENT-NORMALIZATION.md)
+- [Remote API](./reference/REMOTE-API.md)
 - [Troubleshooting](./TROUBLESHOOTING.md)
 - [Adding Adapters](./adding-adapters.md)
 - [Historical Adapter Notes](./adapters.md)

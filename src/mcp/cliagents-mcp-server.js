@@ -1566,6 +1566,36 @@ This calls cliagents' direct-session discussion route and returns the completed 
     }
   },
   {
+    name: 'get_remote_snapshot',
+    description: 'Get a runtime-neutral read-only broker snapshot for remote, web, or mobile clients.',
+    inputSchema: {
+      type: 'object',
+      properties: {
+        rootLimit: {
+          type: 'number',
+          description: 'Maximum root sessions to include. Default: 20'
+        },
+        taskLimit: {
+          type: 'number',
+          description: 'Maximum tasks to include. Default: 20'
+        },
+        roomLimit: {
+          type: 'number',
+          description: 'Maximum rooms to include. Default: 20'
+        },
+        includeUsage: {
+          type: 'boolean',
+          description: 'Include global usage totals. Default: true'
+        },
+        format: {
+          type: 'string',
+          enum: ['summary', 'json'],
+          description: 'Return a human summary or raw JSON. Default: summary'
+        }
+      }
+    }
+  },
+  {
     name: 'get_root_session_status',
     description: 'Get a detailed snapshot for one root session, including child sessions, attention reasons, and the latest conclusion.',
     inputSchema: {
@@ -3312,6 +3342,70 @@ async function handleListRootSessions(args) {
   };
 }
 
+async function handleGetRemoteSnapshot(args) {
+  const params = new URLSearchParams();
+  if (Number.isFinite(args?.rootLimit)) {
+    params.set('rootLimit', String(args.rootLimit));
+  }
+  if (Number.isFinite(args?.taskLimit)) {
+    params.set('taskLimit', String(args.taskLimit));
+  }
+  if (Number.isFinite(args?.roomLimit)) {
+    params.set('roomLimit', String(args.roomLimit));
+  }
+  if (typeof args?.includeUsage === 'boolean') {
+    params.set('includeUsage', args.includeUsage ? '1' : '0');
+  }
+
+  const res = await callCliagents('GET', `/orchestration/remote/snapshot${params.toString() ? `?${params.toString()}` : ''}`);
+  if (res.status !== 200) {
+    throw new Error(`Failed to get remote snapshot: ${JSON.stringify(res.data)}`);
+  }
+
+  if (args?.format === 'json') {
+    return {
+      content: [{
+        type: 'text',
+        text: JSON.stringify(res.data, null, 2)
+      }]
+    };
+  }
+
+  const data = res.data || {};
+  const roots = Array.isArray(data.roots) ? data.roots : [];
+  const actionableRoots = roots.filter((root) => root.attention?.requiresAttention).length;
+  const runningRoots = roots.filter((root) => ['running', 'processing', 'blocked'].includes(String(root.status || '').toLowerCase())).length;
+  const usageTokens = data.usage?.summary?.totalTokens || 0;
+
+  return {
+    content: [{
+      type: 'text',
+      text: [
+        '## Remote Broker Snapshot',
+        '',
+        `api_version: ${data.apiVersion || 'remote-v1'}`,
+        `generated_at: ${data.generatedAt || 'n/a'}`,
+        `bind_host: ${data.access?.bindHost || 'n/a'}`,
+        `local_only_default: ${data.access?.localOnlyDefault === true}`,
+        `auth_required: ${data.access?.authRequired === true}`,
+        `raw_terminal_input: ${data.access?.rawTerminalInput || 'runtime_capability_gated'}`,
+        `roots: ${data.counts?.roots ?? roots.length}`,
+        `running_roots: ${runningRoots}`,
+        `actionable_roots: ${actionableRoots}`,
+        `tasks: ${data.counts?.tasks ?? 0}`,
+        `rooms: ${data.counts?.rooms ?? 0}`,
+        data.usage ? `usage_total_tokens: ${usageTokens}` : null,
+        '',
+        'Routes:',
+        `roots: ${data.routes?.roots || '/orchestration/root-sessions'}`,
+        `tasks: ${data.routes?.tasks || '/orchestration/tasks'}`,
+        `rooms: ${data.routes?.rooms || '/orchestration/rooms'}`,
+        `session_events: ${data.routes?.sessionEvents || '/orchestration/session-events?normalized=1'}`
+      ].filter(Boolean).join('\n')
+    }]
+  };
+}
+
 async function attachRootSessionInternal(args, options = {}) {
   const existing = getImplicitRootContext();
   const workspaceRoot = inferWorkspaceRoot();
@@ -4904,6 +4998,9 @@ async function handleRequest(request) {
           case 'list_root_sessions':
             result = await handleListRootSessions(args);
             break;
+          case 'get_remote_snapshot':
+            result = await handleGetRemoteSnapshot(args);
+            break;
           case 'get_root_session_status':
             result = await handleGetRootSessionStatus(args);
             break;
@@ -5036,6 +5133,7 @@ module.exports = {
   handleReplyToTerminal,
   handleGetTerminalOutput,
   handleGetRootSessionStatus,
+  handleGetRemoteSnapshot,
   handleListChildSessions,
   handleGetUsageSummary,
   handleListAdapterReadiness,

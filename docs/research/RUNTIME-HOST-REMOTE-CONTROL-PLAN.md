@@ -227,6 +227,21 @@ Implement Event Normalization V1 as a runtime-neutral observability read model:
 - do not add a DB migration, remote input handling, approval state machines,
   web UI, tunnels, or direct PTY ownership in this milestone
 
+## Milestone 4 Execution Brief
+
+Implement Remote API V1 as a read-only broker snapshot and local-first access
+hardening slice:
+
+- expose a runtime-neutral snapshot route for roots, tasks, rooms, usage,
+  runtime status, and route discovery
+- add an MCP wrapper for the same snapshot so agent supervisors and future apps
+  can inspect one coherent broker state
+- make server binding local by default and require an explicit host override for
+  LAN or tunnel exposure
+- keep terminal input capability-gated and do not add raw shell control
+- do not add tunnels, remote approval queues, direct PTY ownership, or a web UI
+  in this milestone
+
 ## Rejected Alternative
 
 Do not follow Warp by building a native terminal renderer inside `cliagents`.

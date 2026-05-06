@@ -548,6 +548,11 @@ test('Serve CLI parses broker isolation flags and explicit shutdown policy', () 
   assert.strictEqual(parsed.orchestration.destroyTerminalsOnStop, true);
 });
 
+test('Serve CLI binds locally by default', () => {
+  const parsed = parseServeArgs([], {});
+  assert.strictEqual(parsed.host, '127.0.0.1');
+});
+
 test('Serve CLI falls back to broker environment variables', () => {
   const parsed = parseServeArgs([], {
     CLIAGENTS_HOST: '127.0.0.1',

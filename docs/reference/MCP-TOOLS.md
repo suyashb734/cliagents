@@ -17,6 +17,8 @@ The MCP server is the primary agent-facing control surface for `cliagents`.
   readiness before delegating.
 - **Usage**: summarize usage by root, terminal, run, task, or assignment.
 - **Memory**: retrieve memory bundles and message windows.
+- **Remote snapshot**: inspect one runtime-neutral broker snapshot for
+  remote/web/mobile control surfaces.
 
 ## Source Of Truth
 

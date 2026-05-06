@@ -1489,6 +1489,105 @@ async function testSessionEventsRouteReturnsReplayOrderedEvents() {
   }
 }
 
+async function testRemoteSnapshotRouteReturnsRuntimeNeutralBrokerState() {
+  const rootDir = makeTempDir('cliagents-remote-snapshot-route-');
+  const dbPath = path.join(rootDir, 'cliagents.db');
+  const db = new OrchestrationDB({ dbPath, dataDir: rootDir });
+  const rootSessionId = 'dddddddddddddddddddddddddddddddd';
+
+  db.addSessionEvent({
+    rootSessionId,
+    sessionId: rootSessionId,
+    eventType: 'session_started',
+    originClient: 'mcp',
+    idempotencyKey: `${rootSessionId}:session_started`,
+    payloadSummary: 'remote root started',
+    payloadJson: {
+      adapter: 'codex-cli',
+      sessionKind: 'main'
+    }
+  });
+  db.registerTerminal(
+    rootSessionId,
+    'cliagents-remote',
+    '0',
+    'codex-cli',
+    'main_codex-cli',
+    'main',
+    rootDir,
+    path.join(rootDir, 'remote.log'),
+    {
+      rootSessionId,
+      parentSessionId: null,
+      sessionKind: 'main',
+      originClient: 'mcp',
+      runtimeHost: 'tmux',
+      runtimeFidelity: 'managed'
+    }
+  );
+  const task = db.createTask({
+    id: 'task_remote_snapshot',
+    title: 'Remote snapshot test',
+    workspaceRoot: rootDir,
+    rootSessionId
+  });
+  db.createRoom({
+    id: 'room_remote_snapshot',
+    rootSessionId,
+    taskId: task.id,
+    title: 'Remote Snapshot Room'
+  });
+  db.addUsageRecord({
+    rootSessionId,
+    terminalId: rootSessionId,
+    taskId: task.id,
+    adapter: 'codex-cli',
+    model: 'gpt-5.4',
+    inputTokens: 10,
+    outputTokens: 5,
+    totalTokens: 15,
+    sourceConfidence: 'reported'
+  });
+
+  const { server, baseUrl } = await startApp({
+    sessionManager: {
+      getTerminal() {
+        return null;
+      },
+      async createTerminal() {
+        throw new Error('not used');
+      },
+      async sendInput() {
+        throw new Error('not used');
+      }
+    },
+    apiSessionManager: null,
+    db,
+    host: '127.0.0.1'
+  });
+
+  try {
+    const res = await request(baseUrl, 'GET', '/orchestration/remote/snapshot?rootLimit=5&taskLimit=5&roomLimit=5&includeUsage=1');
+    assert.strictEqual(res.status, 200);
+    assert.strictEqual(res.data.apiVersion, 'remote-v1');
+    assert.strictEqual(res.data.access.localOnlyDefault, true);
+    assert.strictEqual(res.data.access.bindHost, '127.0.0.1');
+    assert.strictEqual(res.data.access.rawTerminalInput, 'runtime_capability_gated');
+    assert.strictEqual(res.data.routes.sessionEvents, '/orchestration/session-events?normalized=1');
+    assert(res.data.capabilities.read.includes('runtime_status'));
+    assert.strictEqual(res.data.counts.roots, 1);
+    assert.strictEqual(res.data.counts.tasks, 1);
+    assert.strictEqual(res.data.counts.rooms, 1);
+    assert.strictEqual(res.data.roots[0].runtimeHost, 'tmux');
+    assert.strictEqual(res.data.tasks[0].task.id, task.id);
+    assert.strictEqual(res.data.rooms[0].room.id, 'room_remote_snapshot');
+    assert.strictEqual(res.data.usage.summary.totalTokens, 15);
+  } finally {
+    await stopApp(server);
+    db.close();
+  }
+}
+
 async function testReconcileRouteRecoversStaleRuns() {
   const previousWriteFlag = process.env.RUN_LEDGER_ENABLED;
   process.env.RUN_LEDGER_ENABLED = '1';
@@ -2407,6 +2506,9 @@ async function run() {
 
     await testSessionEventsRouteReturnsReplayOrderedEvents();
     console.log('  ✓ session-events route replays ordered control-plane events');
+
+    await testRemoteSnapshotRouteReturnsRuntimeNeutralBrokerState();
+    console.log('  ✓ remote snapshot route exposes runtime-neutral broker state');
 
     await testReconcileRouteRecoversStaleRuns();
     console.log('  ✓ stale-run reconciliation route recovers stuck runs');

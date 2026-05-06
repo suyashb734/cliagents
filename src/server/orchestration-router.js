@@ -48,6 +48,8 @@ const {
 function createOrchestrationRouter(context) {
   const router = express.Router();
   const { sessionManager, apiSessionManager, db, inboxService, adapterAuthInspector } = context;
+  const configuredHost = String(context.host || process.env.CLIAGENTS_HOST || process.env.HOST || '127.0.0.1').trim() || '127.0.0.1';
+  const authConfigured = Boolean(process.env.CLI_AGENTS_API_KEY || process.env.CLIAGENTS_API_KEY);
   const sessionGraphWritesEnabled = process.env.SESSION_GRAPH_WRITES_ENABLED === '1';
   const sessionEventsEnabled = process.env.SESSION_EVENTS_ENABLED === '1';
   const runLedgerWritesEnabled = process.env.RUN_LEDGER_ENABLED === '1';
@@ -902,9 +904,162 @@ function createOrchestrationRouter(context) {
       || null;
   }
 
+  function buildRemoteApiSnapshot(req) {
+    const rootLimit = parseQueryInteger(req.query.rootLimit ?? req.query.root_limit, 20);
+    const taskLimit = parseQueryInteger(req.query.taskLimit ?? req.query.task_limit, 20);
+    const roomLimit = parseQueryInteger(req.query.roomLimit ?? req.query.room_limit, 20);
+    const terminalLimit = parseQueryInteger(req.query.terminalLimit ?? req.query.terminal_limit, 50);
+    const eventLimit = parseQueryInteger(req.query.eventLimit ?? req.query.event_limit, 80);
+    const includeUsage = parseQueryBoolean(req.query.includeUsage ?? req.query.include_usage, true);
+    const includeArchived = parseQueryBoolean(req.query.includeArchived ?? req.query.include_archived, false);
+    const workspaceRoot = req.query.workspace_root
+      ? String(req.query.workspace_root).trim()
+      : (req.query.workspaceRoot ? String(req.query.workspaceRoot).trim() : null);
+    const scope = String(req.query.scope || 'user').trim() || 'user';
+    const statusFilter = String(req.query.status || req.query.statusFilter || 'all').trim() || 'all';
+    const roomStatus = req.query.roomStatus ? String(req.query.roomStatus).trim().toLowerCase() : null;
+
+    const rootPayload = db?.listRootSessions
+      ? listRootSessionSummaries({
+        db,
+        limit: rootLimit,
+        eventLimit,
+        terminalLimit,
+        includeArchived,
+        scope,
+        statusFilter,
+        liveTerminalResolver: getLiveTerminal,
+        liveOutputResolver: null
+      })
+      : {
+        roots: [],
+        archivedCount: 0,
+        hiddenDetachedCount: 0,
+        hiddenNonUserCount: 0,
+        scope,
+        statusFilter
+      };
+
+    const tasks = db?.listTasks
+      ? db.listTasks({
+        limit: taskLimit,
+        workspaceRoot: workspaceRoot || null
+      }).map((task) => buildTaskPayload(task.id, { includeRecentRuns: false })).filter(Boolean)
+      : [];
+    const rooms = roomService
+      ? roomService.listRooms({
+        limit: roomLimit,
+        status: roomStatus
+      })
+      : [];
+    const usage = includeUsage && typeof db?.summarizeUsage === 'function'
+      ? {
+        summary: db.summarizeUsage({}),
+        attribution: typeof db.summarizeUsageAttribution === 'function'
+          ? db.summarizeUsageAttribution({})
+          : null
+      }
+      : null;
+
+    return {
+      apiVersion: 'remote-v1',
+      generatedAt: new Date().toISOString(),
+      access: {
+        bindHost: configuredHost,
+        localOnlyDefault: true,
+        authRequired: authConfigured,
+        unauthenticatedDevMode: !authConfigured,
+        rawTerminalInput: 'runtime_capability_gated'
+      },
+      capabilities: {
+        runtimeHosts: Object.values(RUNTIME_HOSTS),
+        read: [
+          'roots',
+          'children',
+          'tasks',
+          'assignments',
+          'rooms',
+          'runs',
+          'usage',
+          'memory',
+          'session_events',
+          'runtime_status'
+        ],
+        write: [
+          'task_assignment_start',
+          'room_message',
+          'room_discussion',
+          'root_launch',
+          'root_adopt',
+          'root_attach'
+        ],
+        terminalInput: {
+          route: '/orchestration/terminals/:id/input',
+          mode: 'runtime_capability_gated',
+          requiresRuntimeCapability: 'send_input'
+        }
+      },
+      routes: {
+        roots: '/orchestration/root-sessions',
+        rootDetail: '/orchestration/root-sessions/:rootSessionId',
+        children: '/orchestration/root-sessions/:rootSessionId/children',
+        tasks: '/orchestration/tasks',
+        taskAssignments: '/orchestration/tasks/:taskId/assignments',
+        rooms: '/orchestration/rooms',
+        runs: '/orchestration/runs',
+        usage: '/orchestration/usage/*',
+        memory: '/orchestration/memory/*',
+        sessionEvents: '/orchestration/session-events?normalized=1',
+        adapters: '/orchestration/adapters'
+      },
+      roots: rootPayload.roots,
+      rootMetadata: {
+        archivedCount: rootPayload.archivedCount,
+        hiddenDetachedCount: rootPayload.hiddenDetachedCount,
+        hiddenNonUserCount: rootPayload.hiddenNonUserCount,
+        scope: rootPayload.scope,
+        statusFilter: rootPayload.statusFilter
+      },
+      tasks,
+      rooms,
+      usage,
+      counts: {
+        roots: rootPayload.roots.length,
+        tasks: tasks.length,
+        rooms: rooms.length
+      },
+      pagination: {
+        rootLimit,
+        taskLimit,
+        roomLimit,
+        terminalLimit,
+        eventLimit
+      }
+    };
+  }
+
   // Mount shared memory routes at /orchestration/memory
   const memoryRouter = createMemoryRouter({ db });
   router.use('/memory', memoryRouter);
+
+  /**
+   * GET /orchestration/remote/snapshot
+   * Runtime-neutral read-only snapshot for remote and mobile clients.
+   */
+  router.get('/remote/snapshot', (req, res) => {
+    try {
+      if (!db) {
+        return res.status(503).json({
+          error: { code: 'unavailable', message: 'remote broker snapshot requires orchestration DB support' }
+        });
+      }
+      res.json(buildRemoteApiSnapshot(req));
+    } catch (error) {
+      res.status(500).json({
+        error: { code: 'internal_error', message: error.message }
+      });
+    }
+  });
 
   /**
    * POST /orchestration/tasks

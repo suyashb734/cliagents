@@ -529,7 +529,7 @@ function parseServePort(value, fallback = 4001) {
 function parseServeArgs(rawArgs = [], env = process.env) {
   const args = [...rawArgs];
   const parsed = {
-    host: String(env.CLIAGENTS_HOST || env.HOST || '0.0.0.0').trim() || '0.0.0.0',
+    host: String(env.CLIAGENTS_HOST || env.HOST || '127.0.0.1').trim() || '127.0.0.1',
     port: parseServePort(env.PORT, 4001),
     orchestration: {
       dataDir: env.CLIAGENTS_DATA_DIR || null,
@@ -585,7 +585,7 @@ function printServeUsage() {
   console.log('       cliagents [options]');
   console.log('');
   console.log('Options:');
-  console.log('  --host <host>                Host to bind (default: 0.0.0.0)');
+  console.log('  --host <host>                Host to bind (default: 127.0.0.1; use 0.0.0.0 for LAN)');
   console.log('  --port <port>                Port to bind (default: 4001)');
   console.log('  --data-dir <path>            Broker data directory');
   console.log('  --log-dir <path>             Broker terminal log directory');

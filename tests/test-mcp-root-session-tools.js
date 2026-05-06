@@ -86,6 +86,7 @@ async function startFakeCliagentsServer() {
     },
     rootDetailResponse: null,
     rootDetailById: new Map(),
+    remoteSnapshotResponse: null,
     memoryBundleResponse: null,
     memoryBundleByScopeId: new Map(),
     memoryMessagesResponse: null,
@@ -190,6 +191,30 @@ async function startFakeCliagentsServer() {
 
     if (req.method === 'GET' && req.url === '/orchestration/adapters') {
       return writeJson(200, state.adaptersResponse);
+    }
+
+    if (req.method === 'GET' && req.url.startsWith('/orchestration/remote/snapshot')) {
+      return writeJson(200, state.remoteSnapshotResponse || {
+        apiVersion: 'remote-v1',
+        generatedAt: '2026-05-06T00:00:00.000Z',
+        access: {
+          bindHost: '127.0.0.1',
+          localOnlyDefault: true,
+          authRequired: false,
+          rawTerminalInput: 'runtime_capability_gated'
+        },
+        routes: {
+          roots: '/orchestration/root-sessions',
+          tasks: '/orchestration/tasks',
+          rooms: '/orchestration/rooms',
+          sessionEvents: '/orchestration/session-events?normalized=1'
+        },
+        roots: [],
+        tasks: [],
+        rooms: [],
+        counts: { roots: 0, tasks: 0, rooms: 0 },
+        usage: null
+      });
     }
 
     if (req.method === 'POST' && req.url === '/orchestration/model-routing/recommend') {
@@ -460,6 +485,54 @@ async function run() {
     assert(listText.includes('status=blocked'));
     assert(listText.includes('mode=attached'));
     assert(listText.includes('summary="Waiting for operator approval before continuing."'));
+
+    fakeServer.state.remoteSnapshotResponse = {
+      apiVersion: 'remote-v1',
+      generatedAt: '2026-05-06T00:00:00.000Z',
+      access: {
+        bindHost: '127.0.0.1',
+        localOnlyDefault: true,
+        authRequired: true,
+        rawTerminalInput: 'runtime_capability_gated'
+      },
+      routes: {
+        roots: '/orchestration/root-sessions',
+        tasks: '/orchestration/tasks',
+        rooms: '/orchestration/rooms',
+        sessionEvents: '/orchestration/session-events?normalized=1'
+      },
+      roots: [
+        {
+          rootSessionId: 'root-123',
+          status: 'blocked',
+          attention: { requiresAttention: true, reasons: [{ code: 'user_input_required' }] }
+        }
+      ],
+      tasks: [{ task: { id: 'task-1' } }],
+      rooms: [{ room: { id: 'room-1' } }],
+      counts: { roots: 1, tasks: 1, rooms: 1 },
+      usage: {
+        summary: { totalTokens: 42 }
+      }
+    };
+
+    const remoteSnapshot = await mod.handleGetRemoteSnapshot({
+      rootLimit: 5,
+      taskLimit: 5,
+      roomLimit: 5
+    });
+    const remoteText = remoteSnapshot.content[0].text;
+    assert(remoteText.includes('Remote Broker Snapshot'));
+    assert(remoteText.includes('api_version: remote-v1'));
+    assert(remoteText.includes('bind_host: 127.0.0.1'));
+    assert(remoteText.includes('auth_required: true'));
+    assert(remoteText.includes('raw_terminal_input: runtime_capability_gated'));
+    assert(remoteText.includes('roots: 1'));
+    assert(remoteText.includes('actionable_roots: 1'));
+    assert(remoteText.includes('usage_total_tokens: 42'));
+
+    const remoteJson = await mod.handleGetRemoteSnapshot({ format: 'json' });
+    assert.strictEqual(JSON.parse(remoteJson.content[0].text).apiVersion, 'remote-v1');
 
     fakeServer.state.rootDetailResponse = {
       rootSessionId: 'root-123',
