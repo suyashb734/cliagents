@@ -4,6 +4,12 @@
 
 Review status: `revise`
 
+Current sequencing note: for runtime-host and remote-control execution, use
+[Runtime Host And Remote Control Plan](./RUNTIME-HOST-REMOTE-CONTROL-PLAN.md).
+That plan supersedes this document's earlier managed-root-first and attach-mode
+sequencing. This file remains useful historical context for session graph,
+event, and remote UI concerns.
+
 This direction is still correct, but the review consensus is that the plan is not safe to execute as written. The control-plane architecture should proceed only after a Phase 0 foundation is in place.
 
 ## Roadmap Position

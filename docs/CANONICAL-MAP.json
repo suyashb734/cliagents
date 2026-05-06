@@ -1,6 +1,6 @@
 {
   "version": 1,
-  "lastReviewed": "2026-05-04",
+  "lastReviewed": "2026-05-06",
   "allowedStatuses": [
     "canonical",
     "active-plan",
@@ -82,7 +82,7 @@
       "scope": ["roadmap", "active-plans"],
       "related_code": [],
       "supersedes": ["docs/research/CLIAGENTS-BROKER-PLAN.md"],
-      "last_reviewed": "2026-05-04"
+      "last_reviewed": "2026-05-06"
     },
     {
       "path": "docs/adr/README.md",
@@ -144,6 +144,23 @@
       ],
       "supersedes": [],
       "last_reviewed": "2026-05-05"
+    },
+    {
+      "path": "docs/research/RUNTIME-HOST-REMOTE-CONTROL-PLAN.md",
+      "status": "active-plan",
+      "type": "plan",
+      "scope": ["runtime-hosts", "remote-control", "roots", "tmux", "adopted-sessions"],
+      "related_code": [
+        "src/tmux/session-manager.js",
+        "src/tmux/client.js",
+        "src/server/orchestration-router.js",
+        "src/mcp/cliagents-mcp-server.js"
+      ],
+      "supersedes": [
+        "docs/research/SESSION-CONTROL-PLANE-PLAN.md",
+        "docs/research/REALTIME-REMOTE-UI-PLAN.md"
+      ],
+      "last_reviewed": "2026-05-06"
     },
     {
       "path": "docs/research/BROKER-NATIVE-ORCHESTRATION-UX-PROPOSAL.md",
