@@ -14,6 +14,10 @@ const DEFAULT_TIMEOUT_MS = 180000;
 const POLL_INTERVAL_MS = 1500;
 const REQUIRED_SUCCESSFUL_ADAPTERS = 2;
 
+function resolveDefaultApiKey() {
+  return String(process.env.CLIAGENTS_API_KEY || process.env.CLI_AGENTS_API_KEY || '').trim() || null;
+}
+
 const RETRY_POLICY = {
   terminal_busy: { maxRetries: 1, delayMs: 1000 },
   binary_not_found: { maxRetries: 0, delayMs: 0 },
@@ -38,7 +42,7 @@ function parseArgs(argv) {
   const options = {
     adapters: [...DEFAULT_ADAPTERS],
     baseUrl: null,
-    apiKey: null,
+    apiKey: resolveDefaultApiKey(),
     timeoutMs: DEFAULT_TIMEOUT_MS,
     workDir: process.cwd(),
     json: false,
@@ -110,7 +114,7 @@ function parseArgs(argv) {
 }
 
 function printHelp() {
-  console.log(`Track A launch smoke test\n\nUsage:\n  node scripts/track-a-launch-smoke.js [options]\n\nOptions:\n  --adapters <list>                    Comma-separated adapters to validate (default: codex-cli,gemini-cli)\n  --base-url <url>                     Reuse an existing cliagents server instead of starting a local one\n  --api-key <key>                      API key for hosted/secured server requests\n  --timeout-ms <ms>                    Max time per flow attempt (default: ${DEFAULT_TIMEOUT_MS})\n  --work-dir <path>                    Working directory passed to orchestration route (default: current directory)\n  --require-successful-adapters <n>    Minimum adapters that must pass both flows (default: ${REQUIRED_SUCCESSFUL_ADAPTERS})\n  --json                               Print machine-readable JSON summary\n  --quiet                              Reduce per-step logs\n  --help, -h                           Show this help\n`);
+  console.log(`Track A launch smoke test\n\nUsage:\n  node scripts/track-a-launch-smoke.js [options]\n\nOptions:\n  --adapters <list>                    Comma-separated adapters to validate (default: codex-cli,gemini-cli)\n  --base-url <url>                     Reuse an existing cliagents server instead of starting a local one\n  --api-key <key>                      API key override for hosted/secured server requests (default: CLIAGENTS_API_KEY or CLI_AGENTS_API_KEY env)\n  --timeout-ms <ms>                    Max time per flow attempt (default: ${DEFAULT_TIMEOUT_MS})\n  --work-dir <path>                    Working directory passed to orchestration route (default: current directory)\n  --require-successful-adapters <n>    Minimum adapters that must pass both flows (default: ${REQUIRED_SUCCESSFUL_ADAPTERS})\n  --json                               Print machine-readable JSON summary\n  --quiet                              Reduce per-step logs\n  --help, -h                           Show this help\n`);
 }
 
 function logLine(enabled, message) {

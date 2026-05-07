@@ -10,6 +10,30 @@ const {
   parseArgs
 } = require('../scripts/track-a-launch-smoke');
 
+function withEnv(overrides, fn) {
+  const previous = new Map();
+  for (const [key, value] of Object.entries(overrides)) {
+    previous.set(key, Object.prototype.hasOwnProperty.call(process.env, key) ? process.env[key] : undefined);
+    if (value === undefined) {
+      delete process.env[key];
+    } else {
+      process.env[key] = value;
+    }
+  }
+
+  try {
+    fn();
+  } finally {
+    for (const [key, value] of previous.entries()) {
+      if (value === undefined) {
+        delete process.env[key];
+      } else {
+        process.env[key] = value;
+      }
+    }
+  }
+}
+
 function run(name, fn) {
   try {
     fn();
@@ -60,24 +84,58 @@ run('getRetryPolicy returns expected retry counts', () => {
   assert.deepStrictEqual(getRetryPolicy('process_exit'), { maxRetries: 1, delayMs: 3000 });
 });
 
-run('parseArgs parses adapters and base url', () => {
-  const parsed = parseArgs([
-    '--adapters', 'codex-cli,gemini-cli',
-    '--base-url', 'https://example.test',
-    '--api-key', 'secret',
-    '--timeout-ms', '20000',
-    '--require-successful-adapters', '2',
-    '--json',
-    '--quiet'
-  ]);
+run('parseArgs defaults apiKey from canonical env when --api-key is omitted', () => {
+  withEnv(
+    {
+      CLIAGENTS_API_KEY: 'env-secret',
+      CLI_AGENTS_API_KEY: undefined
+    },
+    () => {
+      const parsed = parseArgs(['--adapters', 'codex-cli,gemini-cli']);
+      assert.strictEqual(parsed.apiKey, 'env-secret');
+    }
+  );
+});
 
-  assert.deepStrictEqual(parsed.adapters, ['codex-cli', 'gemini-cli']);
-  assert.strictEqual(parsed.baseUrl, 'https://example.test');
-  assert.strictEqual(parsed.apiKey, 'secret');
-  assert.strictEqual(parsed.timeoutMs, 20000);
-  assert.strictEqual(parsed.requireSuccessfulAdapters, 2);
-  assert.strictEqual(parsed.json, true);
-  assert.strictEqual(parsed.quiet, true);
+run('parseArgs defaults apiKey from legacy env alias when canonical is absent', () => {
+  withEnv(
+    {
+      CLIAGENTS_API_KEY: undefined,
+      CLI_AGENTS_API_KEY: 'legacy-secret'
+    },
+    () => {
+      const parsed = parseArgs(['--adapters', 'codex-cli,gemini-cli']);
+      assert.strictEqual(parsed.apiKey, 'legacy-secret');
+    }
+  );
+});
+
+run('parseArgs keeps --api-key as an explicit override over env defaults', () => {
+  withEnv(
+    {
+      CLIAGENTS_API_KEY: 'env-secret',
+      CLI_AGENTS_API_KEY: 'legacy-secret'
+    },
+    () => {
+      const parsed = parseArgs([
+        '--adapters', 'codex-cli,gemini-cli',
+        '--base-url', 'https://example.test',
+        '--api-key', 'arg-secret',
+        '--timeout-ms', '20000',
+        '--require-successful-adapters', '2',
+        '--json',
+        '--quiet'
+      ]);
+
+      assert.deepStrictEqual(parsed.adapters, ['codex-cli', 'gemini-cli']);
+      assert.strictEqual(parsed.baseUrl, 'https://example.test');
+      assert.strictEqual(parsed.apiKey, 'arg-secret');
+      assert.strictEqual(parsed.timeoutMs, 20000);
+      assert.strictEqual(parsed.requireSuccessfulAdapters, 2);
+      assert.strictEqual(parsed.json, true);
+      assert.strictEqual(parsed.quiet, true);
+    }
+  );
 });
 
 console.log('✅ test-track-a-launch-smoke: all assertions passed');

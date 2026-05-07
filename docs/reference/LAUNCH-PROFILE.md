@@ -58,10 +58,11 @@ export CLIAGENTS_API_KEY="<hosted-api-key>"
 
 node scripts/run-with-supported-node.js scripts/track-a-launch-smoke.js \
   --base-url "$CLIAGENTS_BASE_URL" \
-  --api-key "$CLIAGENTS_API_KEY" \
   --adapters codex-cli,gemini-cli \
   --work-dir "$(pwd)"
 ```
+
+`scripts/track-a-launch-smoke.js` automatically reads `CLIAGENTS_API_KEY` (or `CLI_AGENTS_API_KEY`) from the environment in hosted mode.
 
 ## Evidence Capture
 
