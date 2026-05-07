@@ -10,6 +10,7 @@ const {
   CLI_COMMANDS,
   resolveTerminalStartupDelayMs,
   extractProviderThreadRefFromOutput,
+  inferEffectiveModelFromOutput,
   buildGeminiOneShotRunnerCommand,
   buildClaudeOneShotCommand,
   buildCodexOneShotCommand,
@@ -654,6 +655,80 @@ test('Worker terminals keep a minimal startup delay by default', () => {
       process.env.CLIAGENTS_WORKER_STARTUP_DELAY_MS = originalValue;
     }
   }
+});
+
+console.log('\n--- Effective Model Verification ---');
+
+test('Effective model parser reads provider-reported model ids', () => {
+  assert.strictEqual(
+    inferEffectiveModelFromOutput('codex-cli', '│ model:     gpt-5.5 xhigh   /model to change  │'),
+    'gpt-5.5'
+  );
+  assert.strictEqual(
+    inferEffectiveModelFromOutput('claude-code', '{"type":"result","modelUsage":{"claude-opus-4-7":{"inputTokens":12}}}'),
+    'claude-opus-4-7'
+  );
+  assert.strictEqual(
+    inferEffectiveModelFromOutput(
+      'gemini-cli',
+      '{"type":"init","model":"gemini-2.5-flash"}\n{"type":"result","stats":{"models":{"gemini-3-pro-preview":{"tokens":{"total":42}}}}}'
+    ),
+    'gemini-3-pro-preview'
+  );
+  assert.strictEqual(
+    inferEffectiveModelFromOutput('opencode-cli', '{"model":"minimax-coding-plan/MiniMax-M2.7"}'),
+    'minimax-coding-plan/MiniMax-M2.7'
+  );
+});
+
+test('Session manager persists verified effective model changes', () => {
+  const events = [];
+  const touches = [];
+  const manager = new PersistentSessionManager({
+    sessionEventsEnabled: true,
+    tmuxClient: {
+      listSessions() {
+        return [];
+      }
+    },
+    db: {
+      listTerminals() {
+        return [];
+      },
+      touchTerminalMessage(terminalId, payload) {
+        touches.push({ terminalId, payload });
+      },
+      addSessionEvent(event) {
+        events.push(event);
+        return event;
+      }
+    }
+  });
+  const terminal = {
+    terminalId: 'term-model-1',
+    rootSessionId: 'root-model-1',
+    parentSessionId: 'root-model-1',
+    adapter: 'claude-code',
+    model: 'claude-opus-4-6',
+    originClient: 'test',
+    activeRun: { runId: 'abc123def4567890' },
+    sessionMetadata: { purpose: 'model-verification-test' }
+  };
+
+  manager._syncEffectiveModelFromOutput(
+    terminal,
+    '{"type":"result","modelUsage":{"claude-opus-4-7":{"inputTokens":12}}}',
+    { source: 'unit-test' }
+  );
+
+  assert.strictEqual(terminal.model, 'claude-opus-4-7');
+  assert.strictEqual(touches.length, 1);
+  assert.strictEqual(touches[0].payload.model, 'claude-opus-4-7');
+  assert.strictEqual(events.length, 1);
+  assert.strictEqual(events[0].eventType, 'model_verified');
+  assert.strictEqual(events[0].payloadJson.requestedModel, 'claude-opus-4-6');
+  assert.strictEqual(events[0].payloadJson.effectiveModel, 'claude-opus-4-7');
+  assert.strictEqual(events[0].payloadJson.changed, true);
 });
 
 console.log('\n--- Launch Attach ---');

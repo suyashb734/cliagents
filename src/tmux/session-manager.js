@@ -268,6 +268,139 @@ function getLastMatchValue(text, regex) {
   return matches[matches.length - 1][1] || null;
 }
 
+function normalizeReportedModelId(adapter, value) {
+  const raw = String(value || '').trim();
+  if (!raw || raw.length > 160) {
+    return null;
+  }
+
+  const stripped = raw
+    .replace(/^models\//, '')
+    .replace(/^[`"']+|[`"'.,;:]+$/g, '')
+    .trim();
+  if (!stripped || stripped.toLowerCase() === 'default' || stripped.toLowerCase() === 'unknown') {
+    return null;
+  }
+
+  const normalized = normalizeBrokerModelAlias(adapter, stripped);
+  if (!/^[A-Za-z0-9._:@/-]+$/.test(normalized)) {
+    return null;
+  }
+
+  if (adapter === 'codex-cli') {
+    return /^(?:gpt-|o\d|codex-)/i.test(normalized) ? normalized : null;
+  }
+  if (adapter === 'claude-code') {
+    return /^claude-/i.test(normalized) ? normalized : null;
+  }
+  if (adapter === 'gemini-cli') {
+    return /^gemini-/i.test(normalized) ? normalized : null;
+  }
+  if (adapter === 'qwen-cli') {
+    return /^(?:qwen|openrouter\/qwen|opencode-go\/qwen)/i.test(normalized) ? normalized : null;
+  }
+  if (adapter === 'opencode-cli') {
+    return /^[A-Za-z0-9._:-]+\/[A-Za-z0-9._:@/-]+$/.test(normalized)
+      || /^(?:minimax|qwen|glm|kimi|deepseek|claude|gemini)/i.test(normalized)
+      ? normalized
+      : null;
+  }
+
+  return normalized;
+}
+
+function collectReportedModelCandidates(adapter, value, candidates = []) {
+  if (value == null) {
+    return candidates;
+  }
+
+  if (typeof value === 'string') {
+    const normalized = normalizeReportedModelId(adapter, value);
+    if (normalized) {
+      candidates.push(normalized);
+    }
+    return candidates;
+  }
+
+  if (Array.isArray(value)) {
+    for (const entry of value) {
+      collectReportedModelCandidates(adapter, entry, candidates);
+    }
+    return candidates;
+  }
+
+  if (typeof value !== 'object') {
+    return candidates;
+  }
+
+  for (const key of ['model', 'modelId', 'model_id', 'selectedModel', 'selected_model', 'effectiveModel', 'effective_model']) {
+    collectReportedModelCandidates(adapter, value[key], candidates);
+  }
+
+  for (const key of ['modelUsage', 'models']) {
+    if (value[key] && typeof value[key] === 'object' && !Array.isArray(value[key])) {
+      for (const modelId of Object.keys(value[key])) {
+        collectReportedModelCandidates(adapter, modelId, candidates);
+      }
+    }
+  }
+
+  for (const key of ['usage', 'stats', 'metadata', 'responseMetadata', 'result']) {
+    if (value[key] && typeof value[key] === 'object') {
+      collectReportedModelCandidates(adapter, value[key], candidates);
+    }
+  }
+
+  return candidates;
+}
+
+function parseJsonObjectsFromOutput(output) {
+  const objects = [];
+  const lines = String(output || '').split(/\r?\n/);
+  for (const line of lines) {
+    const trimmed = line.trim();
+    if (!trimmed || !trimmed.startsWith('{') || !trimmed.endsWith('}')) {
+      continue;
+    }
+    try {
+      objects.push(JSON.parse(trimmed));
+    } catch {
+      // Ignore non-JSON terminal noise.
+    }
+  }
+  return objects;
+}
+
+function inferEffectiveModelFromOutput(adapter, output) {
+  const source = String(output || '');
+  if (!source.trim()) {
+    return null;
+  }
+
+  const candidates = [];
+  for (const object of parseJsonObjectsFromOutput(source)) {
+    collectReportedModelCandidates(adapter, object, candidates);
+  }
+
+  const regexes = [
+    /"model"\s*:\s*"([^"]+)"/g,
+    /"model_id"\s*:\s*"([^"]+)"/g,
+    /"modelId"\s*:\s*"([^"]+)"/g,
+    /"modelUsage"\s*:\s*\{\s*"([^"]+)"/g,
+    /"models"\s*:\s*\{\s*"([^"]+)"/g,
+    /\bmodel:\s*([A-Za-z0-9._:@/-]+)/gi,
+    /│\s*model:\s*([A-Za-z0-9._:@/-]+)/gi,
+    /\b([A-Za-z0-9._:-]+\/(?:claude|gemini|qwen|glm|kimi|deepseek|minimax)[A-Za-z0-9._:@/-]*)\b/gi
+  ];
+  for (const regex of regexes) {
+    for (const match of source.matchAll(regex)) {
+      collectReportedModelCandidates(adapter, match[1], candidates);
+    }
+  }
+
+  return candidates.length > 0 ? candidates[candidates.length - 1] : null;
+}
+
 function hasTrackedRunStartMarker(text, runId) {
   if (!text || !runId) {
     return false;
@@ -1836,6 +1969,72 @@ class PersistentSessionManager extends EventEmitter {
     return this._updateProviderThreadRef(terminal, providerThreadRef);
   }
 
+  _recordEffectiveModelVerification(terminal, effectiveModel, previousModel, options = {}) {
+    if (!terminal || !effectiveModel) {
+      return null;
+    }
+
+    const runId = terminal.activeRun?.runId || null;
+    const changed = Boolean(previousModel && previousModel !== effectiveModel);
+    const stableStepKey = runId ? `run-${runId}-${effectiveModel}` : `model-${effectiveModel}`;
+    return this._recordSessionEvent({
+      rootSessionId: terminal.rootSessionId || terminal.terminalId,
+      sessionId: terminal.terminalId,
+      parentSessionId: terminal.parentSessionId || null,
+      eventType: 'model_verified',
+      originClient: terminal.originClient || 'legacy',
+      idempotencyKey: this._buildSessionEventIdempotencyKey(
+        terminal.rootSessionId || terminal.terminalId,
+        terminal.terminalId,
+        'model_verified',
+        stableStepKey
+      ),
+      payloadSummary: changed
+        ? `${terminal.adapter} effective model changed from ${previousModel} to ${effectiveModel}`
+        : `${terminal.adapter} effective model verified as ${effectiveModel}`,
+      payloadJson: {
+        adapter: terminal.adapter,
+        requestedModel: previousModel || null,
+        effectiveModel,
+        changed,
+        runId,
+        source: options.source || null
+      },
+      metadata: terminal.sessionMetadata || null
+    });
+  }
+
+  _syncEffectiveModelFromOutput(terminal, output, options = {}) {
+    if (!terminal || !output) {
+      return terminal?.model || null;
+    }
+
+    const effectiveModel = inferEffectiveModelFromOutput(terminal.adapter, output);
+    if (!effectiveModel) {
+      return terminal.model || null;
+    }
+
+    const previousModel = String(terminal.model || '').trim() || null;
+    const verifiedKey = `${terminal.activeRun?.runId || 'session'}:${effectiveModel}`;
+    if (terminal._lastEffectiveModelVerificationKey === verifiedKey) {
+      return terminal.model || effectiveModel;
+    }
+    terminal._lastEffectiveModelVerificationKey = verifiedKey;
+
+    if (previousModel !== effectiveModel) {
+      terminal.model = effectiveModel;
+      if (this.db?.touchTerminalMessage) {
+        this.db.touchTerminalMessage(terminal.terminalId, {
+          model: effectiveModel,
+          timestamp: Date.now()
+        });
+      }
+    }
+
+    this._recordEffectiveModelVerification(terminal, effectiveModel, previousModel, options);
+    return effectiveModel;
+  }
+
   _restoreTrackedRunFromPersistence(terminal, output, detector) {
     if (!terminal || terminal.activeRun) {
       return terminal?.activeRun || null;
@@ -1905,6 +2104,7 @@ class PersistentSessionManager extends EventEmitter {
         ? outputText.slice(run.baselineOutputLength)
         : outputText;
     this._syncProviderThreadRefFromOutput(terminal, tail, detector);
+    this._syncEffectiveModelFromOutput(terminal, tail, { source: 'tracked-run-output' });
     const sawStartMarkerInTail = hasTrackedRunStartMarker(tail, run.runId);
     const exitMatch = matchTrackedRunExitMarker(tail, run.exitMarkerPrefix);
 
@@ -1917,6 +2117,7 @@ class PersistentSessionManager extends EventEmitter {
 
     const logTail = terminal.logPath ? this.readLogTail(terminal.terminalId, 12000) : '';
     this._syncProviderThreadRefFromOutput(terminal, logTail, detector);
+    this._syncEffectiveModelFromOutput(terminal, logTail, { source: 'tracked-run-log' });
     const sawStartMarkerInLog = hasTrackedRunStartMarker(logTail, run.runId);
     const logExitMatch = matchTrackedRunExitMarker(logTail, run.exitMarkerPrefix);
     if (logExitMatch) {
@@ -3559,6 +3760,7 @@ class PersistentSessionManager extends EventEmitter {
     const output = this.getOutput(terminalId);
     // Use status detector if available
     const detector = this.statusDetectors.get(reconciledTerminal.adapter);
+    this._syncEffectiveModelFromOutput(reconciledTerminal, output, { source: 'terminal-output' });
     this._restoreTrackedRunFromPersistence(reconciledTerminal, output, detector);
     const trackedRunStatus = this._detectTrackedRunStatus(reconciledTerminal, output, detector);
     const attention = this._getTerminalAttention(reconciledTerminal, { output });
@@ -4084,6 +4286,7 @@ module.exports = {
   resolveTerminalStartupDelayMs,
   extractProviderThreadRefFromOutput,
   normalizeProviderThreadRef,
+  inferEffectiveModelFromOutput,
   buildGeminiOneShotRunnerCommand,
   buildClaudeOneShotCommand,
   buildCodexOneShotCommand,
