@@ -90,21 +90,17 @@ Validation date: **2026-05-07**
 Commands run:
 
 ```bash
-# Track A implement+review proof across two adapters
-node scripts/run-with-supported-node.js scripts/track-a-launch-smoke.js \
-  --adapters codex-cli,claude-code \
-  --work-dir "$(pwd)" \
-  --json
-
-# Cross-adapter child reliability matrix (live)
-CLIAGENTS_READINESS_JSON=1 node scripts/run-with-supported-node.js \
-  tests/test-child-adapter-reliability-live.js
+# KD-59 corrected repro: no API key env aliases configured
+env -u CLIAGENTS_API_KEY -u CLI_AGENTS_API_KEY \
+  node scripts/run-with-supported-node.js scripts/track-a-launch-smoke.js \
+    --adapters codex-cli,gemini-cli \
+    --work-dir "$(pwd)" \
+    --json --quiet
 ```
 
 Observed results:
 
-- Launch smoke: `success=true`, `passedAdapters=2/2` (`codex-cli`, `claude-code`)
-- `codex-cli`: implement/review both passed in 1 attempt each
-- `claude-code`: implement/review both passed in 1 attempt each
-- Reliability matrix: `gemini-cli`, `opencode-cli`, and `claude-code` were `ready`; `codex-cli` was `partial` (subagent continuity), and `qwen-cli` required auth migration
-- Qwen note from live run: OAuth discontinuation message references **2026-04-15** and recommends `qwen auth` migration
+- Local smoke auto-enabled loopback-only unauth mode (`CLIAGENTS_ALLOW_UNAUTHENTICATED_LOCALHOST=1`) for the temporary broker, so requests no longer failed at `GET /adapters` with `401`.
+- Launch smoke completed with `success=true` and `passedAdapters=2/2` (`codex-cli`, `gemini-cli`).
+- `codex-cli`: implement passed in 1 attempt (~11.5s), review passed in 1 attempt (~10.6s).
+- `gemini-cli`: implement passed in 2 attempts (~260.0s), review passed in 1 attempt (~42.9s).
