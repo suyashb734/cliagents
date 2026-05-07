@@ -3,7 +3,7 @@
 Base URL: `http://localhost:4001`
 
 Authentication:
-`CLIAGENTS_API_KEY` (or legacy alias `CLI_AGENTS_API_KEY`) enables API-key auth. Provide `Authorization: Bearer <key>` or `X-API-Key: <key>`. Auth is fail-closed by default. To opt into local-only unauthenticated mode, set `CLIAGENTS_ALLOW_UNAUTHENTICATED_LOCALHOST=1` and bind to a loopback host. WebSocket auth uses `?apiKey=...` or the `Sec-WebSocket-Protocol` header.
+`CLIAGENTS_API_KEY` (or legacy alias `CLI_AGENTS_API_KEY`) enables API-key auth. Provide `Authorization: Bearer <key>` or `X-API-Key: <key>`. Auth is fail-closed by default. When no env API key is configured, the broker creates a same-machine local token at `$CLIAGENTS_DATA_DIR/local-api-key` for local CLI clients. To opt into fully unauthenticated local-only mode, set `CLIAGENTS_ALLOW_UNAUTHENTICATED_LOCALHOST=1` and bind to a loopback host. WebSocket auth uses `?apiKey=...` or the `Sec-WebSocket-Protocol` header.
 
 ## Core Endpoints
 

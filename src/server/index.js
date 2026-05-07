@@ -33,6 +33,9 @@ const {
   authenticateRequest,
   validateApiKey,
   getConfiguredApiKey,
+  getConfiguredApiKeySource,
+  configureAuth,
+  ensureLocalApiKey,
   isLoopbackHost,
   isUnauthenticatedLocalhostModeEnabled,
   assertAuthConfigurationForHost
@@ -173,6 +176,9 @@ class AgentServer {
   constructor(options = {}) {
     this.port = options.port ?? 4001;
     this.host = options.host ?? '127.0.0.1';
+    this.dataDir = options.orchestration?.dataDir || process.env.CLIAGENTS_DATA_DIR || path.join(process.cwd(), 'data');
+    this.localApiKey = ensureLocalApiKey({ dataDir: this.dataDir });
+    configureAuth({ localApiKeyFilePath: this.localApiKey.filePath });
     this.cleanupOrphans = options.cleanupOrphans ?? process.env.CLI_AGENTS_CLEANUP_ORPHANS === '1';
     this.destroyOrchestrationTerminalsOnStop = options.orchestration?.destroyTerminalsOnStop
       ?? process.env.CLI_AGENTS_DESTROY_TERMINALS_ON_STOP === '1';
@@ -271,7 +277,7 @@ class AgentServer {
 
       // Initialize database
       const db = getDB({
-        dataDir: options.orchestration?.dataDir || path.join(process.cwd(), 'data')
+        dataDir: this.dataDir
       });
 
       // Initialize persistent session manager
@@ -1340,8 +1346,13 @@ class AgentServer {
         console.log('');
 
         const configuredApiKey = getConfiguredApiKey();
+        const configuredApiKeySource = getConfiguredApiKeySource();
         if (configuredApiKey) {
-          console.log('[Security] API key authentication is enabled.');
+          if (configuredApiKeySource === 'local-file') {
+            console.log(`[Security] API key authentication is enabled via local broker token: ${this.localApiKey.filePath}`);
+          } else {
+            console.log('[Security] API key authentication is enabled.');
+          }
         } else if (isUnauthenticatedLocalhostModeEnabled()) {
           console.warn('\n[SECURITY WARNING] CLIAGENTS_ALLOW_UNAUTHENTICATED_LOCALHOST=1 is enabled.');
           console.warn(`Unauthenticated access is allowed only on loopback host "${this.host}" for local development.`);

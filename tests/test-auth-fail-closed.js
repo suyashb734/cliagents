@@ -3,13 +3,21 @@
 'use strict';
 
 const assert = require('assert');
+const fs = require('fs');
+const os = require('os');
+const path = require('path');
 const WebSocket = require('ws');
 const AgentServer = require('../src/server');
+const { callCliagentsJson } = require('../src/index');
+const { readLocalApiKey } = require('../src/server/auth');
 
 const AUTH_ENV_KEYS = [
   'CLIAGENTS_API_KEY',
   'CLI_AGENTS_API_KEY',
-  'CLIAGENTS_ALLOW_UNAUTHENTICATED_LOCALHOST'
+  'CLIAGENTS_ALLOW_UNAUTHENTICATED_LOCALHOST',
+  'CLIAGENTS_DATA_DIR',
+  'CLIAGENTS_LOCAL_API_KEY_FILE',
+  'CLIAGENTS_URL'
 ];
 
 function snapshotAuthEnv() {
@@ -45,19 +53,26 @@ function applyAuthEnv(overrides) {
   }
 }
 
-async function startServer(host = '127.0.0.1') {
+function makeTempDir(prefix) {
+  return fs.mkdtempSync(path.join(os.tmpdir(), prefix));
+}
+
+async function startServer(host = '127.0.0.1', options = {}) {
+  const dataDir = options.dataDir || makeTempDir('cliagents-auth-test-');
   const server = new AgentServer({
     host,
     port: 0,
     cleanupOrphans: false,
     orchestration: {
-      enabled: false
+      enabled: false,
+      dataDir
     }
   });
   try {
     await server.start();
   } catch (error) {
     await server.stop().catch(() => {});
+    fs.rmSync(dataDir, { recursive: true, force: true });
     throw error;
   }
   const address = server.server?.address();
@@ -67,9 +82,19 @@ async function startServer(host = '127.0.0.1') {
   }
   return {
     server,
+    dataDir,
     baseUrl: `http://127.0.0.1:${port}`,
     wsUrl: `ws://127.0.0.1:${port}/ws`
   };
+}
+
+async function stopServerHandle(serverHandle) {
+  if (serverHandle?.server) {
+    await serverHandle.server.stop();
+  }
+  if (serverHandle?.dataDir) {
+    fs.rmSync(serverHandle.dataDir, { recursive: true, force: true });
+  }
 }
 
 async function request(baseUrl, path, headers = {}) {
@@ -133,9 +158,7 @@ async function testHttpFailClosedByDefault() {
     assert.strictEqual(result.status, 401, `Expected 401 from protected route, got ${result.status}`);
     assert.strictEqual(result.body?.error?.code, 'authentication_required');
   } finally {
-    if (serverHandle?.server) {
-      await serverHandle.server.stop();
-    }
+    await stopServerHandle(serverHandle);
     restoreAuthEnv(envSnapshot);
   }
 }
@@ -149,9 +172,34 @@ async function testWebSocketFailClosedByDefault() {
     serverHandle = await startServer();
     await expectWebSocketUnauthorized(serverHandle.wsUrl);
   } finally {
-    if (serverHandle?.server) {
-      await serverHandle.server.stop();
-    }
+    await stopServerHandle(serverHandle);
+    restoreAuthEnv(envSnapshot);
+  }
+}
+
+async function testLocalBrokerTokenAuthenticatesSameMachineCli() {
+  const envSnapshot = snapshotAuthEnv();
+  let serverHandle = null;
+
+  try {
+    applyAuthEnv({});
+    serverHandle = await startServer();
+    const unauthenticated = await request(serverHandle.baseUrl, '/adapters');
+    assert.strictEqual(unauthenticated.status, 401, `Expected unauthenticated route to fail closed, got ${unauthenticated.status}`);
+
+    const localApiKey = readLocalApiKey({ dataDir: serverHandle.dataDir });
+    assert(localApiKey, 'Expected server to create a local broker token when no env API key is configured');
+    const authenticated = await request(serverHandle.baseUrl, '/adapters', {
+      authorization: `Bearer ${localApiKey}`
+    });
+    assert.strictEqual(authenticated.status, 200, `Expected local broker token auth success, got ${authenticated.status}`);
+
+    process.env.CLIAGENTS_DATA_DIR = serverHandle.dataDir;
+    process.env.CLIAGENTS_URL = serverHandle.baseUrl;
+    const cliResult = await callCliagentsJson('/adapters');
+    assert(Array.isArray(cliResult.adapters), 'Expected local CLI JSON client to authenticate with the local broker token');
+  } finally {
+    await stopServerHandle(serverHandle);
     restoreAuthEnv(envSnapshot);
   }
 }
@@ -168,7 +216,7 @@ async function testEnvAliasParity() {
       authorization: `Bearer ${key}`
     });
     assert.strictEqual(canonicalResult.status, 200, `Expected canonical alias auth success, got ${canonicalResult.status}`);
-    await serverHandle.server.stop();
+    await stopServerHandle(serverHandle);
     serverHandle = null;
 
     applyAuthEnv({ CLI_AGENTS_API_KEY: key });
@@ -178,9 +226,7 @@ async function testEnvAliasParity() {
     });
     assert.strictEqual(legacyResult.status, 200, `Expected legacy alias auth success, got ${legacyResult.status}`);
   } finally {
-    if (serverHandle?.server) {
-      await serverHandle.server.stop();
-    }
+    await stopServerHandle(serverHandle);
     restoreAuthEnv(envSnapshot);
   }
 }
@@ -203,6 +249,7 @@ async function run() {
   const tests = [
     { name: 'HTTP auth is fail-closed by default', fn: testHttpFailClosedByDefault },
     { name: 'WebSocket auth is fail-closed by default', fn: testWebSocketFailClosedByDefault },
+    { name: 'local broker token authenticates same-machine CLI calls', fn: testLocalBrokerTokenAuthenticatesSameMachineCli },
     { name: 'API key env aliases are parity-compatible', fn: testEnvAliasParity },
     { name: 'localhost unauthenticated override rejects non-loopback bind host', fn: testLocalhostOverrideRejectsNonLoopbackHost }
   ];

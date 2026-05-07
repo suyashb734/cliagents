@@ -34,6 +34,7 @@ const SessionWrapper = require('./utils/session-wrapper');
 
 // Server
 const AgentServer = require('./server');
+const { getConfiguredApiKey } = require('./server/auth');
 
 // Transcription Service
 const { transcribeAudio } = require('./services/transcriptionService');
@@ -106,7 +107,7 @@ async function callCliagentsJson(route, options = {}) {
   const baseUrl = getCliagentsBaseUrl();
   const url = new URL(route, baseUrl);
   const headers = { 'content-type': 'application/json' };
-  const apiKey = process.env.CLIAGENTS_API_KEY || process.env.CLI_AGENTS_API_KEY;
+  const apiKey = getConfiguredApiKey();
   if (apiKey) {
     headers.authorization = `Bearer ${apiKey}`;
     headers['x-api-key'] = apiKey;
@@ -2489,6 +2490,7 @@ module.exports = {
   handleAttachRootCommand,
   handleAdoptCommand,
   handleServeCommand,
+  callCliagentsJson,
   listAdapterModels,
   listOperatorRootSessions,
   getOperatorRootSession,

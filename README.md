@@ -278,7 +278,13 @@ Built-in skills: `test-driven-development`, `debugging`, `code-review`, `multi-a
 
 Authentication is **required by default** (fail-closed).
 
-Set either API-key environment variable:
+If no API key is configured, `cliagents serve` creates a local broker token at
+`$CLIAGENTS_DATA_DIR/local-api-key` (default `./data/local-api-key`). Local
+`cliagents` CLI commands read that token automatically, so commands like
+`cliagents launch codex` work on the same machine while unauthenticated HTTP
+requests still receive `401`.
+
+For explicit shared or remote clients, set either API-key environment variable:
 
 ```bash
 export CLIAGENTS_API_KEY="your-secret-key"
@@ -392,6 +398,7 @@ Use that index to distinguish current source-of-truth docs from research notes.
 |----------|-------------|---------|
 | `CLIAGENTS_API_KEY` | API key for authentication (preferred) | None |
 | `CLI_AGENTS_API_KEY` | API key for authentication (legacy alias) | None |
+| `CLIAGENTS_LOCAL_API_KEY_FILE` | Local broker token file used when no env API key is configured | `$CLIAGENTS_DATA_DIR/local-api-key` |
 | `CLIAGENTS_ALLOW_UNAUTHENTICATED_LOCALHOST` | Allow unauthenticated access only on loopback host when set to `1` | `0` |
 | `CLIAGENTS_API_CORS_ALLOWED_ORIGINS` | Comma-separated explicit API CORS origins | None |
 | `CLIAGENTS_API_CORS_ALLOW_LOOPBACK` | Allow loopback API CORS origins when set to `1` | `1` |

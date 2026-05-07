@@ -6,12 +6,22 @@
  * explicitly enabled for local development.
  */
 
+const crypto = require('crypto');
+const fs = require('fs');
 const net = require('net');
+const path = require('path');
 const { sendError } = require('../utils/errors');
 
 const UNAUTH_LOCALHOST_ENV = 'CLIAGENTS_ALLOW_UNAUTHENTICATED_LOCALHOST';
 const LEGACY_API_KEY_ENV = 'CLI_AGENTS_API_KEY';
 const CANONICAL_API_KEY_ENV = 'CLIAGENTS_API_KEY';
+const LOCAL_API_KEY_FILE_ENV = 'CLIAGENTS_LOCAL_API_KEY_FILE';
+const DATA_DIR_ENV = 'CLIAGENTS_DATA_DIR';
+const LOCAL_API_KEY_FILENAME = 'local-api-key';
+
+let runtimeAuthConfig = {
+  localApiKeyFilePath: null
+};
 
 function normalizeEnvString(value) {
   if (typeof value !== 'string') {
@@ -26,7 +36,142 @@ function getConfiguredApiKey() {
   if (canonical) {
     return canonical;
   }
-  return normalizeEnvString(process.env[LEGACY_API_KEY_ENV]);
+  const legacy = normalizeEnvString(process.env[LEGACY_API_KEY_ENV]);
+  if (legacy) {
+    return legacy;
+  }
+  return readLocalApiKey();
+}
+
+function getConfiguredEnvApiKey() {
+  return normalizeEnvString(process.env[CANONICAL_API_KEY_ENV])
+    || normalizeEnvString(process.env[LEGACY_API_KEY_ENV]);
+}
+
+function getConfiguredApiKeySource() {
+  const canonical = normalizeEnvString(process.env[CANONICAL_API_KEY_ENV]);
+  if (canonical) {
+    return CANONICAL_API_KEY_ENV;
+  }
+  const legacy = normalizeEnvString(process.env[LEGACY_API_KEY_ENV]);
+  if (legacy) {
+    return LEGACY_API_KEY_ENV;
+  }
+  const local = readLocalApiKey();
+  if (local) {
+    return 'local-file';
+  }
+  return null;
+}
+
+function configureAuth(options = {}) {
+  runtimeAuthConfig = {
+    ...runtimeAuthConfig,
+    ...(options.localApiKeyFilePath !== undefined
+      ? { localApiKeyFilePath: options.localApiKeyFilePath || null }
+      : {})
+  };
+}
+
+function getDefaultDataDir() {
+  return normalizeEnvString(process.env[DATA_DIR_ENV]) || path.join(process.cwd(), 'data');
+}
+
+function getLocalApiKeyFilePath(options = {}) {
+  const explicitFilePath = normalizeEnvString(options.filePath)
+    || normalizeEnvString(process.env[LOCAL_API_KEY_FILE_ENV]);
+  if (explicitFilePath) {
+    return path.resolve(explicitFilePath);
+  }
+
+  if (options.dataDir) {
+    return path.resolve(options.dataDir, LOCAL_API_KEY_FILENAME);
+  }
+
+  return path.resolve(
+    normalizeEnvString(runtimeAuthConfig.localApiKeyFilePath)
+    || path.join(getDefaultDataDir(), LOCAL_API_KEY_FILENAME)
+  );
+}
+
+function readLocalApiKey(options = {}) {
+  const filePath = getLocalApiKeyFilePath(options);
+  try {
+    const value = fs.readFileSync(filePath, 'utf8').trim();
+    return value || null;
+  } catch (error) {
+    if (error && error.code === 'ENOENT') {
+      return null;
+    }
+    return null;
+  }
+}
+
+function ensureLocalApiKey(options = {}) {
+  const filePath = getLocalApiKeyFilePath(options);
+  if (normalizeEnvString(process.env[CANONICAL_API_KEY_ENV]) || normalizeEnvString(process.env[LEGACY_API_KEY_ENV])) {
+    return {
+      enabled: false,
+      source: 'env',
+      filePath,
+      apiKey: null
+    };
+  }
+  if (isUnauthenticatedLocalhostModeRequested()) {
+    return {
+      enabled: false,
+      source: UNAUTH_LOCALHOST_ENV,
+      filePath,
+      apiKey: null
+    };
+  }
+
+  const existing = readLocalApiKey({ filePath });
+  if (existing) {
+    return {
+      enabled: true,
+      source: 'local-file',
+      filePath,
+      apiKey: existing,
+      created: false
+    };
+  }
+
+  fs.mkdirSync(path.dirname(filePath), { recursive: true, mode: 0o700 });
+  const apiKey = `cliagents-local-${crypto.randomBytes(32).toString('base64url')}`;
+  try {
+    const fd = fs.openSync(filePath, 'wx', 0o600);
+    try {
+      fs.writeFileSync(fd, `${apiKey}\n`, 'utf8');
+    } finally {
+      fs.closeSync(fd);
+    }
+  } catch (error) {
+    if (error && error.code === 'EEXIST') {
+      const concurrent = readLocalApiKey({ filePath });
+      if (concurrent) {
+        return {
+          enabled: true,
+          source: 'local-file',
+          filePath,
+          apiKey: concurrent,
+          created: false
+        };
+      }
+    }
+    throw error;
+  }
+  try {
+    fs.chmodSync(filePath, 0o600);
+  } catch {}
+
+  return {
+    enabled: true,
+    source: 'local-file',
+    filePath,
+    apiKey,
+    created: true
+  };
 }
 
 function isUnauthenticatedLocalhostModeRequested() {
@@ -83,7 +228,7 @@ function isLoopbackHost(host) {
 }
 
 function isUnauthenticatedLocalhostModeEnabled() {
-  if (getConfiguredApiKey()) {
+  if (getConfiguredEnvApiKey()) {
     return false;
   }
   return isUnauthenticatedLocalhostModeRequested();
@@ -211,6 +356,11 @@ module.exports = {
   authenticateRequest,
   validateApiKey,
   getConfiguredApiKey,
+  getConfiguredApiKeySource,
+  configureAuth,
+  ensureLocalApiKey,
+  getLocalApiKeyFilePath,
+  readLocalApiKey,
   isLoopbackHost,
   isUnauthenticatedLocalhostModeEnabled,
   assertAuthConfigurationForHost

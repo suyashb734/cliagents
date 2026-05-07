@@ -24,6 +24,7 @@ This guide provides solutions for common issues encountered when using `cliagent
 - **Header Format**: Ensure you are using the correct header format:
   - `Authorization: Bearer YOUR_API_KEY`
   - OR `X-API-Key: YOUR_API_KEY`
+- **Local CLI**: If `cliagents launch` fails with `Authentication required`, restart the broker after this version; it will create `$CLIAGENTS_DATA_DIR/local-api-key`, and local CLI commands will read it automatically.
 - **Localhost Override**: For local-only development without auth, set `CLIAGENTS_ALLOW_UNAUTHENTICATED_LOCALHOST=1` and bind to `127.0.0.1`, `::1`, or `localhost`.
 - **Restart Server**: After changing environment variables, you must restart the `cliagents` server.
 
