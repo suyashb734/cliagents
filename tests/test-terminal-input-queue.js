@@ -212,12 +212,12 @@ async function run() {
       assert.strictEqual(crossRootReply.data.error.code, 'terminal_input_forbidden');
 
       const ownerReply = await request(baseUrl, 'POST', '/orchestration/terminals/term-input-1/input', {
-        message: 'Owner root reply should be allowed.'
+        message: 'pwd'
       }, ownerHeaders);
       assert.strictEqual(ownerReply.status, 200);
       assert.deepStrictEqual(sentInputs.at(-1), {
         terminalId: 'term-input-1',
-        message: 'Owner root reply should be allowed.'
+        message: 'pwd'
       });
 
       const missingRootEnqueue = await request(baseUrl, 'POST', '/orchestration/terminals/term-input-1/input-queue', {
@@ -331,7 +331,7 @@ async function run() {
         message: 'Deliver through queue.'
       });
 
-      const secretMessage = 'SYNTHETIC_SECRET=sk-test-KD51-LEAKCHECK-XYZ987654321';
+      const secretMessage = 'rg sk-test-KD51-LEAKCHECK-XYZ987654321 ./';
       const secretEnqueue = await request(baseUrl, 'POST', '/orchestration/terminals/term-input-1/input-queue', {
         message: secretMessage,
         approvalRequired: false
@@ -355,7 +355,10 @@ async function run() {
 
       const secretHistory = await request(baseUrl, 'GET', '/orchestration/memory/messages?terminal_id=term-input-1&role=user&limit=100');
       assert.strictEqual(secretHistory.status, 200);
-      const secretHistoryMessage = secretHistory.data.messages.find((entry) => entry.content.includes('SYNTHETIC_SECRET='));
+      const secretHistoryMessage = secretHistory.data.messages.find((entry) => (
+        entry.content.includes('rg ')
+        && entry.content.includes('[REDACTED_SECRET]')
+      ));
       assert(secretHistoryMessage, 'history should include the synthetic secret input entry');
       assert(secretHistoryMessage.content.includes('[REDACTED_SECRET]'));
       assert(!secretHistoryMessage.content.includes('sk-test-KD51-LEAKCHECK-XYZ987654321'));
@@ -378,7 +381,7 @@ async function run() {
       assert.strictEqual(sensitiveDirectInput.data.error.code, 'approval_required_for_sensitive_input');
 
       const bypassDirectInput = await request(baseUrl, 'POST', '/orchestration/terminals/term-input-1/input', {
-        message: 'find /tmp -mindepth 1 -delete'
+        message: 'scp /tmp/a.txt backup:/tmp/a.txt'
       }, ownerHeaders);
       assert.strictEqual(bypassDirectInput.status, 403);
       assert.strictEqual(bypassDirectInput.data.error.code, 'approval_required_for_sensitive_input');
@@ -392,7 +395,7 @@ async function run() {
       assert.strictEqual(sensitiveQueueWithoutApproval.data.error.code, 'approval_required_for_sensitive_input');
 
       const bypassQueueWithoutApproval = await request(baseUrl, 'POST', '/orchestration/terminals/term-input-1/input-queue', {
-        message: 'find /tmp -mindepth 1 -delete',
+        message: 'scp /tmp/a.txt backup:/tmp/a.txt',
         approvalRequired: false
       }, ownerHeaders);
       assert.strictEqual(bypassQueueWithoutApproval.status, 403);
@@ -400,7 +403,7 @@ async function run() {
       assert.strictEqual(bypassQueueWithoutApproval.data.error.ruleId, 'shell_command_not_allowlisted');
 
       const bypassQueueWithApproval = await request(baseUrl, 'POST', '/orchestration/terminals/term-input-1/input-queue', {
-        message: 'find /tmp -mindepth 1 -delete',
+        message: 'scp /tmp/a.txt backup:/tmp/a.txt',
         approvalRequired: true
       }, ownerHeaders);
       assert.strictEqual(bypassQueueWithApproval.status, 200);
@@ -416,7 +419,7 @@ async function run() {
 
       const bypassApprovalAudit = db.enqueueTerminalInput({
         terminalId: 'term-input-1',
-        message: 'rm -rf /tmp/bypass-attempt',
+        message: 'scp /tmp/a.txt backup:/tmp/a.txt',
         approvalRequired: true
       });
       db.updateTerminalInputQueueItem(bypassApprovalAudit.id, {
@@ -430,13 +433,13 @@ async function run() {
 
       db.updateTerminalBinding('term-input-1', { sessionControlMode: 'observer' });
       const observerInput = await request(baseUrl, 'POST', '/orchestration/terminals/term-input-1/input', {
-        message: 'Should not deliver.'
+        message: 'pwd'
       }, ownerHeaders);
       assert.strictEqual(observerInput.status, 403);
       assert.strictEqual(observerInput.data.error.code, 'session_control_observer');
 
       const observerQueued = await request(baseUrl, 'POST', '/orchestration/terminals/term-input-1/input-queue', {
-        message: 'Still should not deliver.',
+        message: 'pwd',
         controlMode: 'observer'
       }, ownerHeaders);
       assert.strictEqual(observerQueued.status, 200);

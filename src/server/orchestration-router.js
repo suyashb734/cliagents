@@ -3699,68 +3699,6 @@ function createOrchestrationRouter(context) {
     return ['message', 'approval', 'denial'].includes(normalized) ? normalized : 'message';
   }
 
-  const TERMINAL_INPUT_COMMAND_CANDIDATES = new Set([
-    'awk',
-    'bash',
-    'brew',
-    'bun',
-    'cargo',
-    'cat',
-    'chmod',
-    'chown',
-    'cmake',
-    'cp',
-    'curl',
-    'dd',
-    'deno',
-    'docker',
-    'echo',
-    'env',
-    'find',
-    'git',
-    'go',
-    'grep',
-    'head',
-    'id',
-    'jq',
-    'kubectl',
-    'ln',
-    'ls',
-    'make',
-    'mkdir',
-    'mv',
-    'node',
-    'npm',
-    'perl',
-    'php',
-    'pip',
-    'pnpm',
-    'powershell',
-    'printenv',
-    'ps',
-    'pwd',
-    'python',
-    'python3',
-    'rg',
-    'rm',
-    'rsync',
-    'ruby',
-    'sed',
-    'sh',
-    'sudo',
-    'tail',
-    'tar',
-    'tee',
-    'touch',
-    'truncate',
-    'uname',
-    'wget',
-    'whoami',
-    'xargs',
-    'yarn',
-    'zsh'
-  ]);
-
   const UNAPPROVED_TERMINAL_INPUT_ALLOWLIST = [
     { id: 'read_pwd', pattern: /^pwd$/i },
     { id: 'read_ls', pattern: /^ls(?:\s+[-\w./~]+)*$/i },
@@ -3772,29 +3710,9 @@ function createOrchestrationRouter(context) {
     { id: 'rg_search', pattern: /^rg\s+.+$/i }
   ];
 
-  function looksLikeShellCommandInput(text) {
-    if (!text) {
-      return false;
-    }
-    if (/[\r\n`$><;&|]/.test(text)) {
-      return true;
-    }
-    const firstToken = text.split(/\s+/)[0] || '';
-    if (!firstToken) {
-      return false;
-    }
-    if (/^(?:\.\/|~\/|\/)/.test(firstToken)) {
-      return true;
-    }
-    return TERMINAL_INPUT_COMMAND_CANDIDATES.has(firstToken.toLowerCase());
-  }
-
   function detectSensitiveTerminalInput(message) {
     const text = String(message || '').trim();
     if (!text) {
-      return null;
-    }
-    if (!looksLikeShellCommandInput(text)) {
       return null;
     }
     for (const rule of UNAPPROVED_TERMINAL_INPUT_ALLOWLIST) {
@@ -3804,7 +3722,7 @@ function createOrchestrationRouter(context) {
     }
     return {
       id: 'shell_command_not_allowlisted',
-      reason: 'shell-like command is not in the unapproved input allowlist'
+      reason: 'terminal message input is not in the unapproved input allowlist'
     };
   }
 

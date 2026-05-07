@@ -216,21 +216,21 @@ async function run() {
 
     const pendingDeliverInput = await ownerSession.mod.handleEnqueueTerminalInput({
       terminalId: 'term-kd71-owner',
-      message: 'OWNER_PENDING_FOR_DELIVER'
+      message: 'pwd'
     });
     const pendingDeliverInputId = parseOutputField(pendingDeliverInput.content?.[0]?.text, 'input_id');
     assert(pendingDeliverInputId && pendingDeliverInputId !== 'n/a', 'pending deliver input id should be returned');
 
     const pendingDenyInput = await ownerSession.mod.handleEnqueueTerminalInput({
       terminalId: 'term-kd71-owner',
-      message: 'OWNER_PENDING_FOR_DENY'
+      message: 'whoami'
     });
     const pendingDenyInputId = parseOutputField(pendingDenyInput.content?.[0]?.text, 'input_id');
     assert(pendingDenyInputId && pendingDenyInputId !== 'n/a', 'pending deny input id should be returned');
 
     const pendingCancelInput = await ownerSession.mod.handleEnqueueTerminalInput({
       terminalId: 'term-kd71-owner',
-      message: 'OWNER_PENDING_FOR_CANCEL'
+      message: 'id'
     });
     const pendingCancelInputId = parseOutputField(pendingCancelInput.content?.[0]?.text, 'input_id');
     assert(pendingCancelInputId && pendingCancelInputId !== 'n/a', 'pending cancel input id should be returned');
@@ -382,7 +382,7 @@ async function run() {
       sentInputs,
       [
         { terminalId: 'term-kd71-owner', message: 'OWNER_HELD_FOR_APPROVAL' },
-        { terminalId: 'term-kd71-owner', message: 'OWNER_PENDING_FOR_DELIVER' }
+        { terminalId: 'term-kd71-owner', message: 'pwd' }
       ],
       'owner-root positive controls should remain functional'
     );
