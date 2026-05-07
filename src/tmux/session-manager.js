@@ -401,6 +401,106 @@ function inferEffectiveModelFromOutput(adapter, output) {
   return candidates.length > 0 ? candidates[candidates.length - 1] : null;
 }
 
+function normalizeUsageTokenSum(values = []) {
+  return values.reduce((sum, value) => {
+    const parsed = Number(value);
+    return Number.isFinite(parsed) ? sum + Math.max(0, Math.round(parsed)) : sum;
+  }, 0);
+}
+
+function extractUsageMetadataFromOutput(adapter, output) {
+  const objects = parseJsonObjectsFromOutput(output);
+  for (let index = objects.length - 1; index >= 0; index -= 1) {
+    const object = objects[index];
+    if (!object || typeof object !== 'object' || Array.isArray(object)) {
+      continue;
+    }
+
+    const usage = object.usage && typeof object.usage === 'object' && !Array.isArray(object.usage)
+      ? object.usage
+      : null;
+    const modelUsage = object.modelUsage && typeof object.modelUsage === 'object' && !Array.isArray(object.modelUsage)
+      ? object.modelUsage
+      : null;
+    const modelUsageEntry = modelUsage
+      ? Object.entries(modelUsage).find(([, value]) => value && typeof value === 'object' && !Array.isArray(value))
+      : null;
+
+    if (!usage && !modelUsageEntry) {
+      continue;
+    }
+
+    const modelUsageMetadata = modelUsageEntry
+      ? {
+          model: modelUsageEntry[0],
+          ...modelUsageEntry[1]
+        }
+      : {};
+    const inputTokens = usage?.input_tokens
+      ?? usage?.inputTokens
+      ?? modelUsageMetadata.inputTokens
+      ?? modelUsageMetadata.input_tokens
+      ?? null;
+    const outputTokens = usage?.output_tokens
+      ?? usage?.outputTokens
+      ?? modelUsageMetadata.outputTokens
+      ?? modelUsageMetadata.output_tokens
+      ?? null;
+    const reasoningTokens = usage?.reasoning_tokens
+      ?? usage?.reasoningTokens
+      ?? modelUsageMetadata.reasoningTokens
+      ?? modelUsageMetadata.reasoning_tokens
+      ?? null;
+    const cacheCreationInputTokens = usage?.cache_creation_input_tokens
+      ?? usage?.cacheCreationInputTokens
+      ?? modelUsageMetadata.cacheCreationInputTokens
+      ?? modelUsageMetadata.cache_creation_input_tokens
+      ?? null;
+    const cacheReadInputTokens = usage?.cache_read_input_tokens
+      ?? usage?.cacheReadInputTokens
+      ?? modelUsageMetadata.cacheReadInputTokens
+      ?? modelUsageMetadata.cache_read_input_tokens
+      ?? null;
+    const totalTokens = usage?.total_tokens
+      ?? usage?.totalTokens
+      ?? modelUsageMetadata.totalTokens
+      ?? modelUsageMetadata.total_tokens
+      ?? null;
+    const cacheRelatedInputTokens = normalizeUsageTokenSum([cacheCreationInputTokens, cacheReadInputTokens]);
+    const computedTotalTokens = totalTokens ?? normalizeUsageTokenSum([
+      inputTokens,
+      outputTokens,
+      reasoningTokens,
+      cacheCreationInputTokens,
+      cacheReadInputTokens
+    ]);
+
+    return {
+      ...object,
+      adapter,
+      source: 'tracked-run-output',
+      usage: {
+        ...(usage || {}),
+        ...modelUsageMetadata,
+        inputTokens,
+        outputTokens,
+        reasoningTokens,
+        cacheCreationInputTokens,
+        cacheReadInputTokens,
+        cachedInputTokens: cacheRelatedInputTokens,
+        totalTokens: computedTotalTokens,
+        costUsd: object.total_cost_usd
+          ?? object.totalCostUsd
+          ?? modelUsageMetadata.costUSD
+          ?? modelUsageMetadata.costUsd
+          ?? null
+      }
+    };
+  }
+
+  return null;
+}
+
 function hasTrackedRunStartMarker(text, runId) {
   if (!text || !runId) {
     return false;
@@ -1831,6 +1931,11 @@ class PersistentSessionManager extends EventEmitter {
     }
     this._interruptFatalTrackedRun(terminal, nextStatus);
     this._recordModelExecutionOutcome(terminal, nextStatus, extra);
+    if ([TerminalStatus.COMPLETED, TerminalStatus.ERROR].includes(nextStatus)) {
+      this._persistTrackedRunUsageFromOutput(terminal, extra.runOutput || terminal.activeRun?.outputText || '', {
+        exitCode: extra.exitCode
+      });
+    }
     this.emit('status-change', { terminalId: terminal.terminalId, status: nextStatus });
 
     if ([TerminalStatus.COMPLETED, TerminalStatus.ERROR].includes(nextStatus)) {
@@ -2075,6 +2180,52 @@ class PersistentSessionManager extends EventEmitter {
     return effectiveModel;
   }
 
+  _persistTrackedRunUsageFromOutput(terminal, output, options = {}) {
+    if (!terminal || !terminal.activeRun || terminal.activeRun.usagePersisted) {
+      return null;
+    }
+    if (typeof this.db?.addUsageRecordFromMetadata !== 'function') {
+      return null;
+    }
+
+    const metadata = extractUsageMetadataFromOutput(terminal.adapter, output);
+    if (!metadata) {
+      return null;
+    }
+
+    const sessionMetadata = terminal.sessionMetadata && typeof terminal.sessionMetadata === 'object'
+      ? terminal.sessionMetadata
+      : {};
+    const usageMetadata = {
+      ...metadata,
+      taskId: sessionMetadata.taskId || null,
+      taskAssignmentId: sessionMetadata.taskAssignmentId || null,
+      terminalId: terminal.terminalId,
+      rootSessionId: terminal.rootSessionId || terminal.terminalId,
+      runId: terminal.activeRun.runId,
+      exitCode: options.exitCode ?? terminal.activeRun.exitCode ?? null
+    };
+    const usageId = this.db.addUsageRecordFromMetadata({
+      rootSessionId: terminal.rootSessionId || terminal.terminalId,
+      terminalId: terminal.terminalId,
+      runId: terminal.activeRun.runId,
+      taskId: sessionMetadata.taskId || null,
+      taskAssignmentId: sessionMetadata.taskAssignmentId || null,
+      participantId: terminal.terminalId,
+      adapter: terminal.adapter,
+      model: terminal.effectiveModel || terminal.model || null,
+      role: sessionMetadata.taskRole || terminal.role || null,
+      sourceConfidence: 'provider_reported',
+      metadata: usageMetadata,
+      createdAt: Date.now()
+    });
+
+    if (usageId) {
+      terminal.activeRun.usagePersisted = true;
+    }
+    return usageId || null;
+  }
+
   _restoreTrackedRunFromPersistence(terminal, output, detector) {
     if (!terminal || terminal.activeRun) {
       return terminal?.activeRun || null;
@@ -2143,6 +2294,11 @@ class PersistentSessionManager extends EventEmitter {
       : (run.baselineOutputLength > 0 && run.baselineOutputLength < outputText.length)
         ? outputText.slice(run.baselineOutputLength)
         : outputText;
+    const setRunOutputText = (value) => {
+      if (value) {
+        run.outputText = value;
+      }
+    };
     this._syncProviderThreadRefFromOutput(terminal, tail, detector);
     this._syncEffectiveModelFromOutput(terminal, tail, { source: 'tracked-run-output' });
     const sawStartMarkerInTail = hasTrackedRunStartMarker(tail, run.runId);
@@ -2152,6 +2308,7 @@ class PersistentSessionManager extends EventEmitter {
       const exitCode = Number.parseInt(exitMatch[1], 10);
       run.exitCode = exitCode;
       run.completedAt = new Date();
+      setRunOutputText(tail);
       return exitCode === 0 ? TerminalStatus.COMPLETED : TerminalStatus.ERROR;
     }
 
@@ -2164,6 +2321,7 @@ class PersistentSessionManager extends EventEmitter {
       const exitCode = Number.parseInt(logExitMatch[1], 10);
       run.exitCode = exitCode;
       run.completedAt = new Date();
+      setRunOutputText([tail, logTail].filter(Boolean).join('\n'));
       return exitCode === 0 ? TerminalStatus.COMPLETED : TerminalStatus.ERROR;
     }
 
@@ -2195,12 +2353,14 @@ class PersistentSessionManager extends EventEmitter {
             run.exitCode = 0;
           }
           run.completedAt = new Date();
+          setRunOutputText([tail, logTail].filter(Boolean).join('\n'));
           return TerminalStatus.COMPLETED;
         }
         if (run.exitCode == null) {
           run.exitCode = 1;
         }
         run.completedAt = new Date();
+        setRunOutputText([tail, logTail].filter(Boolean).join('\n'));
         return run.exitCode !== 0 ? TerminalStatus.ERROR : TerminalStatus.COMPLETED;
       }
       return TerminalStatus.PROCESSING;
@@ -3847,7 +4007,8 @@ class PersistentSessionManager extends EventEmitter {
       this._syncInteractiveTranscript(reconciledTerminal, output, trackedRunStatus);
       this._applyStatusUpdate(reconciledTerminal, trackedRunStatus, {
         exitCode: reconciledTerminal.activeRun?.exitCode ?? null,
-        attention
+        attention,
+        runOutput: reconciledTerminal.activeRun?.outputText || output
       });
       return trackedRunStatus;
     }
@@ -4366,6 +4527,7 @@ module.exports = {
   extractProviderThreadRefFromOutput,
   normalizeProviderThreadRef,
   inferEffectiveModelFromOutput,
+  extractUsageMetadataFromOutput,
   buildGeminiOneShotRunnerCommand,
   buildClaudeOneShotCommand,
   buildCodexOneShotCommand,

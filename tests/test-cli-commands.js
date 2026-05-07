@@ -7,10 +7,12 @@
 const assert = require('assert');
 const {
   PersistentSessionManager,
+  TerminalStatus,
   CLI_COMMANDS,
   resolveTerminalStartupDelayMs,
   extractProviderThreadRefFromOutput,
   inferEffectiveModelFromOutput,
+  extractUsageMetadataFromOutput,
   buildGeminiOneShotRunnerCommand,
   buildClaudeOneShotCommand,
   buildCodexOneShotCommand,
@@ -737,6 +739,80 @@ test('Session manager persists verified effective model changes', () => {
   assert.strictEqual(events[0].payloadJson.effectiveModel, 'claude-opus-4-7');
   assert.strictEqual(events[0].payloadJson.changed, true);
   assert.strictEqual(events[0].payloadJson.requestedModelMatched, true);
+});
+
+test('Tracked-run usage parser reads Claude stream-json result usage', () => {
+  const metadata = extractUsageMetadataFromOutput(
+    'claude-code',
+    [
+      '{"type":"assistant","message":{"usage":{"input_tokens":10,"cache_creation_input_tokens":24457,"output_tokens":7}}}',
+      '{"type":"result","total_cost_usd":0.03092125,"usage":{"input_tokens":10,"cache_creation_input_tokens":24457,"cache_read_input_tokens":0,"output_tokens":68},"modelUsage":{"claude-haiku-4-5":{"inputTokens":10,"outputTokens":68,"cacheReadInputTokens":0,"cacheCreationInputTokens":24457,"costUSD":0.03092125}}}'
+    ].join('\n')
+  );
+
+  assert(metadata, 'usage metadata should be extracted from result JSON');
+  assert.strictEqual(metadata.usage.inputTokens, 10);
+  assert.strictEqual(metadata.usage.outputTokens, 68);
+  assert.strictEqual(metadata.usage.cacheCreationInputTokens, 24457);
+  assert.strictEqual(metadata.usage.cacheReadInputTokens, 0);
+  assert.strictEqual(metadata.usage.cachedInputTokens, 24457);
+  assert.strictEqual(metadata.usage.totalTokens, 24535);
+  assert.strictEqual(metadata.usage.costUsd, 0.03092125);
+  assert.strictEqual(metadata.usage.model, 'claude-haiku-4-5');
+});
+
+test('Session manager persists tracked one-shot usage for task assignments', () => {
+  const usageInputs = [];
+  const manager = new PersistentSessionManager({
+    tmuxClient: {
+      listSessions() {
+        return [];
+      }
+    },
+    db: {
+      listTerminals() {
+        return [];
+      },
+      updateStatus() {},
+      addUsageRecordFromMetadata(input) {
+        usageInputs.push(input);
+        return `usage-${usageInputs.length}`;
+      }
+    }
+  });
+  const terminal = {
+    terminalId: 'term-usage-1',
+    rootSessionId: 'root-usage-1',
+    parentSessionId: 'root-usage-1',
+    adapter: 'claude-code',
+    role: 'worker',
+    status: TerminalStatus.PROCESSING,
+    model: 'claude-haiku-4-5',
+    effectiveModel: 'claude-haiku-4-5',
+    activeRun: { runId: 'abc123def4567890', exitCode: 0 },
+    sessionMetadata: {
+      taskId: 'task-usage-1',
+      taskAssignmentId: 'assignment-usage-1',
+      taskRole: 'test'
+    }
+  };
+  const runOutput = '{"type":"result","total_cost_usd":0.03092125,"usage":{"input_tokens":10,"cache_creation_input_tokens":24457,"cache_read_input_tokens":0,"output_tokens":68},"modelUsage":{"claude-haiku-4-5":{"inputTokens":10,"outputTokens":68,"cacheReadInputTokens":0,"cacheCreationInputTokens":24457,"costUSD":0.03092125}}}';
+
+  manager._applyStatusUpdate(terminal, TerminalStatus.COMPLETED, {
+    runOutput,
+    exitCode: 0
+  });
+  manager._persistTrackedRunUsageFromOutput(terminal, runOutput);
+
+  assert.strictEqual(usageInputs.length, 1, 'usage should persist once');
+  assert.strictEqual(usageInputs[0].terminalId, 'term-usage-1');
+  assert.strictEqual(usageInputs[0].rootSessionId, 'root-usage-1');
+  assert.strictEqual(usageInputs[0].runId, 'abc123def4567890');
+  assert.strictEqual(usageInputs[0].taskId, 'task-usage-1');
+  assert.strictEqual(usageInputs[0].taskAssignmentId, 'assignment-usage-1');
+  assert.strictEqual(usageInputs[0].role, 'test');
+  assert.strictEqual(usageInputs[0].metadata.usage.totalTokens, 24535);
+  assert.strictEqual(usageInputs[0].metadata.usage.cachedInputTokens, 24457);
 });
 
 console.log('\n--- Launch Attach ---');

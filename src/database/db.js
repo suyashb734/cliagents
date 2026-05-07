@@ -206,6 +206,11 @@ function buildUsageRecordFromMetadata(context = {}, metadata = {}) {
   const outputTokens = getFirstUsageValue(usageMetadata, ['outputTokens', 'output_tokens', 'completionTokens', 'completion_tokens', 'candidateTokens', 'candidate_tokens']);
   const reasoningTokens = getFirstUsageValue(usageMetadata, ['reasoningTokens', 'reasoning_tokens']);
   const cachedInputTokens = getFirstUsageValue(usageMetadata, ['cachedInputTokens', 'cached_input_tokens']);
+  const cacheReadInputTokens = getFirstUsageValue(usageMetadata, ['cacheReadInputTokens', 'cache_read_input_tokens']);
+  const cacheCreationInputTokens = getFirstUsageValue(usageMetadata, [
+    'cacheCreationInputTokens',
+    'cache_creation_input_tokens'
+  ]);
   const totalTokens = getFirstUsageValue(usageMetadata, ['totalTokens', 'total_tokens']);
   const costUsd = getFirstUsageValue(usageMetadata, ['costUsd', 'cost_usd', 'totalCostUsd', 'total_cost_usd']);
   const durationMs = getFirstUsageValue(usageMetadata, ['durationMs', 'duration_ms']);
@@ -240,7 +245,9 @@ function buildUsageRecordFromMetadata(context = {}, metadata = {}) {
   const normalizedInputTokens = normalizeInteger(inputTokens, 0);
   const normalizedOutputTokens = normalizeInteger(outputTokens, 0);
   const normalizedReasoningTokens = normalizeInteger(reasoningTokens, 0);
-  const normalizedCachedInputTokens = normalizeInteger(cachedInputTokens, 0);
+  const normalizedCachedInputTokens = cachedInputTokens !== null && cachedInputTokens !== undefined
+    ? normalizeInteger(cachedInputTokens, 0)
+    : normalizeInteger(cacheReadInputTokens, 0) + normalizeInteger(cacheCreationInputTokens, 0);
   const normalizedTotalTokens = normalizeUsageTotalTokens(
     totalTokens,
     normalizedInputTokens + normalizedOutputTokens + normalizedReasoningTokens
