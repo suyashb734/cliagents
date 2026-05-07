@@ -11,6 +11,21 @@ It is intentionally narrower than a generic task board. The goal is not to add
 "tasks everywhere." The goal is to make long-horizon multi-agent execution
 durable, inspectable, resumable, and operator-controlled.
 
+The persistence goal is broader than restart safety. `cliagents` should become
+the broker memory substrate for supervisors such as OpenClaw, Hermes, or a
+future desktop/mobile control app. Those supervisors should be able to ask:
+
+- what work was requested
+- which roots, children, rooms, and models worked on it
+- what prompts, visible responses, tool actions, files, findings, usage, and
+  outcomes were produced
+- what is currently blocked or needs operator attention
+- what summary context should be carried into the next run or resume
+
+Raw event history stays canonical. Summaries are derived memory: brief,
+decisions, blockers, next actions, and eventually a tree or graph of
+conversation, run, task, and project summaries.
+
 ## Problem Statement
 
 `cliagents` already has useful building blocks:
@@ -20,6 +35,7 @@ durable, inspectable, resumable, and operator-controlled.
 - persisted room state
 - shared `taskId` memory for artifacts, findings, and context
 - async delegation and grouped task monitoring
+- raw terminal logs for managed interactive roots
 
 That is enough for bounded delegation, review loops, and discussion workflows.
 It is not enough for true long-horizon team execution.
@@ -32,6 +48,11 @@ The current gaps are:
 4. no reliable dependency-aware execution model above raw runs
 5. `run_workflow` async mode launches all steps immediately, which is not valid
    for dependent implementation phases
+6. native interactive roots are mostly raw terminal capture rather than
+   normalized messages, tool events, usage, and continuation memory
+7. derived memory exists, but there is not yet a clear summary tree or graph
+   connecting root conversations, dispatches, runs, tasks, rooms, artifacts,
+   findings, and usage
 
 The result is that teams can be approximated, but not supervised cleanly.
 
@@ -44,11 +65,49 @@ The correct center of gravity is:
 - `orchestration` becomes the top-level long-horizon object
 - `phases`, `gates`, and `handoffs` model execution semantics
 - `specialists` define routing and policy
+- native interactive roots get their own event-capture path so human-managed
+  TUI sessions become queryable broker memory, not just replayable terminal logs
+- memory snapshots become layered derived summaries over raw events, suitable
+  for external supervisors and future summary-tree/summary-graph navigation
 
 Do not start with a generic first-class `task` object.
 
 For long-horizon coding work, the broker needs an execution model more than it
 needs a backlog model.
+
+## Native Interactive Root Persistence Gap
+
+Managed native roots are essential for human-facing fidelity, but they are a
+different capture problem than broker-delegated runs.
+
+Today, a native Codex or Claude root can be visible and resumable while the
+database only stores terminal metadata, a `session_started` event, and a raw TTY
+log. That is not enough for OpenClaw, Hermes, or another supervisor to reliably
+understand what happened.
+
+Interactive root persistence should become a first-class branch with this V1
+scope:
+
+- persist broker-sent inputs as durable input events
+- persist terminal output chunks with timestamps, terminal id, root id, and
+  screen/log offsets
+- best-effort parse visible user and assistant messages from native TUI output
+  into `messages`
+- record tool, MCP, shell, browser, and filesystem events when cliagents
+  mediates them or when the provider emits machine-readable metadata
+- extract model, effort, and usage when the provider exposes it; never invent
+  usage when it is not observable
+- maintain raw terminal logs as the audit fallback
+- generate continuation summaries for roots, tasks, rooms, and projects from
+  the persisted raw event stream
+
+Hidden model thoughts are not a persistence target. Providers do not expose
+private reasoning. The broker should only persist visible responses, provider
+reported summaries, tool events, metadata, and raw terminal output.
+
+This branch is separate from dispatch requests. Dispatch requests control
+future work before spawn. Interactive-root persistence records what happened in
+human-managed native roots after launch.
 
 ## Paperclip-Derived Mechanics To Adopt
 
@@ -384,6 +443,41 @@ Add orchestration-specific state keyed by `run_id`.
 - `created_at`
 - `last_verified_at`
 
+#### `root_io_events`
+
+- `root_io_event_id`
+- `root_session_id`
+- `terminal_id`
+- `event_kind` (`input`, `output`, `screen_snapshot`, `parsed_message`,
+  `tool_event`, `usage`, `liveness`)
+- `source` (`broker`, `terminal_log`, `provider_metadata`, `parser`)
+- `sequence_no`
+- `content_preview`
+- `content_full`
+- `content_sha256`
+- `log_path`
+- `log_offset_start`
+- `log_offset_end`
+- `screen_rows`
+- `screen_cols`
+- `parsed_role`
+- `confidence`
+- `metadata`
+- `occurred_at`
+- `recorded_at`
+
+#### `memory_summary_edges`
+
+- `edge_id`
+- `parent_scope_type`
+- `parent_scope_id`
+- `child_scope_type`
+- `child_scope_id`
+- `edge_kind` (`contains`, `continues`, `summarizes`, `supersedes`,
+  `derived_from`, `blocks`, `unblocks`)
+- `metadata`
+- `created_at`
+
 #### `orchestration_phases`
 
 - `phase_id`
@@ -447,11 +541,15 @@ Continue using:
 - `run_outputs`
 - `run_tool_events`
 - `messages`
+- `session_events`
 - `artifacts`
 - `findings`
 - `context`
 - `memory_snapshots`
-- `session_events`
+
+`root_io_events` and `memory_summary_edges` should complement these tables, not
+replace them. The raw terminal log remains the audit fallback, but query APIs
+should prefer normalized event rows and derived summaries.
 
 ## Phase Order
 
@@ -475,6 +573,37 @@ Primary touchpoints:
 - `src/mcp/cliagents-mcp-server.js`
 - `src/database/db.js`
 - `src/database/migrations`
+
+### Phase 1a: Native Interactive Root Persistence
+
+Goal:
+Make broker-managed native roots inspectable as structured broker memory, not
+only as raw tmux logs.
+
+Required work:
+
+1. add `root_io_events` persistence and projection helpers
+2. record broker-sent terminal input, permission replies, approvals, denials,
+   interrupts, detach, resize, and kill actions as durable events
+3. persist terminal output chunks with log offsets and timestamps
+4. add best-effort native TUI parsers that extract visible user/assistant
+   messages into `messages` without treating parser output as more canonical
+   than the raw log
+5. record provider-reported model, effort, and usage when observable
+6. generate root continuation summaries from root IO plus existing messages,
+   session events, artifacts, findings, and usage
+7. expose native-root memory through `get_message_window`, `get_memory_bundle`,
+   and memory query surfaces
+
+Primary touchpoints:
+
+- `src/orchestration/session-manager.js`
+- `src/orchestration/terminal-manager.js`
+- `src/database/db.js`
+- `src/database/migrations`
+- `src/services/memory-snapshot-service.js`
+- `src/server/orchestration-router.js`
+- `src/mcp/cliagents-mcp-server.js`
 
 ### Phase 2: Add Orchestration State
 
@@ -635,21 +764,32 @@ This plan is successful when:
 5. specialist routing is data-driven rather than hardcoded inside one workflow
    function
 6. the full execution history is inspectable from the broker after restart
+7. native interactive roots produce enough structured broker events for an
+   external supervisor to understand visible conversation, actions, status,
+   continuation summary, and known usage without reading raw tmux logs directly
+8. root, task, room, run, and project summaries can be linked into a derived
+   memory tree or graph without overriding raw event truth
 
 ## Recommended Initial Implementation Order
 
 1. fix run-state and blocked-state durability
-2. add orchestration tables and service layer
-3. add dispatch request, context snapshot, and task-session binding records
-4. add phase and gate state with minimal HTTP routes
-5. move async workflow execution to orchestration-engine readiness logic
-6. replace hardcoded workflow routing with specialist registry config
+2. add native interactive-root persistence with `root_io_events`, parsed
+   messages, and continuation summaries
+3. add orchestration tables and service layer
+4. add dispatch request, context snapshot, and task-session binding records
+5. add phase and gate state with minimal HTTP routes
+6. move async workflow execution to orchestration-engine readiness logic
+7. replace hardcoded workflow routing with specialist registry config
 
 ## Initial Test Gates
 
 Add or extend tests for:
 
 - run blocked-state persistence and replay
+- native root input/output event capture and replay after restart
+- best-effort native TUI message parsing with raw-log fallback
+- root continuation summary creation and refresh behavior
+- memory summary edge creation for root -> run/task/room/project rollups
 - dispatch request queue/coalesce/defer/cancel behavior
 - immutable run context snapshot creation before launch
 - task-session binding behavior for adapter, model, effort, and reuse policy

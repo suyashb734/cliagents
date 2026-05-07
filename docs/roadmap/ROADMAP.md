@@ -14,6 +14,17 @@ docs remain useful context, but this file is the current entrypoint.
    - Keep task, assignment, run, usage, and memory linkage coherent.
    - Execute [Memory Read Model V1](../research/MEMORY-READ-MODEL-V1-PLAN.md)
      as the concrete persistence/query branch.
+   - Add native interactive-root persistence so broker-managed Codex, Claude,
+     Gemini, Qwen, and OpenCode roots are not only raw tmux logs. Persist
+     broker-sent inputs, visible terminal output events, best-effort parsed
+     messages, continuation summaries, and provider usage where exposed.
+   - Treat persistence as the substrate for external supervisors such as
+     OpenClaw or Hermes: they should be able to inspect what work happened,
+     which workers did it, what changed, what remains blocked, and what context
+     should be carried forward.
+   - Build derived memory as layered summaries over raw events: brief,
+     decisions, blockers, next actions, and eventually a tree or graph of
+     conversation/run summaries.
    - Improve live metadata completeness for model, duration, and cost where
      providers expose it.
 
@@ -40,6 +51,9 @@ docs remain useful context, but this file is the current entrypoint.
      after the runtime/control-plane foundation is stable.
    - Adopt Paperclip-style pre-run dispatch requests, immutable run context
      snapshots, task/session bindings, coalescing, defer, and liveness policies.
+   - Use dispatch requests as the durable queue boundary before spawning work,
+     but keep native interactive-root capture as the audit boundary for
+     human-managed roots.
    - Keep this as an execution-control model, not a generic task-board product.
 
 ## Deferred
