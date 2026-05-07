@@ -813,6 +813,33 @@ test('Session manager persists tracked one-shot usage for task assignments', () 
   assert.strictEqual(usageInputs[0].role, 'test');
   assert.strictEqual(usageInputs[0].metadata.usage.totalTokens, 24535);
   assert.strictEqual(usageInputs[0].metadata.usage.cachedInputTokens, 24457);
+
+  const alreadyCompletedTerminal = {
+    terminalId: 'term-usage-2',
+    rootSessionId: 'root-usage-1',
+    parentSessionId: 'root-usage-1',
+    adapter: 'claude-code',
+    role: 'worker',
+    status: TerminalStatus.COMPLETED,
+    model: 'claude-haiku-4-5',
+    effectiveModel: 'claude-haiku-4-5',
+    activeRun: { runId: 'def456abc1237890', exitCode: 0 },
+    sessionMetadata: {
+      taskId: 'task-usage-1',
+      taskAssignmentId: 'assignment-usage-2',
+      taskRole: 'test'
+    }
+  };
+
+  manager._applyStatusUpdate(alreadyCompletedTerminal, TerminalStatus.COMPLETED, {
+    runOutput,
+    exitCode: 0
+  });
+
+  assert.strictEqual(usageInputs.length, 2, 'same-status completed reconciliation should still persist usage');
+  assert.strictEqual(usageInputs[1].terminalId, 'term-usage-2');
+  assert.strictEqual(usageInputs[1].runId, 'def456abc1237890');
+  assert.strictEqual(usageInputs[1].taskAssignmentId, 'assignment-usage-2');
 });
 
 console.log('\n--- Launch Attach ---');

@@ -1918,7 +1918,16 @@ class PersistentSessionManager extends EventEmitter {
   }
 
   _applyStatusUpdate(terminal, nextStatus, extra = {}) {
-    if (!terminal || !nextStatus || terminal.status === nextStatus) {
+    if (!terminal || !nextStatus) {
+      return nextStatus;
+    }
+
+    if (terminal.status === nextStatus) {
+      if ([TerminalStatus.COMPLETED, TerminalStatus.ERROR].includes(nextStatus)) {
+        this._persistTrackedRunUsageFromOutput(terminal, extra.runOutput || terminal.activeRun?.outputText || '', {
+          exitCode: extra.exitCode
+        });
+      }
       return nextStatus;
     }
 
