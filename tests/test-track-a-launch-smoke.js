@@ -30,6 +30,12 @@ run('classifyFailure identifies auth_failed', () => {
   assert.strictEqual(classifyFailure('anything', 'auth_required'), 'auth_failed');
 });
 
+run('classifyFailure identifies terminal_busy', () => {
+  assert.strictEqual(classifyFailure('terminal_busy from route'), 'terminal_busy');
+  assert.strictEqual(classifyFailure('Terminal abc is busy (processing).'), 'terminal_busy');
+  assert.strictEqual(classifyFailure('anything', 'terminal_busy'), 'terminal_busy');
+});
+
 run('classifyFailure identifies rate_limited', () => {
   assert.strictEqual(classifyFailure('rate limit exceeded by provider'), 'rate_limited');
   assert.strictEqual(classifyFailure('anything', 'quota_exceeded'), 'rate_limited');
@@ -45,6 +51,7 @@ run('classifyFailure identifies process_exit', () => {
 });
 
 run('getRetryPolicy returns expected retry counts', () => {
+  assert.deepStrictEqual(getRetryPolicy('terminal_busy'), { maxRetries: 1, delayMs: 1000 });
   assert.deepStrictEqual(getRetryPolicy('binary_not_found'), { maxRetries: 0, delayMs: 0 });
   assert.deepStrictEqual(getRetryPolicy('auth_failed'), { maxRetries: 0, delayMs: 0 });
   assert.deepStrictEqual(getRetryPolicy('root_attach_required'), { maxRetries: 0, delayMs: 0 });

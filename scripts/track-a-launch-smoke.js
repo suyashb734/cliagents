@@ -15,6 +15,7 @@ const POLL_INTERVAL_MS = 1500;
 const REQUIRED_SUCCESSFUL_ADAPTERS = 2;
 
 const RETRY_POLICY = {
+  terminal_busy: { maxRetries: 1, delayMs: 1000 },
   binary_not_found: { maxRetries: 0, delayMs: 0 },
   auth_failed: { maxRetries: 0, delayMs: 0 },
   root_attach_required: { maxRetries: 0, delayMs: 0 },
@@ -149,9 +150,19 @@ function classifyFailure(message = '', attentionCode = '') {
   if (code.includes('auth')) return 'auth_failed';
   if (code.includes('rate') || code.includes('quota')) return 'rate_limited';
   if (code.includes('timeout')) return 'timeout';
+  if (code.includes('busy')) return 'terminal_busy';
   if (code.includes('permission') || code.includes('approval')) return 'permission_required';
 
   const text = String(message || '').toLowerCase();
+
+  if (
+    text.includes('terminal_busy')
+    || text.includes('terminal is busy')
+    || text.includes(' is busy')
+    || text.includes('currently processing')
+  ) {
+    return 'terminal_busy';
+  }
 
   if (
     text.includes('root session is required')

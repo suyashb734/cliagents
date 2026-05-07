@@ -16,6 +16,9 @@ const { isAdapterAuthenticated } = require('../utils/adapter-auth');
 const { getChildSessionSupport } = require('./child-session-support');
 const { AdapterReadinessService } = require('./adapter-readiness');
 
+const ROUTE_TASK_RETRY_MAX_ATTEMPTS = 2;
+const DEFAULT_ROUTE_RETRY_DELAY_MS = 500;
+
 // Task types and their default agent mappings
 const TASK_TYPES = {
   PLAN: 'plan',
@@ -570,6 +573,39 @@ class TaskRouter extends EventEmitter {
     };
   }
 
+  _classifyRouteRetry(error) {
+    if (!error) {
+      return null;
+    }
+
+    const code = String(error.code || '').trim().toLowerCase();
+    const message = String(error.message || '').trim();
+    const normalizedMessage = message.toLowerCase();
+    const statusCode = Number.parseInt(error.statusCode, 10);
+    const retryAfterMs = Number.isFinite(error.retryAfterMs) ? Math.max(0, Number(error.retryAfterMs)) : null;
+
+    if (code === 'terminal_busy' || statusCode === 409) {
+      return {
+        reason: 'terminal_busy',
+        delayMs: retryAfterMs ?? DEFAULT_ROUTE_RETRY_DELAY_MS
+      };
+    }
+
+    if (
+      code === 'terminal_not_found'
+      || normalizedMessage.includes('terminal not found')
+      || normalizedMessage.includes('tmux session not found')
+      || normalizedMessage.includes('tmux window not found')
+    ) {
+      return {
+        reason: 'terminal_missing',
+        delayMs: retryAfterMs ?? 0
+      };
+    }
+
+    return null;
+  }
+
   /**
    * Route a single task to the appropriate agent
    *
@@ -672,8 +708,7 @@ class TaskRouter extends EventEmitter {
       };
     }
 
-    // Create terminal and send task
-    const terminal = await this.sessionManager.createTerminal({
+    const baseTerminalOptions = {
       adapter: profile.adapter,
       agentProfile: profileName,
       systemPrompt: systemPrompt || profile.systemPrompt,
@@ -689,34 +724,91 @@ class TaskRouter extends EventEmitter {
       originClient,
       externalSessionRef,
       lineageDepth,
-      sessionMetadata,
-      preferReuse,
-      forceFreshSession
-    });
-
-    // Send the message
-    await this.sessionManager.sendInput(terminal.terminalId, message);
-
-    return {
-      terminalId: terminal.terminalId,
-      reused: terminal.reused === true,
-      reuseReason: terminal.reuseReason || null,
-      profile: profileName,
-      adapter: profile.adapter,
-      model: modelSelection.model,
-      reasoningEffort: reasoningEffort || null,
-      modelRecommendation: modelSelection.recommendation,
-      taskType: detection.type,
-      confidence: detection.confidence,
-      runtimeAvailable: runtimeAdapter.available,
-      runtimeAuthenticated: runtimeAdapter.authenticated,
-      authenticationReason: runtimeAdapter.authenticationReason,
-      runtimeCapabilities: runtimeAdapter.capabilities,
-      runtimeChildSessionSupport: runtimeAdapter.childSessionSupport || null,
-      adapterReadiness: runtimeAdapter.adapterReadiness || null,
-      runtimeContract: runtimeAdapter.contract,
-      routingDecision
+      sessionMetadata
     };
+
+    let lastError = null;
+    let retryReason = null;
+
+    for (let attempt = 1; attempt <= ROUTE_TASK_RETRY_MAX_ATTEMPTS; attempt++) {
+      const isRetryAttempt = attempt > 1;
+      const attemptForceFreshSession = isRetryAttempt ? true : forceFreshSession;
+      const attemptPreferReuse = isRetryAttempt ? false : preferReuse;
+      let terminal = null;
+
+      try {
+        terminal = await this.sessionManager.createTerminal({
+          ...baseTerminalOptions,
+          preferReuse: attemptPreferReuse,
+          forceFreshSession: attemptForceFreshSession
+        });
+
+        await this.sessionManager.sendInput(terminal.terminalId, message);
+
+        return {
+          terminalId: terminal.terminalId,
+          reused: terminal.reused === true,
+          reuseReason: terminal.reuseReason || null,
+          profile: profileName,
+          adapter: profile.adapter,
+          model: modelSelection.model,
+          reasoningEffort: reasoningEffort || null,
+          modelRecommendation: modelSelection.recommendation,
+          taskType: detection.type,
+          confidence: detection.confidence,
+          runtimeAvailable: runtimeAdapter.available,
+          runtimeAuthenticated: runtimeAdapter.authenticated,
+          authenticationReason: runtimeAdapter.authenticationReason,
+          runtimeCapabilities: runtimeAdapter.capabilities,
+          runtimeChildSessionSupport: runtimeAdapter.childSessionSupport || null,
+          adapterReadiness: runtimeAdapter.adapterReadiness || null,
+          runtimeContract: runtimeAdapter.contract,
+          routingDecision,
+          routeAttempts: attempt,
+          routeRetried: isRetryAttempt,
+          routeRetryReason: retryReason
+        };
+      } catch (error) {
+        lastError = error;
+        const retryPlan = attempt < ROUTE_TASK_RETRY_MAX_ATTEMPTS
+          ? this._classifyRouteRetry(error)
+          : null;
+        if (!retryPlan) {
+          throw error;
+        }
+
+        retryReason = retryPlan.reason || 'transient';
+
+        if (
+          terminal
+          && terminal.reused !== true
+          && typeof this.sessionManager.destroyTerminal === 'function'
+        ) {
+          try {
+            await this.sessionManager.destroyTerminal(terminal.terminalId);
+          } catch (cleanupError) {
+            this.emit('task-route-retry-cleanup-failed', {
+              terminalId: terminal.terminalId,
+              reason: cleanupError.message
+            });
+          }
+        }
+
+        this.emit('task-route-retry', {
+          profile: profileName,
+          adapter: profile.adapter,
+          reason: retryReason,
+          attempt,
+          nextAttempt: attempt + 1
+        });
+
+        if ((retryPlan.delayMs || 0) > 0) {
+          await new Promise((resolve) => setTimeout(resolve, retryPlan.delayMs));
+        }
+      }
+    }
+
+    throw lastError || new Error('Failed to route task');
   }
 
   /**

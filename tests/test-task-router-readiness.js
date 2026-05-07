@@ -17,6 +17,37 @@ function createFakeSessionManager() {
   };
 }
 
+function createRetrySessionManager() {
+  return {
+    createCalls: [],
+    sendCalls: [],
+    destroyCalls: [],
+    async createTerminal(options = {}) {
+      this.createCalls.push(options);
+      const index = this.createCalls.length;
+      return {
+        terminalId: `term-retry-${index}`,
+        reused: false,
+        reuseReason: null
+      };
+    },
+    async sendInput(terminalId, message) {
+      this.sendCalls.push({ terminalId, message });
+      if (this.sendCalls.length === 1) {
+        const error = new Error(`Terminal ${terminalId} is busy (processing).`);
+        error.code = 'terminal_busy';
+        error.statusCode = 409;
+        error.retryAfterMs = 1;
+        throw error;
+      }
+    },
+    async destroyTerminal(terminalId) {
+      this.destroyCalls.push(terminalId);
+      return true;
+    }
+  };
+}
+
 function createFakeApiSessionManager() {
   return {
     getAdapter(name) {
@@ -148,6 +179,33 @@ async function run() {
   assert.strictEqual(result.terminalId, 'term-ready');
   assert.strictEqual(readyManager.createCalls.length, 1);
   assert.strictEqual(result.runtimeChildSessionSupport.collaboratorReady, true);
+
+  const retryManager = createRetrySessionManager();
+  const retryRouter = new TaskRouter(retryManager, {
+    apiSessionManager,
+    adapterAuthInspector,
+    adapterReadinessService: createReadinessService({
+      ephemeralReady: true,
+      collaboratorReady: true,
+      continuityMode: 'provider_resume'
+    })
+  });
+
+  const retried = await retryRouter.routeTask('Review this patch with transient terminal contention.', {
+    forceRole: 'review',
+    forceAdapter: 'claude-code',
+    preferReuse: true
+  });
+  assert.strictEqual(retried.terminalId, 'term-retry-2');
+  assert.strictEqual(retried.routeAttempts, 2);
+  assert.strictEqual(retried.routeRetried, true);
+  assert.strictEqual(retried.routeRetryReason, 'terminal_busy');
+  assert.strictEqual(retryManager.createCalls.length, 2, 'retry path should create a second terminal');
+  assert.strictEqual(retryManager.sendCalls.length, 2, 'retry path should retry sendInput once');
+  assert.deepStrictEqual(retryManager.destroyCalls, ['term-retry-1'], 'failed first attempt terminal should be cleaned up');
+  assert.strictEqual(retryManager.createCalls[0].preferReuse, true);
+  assert.strictEqual(retryManager.createCalls[1].preferReuse, false);
+  assert.strictEqual(retryManager.createCalls[1].forceFreshSession, true);
 
   console.log('✅ TaskRouter gates routing with effective adapter readiness');
 }
