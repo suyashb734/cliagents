@@ -117,16 +117,23 @@ function classifyUsageRoleBucket(value) {
 
   if (
     role === 'worker'
+    || role === 'executor'
     || role === 'implement'
+    || role === 'implementer'
     || role === 'participant'
     || role === 'reviewer'
+    || role === 'reviewer-bugs'
     || role === 'review'
     || role === 'review-security'
     || role === 'review-performance'
     || role === 'test'
+    || role === 'tester'
     || role === 'fix'
+    || role === 'fixer'
     || role === 'research'
+    || role === 'researcher'
     || role === 'document'
+    || role === 'documenter'
   ) {
     return 'execution';
   }
