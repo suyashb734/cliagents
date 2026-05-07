@@ -35,9 +35,9 @@ const {
   buildManagedRootRecoveryLaunchOptions,
   buildManagedRootContextLaunchOptions
 } = require('../index');
+const { getConfiguredApiKey } = require('../server/auth');
 
 const CLIAGENTS_URL = process.env.CLIAGENTS_URL || 'http://localhost:4001';
-const CLIAGENTS_API_KEY = process.env.CLIAGENTS_API_KEY || process.env.CLI_AGENTS_API_KEY || null;
 const MCP_POLL_INTERVAL_MS = parseInt(process.env.CLIAGENTS_MCP_POLL_MS || '3000', 10);
 const MCP_SYNC_WAIT_MS = parseInt(process.env.CLIAGENTS_MCP_SYNC_WAIT_MS || '25000', 10);
 const MCP_ROOM_DISCUSSION_TIMEOUT_MS = parseInt(process.env.CLIAGENTS_MCP_ROOM_DISCUSSION_TIMEOUT_MS || '90000', 10);
@@ -176,14 +176,19 @@ function parseCliagentsJsonResponse(raw) {
   return { parsed: false, value: raw };
 }
 
+function getCliagentsApiKey() {
+  return getConfiguredApiKey();
+}
+
 // HTTP client for cliagents API
 async function callCliagents(method, path, body = null, requestTimeout = 600000) {
   return new Promise((resolve, reject) => {
     const url = new URL(path, CLIAGENTS_URL);
     const headers = { 'Content-Type': 'application/json' };
-    if (CLIAGENTS_API_KEY) {
-      headers['Authorization'] = `Bearer ${CLIAGENTS_API_KEY}`;
-      headers['X-API-Key'] = CLIAGENTS_API_KEY;
+    const apiKey = getCliagentsApiKey();
+    if (apiKey) {
+      headers['Authorization'] = `Bearer ${apiKey}`;
+      headers['X-API-Key'] = apiKey;
     }
     const options = {
       method,

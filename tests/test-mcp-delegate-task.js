@@ -39,6 +39,7 @@ async function startFakeCliagentsServer() {
     routeCallCount: 0,
     statusPolls: new Map(),
     lastRouteBody: null,
+    lastRouteHeaders: null,
     routeBodies: [],
     lastTerminalInput: null
   };
@@ -58,6 +59,7 @@ async function startFakeCliagentsServer() {
     };
 
     if (req.method === 'POST' && req.url === '/orchestration/route') {
+      state.lastRouteHeaders = req.headers;
       state.lastRouteBody = await readBody();
       state.routeBodies.push(state.lastRouteBody);
       let routeStatus;
@@ -134,8 +136,13 @@ async function startFakeCliagentsServer() {
 
 async function run() {
   const fakeServer = await startFakeCliagentsServer();
+  const localTokenPath = path.join(os.tmpdir(), `cliagents-mcp-local-token-${process.pid}`);
+  fs.writeFileSync(localTokenPath, 'local-token-for-mcp-tests\n', 'utf8');
   const { mod, restore } = loadMcpModule({
     CLIAGENTS_URL: fakeServer.baseUrl,
+    CLIAGENTS_API_KEY: '',
+    CLI_AGENTS_API_KEY: '',
+    CLIAGENTS_LOCAL_API_KEY_FILE: localTokenPath,
     CLIAGENTS_MCP_POLL_MS: '10',
     CLIAGENTS_MCP_SYNC_WAIT_MS: '80',
     CLIAGENTS_MCP_ROUTE_RETRY_DELAY_MAX_MS: '25',
@@ -170,6 +177,8 @@ async function run() {
     assert(completedText.includes('Response'));
     assert(completedText.includes('Completed delegated review'));
     assert(completedText.includes('term-complete'));
+    assert.strictEqual(fakeServer.state.lastRouteHeaders.authorization, 'Bearer local-token-for-mcp-tests');
+    assert.strictEqual(fakeServer.state.lastRouteHeaders['x-api-key'], 'local-token-for-mcp-tests');
 
     fakeServer.state.statusPolls.clear();
     fakeServer.state.routeCallCount = 0;
@@ -700,6 +709,9 @@ __CLIAGENTS_RUN_EXIT__stale123__0
     console.log('\nMCP delegate_task tests passed');
   } finally {
     restore();
+    try {
+      fs.unlinkSync(localTokenPath);
+    } catch {}
     await fakeServer.close();
   }
 }
