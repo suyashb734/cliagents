@@ -90,6 +90,26 @@ async function request(method, route, body = null, timeoutMs = 180000) {
   return { status: response.status, data };
 }
 
+async function withOperationDeadline(runOperation, timeoutMs, label) {
+  let timer = null;
+  const timeoutPromise = new Promise((_, reject) => {
+    timer = setTimeout(() => {
+      reject(new Error(`${label} timed out after ${timeoutMs}ms`));
+    }, timeoutMs);
+  });
+
+  try {
+    return await Promise.race([
+      Promise.resolve().then(runOperation),
+      timeoutPromise
+    ]);
+  } finally {
+    if (timer) {
+      clearTimeout(timer);
+    }
+  }
+}
+
 async function runTest(name, fn) {
   try {
     await fn();
@@ -157,11 +177,23 @@ async function runQwenPromptWithRetry(options) {
     retryTimeoutMs,
     skipLabel
   } = options;
+  const firstAttemptBudgetMs = Math.max(30000, timeoutMs + 20000);
+  const retryTimeoutBudgetMs = Math.max(30000, (retryTimeoutMs || timeoutMs) + 20000);
+  const cleanupBudgetMs = 45000;
+  const createBudgetMs = 45000;
 
-  let sessionId = await createSession('qwen-cli');
+  let sessionId = await withOperationDeadline(
+    () => createSession('qwen-cli'),
+    createBudgetMs,
+    'Qwen createSession'
+  );
   try {
     try {
-      return await sendMessage(sessionId, prompt, timeoutMs);
+      return await withOperationDeadline(
+        () => sendMessage(sessionId, prompt, timeoutMs),
+        firstAttemptBudgetMs,
+        'Qwen first attempt'
+      );
     } catch (error) {
       const message = String(error?.message || error);
       if (!isQwenTransientMessage(message)) {
@@ -171,11 +203,23 @@ async function runQwenPromptWithRetry(options) {
         throw error;
       }
 
-      await deleteSession(sessionId);
-      sessionId = await createSession('qwen-cli');
+      await withOperationDeadline(
+        () => deleteSession(sessionId),
+        cleanupBudgetMs,
+        'Qwen retry cleanup'
+      );
+      sessionId = await withOperationDeadline(
+        () => createSession('qwen-cli'),
+        createBudgetMs,
+        'Qwen retry createSession'
+      );
 
       try {
-        return await sendMessage(sessionId, retryPrompt || prompt, retryTimeoutMs || timeoutMs);
+        return await withOperationDeadline(
+          () => sendMessage(sessionId, retryPrompt || prompt, retryTimeoutMs || timeoutMs),
+          retryTimeoutBudgetMs,
+          'Qwen retry attempt'
+        );
       } catch (retryError) {
         const retryMessage = String(retryError?.message || retryError);
         if (isQwenSkippableMessage(retryMessage) || isQwenTransientMessage(retryMessage)) {
@@ -185,7 +229,13 @@ async function runQwenPromptWithRetry(options) {
       }
     }
   } finally {
-    await deleteSession(sessionId);
+    try {
+      await withOperationDeadline(
+        () => deleteSession(sessionId),
+        cleanupBudgetMs,
+        'Qwen final cleanup'
+      );
+    } catch {}
   }
 }
 
@@ -275,9 +325,9 @@ async function testQwenShort() {
 async function testQwenLong() {
   const result = await runQwenPromptWithRetry({
     prompt: 'Provide a 12-step checklist to review a pull request. Keep each step under 12 words and end with QWEN_DONE.',
-    timeoutMs: 240000,
+    timeoutMs: 120000,
     retryPrompt: 'Provide exactly 8 concise PR review checks and end with QWEN_DONE.',
-    retryTimeoutMs: 180000,
+    retryTimeoutMs: 90000,
     skipLabel: 'Qwen long task'
   });
   const hasMarker = /QWEN_DONE/i.test(String(result));

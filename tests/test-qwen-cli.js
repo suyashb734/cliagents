@@ -166,6 +166,89 @@ async function withTimeout(promise, timeoutMs, label) {
     );
   });
 
+  await runTest('_runQwenCommandStreaming settles when the child never emits close/error', async () => {
+    const adapter = new QwenCliAdapter({ timeout: 20, terminationGraceMs: 10, timeoutSettleMs: 20 });
+    const killSignals = [];
+
+    adapter._getQwenPath = async () => '/usr/local/bin/qwen';
+    adapter._spawnProcess = () => {
+      const proc = new EventEmitter();
+      proc.stdout = Readable.from([]);
+      proc.stderr = new EventEmitter();
+      proc.stdin = { end() {} };
+      proc.exitCode = null;
+      proc.signalCode = null;
+      proc.killed = false;
+      proc.kill = (signal) => {
+        killSignals.push(signal);
+        proc.killed = true;
+        if (signal === 'SIGKILL') {
+          proc.signalCode = 'SIGKILL';
+        }
+        return true;
+      };
+      return proc;
+    };
+
+    const chunks = await withTimeout(collect(adapter._runQwenCommandStreaming(['-p', 'timeout-test'], {
+      timeout: 20,
+      sessionId: 'qwen-timeout-never-closes',
+      workDir: process.cwd()
+    })), 1000, 'never-close timeout path did not settle');
+
+    const errorChunk = chunks.find((chunk) => chunk.type === 'error');
+    assert(errorChunk, 'Expected an error chunk after forced settle timeout');
+    assert.strictEqual(errorChunk.timedOut, true, 'Timeout error should be marked timedOut=true');
+    assert(killSignals.includes('SIGTERM'), `Expected SIGTERM during timeout handling, got ${killSignals.join(', ')}`);
+    assert(killSignals.includes('SIGKILL'), `Expected SIGKILL during timeout handling, got ${killSignals.join(', ')}`);
+  });
+
+  await runTest('_runQwenCommandStreaming settles when stdout iterator never resolves after timeout', async () => {
+    const adapter = new QwenCliAdapter({ timeout: 20, terminationGraceMs: 10, timeoutSettleMs: 20 });
+    const killSignals = [];
+
+    adapter._getQwenPath = async () => '/usr/local/bin/qwen';
+    adapter._spawnProcess = () => {
+      const proc = new EventEmitter();
+      const iterator = {
+        next: () => new Promise(() => {}),
+        return: async () => ({ done: true })
+      };
+      proc.stdout = {
+        destroy() {},
+        [Symbol.asyncIterator]() {
+          return iterator;
+        }
+      };
+      proc.stderr = { destroy() {} };
+      proc.stdin = { end() {} };
+      proc.exitCode = null;
+      proc.signalCode = null;
+      proc.killed = false;
+      proc.kill = (signal) => {
+        killSignals.push(signal);
+        proc.killed = true;
+        if (signal === 'SIGKILL') {
+          proc.signalCode = 'SIGKILL';
+        }
+        return true;
+      };
+      return proc;
+    };
+
+    const chunks = await withTimeout(collect(adapter._runQwenCommandStreaming(['-p', 'timeout-test'], {
+      timeout: 20,
+      sessionId: 'qwen-timeout-stuck-stdout-iterator',
+      workDir: process.cwd()
+    })), 1000, 'stuck stdout iterator timeout path did not settle');
+
+    const errorChunk = chunks.find((chunk) => chunk.type === 'error');
+    assert(errorChunk, 'Expected an error chunk after timeout + forced settle');
+    assert.strictEqual(errorChunk.timedOut, true, 'Timeout error should be marked timedOut=true');
+    assert(killSignals.includes('SIGTERM'), `Expected SIGTERM during timeout handling, got ${killSignals.join(', ')}`);
+    assert(killSignals.includes('SIGKILL'), `Expected SIGKILL during timeout handling, got ${killSignals.join(', ')}`);
+  });
+
   await runTest('send rejects invalid allowedTools entries', async () => {
     const adapter = new QwenCliAdapter({ timeout: 1000 });
     await adapter.spawn('qwen-invalid-tools', { workDir: process.cwd() });
