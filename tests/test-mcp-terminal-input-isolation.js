@@ -207,7 +207,7 @@ async function run() {
 
     const heldInput = await ownerSession.mod.handleEnqueueTerminalInput({
       terminalId: 'term-kd71-owner',
-      message: 'OWNER_HELD_FOR_APPROVAL',
+      message: 'READY',
       approvalRequired: true,
       requestedBy: 'owner'
     });
@@ -356,6 +356,12 @@ async function run() {
     });
     assert(deliverHeld.content?.[0]?.text?.includes('Terminal Input Delivered'));
 
+    const pingAfterReady = await ownerReloaded.mod.handleReplyToTerminal({
+      terminalId: 'term-kd71-owner',
+      message: 'whoami'
+    });
+    assert(pingAfterReady.content?.[0]?.text?.includes('Terminal Updated'));
+
     const deliverPending = await ownerReloaded.mod.handleDeliverTerminalInput({
       inputId: pendingDeliverInputId
     });
@@ -381,13 +387,14 @@ async function run() {
     assert.deepStrictEqual(
       sentInputs,
       [
-        { terminalId: 'term-kd71-owner', message: 'OWNER_HELD_FOR_APPROVAL' },
+        { terminalId: 'term-kd71-owner', message: 'READY' },
+        { terminalId: 'term-kd71-owner', message: 'whoami' },
         { terminalId: 'term-kd71-owner', message: 'pwd' }
       ],
       'owner-root positive controls should remain functional'
     );
 
-    console.log('✅ MCP terminal input isolation blocks cross-root and no-root writes with fail-closed behavior');
+    console.log('✅ MCP terminal input isolation blocks cross-root and no-root writes while preserving owner ping-after-READY and queue controls');
   } finally {
     if (ownerSession) {
       ownerSession.restore();
