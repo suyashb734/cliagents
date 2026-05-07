@@ -214,11 +214,48 @@ async function run() {
     assert.strictEqual(mismatchReplay.data.failureClass, 'action_rejection');
     assert.strictEqual(mismatchReplay.data.terminalFailureReason, 'action_rejection');
 
+    const ownershipMismatchState = await request(
+      baseUrl,
+      'GET',
+      `/orchestration/browser-perception-engine/sessions/${sessionId}/state?runId=other-run-context`
+    );
+    assert.strictEqual(ownershipMismatchState.status, 403);
+    assert.strictEqual(ownershipMismatchState.data.failureClass, 'authz_error');
+
     const privateHostSession = await request(baseUrl, 'POST', '/orchestration/browser-perception-engine/session', {
       target: { url: 'http://127.0.0.1/internal' }
     });
     assert.strictEqual(privateHostSession.status, 400);
     assert.strictEqual(privateHostSession.data.failureClass, 'validation_error');
+
+    const capSession = await request(baseUrl, 'POST', '/orchestration/browser-perception-engine/session', {
+      target: { url: 'https://example.com' }
+    });
+    assert.strictEqual(capSession.status, 200);
+    const capSessionId = capSession.data.session.sessionId;
+
+    for (let index = 0; index < 5; index += 1) {
+      const capAction = await request(baseUrl, 'POST', `/orchestration/browser-perception-engine/sessions/${capSessionId}/action`, {
+        idempotency_key: `cap-action-${index}`,
+        expected_state_version: 4,
+        action: {
+          type: 'click',
+          target: { element_id: 'el_more' }
+        }
+      });
+      assert.strictEqual(capAction.status, 200, `Expected action ${index} to remain under cap`);
+    }
+
+    const capExceededAction = await request(baseUrl, 'POST', `/orchestration/browser-perception-engine/sessions/${capSessionId}/action`, {
+      idempotency_key: 'cap-action-overflow',
+      expected_state_version: 4,
+      action: {
+        type: 'click',
+        target: { element_id: 'el_more' }
+      }
+    });
+    assert.strictEqual(capExceededAction.status, 409);
+    assert.strictEqual(capExceededAction.data.failureClass, 'action_rejection');
 
     const successScenario = await request(baseUrl, 'POST', '/orchestration/browser-perception-engine/scenario', {
       targetUrl: 'https://example.com',
