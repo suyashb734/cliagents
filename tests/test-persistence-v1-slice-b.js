@@ -271,6 +271,49 @@ async function runRouteTests() {
     assert.strictEqual(memoryMaintenance.isRunning, true, 'memory maintenance sweep should be running by default');
     assert(linkedRunEvent, 'linked run fixture should persist run_id on session events');
 
+    const runSnapshot = db.getMemorySnapshot('run', fixture.runId);
+    assert(runSnapshot, 'fixture should create a run snapshot');
+    const runSnapshotEdges = db.queryMemoryEdges({
+      sourceTable: 'memory_snapshots',
+      sourceId: runSnapshot.id,
+      edgeTypes: ['summarizes'],
+      targetScopeType: 'run',
+      targetId: fixture.runId,
+      limit: 10
+    });
+    assert(runSnapshotEdges.length >= 1, 'run snapshots should write provenance edges to their source run');
+
+    const rootSnapshot = db.getMemorySnapshot('root', fixture.rootSessionId);
+    assert(rootSnapshot, 'fixture should create a root snapshot');
+    const rootSnapshotEdges = db.queryMemoryEdges({
+      sourceTable: 'memory_snapshots',
+      sourceId: rootSnapshot.id,
+      edgeTypes: ['summarizes'],
+      targetScopeType: 'run',
+      targetId: fixture.runId,
+      limit: 10
+    });
+    assert(rootSnapshotEdges.length >= 1, 'root snapshots should write provenance edges to summarized runs');
+    const rootLineageCount = db.listMemorySummaryEdges({
+      parentScopeType: 'memory_snapshot',
+      parentScopeId: rootSnapshot.id,
+      childScopeType: 'run',
+      childScopeId: fixture.runId,
+      edgeKind: 'summarizes'
+    }).length;
+    await new MemorySnapshotService(db, console).refreshRootSnapshot(fixture.rootSessionId);
+    assert.strictEqual(
+      db.listMemorySummaryEdges({
+        parentScopeType: 'memory_snapshot',
+        parentScopeId: rootSnapshot.id,
+        childScopeType: 'run',
+        childScopeId: fixture.runId,
+        edgeKind: 'summarizes'
+      }).length,
+      rootLineageCount,
+      'summary lineage should be idempotent across repeated root refreshes'
+    );
+
     const runBundleRes = await request(
       testServer.baseUrl,
       'GET',
@@ -443,6 +486,18 @@ async function runRouteTests() {
     assert(repairRes.data.skippedRunsWithoutRootSessionId >= 1, 'repair should report orphan completed runs');
     assert(db.getMemorySnapshot('run', fixture.repairRunId), 'repair should create missing run snapshot');
     assert(db.getMemorySnapshot('root', fixture.repairRootSessionId), 'repair should create missing root snapshot');
+    const repairRunSnapshot = db.getMemorySnapshot('run', fixture.repairRunId);
+    assert(
+      db.queryMemoryEdges({
+        sourceTable: 'memory_snapshots',
+        sourceId: repairRunSnapshot.id,
+        edgeTypes: ['summarizes'],
+        targetScopeType: 'run',
+        targetId: fixture.repairRunId,
+        limit: 10
+      }).length >= 1,
+      'repair-created run snapshots should write provenance edges'
+    );
     assert.strictEqual(db.getRunById(fixture.linkedRunId).rootSessionId, fixture.linkedRootSessionId, 'repair should populate linked run root_session_id');
     const linkedMessage = db.queryMessages({ terminalId: 'term-linked', limit: 5 }).find((row) => row.content === 'Linked root message');
     assert.strictEqual(linkedMessage.root_session_id || linkedMessage.rootSessionId, fixture.linkedRootSessionId, 'repair should populate linked message root_session_id');

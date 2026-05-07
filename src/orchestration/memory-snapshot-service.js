@@ -81,6 +81,92 @@ class MemorySnapshotService {
     return joinedOutputs;
   }
 
+  _appendSummaryEdge(edge) {
+    if (typeof this.db.appendMemorySummaryEdge !== 'function') {
+      return null;
+    }
+
+    try {
+      return this.db.appendMemorySummaryEdge(edge);
+    } catch (error) {
+      this._logger.warn(`[MemorySnapshotService] Summary lineage edge failed: ${error.message}`);
+      return null;
+    }
+  }
+
+  _linkSnapshotToSources(snapshot, sources = []) {
+    if (!snapshot?.id) {
+      return 0;
+    }
+
+    let linked = 0;
+    for (const source of Array.isArray(sources) ? sources : []) {
+      const scopeType = String(source?.scopeType || '').trim();
+      const scopeId = String(source?.scopeId || '').trim();
+      if (!scopeType || !scopeId) {
+        continue;
+      }
+
+      const edge = this._appendSummaryEdge({
+        edgeNamespace: 'derivation',
+        parentScopeType: 'memory_snapshot',
+        parentScopeId: snapshot.id,
+        childScopeType: scopeType,
+        childScopeId: scopeId,
+        edgeKind: source.edgeKind || 'summarizes',
+        metadata: {
+          source: 'memory-snapshot-service',
+          snapshotScope: snapshot.scope,
+          snapshotScopeId: snapshot.scopeId,
+          ...source.metadata
+        }
+      });
+      if (edge) {
+        linked += 1;
+      }
+    }
+
+    return linked;
+  }
+
+  linkRunSnapshotSources(runId) {
+    const snapshot = this.db.getMemorySnapshot('run', runId);
+    if (!snapshot) {
+      return 0;
+    }
+
+    return this._linkSnapshotToSources(snapshot, [{
+      scopeType: 'run',
+      scopeId: runId,
+      metadata: {
+        runId
+      }
+    }]);
+  }
+
+  linkRootSnapshotSources(rootSessionId, runIds = null) {
+    const snapshot = this.db.getMemorySnapshot('root', rootSessionId);
+    if (!snapshot) {
+      return 0;
+    }
+
+    const candidateRunIds = Array.isArray(runIds) && runIds.length > 0
+      ? runIds
+      : (Array.isArray(snapshot.metadata?.recentRunIds)
+        ? snapshot.metadata.recentRunIds
+        : this.db.getLatestCompletedRuns(rootSessionId, 20).map((run) => run.id));
+    const sources = dedupeStrings(candidateRunIds, 20).map((runId) => ({
+      scopeType: 'run',
+      scopeId: runId,
+      metadata: {
+        rootSessionId,
+        runId
+      }
+    }));
+
+    return this._linkSnapshotToSources(snapshot, sources);
+  }
+
   buildRunSnapshotPayload(runId, options = {}) {
     const run = this.db.getRunById(runId);
     if (!run) {
@@ -126,7 +212,9 @@ class MemorySnapshotService {
       return null;
     }
     this.db.upsertMemorySnapshot(payload);
-    return this.db.getMemorySnapshot('run', runId);
+    const snapshot = this.db.getMemorySnapshot('run', runId);
+    this.linkRunSnapshotSources(runId);
+    return snapshot;
   }
 
   scheduleRootRefresh(rootSessionId) {
@@ -207,6 +295,7 @@ class MemorySnapshotService {
           latestCompletedAt
         }
       });
+      this.linkRootSnapshotSources(rootSessionId, recentRunEntries.map((entry) => entry.runId));
 
       return {
         success: true,

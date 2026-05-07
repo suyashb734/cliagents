@@ -60,7 +60,10 @@ Root IO events are redacted before persistence and ordered per root session.
 Summary lineage edges connect derived memory to its sources. Edge namespaces are
 `structural`, `derivation`, or `execution`; edge kinds are `contains`,
 `continues`, `summarizes`, `supersedes`, `derived_from`, `blocks`, and
-`unblocks`. Direct cycles are rejected in the persistence helper.
+`unblocks`. Direct cycles are rejected in the persistence helper. Generated run
+and root memory snapshots write `derivation/summarizes` edges to the run records
+they summarize; repair backfills those edges idempotently for existing
+snapshots.
 
 ## Task Status
 

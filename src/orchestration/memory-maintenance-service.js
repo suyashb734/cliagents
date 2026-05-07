@@ -102,6 +102,8 @@ class MemoryMaintenanceService {
         if (snapshot) {
           repairedRuns += 1;
         }
+      } else {
+        this._snapshotService.linkRunSnapshotSources(row.id);
       }
 
       if (!row.rootSessionId) {
@@ -112,6 +114,7 @@ class MemoryMaintenanceService {
     const rootSessionIds = [...new Set(finishedRuns.map((row) => row.rootSessionId).filter(Boolean))];
     for (const rootSessionId of rootSessionIds) {
       if (!this._snapshotService.isRootSnapshotStale(rootSessionId)) {
+        this._snapshotService.linkRootSnapshotSources(rootSessionId);
         continue;
       }
       const result = await this._snapshotService.refreshRootSnapshot(rootSessionId);
