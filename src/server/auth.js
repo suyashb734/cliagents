@@ -88,9 +88,14 @@ function getLocalApiKeyFilePath(options = {}) {
     return path.resolve(options.dataDir, LOCAL_API_KEY_FILENAME);
   }
 
+  const envDataDir = normalizeEnvString(process.env[DATA_DIR_ENV]);
+  if (envDataDir) {
+    return path.resolve(envDataDir, LOCAL_API_KEY_FILENAME);
+  }
+
   return path.resolve(
     normalizeEnvString(runtimeAuthConfig.localApiKeyFilePath)
-    || path.join(getDefaultDataDir(), LOCAL_API_KEY_FILENAME)
+    || path.join(process.cwd(), 'data', LOCAL_API_KEY_FILENAME)
   );
 }
 

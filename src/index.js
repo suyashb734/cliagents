@@ -34,7 +34,7 @@ const SessionWrapper = require('./utils/session-wrapper');
 
 // Server
 const AgentServer = require('./server');
-const { getConfiguredApiKey } = require('./server/auth');
+const { getConfiguredApiKey, getLocalApiKeyFilePath } = require('./server/auth');
 
 // Transcription Service
 const { transcribeAudio } = require('./services/transcriptionService');
@@ -103,6 +103,38 @@ function buildManagedRootAttachEnvironment(env = process.env) {
   return attachEnv;
 }
 
+function isLoopbackUrl(url) {
+  const hostname = String(url?.hostname || '').toLowerCase();
+  return hostname === 'localhost'
+    || hostname === '::1'
+    || hostname === '[::1]'
+    || hostname.startsWith('127.');
+}
+
+function buildCliagentsAuthFailureMessage(message, url, apiKey) {
+  if (apiKey) {
+    return [
+      message,
+      `The CLI sent an auth token but the broker at ${url.origin} rejected it.`,
+      'Check that CLIAGENTS_URL and CLIAGENTS_DATA_DIR point at the same broker you started, or restart the broker to refresh the local token.'
+    ].join(' ');
+  }
+
+  if (isLoopbackUrl(url)) {
+    return [
+      message,
+      `No CLIAGENTS_API_KEY or local broker token was found for ${url.origin}.`,
+      `If this broker was already running before local-token auth was added, restart it so it creates ${getLocalApiKeyFilePath()}.`,
+      'For explicit unauthenticated local-only development, start the broker with CLIAGENTS_ALLOW_UNAUTHENTICATED_LOCALHOST=1.'
+    ].join(' ');
+  }
+
+  return [
+    message,
+    'Set CLIAGENTS_API_KEY for this remote broker, or point CLIAGENTS_URL at a local broker with a local token.'
+  ].join(' ');
+}
+
 async function callCliagentsJson(route, options = {}) {
   const baseUrl = getCliagentsBaseUrl();
   const url = new URL(route, baseUrl);
@@ -127,7 +159,10 @@ async function callCliagentsJson(route, options = {}) {
   }
 
   if (!response.ok) {
-    const message = data?.error?.message || rawText || `${response.status} ${response.statusText}`;
+    let message = data?.error?.message || rawText || `${response.status} ${response.statusText}`;
+    if (response.status === 401) {
+      message = buildCliagentsAuthFailureMessage(message, url, apiKey);
+    }
     const error = new Error(message);
     error.status = response.status;
     error.data = data;

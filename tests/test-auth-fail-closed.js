@@ -4,6 +4,7 @@
 
 const assert = require('assert');
 const fs = require('fs');
+const http = require('http');
 const os = require('os');
 const path = require('path');
 const WebSocket = require('ws');
@@ -245,13 +246,54 @@ async function testLocalhostOverrideRejectsNonLoopbackHost() {
   }
 }
 
+async function testCliAuthFailureExplainsLocalTokenMigration() {
+  const envSnapshot = snapshotAuthEnv();
+  const dataDir = makeTempDir('cliagents-auth-hint-');
+  let server = null;
+
+  try {
+    applyAuthEnv({ CLIAGENTS_DATA_DIR: dataDir });
+    server = http.createServer((_req, res) => {
+      res.writeHead(401, { 'content-type': 'application/json' });
+      res.end(JSON.stringify({
+        error: {
+          code: 'authentication_required',
+          message: 'Authentication required. Configure CLIAGENTS_API_KEY (or CLI_AGENTS_API_KEY).'
+        }
+      }));
+    });
+
+    await new Promise((resolve) => server.listen(0, '127.0.0.1', resolve));
+    const address = server.address();
+    process.env.CLIAGENTS_URL = `http://127.0.0.1:${address.port}`;
+
+    await assert.rejects(
+      callCliagentsJson('/orchestration/root-sessions'),
+      (error) => (
+        /Authentication required/.test(error.message)
+        && /local broker token/.test(error.message)
+        && /restart it so it creates/.test(error.message)
+        && error.message.includes(path.join(dataDir, 'local-api-key'))
+      ),
+      'Expected CLI auth failure to explain local-token migration and broker restart'
+    );
+  } finally {
+    if (server) {
+      await new Promise((resolve) => server.close(resolve));
+    }
+    fs.rmSync(dataDir, { recursive: true, force: true });
+    restoreAuthEnv(envSnapshot);
+  }
+}
+
 async function run() {
   const tests = [
     { name: 'HTTP auth is fail-closed by default', fn: testHttpFailClosedByDefault },
     { name: 'WebSocket auth is fail-closed by default', fn: testWebSocketFailClosedByDefault },
     { name: 'local broker token authenticates same-machine CLI calls', fn: testLocalBrokerTokenAuthenticatesSameMachineCli },
     { name: 'API key env aliases are parity-compatible', fn: testEnvAliasParity },
-    { name: 'localhost unauthenticated override rejects non-loopback bind host', fn: testLocalhostOverrideRejectsNonLoopbackHost }
+    { name: 'localhost unauthenticated override rejects non-loopback bind host', fn: testLocalhostOverrideRejectsNonLoopbackHost },
+    { name: 'CLI auth failure explains local-token migration', fn: testCliAuthFailureExplainsLocalTokenMigration }
   ];
 
   console.log('Running auth fail-closed regression tests...');
