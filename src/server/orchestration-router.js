@@ -498,8 +498,13 @@ function createOrchestrationRouter(context) {
       defaultParentToRoot: true
     });
 
-    if (requireConsistentRootBinding(res, endpoint, resolvedControlPlane)) {
-      return null;
+    if (resolvedControlPlane?.conflictingRootSessionId) {
+      return denyTerminalInputOwnership(res, {
+        terminalId: null,
+        callerRootSessionId: String(resolvedControlPlane?.rootSessionId || '').trim() || null,
+        ownerRootSessionId: String(resolvedControlPlane?.conflictingRootSessionId || '').trim() || null,
+        reason: 'root_binding_conflict'
+      });
     }
 
     const callerRootSessionId = String(resolvedControlPlane?.rootSessionId || '').trim() || null;
@@ -509,6 +514,47 @@ function createOrchestrationRouter(context) {
         callerRootSessionId: null,
         ownerRootSessionId: null,
         reason: 'missing_root_context'
+      });
+    }
+
+    const externalSessionRef = String(resolvedControlPlane?.externalSessionRef || '').trim() || null;
+    if (!externalSessionRef) {
+      return denyTerminalInputOwnership(res, {
+        terminalId: null,
+        callerRootSessionId,
+        ownerRootSessionId: null,
+        reason: 'missing_root_binding'
+      });
+    }
+
+    const boundRootRow = typeof db?.findLatestRootSessionByClientRef === 'function'
+      ? db.findLatestRootSessionByClientRef({
+          originClient: resolvedControlPlane?.originClient || null,
+          externalSessionRef,
+          clientName: resolvedControlPlane?.clientName || null
+        })
+      : null;
+    const boundRootSessionId = String(
+      boundRootRow?.root_session_id
+      || boundRootRow?.rootSessionId
+      || ''
+    ).trim() || null;
+
+    if (!boundRootSessionId) {
+      return denyTerminalInputOwnership(res, {
+        terminalId: null,
+        callerRootSessionId,
+        ownerRootSessionId: null,
+        reason: 'unbound_root_context'
+      });
+    }
+
+    if (boundRootSessionId !== callerRootSessionId) {
+      return denyTerminalInputOwnership(res, {
+        terminalId: null,
+        callerRootSessionId,
+        ownerRootSessionId: boundRootSessionId,
+        reason: 'root_binding_mismatch'
       });
     }
 
@@ -1696,6 +1742,9 @@ function createOrchestrationRouter(context) {
         owner,
         resumeSessionId: req.body?.resumeSessionId ?? req.body?.resume_session_id,
         interaction: req.body?.interaction && typeof req.body.interaction === 'object' ? req.body.interaction : {},
+        interactionPolicy: req.body?.interactionPolicy && typeof req.body.interactionPolicy === 'object'
+          ? req.body.interactionPolicy
+          : null,
         timeoutMs,
         actionTimeoutMs: req.body?.actionTimeoutMs ?? req.body?.action_timeout_ms,
         idempotencyKey: req.body?.idempotencyKey ?? req.body?.idempotency_key,

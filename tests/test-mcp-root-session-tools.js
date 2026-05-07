@@ -1332,6 +1332,9 @@ async function run() {
     });
     assert(replyResult.content[0].text.includes('Terminal Updated'));
     assert(replyResult.content[0].text.includes('child-terminal-1'));
+    assert.strictEqual(fakeServer.state.inputBodies.at(-1).rootSessionId, 'attached-root-123');
+    assert(typeof fakeServer.state.inputBodies.at(-1).externalSessionRef === 'string');
+    assert(fakeServer.state.inputBodies.at(-1).externalSessionRef.length > 0);
 
     const queuedResult = await mod.handleEnqueueTerminalInput({
       terminalId: 'child-terminal-1',
@@ -1343,6 +1346,9 @@ async function run() {
     assert(queuedResult.content[0].text.includes('status: held_for_approval'));
     assert.strictEqual(fakeServer.state.inputQueueBodies.at(-1).terminalId, 'child-terminal-1');
     assert.strictEqual(fakeServer.state.inputQueueBodies.at(-1).body.approvalRequired, true);
+    assert.strictEqual(fakeServer.state.inputQueueBodies.at(-1).body.rootSessionId, 'attached-root-123');
+    assert(typeof fakeServer.state.inputQueueBodies.at(-1).body.externalSessionRef === 'string');
+    assert(fakeServer.state.inputQueueBodies.at(-1).body.externalSessionRef.length > 0);
 
     const queueList = await mod.handleListTerminalInputQueue({
       terminalId: 'child-terminal-1',
@@ -1357,12 +1363,14 @@ async function run() {
     });
     assert(approveInput.content[0].text.includes('Terminal Input Approved'));
     assert.strictEqual(fakeServer.state.inputQueueActionBodies.at(-1).action, 'approve');
+    assert.strictEqual(fakeServer.state.inputQueueActionBodies.at(-1).body.rootSessionId, 'attached-root-123');
 
     const deliverInput = await mod.handleDeliverTerminalInput({
       inputId: 'input-queued-1'
     });
     assert(deliverInput.content[0].text.includes('Terminal Input Delivered'));
     assert.strictEqual(fakeServer.state.inputQueueActionBodies.at(-1).action, 'deliver');
+    assert.strictEqual(fakeServer.state.inputQueueActionBodies.at(-1).body.rootSessionId, 'attached-root-123');
 
     const implicitUpgrade = loadMcpModule({
       ...envOverrides,

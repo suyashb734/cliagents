@@ -1,11 +1,106 @@
 /**
  * Authentication Middleware
  *
- * Protects API endpoints with a simple API key mechanism.
- * Requires CLI_AGENTS_API_KEY environment variable to be set.
+ * Protects API endpoints with API key authentication.
+ * Fail-closed by default unless localhost-only unauthenticated mode is
+ * explicitly enabled for local development.
  */
 
+const net = require('net');
 const { sendError } = require('../utils/errors');
+
+const UNAUTH_LOCALHOST_ENV = 'CLIAGENTS_ALLOW_UNAUTHENTICATED_LOCALHOST';
+const LEGACY_API_KEY_ENV = 'CLI_AGENTS_API_KEY';
+const CANONICAL_API_KEY_ENV = 'CLIAGENTS_API_KEY';
+
+function normalizeEnvString(value) {
+  if (typeof value !== 'string') {
+    return null;
+  }
+  const trimmed = value.trim();
+  return trimmed || null;
+}
+
+function getConfiguredApiKey() {
+  const canonical = normalizeEnvString(process.env[CANONICAL_API_KEY_ENV]);
+  if (canonical) {
+    return canonical;
+  }
+  return normalizeEnvString(process.env[LEGACY_API_KEY_ENV]);
+}
+
+function isUnauthenticatedLocalhostModeRequested() {
+  return process.env[UNAUTH_LOCALHOST_ENV] === '1';
+}
+
+function normalizeHost(host) {
+  if (typeof host !== 'string') {
+    return '';
+  }
+
+  let value = host.trim().toLowerCase();
+  if (!value) {
+    return '';
+  }
+
+  if (value.startsWith('[') && value.endsWith(']')) {
+    value = value.slice(1, -1);
+  }
+
+  const zoneIndex = value.indexOf('%');
+  if (zoneIndex !== -1) {
+    value = value.slice(0, zoneIndex);
+  }
+
+  return value;
+}
+
+function isLoopbackHost(host) {
+  const normalized = normalizeHost(host);
+  if (!normalized) {
+    return false;
+  }
+
+  if (normalized === 'localhost') {
+    return true;
+  }
+
+  const ipVersion = net.isIP(normalized);
+  if (ipVersion === 4) {
+    return normalized.startsWith('127.');
+  }
+  if (ipVersion === 6) {
+    if (normalized === '::1' || normalized === '0:0:0:0:0:0:0:1') {
+      return true;
+    }
+    if (normalized.startsWith('::ffff:')) {
+      const mapped = normalized.slice('::ffff:'.length);
+      return net.isIP(mapped) === 4 && mapped.startsWith('127.');
+    }
+  }
+
+  return false;
+}
+
+function isUnauthenticatedLocalhostModeEnabled() {
+  if (getConfiguredApiKey()) {
+    return false;
+  }
+  return isUnauthenticatedLocalhostModeRequested();
+}
+
+function assertAuthConfigurationForHost(host) {
+  if (!isUnauthenticatedLocalhostModeEnabled()) {
+    return;
+  }
+
+  if (!isLoopbackHost(host)) {
+    throw new Error(
+      `${UNAUTH_LOCALHOST_ENV}=1 requires a loopback bind host (received "${String(host)}"). ` +
+      'Use 127.0.0.1, ::1, or localhost, or configure an API key instead.'
+    );
+  }
+}
 
 /**
  * Middleware to enforce API key authentication
@@ -30,19 +125,15 @@ function authenticateRequest(req, res, next) {
     return next();
   }
 
-  // Check if authentication is enabled
-  const apiKey = process.env.CLI_AGENTS_API_KEY;
-  if (!apiKey) {
-    // If no API key is configured, warn but allow access (dev mode)
-    // In production, this should be enforced strictly
-    if (process.env.NODE_ENV === 'production') {
-      console.error('[Security] CLI_AGENTS_API_KEY not set in production mode');
-      return sendError(res, 'AUTH_REQUIRED', {
-        message: 'Server authentication is not configured correctly',
-        status: 500
-      });
-    }
+  if (isUnauthenticatedLocalhostModeEnabled()) {
     return next();
+  }
+
+  const apiKey = getConfiguredApiKey();
+  if (!apiKey) {
+    return sendError(res, 'AUTH_REQUIRED', {
+      message: 'Authentication required. Configure CLIAGENTS_API_KEY (or CLI_AGENTS_API_KEY).'
+    });
   }
 
   // Check headers for API key
@@ -79,12 +170,14 @@ function authenticateRequest(req, res, next) {
  * @returns {boolean}
  */
 function validateApiKey(providedKey) {
-  const apiKey = process.env.CLI_AGENTS_API_KEY;
-  
-  // If no API key is configured, allow access (dev mode)
-  // In production check is done in middleware
-  if (!apiKey) {
+  const apiKey = getConfiguredApiKey();
+
+  if (isUnauthenticatedLocalhostModeEnabled()) {
     return true;
+  }
+
+  if (!apiKey) {
+    return false;
   }
 
   if (!providedKey) {
@@ -116,5 +209,9 @@ function constantTimeCompare(a, b) {
 
 module.exports = {
   authenticateRequest,
-  validateApiKey
+  validateApiKey,
+  getConfiguredApiKey,
+  isLoopbackHost,
+  isUnauthenticatedLocalhostModeEnabled,
+  assertAuthConfigurationForHost
 };

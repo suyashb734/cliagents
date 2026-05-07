@@ -120,13 +120,22 @@ async function run() {
 
   try {
     const success = await mod.handleRunBpeScenario({
-      targetUrl: 'https://example.com'
+      targetUrl: 'https://example.com',
+      interactionPolicy: {
+        allowRiskyTarget: true,
+        justification: 'kd-83-safe-override-test'
+      }
     });
     const successText = success.content[0].text;
     assert(successText.includes('BPE Scenario Completed'));
     assert(successText.includes('session_id: sess_det_1'));
     assert(successText.includes('action_id: act_1'));
     assert.strictEqual(fakeServer.state.lastScenarioBody.targetUrl, 'https://example.com');
+    assert.strictEqual(
+      fakeServer.state.lastScenarioBody.interactionPolicy?.justification,
+      'kd-83-safe-override-test',
+      'Expected run_bpe_scenario interactionPolicy to be forwarded'
+    );
 
     const jsonSuccess = await mod.handleRunBpeScenario({
       targetUrl: 'https://example.com',

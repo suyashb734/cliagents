@@ -12,6 +12,7 @@ const { getDB } = require('../database/db');
 const {
   peekMemoryMaintenanceService
 } = require('../orchestration/memory-maintenance-service');
+const { redactSecretsInText } = require('../security/secret-redaction');
 
 const MEMORY_BUNDLE_SCOPE_TYPES = new Set(['run', 'root', 'task']);
 const MESSAGE_ROLES = new Set(['user', 'assistant', 'system', 'tool']);
@@ -264,16 +265,29 @@ function createMemoryRouter(options = {}) {
         role
       });
       const hasMore = rows.length > requestedLimit;
-      const messages = rows.slice(0, requestedLimit).map((row) => ({
-        id: row.id,
-        terminalId: row.terminal_id,
-        traceId: row.trace_id,
-        rootSessionId: row.root_session_id || null,
-        role: row.role,
-        content: row.content,
-        metadata: row.metadata || {},
-        createdAt: row.created_at
-      }));
+      const messages = rows.slice(0, requestedLimit).map((row) => {
+        const metadata = row.metadata || {};
+        const redaction = redactSecretsInText(row.content);
+        return {
+          id: row.id,
+          terminalId: row.terminal_id,
+          traceId: row.trace_id,
+          rootSessionId: row.root_session_id || null,
+          role: row.role,
+          content: redaction.content,
+          metadata: redaction.redacted
+            ? {
+              ...metadata,
+              security: {
+                ...(metadata.security || {}),
+                redactedSecretLikeContent: true,
+                redactionReasonCodes: redaction.reasons
+              }
+            }
+            : metadata,
+          createdAt: row.created_at
+        };
+      });
       const totalCount = db.countMessages({
         terminalId: terminal_id,
         rootSessionId: root_session_id,

@@ -20,11 +20,11 @@ This guide provides solutions for common issues encountered when using `cliagent
 **Issue**: Receiving `401 Unauthorized` or `403 Forbidden` responses.
 
 **Solutions**:
-- **Check Environment Variables**: If you set `CLI_AGENTS_API_KEY`, all requests must include it.
+- **Check Environment Variables**: If you set `CLIAGENTS_API_KEY` (or `CLI_AGENTS_API_KEY`), all requests must include it.
 - **Header Format**: Ensure you are using the correct header format:
   - `Authorization: Bearer YOUR_API_KEY`
   - OR `X-API-Key: YOUR_API_KEY`
-- **Development Mode**: If you don't need authentication for local development, ensure `CLI_AGENTS_API_KEY` is NOT set in your environment.
+- **Localhost Override**: For local-only development without auth, set `CLIAGENTS_ALLOW_UNAUTHENTICATED_LOCALHOST=1` and bind to `127.0.0.1`, `::1`, or `localhost`.
 - **Restart Server**: After changing environment variables, you must restart the `cliagents` server.
 
 ## 3. Model Routing Errors

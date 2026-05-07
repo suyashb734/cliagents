@@ -2511,15 +2511,20 @@ class PersistentSessionManager extends EventEmitter {
   }
 
   _buildReuseContext(options = {}) {
+    const metadata = options.sessionMetadata && typeof options.sessionMetadata === 'object'
+      ? options.sessionMetadata
+      : {};
     const parentSessionId = options.parentSessionId || null;
     const normalizedAllowedTools = Array.isArray(options.allowedTools)
       ? [...options.allowedTools].map((tool) => String(tool || '').trim()).filter(Boolean).sort()
       : [];
     const sessionLabel = String(
       options.sessionLabel
-      || options.sessionMetadata?.sessionLabel
+      || metadata.sessionLabel
       || ''
     ).trim() || null;
+    const taskId = String(options.taskId || metadata.taskId || '').trim() || null;
+    const taskAssignmentId = String(options.taskAssignmentId || metadata.taskAssignmentId || '').trim() || null;
 
     return {
       rootSessionId: options.rootSessionId || null,
@@ -2533,6 +2538,8 @@ class PersistentSessionManager extends EventEmitter {
       permissionMode: options.permissionMode || 'auto',
       allowedTools: normalizedAllowedTools,
       sessionLabel,
+      taskId,
+      taskAssignmentId,
       systemPromptHash: hashSessionShape(options.systemPrompt || '')
     };
   }
@@ -3223,6 +3230,9 @@ class PersistentSessionManager extends EventEmitter {
       : 'legacy';
     if (resolvedSessionKind === 'collaborator' && !isCollaboratorReadyAdapter(adapter)) {
       throw new Error(`Adapter '${adapter}' is not collaborator-ready in the current child-session runtime`);
+    }
+    if (resolvedSessionKind === 'collaborator' && !resolvedSessionLabel) {
+      throw new Error('sessionLabel is required for collaborator sessions');
     }
     const effectiveModel = resolveTerminalModel(adapter, role, resolvedSessionKind, model);
     const requestedModel = effectiveModel || null;

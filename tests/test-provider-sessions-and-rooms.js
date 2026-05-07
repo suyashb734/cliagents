@@ -327,8 +327,24 @@ async function runRouteAssertions(homeDir, fixture) {
       { message: 'This should not be delivered remotely.' }
     );
     assert.strictEqual(importedInputRes.status, 403);
-    assert.strictEqual(importedInputRes.data.error.code, 'runtime_capability_unsupported');
-    assert.strictEqual(importedInputRes.data.error.runtimeHost, 'adopted');
+    assert.strictEqual(importedInputRes.data.error.code, 'terminal_input_forbidden');
+
+    const importedInputWithOwnerContextRes = await request(
+      serverHandle.baseUrl,
+      'POST',
+      `/orchestration/terminals/${encodeURIComponent(importRes.data.rootSessionId)}/input`,
+      { message: 'pwd' },
+      {
+        'x-cliagents-origin-client': 'codex',
+        'x-cliagents-client-name': 'codex',
+        'x-cliagents-session-ref': importRes.data.externalSessionRef,
+        'x-cliagents-root-session-id': importRes.data.rootSessionId,
+        'x-cliagents-parent-session-id': importRes.data.rootSessionId
+      }
+    );
+    assert.strictEqual(importedInputWithOwnerContextRes.status, 403);
+    assert.strictEqual(importedInputWithOwnerContextRes.data.error.code, 'runtime_capability_unsupported');
+    assert.strictEqual(importedInputWithOwnerContextRes.data.error.runtimeHost, 'adopted');
 
     const reimportRes = await request(
       serverHandle.baseUrl,

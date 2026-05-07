@@ -29,7 +29,14 @@ const {
   isAdapterAuthenticated
 } = require('../utils/adapter-auth');
 const { createOpenAIRouter } = require('./openai-compat');
-const { authenticateRequest, validateApiKey } = require('./auth');
+const {
+  authenticateRequest,
+  validateApiKey,
+  getConfiguredApiKey,
+  isLoopbackHost,
+  isUnauthenticatedLocalhostModeEnabled,
+  assertAuthConfigurationForHost
+} = require('./auth');
 
 // Orchestration components
 const { PersistentSessionManager } = require('../tmux/session-manager');
@@ -45,6 +52,121 @@ const { createOrchestrationRouter } = require('./orchestration-router');
 function isProviderCapacityError(message) {
   const text = String(message || '');
   return /rate.?limit|quota|resourceexhausted|quota_exhausted|exhausted your capacity|capacity on this model/i.test(text);
+}
+
+const API_CORS_ALLOWED_ORIGINS_ENV = 'CLIAGENTS_API_CORS_ALLOWED_ORIGINS';
+const API_CORS_ALLOW_LOOPBACK_ENV = 'CLIAGENTS_API_CORS_ALLOW_LOOPBACK';
+const DASHBOARD_ENV_MUTATION_DISABLED_ENV = 'CLIAGENTS_DISABLE_DASHBOARD_ENV_MUTATION';
+const DASHBOARD_ENV_MUTATION_EXTRA_KEYS_ENV = 'CLIAGENTS_DASHBOARD_ENV_MUTATION_EXTRA_KEYS';
+
+const API_ROUTE_PREFIXES = [
+  '/health',
+  '/openapi.json',
+  '/adapters',
+  '/sessions',
+  '/ask',
+  '/dashboard/adapters',
+  '/orchestration',
+  '/v1'
+];
+
+function normalizeEnvList(value) {
+  if (typeof value !== 'string') {
+    return [];
+  }
+  return value
+    .split(',')
+    .map((entry) => entry.trim())
+    .filter(Boolean);
+}
+
+function isValidEnvVarName(name) {
+  return typeof name === 'string' && /^[A-Z_][A-Z0-9_]*$/.test(name);
+}
+
+function shouldApplyApiCors(pathname) {
+  if (typeof pathname !== 'string' || !pathname) {
+    return false;
+  }
+  return API_ROUTE_PREFIXES.some((prefix) => pathname === prefix || pathname.startsWith(`${prefix}/`));
+}
+
+function parseOriginHost(origin) {
+  if (typeof origin !== 'string') {
+    return null;
+  }
+
+  try {
+    const parsed = new URL(origin);
+    if (parsed.protocol !== 'http:' && parsed.protocol !== 'https:') {
+      return null;
+    }
+    return parsed.hostname;
+  } catch {
+    return null;
+  }
+}
+
+function isAllowedApiCorsOrigin(origin, explicitOrigins, allowLoopbackOrigins) {
+  if (typeof origin !== 'string' || !origin.trim()) {
+    return true;
+  }
+
+  const normalizedOrigin = origin.trim();
+  if (explicitOrigins.has(normalizedOrigin)) {
+    return true;
+  }
+
+  if (allowLoopbackOrigins) {
+    const originHost = parseOriginHost(normalizedOrigin);
+    if (originHost && isLoopbackHost(originHost)) {
+      return true;
+    }
+  }
+
+  return false;
+}
+
+function buildApiCorsPolicy() {
+  const explicitOrigins = new Set(normalizeEnvList(process.env[API_CORS_ALLOWED_ORIGINS_ENV]));
+  const allowLoopbackOrigins = process.env[API_CORS_ALLOW_LOOPBACK_ENV] !== '0';
+  const isOriginAllowed = (origin) => isAllowedApiCorsOrigin(origin, explicitOrigins, allowLoopbackOrigins);
+
+  const middleware = cors({
+    origin(origin, callback) {
+      callback(null, isOriginAllowed(origin));
+    },
+    methods: ['GET', 'POST', 'PUT', 'PATCH', 'DELETE', 'OPTIONS'],
+    allowedHeaders: ['Authorization', 'Content-Type', 'X-API-Key']
+  });
+
+  return { middleware, isOriginAllowed };
+}
+
+function isDashboardEnvMutationDisabled() {
+  return process.env[DASHBOARD_ENV_MUTATION_DISABLED_ENV] === '1';
+}
+
+function getDashboardEnvMutationAllowlist(adapterName) {
+  const config = getAuthConfig(adapterName);
+  if (!config) {
+    return null;
+  }
+
+  const allowedKeys = new Set();
+  for (const key of (Array.isArray(config.envVars) ? config.envVars : [])) {
+    if (isValidEnvVarName(key)) {
+      allowedKeys.add(key);
+    }
+  }
+
+  for (const key of normalizeEnvList(process.env[DASHBOARD_ENV_MUTATION_EXTRA_KEYS_ENV])) {
+    if (isValidEnvVarName(key)) {
+      allowedKeys.add(key);
+    }
+  }
+
+  return allowedKeys;
 }
 
 class AgentServer {
@@ -85,7 +207,20 @@ class AgentServer {
 
     // Express app
     this.app = express();
-    this.app.use(cors());
+    const apiCorsPolicy = buildApiCorsPolicy();
+    this.app.use((req, res, next) => {
+      if (!shouldApplyApiCors(req.path)) {
+        return next();
+      }
+      const requestOrigin = req.headers.origin;
+      if (requestOrigin && !apiCorsPolicy.isOriginAllowed(requestOrigin)) {
+        return res.status(403).json({
+          success: false,
+          error: `Origin is not allowed by ${API_CORS_ALLOWED_ORIGINS_ENV}`
+        });
+      }
+      return apiCorsPolicy.middleware(req, res, next);
+    });
     this.app.use(express.json({ limit: '50mb' }));
 
     // Security: Add authentication middleware
@@ -867,20 +1002,69 @@ class AgentServer {
     // Set environment variables for adapter
     app.post('/dashboard/adapters/:name/env', async (req, res) => {
       try {
+        const adapterName = req.params.name;
+        if (isDashboardEnvMutationDisabled()) {
+          return res.status(403).json({
+            success: false,
+            error: `${DASHBOARD_ENV_MUTATION_DISABLED_ENV}=1 disabled this endpoint`
+          });
+        }
+
+        const allowedKeys = getDashboardEnvMutationAllowlist(adapterName);
+        if (!allowedKeys) {
+          return res.status(404).json({ success: false, error: 'Adapter not found' });
+        }
+
         const { envVars } = req.body;
 
-        if (!envVars || typeof envVars !== 'object') {
+        if (!envVars || typeof envVars !== 'object' || Array.isArray(envVars)) {
           return res.status(400).json({ success: false, error: 'envVars object required' });
         }
 
-        // Set each environment variable
+        const rejectedKeys = [];
+        const invalidValueKeys = [];
+        const acceptedEntries = [];
+
         for (const [key, value] of Object.entries(envVars)) {
-          if (value && typeof value === 'string') {
-            setEnvVar(key, value);
+          if (!allowedKeys.has(key)) {
+            rejectedKeys.push(key);
+            continue;
           }
+          if (typeof value !== 'string') {
+            invalidValueKeys.push(key);
+            continue;
+          }
+          acceptedEntries.push([key, value]);
         }
 
-        res.json({ success: true, message: 'Environment variables set' });
+        if (rejectedKeys.length > 0) {
+          return res.status(400).json({
+            success: false,
+            error: 'Unsupported environment variable key(s)',
+            rejectedKeys
+          });
+        }
+
+        if (invalidValueKeys.length > 0) {
+          return res.status(400).json({
+            success: false,
+            error: 'Environment variable values must be strings',
+            invalidValueKeys
+          });
+        }
+
+        for (const [key, value] of acceptedEntries) {
+          setEnvVar(key, value);
+        }
+
+        const acceptedKeys = acceptedEntries.map(([key]) => key);
+        console.info(
+          `[Security] dashboard env mutation accepted adapter=${adapterName} keys=${
+            acceptedKeys.length > 0 ? acceptedKeys.join(',') : '(none)'
+          }`
+        );
+
+        res.json({ success: true, message: 'Environment variables set', acceptedKeys });
       } catch (error) {
         res.json({ success: false, error: error.message });
       }
@@ -908,9 +1092,9 @@ class AgentServer {
         const url = new URL(info.req.url, 'http://localhost');
         const queryKey = url.searchParams.get('apiKey');
         const protocols = info.req.headers['sec-websocket-protocol'];
-        
-        // If authentication is disabled (dev mode), validateApiKey returns true immediately
-        if (validateApiKey(null)) {
+
+        // Explicit localhost-only development override.
+        if (isUnauthenticatedLocalhostModeEnabled()) {
           return cb(true);
         }
 
@@ -1125,6 +1309,9 @@ class AgentServer {
     this._cleanupOrphanProcesses();
     this._pruneHistoricalOrphanedTerminals();
 
+    // Ensure insecure localhost override cannot be combined with non-loopback bind hosts.
+    assertAuthConfigurationForHost(this.host);
+
     // Setup graceful shutdown handlers
     this._setupShutdownHandlers();
 
@@ -1152,11 +1339,17 @@ class AgentServer {
         }
         console.log('');
 
-        // Security Warning
-        if (!process.env.CLI_AGENTS_API_KEY) {
-          console.warn('\n[SECURITY WARNING] CLI_AGENTS_API_KEY environment variable is not set.');
-          console.warn('The server is running without authentication (dev mode).');
-          console.warn('Set CLI_AGENTS_API_KEY to enable authentication.\n');
+        const configuredApiKey = getConfiguredApiKey();
+        if (configuredApiKey) {
+          console.log('[Security] API key authentication is enabled.');
+        } else if (isUnauthenticatedLocalhostModeEnabled()) {
+          console.warn('\n[SECURITY WARNING] CLIAGENTS_ALLOW_UNAUTHENTICATED_LOCALHOST=1 is enabled.');
+          console.warn(`Unauthenticated access is allowed only on loopback host "${this.host}" for local development.`);
+          console.warn('Unset CLIAGENTS_ALLOW_UNAUTHENTICATED_LOCALHOST and configure CLIAGENTS_API_KEY for normal use.\n');
+        } else {
+          console.warn('\n[SECURITY WARNING] No API key configured.');
+          console.warn('Protected routes require authentication and currently fail closed (401).');
+          console.warn('Set CLIAGENTS_API_KEY (or CLI_AGENTS_API_KEY) to allow authenticated clients.\n');
         }
 
         resolve(this.server);

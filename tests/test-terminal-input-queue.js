@@ -74,6 +74,7 @@ async function run() {
       null,
       {
         rootSessionId: 'root-input-1',
+        parentSessionId: 'root-input-1',
         sessionKind: 'worker',
         originClient: 'codex',
         externalSessionRef: 'test-root-a',
@@ -97,6 +98,7 @@ async function run() {
       null,
       {
         rootSessionId: 'root-input-2',
+        parentSessionId: 'root-input-2',
         sessionKind: 'worker',
         originClient: 'codex',
         externalSessionRef: 'test-root-b',
@@ -108,6 +110,41 @@ async function run() {
         }
       }
     );
+
+    db.addSessionEvent({
+      rootSessionId: 'root-input-1',
+      sessionId: 'root-input-1',
+      eventType: 'session_started',
+      originClient: 'codex',
+      idempotencyKey: 'root-input-1:session_started:test-root-a',
+      payloadSummary: 'test root A attached',
+      payloadJson: {
+        attachMode: 'explicit-http-attach',
+        externalSessionRef: 'test-root-a',
+        clientName: 'codex'
+      },
+      metadata: {
+        clientName: 'codex',
+        externalSessionRef: 'test-root-a'
+      }
+    });
+    db.addSessionEvent({
+      rootSessionId: 'root-input-2',
+      sessionId: 'root-input-2',
+      eventType: 'session_started',
+      originClient: 'codex',
+      idempotencyKey: 'root-input-2:session_started:test-root-b',
+      payloadSummary: 'test root B attached',
+      payloadJson: {
+        attachMode: 'explicit-http-attach',
+        externalSessionRef: 'test-root-b',
+        clientName: 'codex'
+      },
+      metadata: {
+        clientName: 'codex',
+        externalSessionRef: 'test-root-b'
+      }
+    });
 
     const terminalColumns = db.db.prepare('PRAGMA table_info(terminals)').all().map((column) => column.name);
     assert(terminalColumns.includes('session_control_mode'), 'terminals should include session_control_mode');
@@ -148,8 +185,20 @@ async function run() {
 
     const { server, baseUrl } = await startApp({
       sessionManager: {
-        getTerminal() {
-          return null;
+        getTerminal(terminalId) {
+          const row = db.getTerminal(terminalId);
+          if (!row) {
+            return null;
+          }
+          return {
+            terminalId,
+            rootSessionId: row.root_session_id || row.rootSessionId || null,
+            parentSessionId: row.parent_session_id || row.parentSessionId || null,
+            originClient: row.origin_client || row.originClient || null,
+            sessionKind: row.session_kind || row.sessionKind || null,
+            agentProfile: row.agent_profile || row.agentProfile || null,
+            sessionControlMode: row.session_control_mode || row.sessionControlMode || null
+          };
         },
         async sendInput(terminalId, message) {
           sentInputs.push({ terminalId, message });
@@ -195,21 +244,44 @@ async function run() {
         'x-cliagents-session-ref': 'test-root-b',
         'x-cliagents-client-name': 'codex'
       };
+      const forgedOwnerRootHeaders = {
+        ...otherRootHeaders,
+        'x-cliagents-root-session-id': 'root-input-1',
+        'x-cliagents-parent-session-id': 'root-input-1'
+      };
+      const forgedOwnerBindingWrongClientHeaders = {
+        ...ownerHeaders,
+        'x-cliagents-client-name': 'attacker-codex'
+      };
 
       const sentInputsBeforeOwnershipChecks = sentInputs.length;
       const specialKeysBeforeOwnershipChecks = specialKeys.length;
+      const missingRootReplyMarker = 'KD86_MISSING_ROOT_REPLY_MARKER';
 
       const missingRootReply = await request(baseUrl, 'POST', '/orchestration/terminals/term-input-1/input', {
-        message: 'Missing root context should fail closed.'
+        message: missingRootReplyMarker
       });
       assert.strictEqual(missingRootReply.status, 403);
       assert.strictEqual(missingRootReply.data.error.code, 'terminal_input_forbidden');
+      assert(!sentInputs.some((entry) => entry.message === missingRootReplyMarker));
 
       const crossRootReply = await request(baseUrl, 'POST', '/orchestration/terminals/term-input-1/input', {
         message: 'Cross root reply should not be allowed.'
       }, otherRootHeaders);
       assert.strictEqual(crossRootReply.status, 403);
       assert.strictEqual(crossRootReply.data.error.code, 'terminal_input_forbidden');
+
+      const forgedRootReply = await request(baseUrl, 'POST', '/orchestration/terminals/term-input-1/input', {
+        message: 'Forged owner root id should not be accepted.'
+      }, forgedOwnerRootHeaders);
+      assert.strictEqual(forgedRootReply.status, 403);
+      assert.strictEqual(forgedRootReply.data.error.code, 'terminal_input_forbidden');
+
+      const forgedWrongClientReply = await request(baseUrl, 'POST', '/orchestration/terminals/term-input-1/input', {
+        message: 'Forged owner binding with wrong client should not be accepted.'
+      }, forgedOwnerBindingWrongClientHeaders);
+      assert.strictEqual(forgedWrongClientReply.status, 403);
+      assert.strictEqual(forgedWrongClientReply.data.error.code, 'terminal_input_forbidden');
 
       const ownerReply = await request(baseUrl, 'POST', '/orchestration/terminals/term-input-1/input', {
         message: 'pwd'
@@ -231,11 +303,19 @@ async function run() {
       }, otherRootHeaders);
       assert.strictEqual(crossRootEnqueue.status, 403);
       assert.strictEqual(crossRootEnqueue.data.error.code, 'terminal_input_forbidden');
+
+      const forgedRootEnqueue = await request(baseUrl, 'POST', '/orchestration/terminals/term-input-1/input-queue', {
+        message: 'Forged root enqueue should not be allowed.'
+      }, forgedOwnerRootHeaders);
+      assert.strictEqual(forgedRootEnqueue.status, 403);
+      assert.strictEqual(forgedRootEnqueue.data.error.code, 'terminal_input_forbidden');
+
       const queueAfterRejectedEnqueue = await request(baseUrl, 'GET', '/orchestration/terminals/term-input-1/input-queue');
       assert.strictEqual(queueAfterRejectedEnqueue.status, 200);
       const queuedMessagesAfterRejectedEnqueue = queueAfterRejectedEnqueue.data.inputs.map((entry) => entry.message);
       assert(!queuedMessagesAfterRejectedEnqueue.includes('Missing root enqueue should not be allowed.'));
       assert(!queuedMessagesAfterRejectedEnqueue.includes('Cross root enqueue should not be allowed.'));
+      assert(!queuedMessagesAfterRejectedEnqueue.includes('Forged root enqueue should not be allowed.'));
 
       const enqueueRes = await request(baseUrl, 'POST', '/orchestration/terminals/term-input-1/input-queue', {
         message: 'Deliver through queue.',
@@ -266,6 +346,11 @@ async function run() {
       assert.strictEqual(crossRootDeliverHeld.data.error.code, 'terminal_input_forbidden');
       await assertHeldInputState('cross-root deliver');
 
+      const forgedRootDeliverHeld = await request(baseUrl, 'POST', `/orchestration/input-queue/${heldInputId}/deliver`, {}, forgedOwnerRootHeaders);
+      assert.strictEqual(forgedRootDeliverHeld.status, 403);
+      assert.strictEqual(forgedRootDeliverHeld.data.error.code, 'terminal_input_forbidden');
+      await assertHeldInputState('forged-root deliver');
+
       const missingRootApproveHeld = await request(baseUrl, 'POST', `/orchestration/input-queue/${heldInputId}/approve`, {
         approvedBy: 'operator'
       });
@@ -279,6 +364,13 @@ async function run() {
       assert.strictEqual(crossRootApproveHeld.status, 403);
       assert.strictEqual(crossRootApproveHeld.data.error.code, 'terminal_input_forbidden');
       await assertHeldInputState('cross-root approve');
+
+      const forgedRootApproveHeld = await request(baseUrl, 'POST', `/orchestration/input-queue/${heldInputId}/approve`, {
+        approvedBy: 'operator'
+      }, forgedOwnerRootHeaders);
+      assert.strictEqual(forgedRootApproveHeld.status, 403);
+      assert.strictEqual(forgedRootApproveHeld.data.error.code, 'terminal_input_forbidden');
+      await assertHeldInputState('forged-root approve');
 
       const missingRootDenyHeld = await request(baseUrl, 'POST', `/orchestration/input-queue/${heldInputId}/deny`, {
         deniedBy: 'operator',
@@ -296,6 +388,14 @@ async function run() {
       assert.strictEqual(crossRootDenyHeld.data.error.code, 'terminal_input_forbidden');
       await assertHeldInputState('cross-root deny');
 
+      const forgedRootDenyHeld = await request(baseUrl, 'POST', `/orchestration/input-queue/${heldInputId}/deny`, {
+        deniedBy: 'operator',
+        reason: 'forged root deny attempt'
+      }, forgedOwnerRootHeaders);
+      assert.strictEqual(forgedRootDenyHeld.status, 403);
+      assert.strictEqual(forgedRootDenyHeld.data.error.code, 'terminal_input_forbidden');
+      await assertHeldInputState('forged-root deny');
+
       const missingRootCancelHeld = await request(baseUrl, 'POST', `/orchestration/input-queue/${heldInputId}/cancel`, {
         reason: 'missing root cancel attempt'
       });
@@ -309,6 +409,13 @@ async function run() {
       assert.strictEqual(crossRootCancelHeld.status, 403);
       assert.strictEqual(crossRootCancelHeld.data.error.code, 'terminal_input_forbidden');
       await assertHeldInputState('cross-root cancel');
+
+      const forgedRootCancelHeld = await request(baseUrl, 'POST', `/orchestration/input-queue/${heldInputId}/cancel`, {
+        reason: 'forged root cancel attempt'
+      }, forgedOwnerRootHeaders);
+      assert.strictEqual(forgedRootCancelHeld.status, 403);
+      assert.strictEqual(forgedRootCancelHeld.data.error.code, 'terminal_input_forbidden');
+      await assertHeldInputState('forged-root cancel');
 
       assert.strictEqual(sentInputs.length, sentInputsBeforeOwnershipChecks + 1);
       assert.strictEqual(specialKeys.length, specialKeysBeforeOwnershipChecks);
@@ -431,7 +538,17 @@ async function run() {
       assert.strictEqual(bypassDeliver.status, 409);
       assert.strictEqual(bypassDeliver.data.error.code, 'invalid_input_queue_state');
 
-      db.updateTerminalBinding('term-input-1', { sessionControlMode: 'observer' });
+      db.updateTerminalBinding('term-input-1', {
+        sessionControlMode: 'observer',
+        rootSessionId: 'root-input-1',
+        parentSessionId: null,
+        originClient: 'codex',
+        externalSessionRef: 'test-root-a',
+        sessionMetadata: {
+          clientName: 'codex',
+          externalSessionRef: 'test-root-a'
+        }
+      });
       const observerInput = await request(baseUrl, 'POST', '/orchestration/terminals/term-input-1/input', {
         message: 'pwd'
       }, ownerHeaders);

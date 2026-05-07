@@ -18,6 +18,40 @@ const { AdapterReadinessService } = require('./adapter-readiness');
 
 const ROUTE_TASK_RETRY_MAX_ATTEMPTS = 2;
 const DEFAULT_ROUTE_RETRY_DELAY_MS = 500;
+const MAX_ROUTE_RETRY_DELAY_MS = (() => {
+  const parsed = Number.parseInt(process.env.CLIAGENTS_ROUTE_RETRY_DELAY_MAX_MS || '5000', 10);
+  if (!Number.isFinite(parsed) || parsed < 0) {
+    return 5000;
+  }
+  return parsed;
+})();
+
+function isExplicitTerminalBusySignal(errorCode, normalizedMessage) {
+  const code = String(errorCode || '').trim().toLowerCase();
+  if (code === 'terminal_busy') {
+    return true;
+  }
+
+  const message = String(normalizedMessage || '').trim().toLowerCase();
+  if (!message) {
+    return false;
+  }
+
+  if (message.includes('terminal_busy')) {
+    return true;
+  }
+
+  const hasTerminalBusy = message.includes('terminal') && message.includes('busy');
+  const hasSessionBusy = message.includes('session') && message.includes('busy');
+  const hasTerminalProcessing = message.includes('terminal') && message.includes('processing');
+  return hasTerminalBusy || hasSessionBusy || hasTerminalProcessing;
+}
+
+function normalizeRouteRetryDelayMs(delayMs, fallbackMs) {
+  const fallback = Number.isFinite(fallbackMs) ? Math.max(0, Number(fallbackMs)) : 0;
+  const normalized = Number.isFinite(delayMs) ? Math.max(0, Number(delayMs)) : fallback;
+  return Math.min(normalized, MAX_ROUTE_RETRY_DELAY_MS);
+}
 
 // Task types and their default agent mappings
 const TASK_TYPES = {
@@ -581,13 +615,12 @@ class TaskRouter extends EventEmitter {
     const code = String(error.code || '').trim().toLowerCase();
     const message = String(error.message || '').trim();
     const normalizedMessage = message.toLowerCase();
-    const statusCode = Number.parseInt(error.statusCode, 10);
-    const retryAfterMs = Number.isFinite(error.retryAfterMs) ? Math.max(0, Number(error.retryAfterMs)) : null;
+    const retryAfterMs = Number.isFinite(error.retryAfterMs) ? Number(error.retryAfterMs) : null;
 
-    if (code === 'terminal_busy' || statusCode === 409) {
+    if (isExplicitTerminalBusySignal(code, normalizedMessage)) {
       return {
         reason: 'terminal_busy',
-        delayMs: retryAfterMs ?? DEFAULT_ROUTE_RETRY_DELAY_MS
+        delayMs: normalizeRouteRetryDelayMs(retryAfterMs, DEFAULT_ROUTE_RETRY_DELAY_MS)
       };
     }
 
@@ -599,7 +632,7 @@ class TaskRouter extends EventEmitter {
     ) {
       return {
         reason: 'terminal_missing',
-        delayMs: retryAfterMs ?? 0
+        delayMs: normalizeRouteRetryDelayMs(retryAfterMs, 0)
       };
     }
 
@@ -649,6 +682,9 @@ class TaskRouter extends EventEmitter {
     const detectedRole = TASK_TO_ROLE[detection.type];
     const resolvedSessionKind = this._deriveSessionKind({ sessionKind, forceRole }, detection.type);
     const requireCollaboratorReady = resolvedSessionKind === 'collaborator';
+    if (resolvedSessionKind === 'collaborator' && !String(sessionLabel || '').trim()) {
+      throw new Error('sessionLabel is required when sessionKind=collaborator');
+    }
 
     if (forceRole || (!forceProfile && detectedRole)) {
       const effectiveRole = forceRole || detectedRole;

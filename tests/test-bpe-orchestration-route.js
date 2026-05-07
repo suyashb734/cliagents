@@ -47,12 +47,17 @@ async function request(baseUrl, method, route, body = null) {
 }
 
 async function startFakeBpeServer() {
+  const buildDefaultElements = () => ([
+    { id: 'el_more', role: 'link', name: 'More information...' },
+    { id: 'danger_delete_btn', role: 'button', name: 'Delete Account' }
+  ]);
   const state = {
     mode: 'success',
     lastSessionBody: null,
     lastActionBody: null,
     sessionCounter: 0,
-    actionCalls: 0
+    actionCalls: 0,
+    elements: buildDefaultElements()
   };
 
   const server = http.createServer(async (req, res) => {
@@ -89,10 +94,7 @@ async function startFakeBpeServer() {
             state_version: 4,
             url: 'https://example.com',
             title: 'Example Domain',
-            elements: [
-              { id: 'el_more', role: 'link', name: 'More information...' },
-              { id: 'danger_delete_btn', role: 'button', name: 'Delete Account' }
-            ]
+            elements: state.elements
           });
         }, 120);
         return;
@@ -112,10 +114,7 @@ async function startFakeBpeServer() {
         state_version: 4,
         url: 'https://example.com',
         title: 'Example Domain',
-        elements: [
-          { id: 'el_more', role: 'link', name: 'More information...' },
-          { id: 'danger_delete_btn', role: 'button', name: 'Delete Account' }
-        ]
+        elements: state.elements
       });
     }
 
@@ -280,6 +279,31 @@ async function run() {
     });
     assert.strictEqual(explicitDangerousElement.status, 409);
     assert.strictEqual(explicitDangerousElement.data.failureClass, 'action_rejection');
+    assert.strictEqual(
+      explicitDangerousElement.data.details?.reason,
+      'resolved_target_blocked_by_policy',
+      'Expected explicit element_id target to be denied by resolved target policy'
+    );
+
+    fakeBpe.state.elements = [
+      { id: 'el_more', role: 'link', name: 'More information...' },
+      { id: 'danger_delete_btn', role: 'button' }
+    ];
+    const explicitDangerousMissingMetadata = await request(baseUrl, 'POST', '/orchestration/browser-perception-engine/scenario', {
+      targetUrl: 'https://example.com',
+      interaction: { type: 'click', target: { element_id: 'danger_delete_btn' } }
+    });
+    assert.strictEqual(explicitDangerousMissingMetadata.status, 409);
+    assert.strictEqual(explicitDangerousMissingMetadata.data.failureClass, 'action_rejection');
+    assert.strictEqual(
+      explicitDangerousMissingMetadata.data.details?.reason,
+      'target_metadata_missing',
+      'Expected fail-closed behavior when resolved target metadata is missing'
+    );
+    fakeBpe.state.elements = [
+      { id: 'el_more', role: 'link', name: 'More information...' },
+      { id: 'danger_delete_btn', role: 'button', name: 'Delete Account' }
+    ];
 
     const explicitDangerousElementWithOverride = await request(baseUrl, 'POST', '/orchestration/browser-perception-engine/scenario', {
       targetUrl: 'https://example.com',
@@ -297,6 +321,29 @@ async function run() {
       fakeBpe.state.lastActionBody.policy_override?.reason,
       'manual-approval-kd83',
       'Expected risky-target override to be audited in action payload'
+    );
+
+    const explicitDangerousElementWithTopLevelOverride = await request(
+      baseUrl,
+      'POST',
+      '/orchestration/browser-perception-engine/scenario',
+      {
+        targetUrl: 'https://example.com',
+        interaction: {
+          type: 'click',
+          target: { element_id: 'danger_delete_btn' }
+        },
+        interactionPolicy: {
+          allowRiskyTarget: true,
+          justification: 'manual-approval-kd83-top-level'
+        }
+      }
+    );
+    assert.strictEqual(explicitDangerousElementWithTopLevelOverride.status, 200);
+    assert.strictEqual(
+      fakeBpe.state.lastActionBody.policy_override?.reason,
+      'manual-approval-kd83-top-level',
+      'Expected top-level interactionPolicy override to be forwarded and audited'
     );
 
     const blockedActionType = await request(baseUrl, 'POST', '/orchestration/browser-perception-engine/scenario', {

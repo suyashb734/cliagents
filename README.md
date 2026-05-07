@@ -183,7 +183,7 @@ import OpenAI from 'openai';
 
 const client = new OpenAI({
   baseURL: 'http://localhost:4001/v1',
-  apiKey: 'unused'  // Not needed in dev mode
+  apiKey: process.env.CLIAGENTS_API_KEY
 });
 
 const response = await client.chat.completions.create({
@@ -213,7 +213,7 @@ When ready for production, change two lines:
 // Development
 const client = new OpenAI({
   baseURL: 'http://localhost:4001/v1',
-  apiKey: 'unused'
+  apiKey: process.env.CLIAGENTS_API_KEY
 });
 
 // Production - just change baseURL and apiKey
@@ -276,12 +276,14 @@ Built-in skills: `test-driven-development`, `debugging`, `code-review`, `multi-a
 
 ## Authentication
 
-Authentication is **optional** and disabled by default (dev mode).
+Authentication is **required by default** (fail-closed).
 
-To enable:
+Set either API-key environment variable:
 
 ```bash
-export CLI_AGENTS_API_KEY="your-secret-key"
+export CLIAGENTS_API_KEY="your-secret-key"
+# or legacy alias:
+# export CLI_AGENTS_API_KEY="your-secret-key"
 pnpm start
 ```
 
@@ -292,7 +294,32 @@ curl -H "Authorization: Bearer your-secret-key" ...
 curl -H "X-API-Key: your-secret-key" ...
 ```
 
-> **Note**: For production deployment, always set `CLI_AGENTS_API_KEY` or use a reverse proxy with authentication.
+### Local Development Override (Explicit Opt-In)
+
+For localhost-only development, you can disable auth explicitly:
+
+```bash
+export CLIAGENTS_ALLOW_UNAUTHENTICATED_LOCALHOST=1
+cliagents serve --host 127.0.0.1
+```
+
+When `CLIAGENTS_ALLOW_UNAUTHENTICATED_LOCALHOST=1` is set without an API key, `cliagents` enforces loopback-only bind hosts (`127.0.0.1`, `::1`, or `localhost`) and refuses non-loopback binds.
+
+### API CORS + Localhost Threat Model
+
+API routes use an explicit origin policy to reduce localhost browser abuse:
+
+- By default, only loopback origins (`localhost`, `127.0.0.1`, `::1`) are accepted for API CORS.
+- Add non-loopback origins explicitly with `CLIAGENTS_API_CORS_ALLOWED_ORIGINS` (comma-separated exact origins).
+- Set `CLIAGENTS_API_CORS_ALLOW_LOOPBACK=0` to disable implicit loopback-origin allowlisting and require explicit origins only.
+
+This is browser-layer defense in depth, not an authentication replacement. Keep API-key auth enabled for non-local use.
+
+### Dashboard Env Mutation Security
+
+`POST /dashboard/adapters/:name/env` is restricted to adapter-approved auth keys (`ADAPTER_AUTH_CONFIG[adapter].envVars`) plus optional operator-reviewed extras in `CLIAGENTS_DASHBOARD_ENV_MUTATION_EXTRA_KEYS`.
+
+To disable this endpoint entirely, set `CLIAGENTS_DISABLE_DASHBOARD_ENV_MUTATION=1`.
 
 ## API Reference
 
@@ -363,9 +390,15 @@ Use that index to distinguish current source-of-truth docs from research notes.
 
 | Variable | Description | Default |
 |----------|-------------|---------|
-| `CLI_AGENTS_API_KEY` | API key for authentication | None (dev mode) |
+| `CLIAGENTS_API_KEY` | API key for authentication (preferred) | None |
+| `CLI_AGENTS_API_KEY` | API key for authentication (legacy alias) | None |
+| `CLIAGENTS_ALLOW_UNAUTHENTICATED_LOCALHOST` | Allow unauthenticated access only on loopback host when set to `1` | `0` |
+| `CLIAGENTS_API_CORS_ALLOWED_ORIGINS` | Comma-separated explicit API CORS origins | None |
+| `CLIAGENTS_API_CORS_ALLOW_LOOPBACK` | Allow loopback API CORS origins when set to `1` | `1` |
+| `CLIAGENTS_DISABLE_DASHBOARD_ENV_MUTATION` | Disable `POST /dashboard/adapters/:name/env` when set to `1` | `0` |
+| `CLIAGENTS_DASHBOARD_ENV_MUTATION_EXTRA_KEYS` | Optional comma-separated extra env keys allowed by dashboard env mutation route | None |
 | `PORT` | Server port | 4001 |
-| `CLIAGENTS_HOST` | Server bind host | `0.0.0.0` |
+| `CLIAGENTS_HOST` | Server bind host | `127.0.0.1` |
 | `CLIAGENTS_DATA_DIR` | Broker data directory | `./data` |
 | `CLIAGENTS_LOG_DIR` | Broker terminal log directory | `./logs` |
 | `CLIAGENTS_TMUX_SOCKET` | Broker-specific tmux socket path | shared default tmux server |
@@ -411,11 +444,13 @@ cliagents --port 4011 --data-dir /tmp/cliagents-a/data --log-dir /tmp/cliagents-
 pnpm test
 pnpm run test:runtime
 pnpm run test:broad
+pnpm run smoke:deterministic
 ```
 
 `pnpm test` runs the focused supported broker suite for `claude-code`, `gemini-cli`, `codex-cli`, `qwen-cli`, and `opencode-cli`.
 Use the package scripts instead of ad-hoc `node` invocations when possible; they route through the supported Node `22.12.0` wrapper from [`.nvmrc`](./.nvmrc).
 `pnpm run test:runtime` and `pnpm run test:broad` may report provider-auth, token-expiry, provider-discontinuation, quota, capacity, or timeout conditions as skips when the broker contract itself is still correct.
+`pnpm run smoke:deterministic` runs a deterministic smoke suite for delegated lifecycle success/failure/timeout/retry plus core route health checks, and writes machine-readable + markdown evidence to `artifacts/deterministic-smoke/latest.json` and `artifacts/deterministic-smoke/latest.md`.
 
 ### Development Mode
 

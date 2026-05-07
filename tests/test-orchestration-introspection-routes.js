@@ -54,10 +54,10 @@ async function stopApp(serverHandle) {
   });
 }
 
-async function request(baseUrl, method, route, body) {
+async function request(baseUrl, method, route, body, headers = {}) {
   const response = await fetch(baseUrl + route, {
     method,
-    headers: { 'content-type': 'application/json' },
+    headers: { 'content-type': 'application/json', ...headers },
     body: body ? JSON.stringify(body) : undefined
   });
   const text = await response.text();
@@ -555,7 +555,24 @@ async function testDestroyTerminalRouteDistinguishesMissingTerminal() {
 }
 
 async function testInputRouteReturnsTerminalBusyConflict() {
+  const rootSessionId = 'root-busy-input';
+  const externalSessionRef = 'busy-input-ref';
   const sessionManager = {
+    getTerminal(terminalId) {
+      if (terminalId !== 'child-1') {
+        return null;
+      }
+      return {
+        terminalId,
+        rootSessionId,
+        parentSessionId: rootSessionId,
+        originClient: 'test',
+        sessionKind: 'worker',
+        agentProfile: 'review_codex-cli',
+        runtimeHost: 'tmux',
+        runtimeCapabilities: ['read_output', 'send_input', 'resize', 'detach']
+      };
+    },
     async createTerminal() {
       throw new Error('not used');
     },
@@ -580,12 +597,26 @@ async function testInputRouteReturnsTerminalBusyConflict() {
         return null;
       }
     },
-    db: { db: null }
+    db: {
+      db: null,
+      findLatestRootSessionByClientRef({ externalSessionRef: requestedRef, clientName }) {
+        if (requestedRef === externalSessionRef && clientName === 'test') {
+          return { root_session_id: rootSessionId };
+        }
+        return null;
+      }
+    }
   });
 
   try {
     const res = await request(baseUrl, 'POST', '/orchestration/terminals/child-1/input', {
-      message: 'Follow up while still running.'
+      message: 'pwd'
+    }, {
+      'x-cliagents-root-session-id': rootSessionId,
+      'x-cliagents-parent-session-id': rootSessionId,
+      'x-cliagents-origin-client': 'test',
+      'x-cliagents-client-name': 'test',
+      'x-cliagents-session-ref': externalSessionRef
     });
     assert.strictEqual(res.status, 409);
     assert.strictEqual(res.data.error.code, 'terminal_busy');
@@ -645,6 +676,8 @@ async function testInputRouteRejectsAttachedRootsAsReadOnly() {
     dataDir: rootDir
   });
   const sendCalls = [];
+  const rootSessionId = 'attached-root-session';
+  const externalSessionRef = 'codex:thread-attached';
 
   db.registerTerminal(
     'attached-root-terminal',
@@ -656,25 +689,26 @@ async function testInputRouteRejectsAttachedRootsAsReadOnly() {
     rootDir,
     path.join(rootDir, 'attached-root.log'),
     {
-      rootSessionId: 'attached-root-session',
+      rootSessionId,
       sessionKind: 'attach',
       originClient: 'codex',
-      externalSessionRef: 'codex:thread-attached'
+      externalSessionRef
     }
   );
   db.addSessionEvent({
-    rootSessionId: 'attached-root-session',
-    sessionId: 'attached-root-session',
+    rootSessionId,
+    sessionId: rootSessionId,
     eventType: 'session_started',
     originClient: 'codex',
     idempotencyKey: 'attached-root-start',
     payloadJson: {
       sessionKind: 'attach',
       adapter: 'codex-cli',
-      externalSessionRef: 'codex:thread-attached'
+      externalSessionRef
     },
     metadata: {
       clientName: 'codex',
+      externalSessionRef,
       attachMode: 'explicit-http-attach'
     }
   });
@@ -685,7 +719,7 @@ async function testInputRouteRejectsAttachedRootsAsReadOnly() {
         return terminalId === 'attached-root-terminal'
           ? {
               terminalId: 'attached-root-terminal',
-              rootSessionId: 'attached-root-session',
+              rootSessionId,
               sessionKind: 'attach',
               originClient: 'codex'
             }
@@ -711,11 +745,17 @@ async function testInputRouteRejectsAttachedRootsAsReadOnly() {
 
   try {
     const res = await request(baseUrl, 'POST', '/orchestration/terminals/attached-root-terminal/input', {
-      message: 'Continue.'
+      message: 'pwd'
+    }, {
+      'x-cliagents-root-session-id': rootSessionId,
+      'x-cliagents-parent-session-id': rootSessionId,
+      'x-cliagents-origin-client': 'codex',
+      'x-cliagents-client-name': 'codex',
+      'x-cliagents-session-ref': externalSessionRef
     });
     assert.strictEqual(res.status, 403);
     assert.strictEqual(res.data.error.code, 'root_read_only');
-    assert.strictEqual(res.data.error.rootSessionId, 'attached-root-session');
+    assert.strictEqual(res.data.error.rootSessionId, rootSessionId);
     assert.strictEqual(sendCalls.length, 0);
   } finally {
     await stopApp(server);
@@ -733,6 +773,7 @@ async function testInputRouteAllowsAttachedRootChildBrokerWork() {
   const sendCalls = [];
 
   const rootSessionId = 'attached-root-session';
+  const externalSessionRef = 'codex:attached-child-work';
   const rootTerminalId = 'attached-root-terminal';
   const childTerminalId = 'attached-child-terminal-84';
 
@@ -759,9 +800,12 @@ async function testInputRouteAllowsAttachedRootChildBrokerWork() {
     idempotencyKey: 'attached-root-start',
     payloadJson: {
       sessionKind: 'attach',
-      adapter: 'codex-cli'
+      adapter: 'codex-cli',
+      externalSessionRef
     },
     metadata: {
+      clientName: 'codex',
+      externalSessionRef,
       attachMode: 'explicit-http-attach'
     }
   });
@@ -833,13 +877,19 @@ async function testInputRouteAllowsAttachedRootChildBrokerWork() {
 
   try {
     const res = await request(baseUrl, 'POST', `/orchestration/terminals/${childTerminalId}/input`, {
-      message: 'Continue.'
+      message: 'pwd'
+    }, {
+      'x-cliagents-root-session-id': rootSessionId,
+      'x-cliagents-parent-session-id': rootSessionId,
+      'x-cliagents-origin-client': 'codex',
+      'x-cliagents-client-name': 'codex',
+      'x-cliagents-session-ref': externalSessionRef
     });
     assert.strictEqual(res.status, 200);
     assert.strictEqual(res.data.success, true);
     assert.strictEqual(sendCalls.length, 1);
     assert.strictEqual(sendCalls[0].terminalId, childTerminalId);
-    assert.strictEqual(sendCalls[0].message, 'Continue.');
+    assert.strictEqual(sendCalls[0].message, 'pwd');
   } finally {
     await stopApp(server);
     db.close();
@@ -856,6 +906,7 @@ async function testInputRouteRejectsDbOnlyAttachedRootChildSpoof() {
   const sendCalls = [];
 
   const rootSessionId = 'attached-root-session';
+  const externalSessionRef = 'codex:attached-child-spoof';
   const childTerminalId = 'spoofed-child-terminal';
 
   db.registerTerminal(
@@ -897,9 +948,12 @@ async function testInputRouteRejectsDbOnlyAttachedRootChildSpoof() {
     idempotencyKey: 'attached-root-spoof-start',
     payloadJson: {
       sessionKind: 'attach',
-      adapter: 'codex-cli'
+      adapter: 'codex-cli',
+      externalSessionRef
     },
     metadata: {
+      clientName: 'codex',
+      externalSessionRef,
       attachMode: 'explicit-http-attach'
     }
   });
@@ -932,7 +986,13 @@ async function testInputRouteRejectsDbOnlyAttachedRootChildSpoof() {
 
   try {
     const res = await request(baseUrl, 'POST', `/orchestration/terminals/${childTerminalId}/input`, {
-      message: 'Continue.'
+      message: 'pwd'
+    }, {
+      'x-cliagents-root-session-id': rootSessionId,
+      'x-cliagents-parent-session-id': rootSessionId,
+      'x-cliagents-origin-client': 'codex',
+      'x-cliagents-client-name': 'codex',
+      'x-cliagents-session-ref': externalSessionRef
     });
     assert.strictEqual(res.status, 403);
     assert.strictEqual(res.data.error.code, 'root_read_only');

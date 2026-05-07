@@ -6,6 +6,29 @@ const assert = require('assert');
 const fs = require('fs');
 
 const AgentServer = require('../src/server');
+const UNAUTH_LOCALHOST_ENV = 'CLIAGENTS_ALLOW_UNAUTHENTICATED_LOCALHOST';
+
+function withLocalhostAuthOverride() {
+  const previousValue = process.env[UNAUTH_LOCALHOST_ENV];
+  const hasApiKey = Boolean(
+    (process.env.CLIAGENTS_API_KEY && process.env.CLIAGENTS_API_KEY.trim()) ||
+    (process.env.CLI_AGENTS_API_KEY && process.env.CLI_AGENTS_API_KEY.trim())
+  );
+
+  if (!hasApiKey && previousValue !== '1') {
+    process.env[UNAUTH_LOCALHOST_ENV] = '1';
+  }
+
+  return () => {
+    if (!hasApiKey && previousValue !== '1') {
+      if (typeof previousValue === 'string') {
+        process.env[UNAUTH_LOCALHOST_ENV] = previousValue;
+      } else {
+        delete process.env[UNAUTH_LOCALHOST_ENV];
+      }
+    }
+  };
+}
 
 async function request(baseUrl, method, route, body) {
   const response = await fetch(baseUrl + route, {
@@ -40,13 +63,16 @@ async function startServer() {
 
 async function run() {
   console.log('Running /ask route option tests...');
-
-  const serverHandle = await startServer();
-  const { server, baseUrl } = serverHandle;
-  const terminatedSessionIds = [];
-  let createSessionOptions = null;
+  const restoreAuthEnv = withLocalhostAuthOverride();
+  let server = null;
 
   try {
+    const serverHandle = await startServer();
+    server = serverHandle.server;
+    const baseUrl = serverHandle.baseUrl;
+    const terminatedSessionIds = [];
+    let createSessionOptions = null;
+
     server.sessionManager.createSession = async (options) => {
       createSessionOptions = { ...options };
       assert(createSessionOptions.workDir, 'expected /ask to create or forward a workDir');
@@ -91,7 +117,13 @@ async function run() {
     console.log('  ✓ /ask forwards generation params and cleans ephemeral workdirs');
     console.log('/ask route option tests passed.');
   } finally {
-    await server.stop();
+    try {
+      if (server) {
+        await server.stop();
+      }
+    } finally {
+      restoreAuthEnv();
+    }
   }
 }
 

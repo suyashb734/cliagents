@@ -16,6 +16,7 @@ const {
   resolveRuntimeHostMetadata,
   serializeRuntimeCapabilities
 } = require('../runtime/host-model');
+const { redactSecretsInText, redactSecretObject } = require('../security/secret-redaction');
 
 /**
  * Generate a unique ID for shared memory entries
@@ -2403,6 +2404,10 @@ class OrchestrationDB {
         continue;
       }
 
+      if (clientName && rowClientName && rowClientName !== clientName) {
+        continue;
+      }
+
       if (!externalSessionRef && clientName && rowClientName !== clientName) {
         continue;
       }
@@ -3380,6 +3385,21 @@ class OrchestrationDB {
   addMessage(terminalId, role, content, options = {}) {
     const { traceId = null, metadata = {}, rootSessionId: explicitRootSessionId = null } = options;
     const terminalRow = this.getTerminal(terminalId);
+    const normalizedRole = String(role || '').trim().toLowerCase();
+    const normalizedMetadata = metadata && typeof metadata === 'object' && !Array.isArray(metadata)
+      ? redactSecretObject({ ...metadata })
+      : {};
+    let persistedContent = content == null ? '' : String(content);
+    const redaction = redactSecretsInText(persistedContent);
+    if (redaction.redacted) {
+      persistedContent = redaction.content;
+      const securityMetadata = normalizedMetadata.security && typeof normalizedMetadata.security === 'object'
+        ? { ...normalizedMetadata.security }
+        : {};
+      securityMetadata.redactedSecretLikeContent = true;
+      securityMetadata.redactionReasonCodes = redaction.reasons;
+      normalizedMetadata.security = securityMetadata;
+    }
 
     const stmt = this.db.prepare(`
       INSERT INTO messages (terminal_id, trace_id, root_session_id, role, content, metadata, created_at)
@@ -3391,18 +3411,18 @@ class OrchestrationDB {
       terminalId,
       traceId,
       explicitRootSessionId || terminalRow?.root_session_id || null,
-      role,
-      content,
-      JSON.stringify(metadata),
+      normalizedRole,
+      persistedContent,
+      JSON.stringify(normalizedMetadata),
       createdAt
     );
 
     this.touchTerminalMessage(terminalId, {
       timestamp: createdAt,
-      model: metadata?.model || null
+      model: normalizedMetadata?.model || null
     });
 
-    const usageRecord = buildUsageRecordFromMessage(terminalRow, terminalId, role, metadata, {
+    const usageRecord = buildUsageRecordFromMessage(terminalRow, terminalId, normalizedRole, normalizedMetadata, {
       traceId
     });
     if (usageRecord) {
