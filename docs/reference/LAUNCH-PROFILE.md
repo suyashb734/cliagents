@@ -43,6 +43,10 @@ node scripts/run-with-supported-node.js scripts/track-a-launch-smoke.js \
   --work-dir "$(pwd)"
 ```
 
+When no `CLIAGENTS_API_KEY` (or `CLI_AGENTS_API_KEY`) is configured, the local smoke script
+automatically enables `CLIAGENTS_ALLOW_UNAUTHENTICATED_LOCALHOST=1` for its temporary loopback
+broker and restores the environment afterward.
+
 Expected result:
 
 - `codex-cli` and `gemini-cli` show `implement: pass` and `review: pass`

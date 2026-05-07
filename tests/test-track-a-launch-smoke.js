@@ -5,9 +5,12 @@
 const assert = require('assert');
 
 const {
+  applyLocalSmokeAuthEnv,
   classifyFailure,
   getRetryPolicy,
-  parseArgs
+  hasConfiguredApiKey,
+  parseArgs,
+  restoreLocalSmokeAuthEnv
 } = require('../scripts/track-a-launch-smoke');
 
 function withEnv(overrides, fn) {
@@ -136,6 +139,47 @@ run('parseArgs keeps --api-key as an explicit override over env defaults', () =>
       assert.strictEqual(parsed.quiet, true);
     }
   );
+});
+
+run('hasConfiguredApiKey checks canonical and legacy env aliases', () => {
+  assert.strictEqual(
+    hasConfiguredApiKey({ CLIAGENTS_API_KEY: ' canonical ', CLI_AGENTS_API_KEY: '' }),
+    true
+  );
+  assert.strictEqual(
+    hasConfiguredApiKey({ CLIAGENTS_API_KEY: '', CLI_AGENTS_API_KEY: ' legacy ' }),
+    true
+  );
+  assert.strictEqual(
+    hasConfiguredApiKey({ CLIAGENTS_API_KEY: ' ', CLI_AGENTS_API_KEY: '\n' }),
+    false
+  );
+});
+
+run('applyLocalSmokeAuthEnv enables localhost unauth mode only when no API key is configured', () => {
+  const env = {};
+  const state = applyLocalSmokeAuthEnv(env);
+  assert.strictEqual(state.changed, true);
+  assert.strictEqual(env.CLIAGENTS_ALLOW_UNAUTHENTICATED_LOCALHOST, '1');
+  restoreLocalSmokeAuthEnv(state, env);
+  assert.strictEqual(Object.prototype.hasOwnProperty.call(env, 'CLIAGENTS_ALLOW_UNAUTHENTICATED_LOCALHOST'), false);
+});
+
+run('applyLocalSmokeAuthEnv preserves existing localhost unauth env and restores original value', () => {
+  const env = { CLIAGENTS_ALLOW_UNAUTHENTICATED_LOCALHOST: '1' };
+  const state = applyLocalSmokeAuthEnv(env);
+  assert.strictEqual(state.changed, false);
+  assert.strictEqual(env.CLIAGENTS_ALLOW_UNAUTHENTICATED_LOCALHOST, '1');
+  restoreLocalSmokeAuthEnv(state, env);
+  assert.strictEqual(env.CLIAGENTS_ALLOW_UNAUTHENTICATED_LOCALHOST, '1');
+});
+
+run('applyLocalSmokeAuthEnv does not enable localhost unauth mode when API key is configured', () => {
+  const env = { CLIAGENTS_API_KEY: 'configured-key' };
+  const state = applyLocalSmokeAuthEnv(env);
+  assert.strictEqual(state.changed, false);
+  assert.strictEqual(Object.prototype.hasOwnProperty.call(env, 'CLIAGENTS_ALLOW_UNAUTHENTICATED_LOCALHOST'), false);
+  restoreLocalSmokeAuthEnv(state, env);
 });
 
 console.log('✅ test-track-a-launch-smoke: all assertions passed');

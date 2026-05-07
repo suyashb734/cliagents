@@ -13,9 +13,54 @@ const DEFAULT_ADAPTERS = ['codex-cli', 'gemini-cli'];
 const DEFAULT_TIMEOUT_MS = 180000;
 const POLL_INTERVAL_MS = 1500;
 const REQUIRED_SUCCESSFUL_ADAPTERS = 2;
+const CANONICAL_API_KEY_ENV = 'CLIAGENTS_API_KEY';
+const LEGACY_API_KEY_ENV = 'CLI_AGENTS_API_KEY';
+const UNAUTH_LOCALHOST_ENV = 'CLIAGENTS_ALLOW_UNAUTHENTICATED_LOCALHOST';
+
+function normalizeEnvString(value) {
+  if (typeof value !== 'string') {
+    return null;
+  }
+  const trimmed = value.trim();
+  return trimmed || null;
+}
+
+function hasConfiguredApiKey(env = process.env) {
+  return Boolean(
+    normalizeEnvString(env[CANONICAL_API_KEY_ENV])
+    || normalizeEnvString(env[LEGACY_API_KEY_ENV])
+  );
+}
+
+function applyLocalSmokeAuthEnv(env = process.env) {
+  const previousValue = Object.prototype.hasOwnProperty.call(env, UNAUTH_LOCALHOST_ENV)
+    ? env[UNAUTH_LOCALHOST_ENV]
+    : undefined;
+
+  if (hasConfiguredApiKey(env) || previousValue === '1') {
+    return { changed: false, previousValue };
+  }
+
+  env[UNAUTH_LOCALHOST_ENV] = '1';
+  return { changed: true, previousValue };
+}
+
+function restoreLocalSmokeAuthEnv(state, env = process.env) {
+  if (!state?.changed) {
+    return;
+  }
+
+  if (typeof state.previousValue === 'string') {
+    env[UNAUTH_LOCALHOST_ENV] = state.previousValue;
+    return;
+  }
+
+  delete env[UNAUTH_LOCALHOST_ENV];
+}
 
 function resolveDefaultApiKey() {
-  return String(process.env.CLIAGENTS_API_KEY || process.env.CLI_AGENTS_API_KEY || '').trim() || null;
+  return normalizeEnvString(process.env[CANONICAL_API_KEY_ENV])
+    || normalizeEnvString(process.env[LEGACY_API_KEY_ENV]);
 }
 
 const RETRY_POLICY = {
@@ -500,6 +545,7 @@ async function runFlowWithRetries(baseUrl, adapter, role, options) {
 }
 
 async function startLocalServer(workDir) {
+  const authEnvState = applyLocalSmokeAuthEnv(process.env);
   const tempDataDir = createTempDir('cliagents-smoke-data-');
   const tempLogDir = createTempDir('cliagents-smoke-logs-');
   const tempTmuxDir = createTempDir('cliagents-smoke-tmux-');
@@ -518,15 +564,21 @@ async function startLocalServer(workDir) {
     }
   });
 
-  await server.start();
-  const address = server.server?.address();
-  const port = address && typeof address === 'object' ? address.port : 0;
+  try {
+    await server.start();
+    const address = server.server?.address();
+    const port = address && typeof address === 'object' ? address.port : 0;
 
-  return {
-    server,
-    baseUrl: `http://127.0.0.1:${port}`,
-    cleanupPaths: [tempDataDir, tempLogDir, tempTmuxDir]
-  };
+    return {
+      server,
+      baseUrl: `http://127.0.0.1:${port}`,
+      cleanupPaths: [tempDataDir, tempLogDir, tempTmuxDir],
+      authEnvState
+    };
+  } catch (error) {
+    restoreLocalSmokeAuthEnv(authEnvState, process.env);
+    throw error;
+  }
 }
 
 async function stopLocalServer(serverHandle) {
@@ -542,6 +594,7 @@ async function stopLocalServer(serverHandle) {
         fs.rmSync(entry, { recursive: true, force: true });
       } catch {}
     }
+    restoreLocalSmokeAuthEnv(serverHandle.authEnvState, process.env);
   }
 }
 
@@ -721,7 +774,10 @@ if (require.main === module) {
 }
 
 module.exports = {
+  applyLocalSmokeAuthEnv,
   classifyFailure,
   getRetryPolicy,
-  parseArgs
+  hasConfiguredApiKey,
+  parseArgs,
+  restoreLocalSmokeAuthEnv
 };
