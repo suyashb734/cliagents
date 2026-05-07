@@ -160,13 +160,13 @@ root-timeline usage events from `addUsageRecord`, tool events from
 Focused regression coverage lives in `tests/test-root-io-events.js`,
 `tests/test-session-reuse.js`, `tests/test-session-control-plane-runtime.js`,
 `tests/test-usage-ledger.js`, and `tests/test-run-ledger-service.js`. Remaining
-work is broader room/task/project summary producers. Generated run and root
-snapshots now write idempotent `memory_summary_edges` back to the runs they
-summarize, repair backfills missing snapshot lineage without regenerating
-summary text, and `getStatus` persists bounded terminal-log `output` chunks
-with exact byte offsets so raw logs remain the audit fallback. Task memory
-bundles now surface assignments, linked rooms, task usage totals, role-aware
-usage attribution, and recent session events for linked roots.
+work is broader task/project summary producers. Generated run, root, and room
+snapshots now write idempotent `memory_summary_edges` back to the records they
+summarize, repair backfills missing run/root snapshot lineage without
+regenerating summary text, and `getStatus` persists bounded terminal-log
+`output` chunks with exact byte offsets so raw logs remain the audit fallback.
+Task memory bundles now surface assignments, linked rooms, task usage totals,
+role-aware usage attribution, and recent session events for linked roots.
 
 Write scope:
 
@@ -181,7 +181,7 @@ Deliverables:
 - log offsets and redacted payload hashes so raw terminal logs remain the audit
   fallback without making query tables unbounded raw-byte stores
 - summary lineage edges for root, run, room, task, and project summaries
-  (run/root snapshot producers implemented; room/task/project producers remain)
+  (run/root/room snapshot producers implemented; task/project producers remain)
 - parser confidence rules so low-confidence TUI extraction does not seed
   authoritative-looking summary edges
 

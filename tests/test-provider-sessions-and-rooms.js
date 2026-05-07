@@ -432,6 +432,31 @@ async function runRouteAssertions(homeDir, fixture) {
     assert.strictEqual(firstTurnRes.data.turn.status, 'completed');
     assert.strictEqual(firstTurnRes.data.participantResults.length, 2);
     assert(firstTurnRes.data.participantResults.every((entry) => entry.success === true));
+    const roomSnapshot = db.getMemorySnapshot('room', roomId);
+    assert(roomSnapshot, 'room refresh should write a room-scoped memory snapshot');
+    assert.strictEqual(roomSnapshot.rootSessionId, roomRootSessionId);
+    assert(!db.getMemorySnapshot('root', roomRootSessionId), 'room refresh should not overwrite root-scoped snapshots');
+    const roomSnapshotEdges = db.queryMemoryEdges({
+      sourceTable: 'memory_snapshots',
+      sourceId: roomSnapshot.id,
+      edgeTypes: ['summarizes'],
+      targetScopeType: 'room',
+      targetId: roomId,
+      limit: 10
+    });
+    assert(roomSnapshotEdges.length >= 1, 'room snapshots should link back to the room they summarize');
+
+    const roomBundleRes = await request(
+      serverHandle.baseUrl,
+      'GET',
+      `/orchestration/memory/bundle/${encodeURIComponent(roomId)}?scope_type=room`
+    );
+    assert.strictEqual(roomBundleRes.status, 200);
+    assert.strictEqual(roomBundleRes.data.scopeType, 'room');
+    assert.strictEqual(roomBundleRes.data.scopeId, roomId);
+    assert(roomBundleRes.data.brief.includes('Planner room'));
+    assert(roomBundleRes.data.participants.length === 2);
+    assert(roomBundleRes.data.recentMessages.length >= 1);
     assert.strictEqual(
       apiSessionManager.createCalls.find((call) => call.adapter === 'codex-cli')?.providerSessionId,
       fixture.activeId,
@@ -632,7 +657,7 @@ async function runRouteAssertions(homeDir, fixture) {
     assert(onlyArtifactMessagesRes.data.messages.length > 0);
     assert(onlyArtifactMessagesRes.data.messages.every((message) => message.metadata?.discussionArtifact === true), 'artifact-only mode should return only discussion artifacts');
 
-    const roomBundle = db.getMemoryBundle(roomRootSessionId, 'root', {
+    const roomBundle = db.getMemoryBundle(roomId, 'room', {
       recentRunsLimit: 3,
       includeRawPointers: true
     });

@@ -2212,17 +2212,17 @@ This calls cliagents' direct-session discussion route and returns the completed 
   },
   {
     name: 'get_memory_bundle',
-    description: 'Get a consolidated memory bundle (brief, key decisions, findings) for a run, root, or task.',
+    description: 'Get a consolidated memory bundle (brief, key decisions, findings) for a run, root, room, or task.',
     inputSchema: {
       type: 'object',
       properties: {
         scopeId: {
           type: 'string',
-          description: 'The ID of the run, root session, or task.'
+          description: 'The ID of the run, root session, room, or task.'
         },
         scopeType: {
           type: 'string',
-          enum: ['run', 'root', 'task'],
+          enum: ['run', 'root', 'room', 'task'],
           description: 'The type of scope for the memory bundle. Default: task',
           default: 'task'
         },

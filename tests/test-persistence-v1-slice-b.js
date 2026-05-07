@@ -659,7 +659,7 @@ async function runMcpTests() {
     const memoryTool = mod.TOOLS.find((tool) => tool.name === 'get_memory_bundle');
     assert(memoryTool, 'get_memory_bundle should be exposed');
     assert.strictEqual(memoryTool.inputSchema.required[0], 'scopeId');
-    assert.deepStrictEqual(memoryTool.inputSchema.properties.scopeType.enum, ['run', 'root', 'task']);
+    assert.deepStrictEqual(memoryTool.inputSchema.properties.scopeType.enum, ['run', 'root', 'room', 'task']);
 
     const messageTool = mod.TOOLS.find((tool) => tool.name === 'get_message_window');
     assert(messageTool, 'get_message_window should be exposed');

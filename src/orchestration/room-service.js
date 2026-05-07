@@ -326,6 +326,38 @@ class RoomService {
     };
   }
 
+  _appendRoomSnapshotLineage(snapshot, room, recentMessages) {
+    if (!snapshot?.id || !room?.id || typeof this.db.appendMemorySummaryEdge !== 'function') {
+      return;
+    }
+
+    const sources = [
+      { scopeType: 'room', scopeId: room.id },
+      ...recentMessages.map((message) => ({
+        scopeType: 'room_message',
+        scopeId: String(message.id)
+      }))
+    ];
+    for (const source of sources) {
+      try {
+        this.db.appendMemorySummaryEdge({
+          edgeNamespace: 'derivation',
+          parentScopeType: 'memory_snapshot',
+          parentScopeId: snapshot.id,
+          childScopeType: source.scopeType,
+          childScopeId: source.scopeId,
+          edgeKind: 'summarizes',
+          metadata: {
+            source: 'room-service.refreshRoomSnapshot',
+            roomId: room.id
+          }
+        });
+      } catch (error) {
+        console.warn(`[RoomService] Room snapshot lineage failed for ${room.id}: ${error.message}`);
+      }
+    }
+  }
+
   refreshRoomSnapshot(roomId) {
     const room = this.db.getRoom(roomId);
     if (!room) {
@@ -334,10 +366,11 @@ class RoomService {
 
     const participants = this.db.listRoomParticipants(roomId);
     const recentMessages = this.db.getRecentRoomMessages(roomId, 12, { artifactMode: 'exclude' });
-    return this.db.upsertMemorySnapshot({
-      scope: 'root',
-      scopeId: room.rootSessionId,
+    this.db.upsertMemorySnapshot({
+      scope: 'room',
+      scopeId: room.id,
       rootSessionId: room.rootSessionId,
+      taskId: room.taskId || null,
       brief: buildRoomSnapshotBrief(room, participants, recentMessages),
       keyDecisions: buildRoomSnapshotKeyDecisions(recentMessages),
       pendingItems: buildRoomSnapshotPendingItems(recentMessages),
@@ -350,6 +383,9 @@ class RoomService {
         lastMessageAt: recentMessages[recentMessages.length - 1]?.createdAt || null
       }
     });
+    const snapshot = this.db.getMemorySnapshot('room', room.id);
+    this._appendRoomSnapshotLineage(snapshot, room, recentMessages);
+    return snapshot;
   }
 
   _resolveMentionedParticipants(roomId, mentions = []) {
@@ -589,12 +625,12 @@ class RoomService {
 
     let results;
     try {
-      const bundle = this.db.getMemoryBundle(room.rootSessionId, 'root', {
+      const bundle = this.db.getMemoryBundle(room.id, 'room', {
         recentRunsLimit: 3,
         includeRawPointers: true
       });
       if (!bundle) {
-        console.debug(`[RoomService] No root memory bundle available yet for room ${roomId} (${room.rootSessionId})`);
+        console.debug(`[RoomService] No room memory bundle available yet for room ${roomId}`);
       }
       const recentMessages = this.db.getRecentRoomMessages(roomId, 12);
       results = await Promise.all(participants.map((participant) => (
@@ -737,12 +773,12 @@ class RoomService {
     };
     try {
       const discussionTimeoutMs = resolveDiscussionTimeoutMs(input.timeout, this.defaultDiscussionTimeoutMs);
-      const bundle = this.db.getMemoryBundle(room.rootSessionId, 'root', {
+      const bundle = this.db.getMemoryBundle(room.id, 'room', {
         recentRunsLimit: 3,
         includeRawPointers: true
       });
       if (!bundle) {
-        console.debug(`[RoomService] No root memory bundle available yet for room discussion ${roomId} (${room.rootSessionId})`);
+        console.debug(`[RoomService] No room memory bundle available yet for room discussion ${roomId}`);
       }
       const recentMessages = this.db.getRecentRoomMessages(roomId, 12, { artifactMode: 'exclude' });
       const discussionPromise = Promise.resolve().then(() => this.runDiscussion(this.sessionManager, input.message, {

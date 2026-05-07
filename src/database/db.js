@@ -351,7 +351,7 @@ function buildUsageWhereClause(options = {}) {
   };
 }
 
-const MEMORY_SNAPSHOT_SCOPES = new Set(['run', 'root']);
+const MEMORY_SNAPSHOT_SCOPES = new Set(['run', 'root', 'room', 'task', 'project']);
 const MEMORY_SNAPSHOT_GENERATION_TRIGGERS = new Set(['run_completed', 'root_refresh', 'repair', 'manual']);
 const MEMORY_SNAPSHOT_GENERATION_STRATEGIES = new Set(['rule_based']);
 const TERMINAL_INPUT_QUEUE_STATUSES = new Set(['pending', 'held_for_approval', 'delivered', 'expired', 'cancelled']);
@@ -6773,6 +6773,70 @@ class OrchestrationDB {
     };
   }
 
+  _buildRoomMemoryBundle(scopeId, options = {}) {
+    const room = this.getRoom(scopeId);
+    const snapshot = this.getMemorySnapshot('room', scopeId);
+    if (!room && !snapshot) {
+      return null;
+    }
+
+    const recentMessages = room
+      ? this.getRecentRoomMessages(scopeId, 12, { artifactMode: 'exclude' }).map((message) => ({
+          id: message.id,
+          turnId: message.turnId,
+          participantId: message.participantId,
+          role: message.role,
+          preview: truncateText(message.content, 240),
+          createdAt: message.createdAt
+        }))
+      : [];
+    const participants = room
+      ? this.listRoomParticipants(scopeId).map((participant) => ({
+          id: participant.id,
+          adapter: participant.adapter,
+          displayName: participant.displayName,
+          model: participant.model,
+          status: participant.status,
+          lastMessageAt: participant.lastMessageAt
+        }))
+      : [];
+    const fallbackBrief = recentMessages.length
+      ? truncateText(recentMessages.map((message) => `${message.role}: ${message.preview}`).join('\n'), 1500)
+      : null;
+
+    return {
+      scopeType: 'room',
+      scopeId,
+      brief: snapshot?.brief || fallbackBrief,
+      keyDecisions: snapshot?.keyDecisions || dedupeStrings(
+        recentMessages
+          .filter((message) => message.role === 'assistant' || message.role === 'system')
+          .map((message) => message.preview),
+        20
+      ),
+      pendingItems: snapshot?.pendingItems || dedupeStrings(
+        recentMessages
+          .filter((message) => message.role === 'user')
+          .map((message) => message.preview),
+        20
+      ),
+      findings: room?.taskId ? this.getTopFindings(room.taskId, 20) : [],
+      participants,
+      recentMessages,
+      recentRuns: [],
+      rawPointers: options.includeRawPointers === false
+        ? null
+        : {
+            roomId: scopeId,
+            rootSessionId: room?.rootSessionId || snapshot?.rootSessionId || null,
+            taskId: room?.taskId || snapshot?.taskId || null,
+            participantIds: participants.map((participant) => participant.id),
+            messageIds: recentMessages.map((message) => message.id)
+          },
+      isStale: false
+    };
+  }
+
   _buildTaskMemoryBundle(scopeId, options = {}) {
     const recentRunsLimit = clampLimit(options.recentRunsLimit, 3, 10);
     const latestRuns = this.getLatestRunsForTask(scopeId, 5);
@@ -6883,6 +6947,9 @@ class OrchestrationDB {
     }
     if (normalizedScopeType === 'root') {
       return this._buildRootMemoryBundle(scopeId, bundleOptions);
+    }
+    if (normalizedScopeType === 'room') {
+      return this._buildRoomMemoryBundle(scopeId, bundleOptions);
     }
     if (normalizedScopeType === 'task') {
       return this._buildTaskMemoryBundle(scopeId, bundleOptions);

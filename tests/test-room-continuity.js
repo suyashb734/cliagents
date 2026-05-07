@@ -443,11 +443,11 @@ async function testDiscussionContinuityAndIdempotency() {
       sessionManager: createDirectSessionManager(),
       roomDiscussionRunner: runnerB.runDiscussion
     });
-    const persistedBundle = appB.db.getMemoryBundle(rootSessionId, 'root', {
+    const persistedBundle = appB.db.getMemoryBundle(roomId, 'room', {
       recentRunsLimit: 3,
       includeRawPointers: true
     });
-    assert(persistedBundle?.brief, 'expected persisted room root bundle after restart');
+    assert(persistedBundle?.brief, 'expected persisted room bundle after restart');
     assert(persistedBundle.brief.includes('Discussion continuity room'));
 
     const duplicateDiscussion = await discussRoom(appB.baseUrl, roomId, {

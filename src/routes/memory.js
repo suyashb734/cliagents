@@ -14,7 +14,7 @@ const {
 } = require('../orchestration/memory-maintenance-service');
 const { redactSecretsInText } = require('../security/secret-redaction');
 
-const MEMORY_BUNDLE_SCOPE_TYPES = new Set(['run', 'root', 'task']);
+const MEMORY_BUNDLE_SCOPE_TYPES = new Set(['run', 'root', 'room', 'task']);
 const MESSAGE_ROLES = new Set(['user', 'assistant', 'system', 'tool']);
 const MEMORY_RECORD_TYPES = new Set([
   'project',
@@ -159,7 +159,7 @@ function createMemoryRouter(options = {}) {
 
   /**
    * GET /orchestration/memory/bundle/:scopeId
-   * Get a consolidated memory bundle for a run, root, or task
+   * Get a consolidated memory bundle for a run, root, room, or task
    */
   router.get('/bundle/:scopeId', (req, res) => {
     try {
