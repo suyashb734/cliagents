@@ -35,6 +35,13 @@ docs remain useful context, but this file is the current entrypoint.
    - Move room UX toward a broker-native moderator model.
    - Keep runs and discussions as audit records underneath the room transcript.
 
+6. **Long-horizon orchestration mechanics**
+   - Execute [Long-Horizon Orchestration V1](../research/LONG-HORIZON-ORCHESTRATION-V1-PLAN.md)
+     after the runtime/control-plane foundation is stable.
+   - Adopt Paperclip-style pre-run dispatch requests, immutable run context
+     snapshots, task/session bindings, coalescing, defer, and liveness policies.
+   - Keep this as an execution-control model, not a generic task-board product.
+
 ## Deferred
 
 - full task board or team workspace product

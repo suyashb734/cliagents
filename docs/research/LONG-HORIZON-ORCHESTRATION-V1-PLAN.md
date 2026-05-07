@@ -40,6 +40,7 @@ The result is that teams can be approximated, but not supervised cleanly.
 The correct center of gravity is:
 
 - `runs` remain the execution-history substrate
+- `dispatch_requests` become the pre-run intent and coalescing surface
 - `orchestration` becomes the top-level long-horizon object
 - `phases`, `gates`, and `handoffs` model execution semantics
 - `specialists` define routing and policy
@@ -48,6 +49,31 @@ Do not start with a generic first-class `task` object.
 
 For long-horizon coding work, the broker needs an execution model more than it
 needs a backlog model.
+
+## Paperclip-Derived Mechanics To Adopt
+
+Paperclip's strongest orchestration lesson is that run spawning should not be
+the first durable event. A broker should record the requested work before it
+decides whether to launch, defer, coalesce, retry, or bind to an existing
+session.
+
+Add these mechanics to the V1 direction:
+
+- `dispatch_requests`: durable pre-run requests that can be queued, coalesced,
+  deferred, cancelled, or converted into a run.
+- `run_context_snapshots`: immutable context packets captured at dispatch time
+  so a run can be replayed and audited without depending on later memory drift.
+- `task_session_bindings`: explicit adapter/model/effort/session bindings for
+  a task or phase, so provider continuity is intentional instead of inferred
+  from terminal reuse.
+- `liveness_policies`: explicit timeout, heartbeat, stale-session, and recovery
+  rules for requests, phases, and runtime hosts.
+- `adapter_lifecycle_callbacks`: a cleaner contract for execute, log, metadata,
+  spawn, result, retry, resume, and failure classification events.
+
+These do not change the product scope. They make the execution model more
+deterministic while preserving the broker thesis: durable, inspectable,
+operator-controlled agent work rather than a generic project-management board.
 
 ## Final Model
 
@@ -79,6 +105,57 @@ Runs do not answer:
 - what phase is currently active
 - which approvals are pending
 - which downstream work is now eligible
+
+#### 1a. Dispatch Request
+
+A dispatch request is the durable intent record before a run exists.
+
+It answers:
+
+- what work was requested
+- what context packet should be used
+- whether equivalent work is already pending or running
+- whether the broker should launch now, defer, coalesce, or cancel
+- which task, phase, gate, or room requested the work
+
+Runs should be created from dispatch requests, not directly from every API call,
+once long-horizon orchestration is active.
+
+#### 1b. Run Context Snapshot
+
+A run context snapshot is an immutable packet captured at dispatch time.
+
+It should include:
+
+- prompt or instruction body
+- selected workspace and context mode
+- linked task, assignment, phase, room, and root ids
+- relevant artifacts, findings, handoffs, and memory excerpts
+- selected adapter, model, effort, tool policy, and runtime host constraints
+
+This is the audit boundary for "what the agent saw." Later memory updates should
+not silently change the replay context for an already-launched run.
+
+#### 1c. Task Session Binding
+
+A task session binding records the intended execution identity for a task,
+assignment, or phase.
+
+It should include:
+
+- task or phase id
+- adapter
+- model
+- reasoning effort
+- provider session id when known
+- runtime host and fidelity
+- reuse policy
+- created and last-verified timestamps
+
+This makes session reuse, model changes, and provider continuity explicit.
+Changing model or effort can be allowed for roots, but it should create a new
+binding event for child/specialist lanes unless the operator deliberately
+chooses continuity over strict attribution.
 
 #### 2. Orchestration
 
@@ -249,6 +326,64 @@ Add orchestration-specific state keyed by `run_id`.
 - `updated_at`
 - `completed_at`
 
+#### `dispatch_requests`
+
+- `dispatch_request_id`
+- `orchestration_id`
+- `phase_id`
+- `task_id`
+- `assignment_id`
+- `room_id`
+- `root_session_id`
+- `requested_by`
+- `request_kind`
+- `status`
+- `coalesce_key`
+- `defer_until`
+- `context_snapshot_id`
+- `bound_session_id`
+- `metadata`
+- `created_at`
+- `updated_at`
+- `dispatched_at`
+- `cancelled_at`
+
+#### `run_context_snapshots`
+
+- `context_snapshot_id`
+- `dispatch_request_id`
+- `workspace_path`
+- `context_mode`
+- `prompt_summary`
+- `prompt_body`
+- `linked_context_json`
+- `tool_policy_json`
+- `adapter`
+- `model`
+- `reasoning_effort`
+- `metadata`
+- `created_at`
+
+#### `task_session_bindings`
+
+- `binding_id`
+- `task_id`
+- `assignment_id`
+- `orchestration_id`
+- `phase_id`
+- `adapter`
+- `model`
+- `reasoning_effort`
+- `terminal_id`
+- `provider_session_id`
+- `runtime_host`
+- `runtime_fidelity`
+- `reuse_policy`
+- `status`
+- `metadata`
+- `created_at`
+- `last_verified_at`
+
 #### `orchestration_phases`
 
 - `phase_id`
@@ -353,6 +488,10 @@ Required work:
 3. attach orchestrations to root sessions and run ids
 4. surface orchestration status in MCP and HTTP
 5. allow orchestration creation without immediately launching every phase
+6. introduce dispatch requests as queued pre-run intent records
+7. capture immutable run context snapshots before launching child work
+8. record explicit task/session bindings when a phase selects adapter, model,
+   effort, and reuse policy
 
 Primary touchpoints:
 
@@ -373,6 +512,10 @@ Required work:
 3. require structured handoffs between dependent phases
 4. route blocked child prompts back through broker-owned operator actions
 5. reconcile child terminal status back into phase status
+6. apply coalescing and defer policies before dispatching duplicate or
+   dependency-blocked requests
+7. model liveness and recovery outcomes explicitly for stale dispatch requests,
+   phases, and task-session bindings
 
 Primary touchpoints:
 
@@ -497,15 +640,19 @@ This plan is successful when:
 
 1. fix run-state and blocked-state durability
 2. add orchestration tables and service layer
-3. add phase and gate state with minimal HTTP routes
-4. move async workflow execution to orchestration-engine readiness logic
-5. replace hardcoded workflow routing with specialist registry config
+3. add dispatch request, context snapshot, and task-session binding records
+4. add phase and gate state with minimal HTTP routes
+5. move async workflow execution to orchestration-engine readiness logic
+6. replace hardcoded workflow routing with specialist registry config
 
 ## Initial Test Gates
 
 Add or extend tests for:
 
 - run blocked-state persistence and replay
+- dispatch request queue/coalesce/defer/cancel behavior
+- immutable run context snapshot creation before launch
+- task-session binding behavior for adapter, model, effort, and reuse policy
 - orchestration create/get/list lifecycle
 - ready-phase computation for sequential and parallel plans
 - gate approval and rejection behavior
@@ -518,4 +665,3 @@ Existing suites that should remain healthy include:
 - [tests/test-run-ledger-routes.js](/Users/mojave/Documents/AI-projects/cliagents/tests/test-run-ledger-routes.js)
 - [tests/test-orchestration-introspection-routes.js](/Users/mojave/Documents/AI-projects/cliagents/tests/test-orchestration-introspection-routes.js)
 - [tests/test-mcp-root-session-tools.js](/Users/mojave/Documents/AI-projects/cliagents/tests/test-mcp-root-session-tools.js)
-
