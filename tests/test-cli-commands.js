@@ -709,6 +709,8 @@ test('Session manager persists verified effective model changes', () => {
     rootSessionId: 'root-model-1',
     parentSessionId: 'root-model-1',
     adapter: 'claude-code',
+    requestedModel: 'claude-opus-4-7',
+    effectiveModel: 'claude-opus-4-6',
     model: 'claude-opus-4-6',
     originClient: 'test',
     activeRun: { runId: 'abc123def4567890' },
@@ -722,13 +724,19 @@ test('Session manager persists verified effective model changes', () => {
   );
 
   assert.strictEqual(terminal.model, 'claude-opus-4-7');
+  assert.strictEqual(terminal.requestedModel, 'claude-opus-4-7');
+  assert.strictEqual(terminal.effectiveModel, 'claude-opus-4-7');
   assert.strictEqual(touches.length, 1);
   assert.strictEqual(touches[0].payload.model, 'claude-opus-4-7');
+  assert.strictEqual(touches[0].payload.requestedModel, 'claude-opus-4-7');
+  assert.strictEqual(touches[0].payload.effectiveModel, 'claude-opus-4-7');
   assert.strictEqual(events.length, 1);
   assert.strictEqual(events[0].eventType, 'model_verified');
-  assert.strictEqual(events[0].payloadJson.requestedModel, 'claude-opus-4-6');
+  assert.strictEqual(events[0].payloadJson.requestedModel, 'claude-opus-4-7');
+  assert.strictEqual(events[0].payloadJson.previousEffectiveModel, 'claude-opus-4-6');
   assert.strictEqual(events[0].payloadJson.effectiveModel, 'claude-opus-4-7');
   assert.strictEqual(events[0].payloadJson.changed, true);
+  assert.strictEqual(events[0].payloadJson.requestedModelMatched, true);
 });
 
 console.log('\n--- Launch Attach ---');

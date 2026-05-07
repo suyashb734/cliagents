@@ -210,6 +210,17 @@ function createOrchestrationRouter(context) {
       adapter: liveTerminal?.adapter || terminalRow?.adapter || null,
       role: liveTerminal?.role || terminalRow?.role || null,
       agentProfile: terminalRow?.agent_profile || terminalRow?.agentProfile || null,
+      model: liveTerminal?.model || terminalRow?.model || null,
+      requestedModel: liveTerminal?.requestedModel
+        || terminalRow?.requested_model
+        || terminalRow?.requestedModel
+        || null,
+      effectiveModel: liveTerminal?.effectiveModel
+        || terminalRow?.effective_model
+        || terminalRow?.effectiveModel
+        || liveTerminal?.model
+        || terminalRow?.model
+        || null,
       status: liveTerminal?.taskState || liveTerminal?.status || terminalRow?.status || null,
       sessionControlMode: normalizeSessionControlMode(
         liveTerminal?.sessionControlMode
@@ -834,6 +845,8 @@ function createOrchestrationRouter(context) {
         status: liveTerminal.status || liveTerminal.taskState || assignment.status || 'queued',
         adapter: liveTerminal.adapter || assignment.adapter || null,
         model: liveTerminal.model || assignment.model || null,
+        requestedModel: liveTerminal.requestedModel || null,
+        effectiveModel: liveTerminal.effectiveModel || liveTerminal.model || null,
         role: liveTerminal.role || null
       };
     }
@@ -857,6 +870,11 @@ function createOrchestrationRouter(context) {
       status: persistedTerminal.status || assignment.status || 'queued',
       adapter: persistedTerminal.adapter || assignment.adapter || null,
       model: persistedTerminal.model || assignment.model || null,
+      requestedModel: persistedTerminal.requested_model || persistedTerminal.requestedModel || null,
+      effectiveModel: persistedTerminal.effective_model
+        || persistedTerminal.effectiveModel
+        || persistedTerminal.model
+        || null,
       role: persistedTerminal.role || null
     };
   }
@@ -887,11 +905,15 @@ function createOrchestrationRouter(context) {
       usageAttribution,
       adapter: assignment.adapter || terminal?.adapter || null,
       model: assignment.model || terminal?.model || null,
+      requestedModel: terminal?.requestedModel || assignment.model || null,
+      effectiveModel: terminal?.effectiveModel || terminal?.model || assignment.model || null,
       terminal: terminal ? {
         terminalId: terminal.terminalId,
         status: terminal.status,
         adapter: terminal.adapter,
         model: terminal.model,
+        requestedModel: terminal.requestedModel || null,
+        effectiveModel: terminal.effectiveModel || terminal.model || null,
         role: terminal.role,
         missing: terminal.missing === true
       } : null,

@@ -72,7 +72,10 @@ async function run() {
       originClient: 'mcp',
       externalSessionRef: 'opencode:thread-9',
       lineageDepth: 1,
-      sessionMetadata: { clientName: 'opencode' }
+      sessionMetadata: { clientName: 'opencode' },
+      model: 'gpt-5.4',
+      requestedModel: 'gpt-5.5',
+      effectiveModel: 'gpt-5.4'
     }
   );
 
@@ -124,6 +127,9 @@ async function run() {
     assert.strictEqual(recoveredTerminal.rootSessionId, 'feedfeedfeedfeedfeedfeedfeedfeed');
     assert.strictEqual(recoveredTerminal.parentSessionId, 'feedfeedfeedfeedfeedfeedfeedfeed');
     assert.strictEqual(recoveredTerminal.originClient, 'mcp');
+    assert.strictEqual(recoveredTerminal.requestedModel, 'gpt-5.5');
+    assert.strictEqual(recoveredTerminal.effectiveModel, 'gpt-5.4');
+    assert.strictEqual(recoveredTerminal.model, 'gpt-5.4');
     assert(!warnings.some((message) => message.includes('sessionId is required')));
 
     db.addSessionEvent({

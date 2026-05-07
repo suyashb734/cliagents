@@ -1189,6 +1189,19 @@ class PersistentSessionManager extends EventEmitter {
         const providerThreadRef = dbTerminal.providerThreadRef || dbTerminal.provider_thread_ref || null;
         const adoptedAt = dbTerminal.adoptedAt || dbTerminal.adopted_at || null;
         const captureMode = dbTerminal.captureMode || dbTerminal.capture_mode || 'raw-tty';
+        const requestedModel = String(
+          dbTerminal.requestedModel
+          || dbTerminal.requested_model
+          || dbTerminal.model
+          || ''
+        ).trim() || null;
+        const effectiveModel = String(
+          dbTerminal.effectiveModel
+          || dbTerminal.effective_model
+          || dbTerminal.model
+          || requestedModel
+          || ''
+        ).trim() || null;
         const runtimeMetadata = resolveRuntimeHostMetadata({
           ...dbTerminal,
           terminalId,
@@ -1217,6 +1230,9 @@ class PersistentSessionManager extends EventEmitter {
             agentProfile,
             role,
             workDir,
+            model: effectiveModel,
+            requestedModel,
+            effectiveModel,
             logPath: path.join(this.logDir, `${terminalId}.log`),
             status: dbTerminal.status || TerminalStatus.IDLE,
             createdAt: new Date(createdAt),
@@ -1621,6 +1637,8 @@ class PersistentSessionManager extends EventEmitter {
         agentProfile: terminal.agentProfile || null,
         role: terminal.role || 'worker',
         model: terminal.model || null,
+        requestedModel: terminal.requestedModel || null,
+        effectiveModel: terminal.effectiveModel || terminal.model || null,
         workDir: terminal.workDir || null,
         sessionKind: terminal.sessionKind || 'legacy'
       },
@@ -1653,6 +1671,8 @@ class PersistentSessionManager extends EventEmitter {
         tmuxTarget: `${terminal.sessionName}:${terminal.windowName}`,
         workDir: terminal.workDir || null,
         model: terminal.model || null,
+        requestedModel: terminal.requestedModel || null,
+        effectiveModel: terminal.effectiveModel || terminal.model || null,
         harnessSessionId: terminal.harnessSessionId || null,
         providerThreadRef: terminal.providerThreadRef || null
       },
@@ -1684,6 +1704,8 @@ class PersistentSessionManager extends EventEmitter {
         agentProfile: terminal.agentProfile || null,
         role: terminal.role || 'worker',
         model: terminal.model || null,
+        requestedModel: terminal.requestedModel || null,
+        effectiveModel: terminal.effectiveModel || terminal.model || null,
         workDir: terminal.workDir || null,
         sessionKind: terminal.sessionKind || 'legacy',
         reuseReason: extra.reuseReason || 'compatible-root-session'
@@ -1975,7 +1997,14 @@ class PersistentSessionManager extends EventEmitter {
     }
 
     const runId = terminal.activeRun?.runId || null;
+    const requestedModel = String(
+      options.requestedModel
+      || terminal.requestedModel
+      || previousModel
+      || ''
+    ).trim() || null;
     const changed = Boolean(previousModel && previousModel !== effectiveModel);
+    const requestedModelMatched = !requestedModel || requestedModel === effectiveModel;
     const stableStepKey = runId ? `run-${runId}-${effectiveModel}` : `model-${effectiveModel}`;
     return this._recordSessionEvent({
       rootSessionId: terminal.rootSessionId || terminal.terminalId,
@@ -1994,9 +2023,11 @@ class PersistentSessionManager extends EventEmitter {
         : `${terminal.adapter} effective model verified as ${effectiveModel}`,
       payloadJson: {
         adapter: terminal.adapter,
-        requestedModel: previousModel || null,
+        requestedModel,
+        previousEffectiveModel: previousModel || null,
         effectiveModel,
         changed,
+        requestedModelMatched,
         runId,
         source: options.source || null
       },
@@ -2006,32 +2037,41 @@ class PersistentSessionManager extends EventEmitter {
 
   _syncEffectiveModelFromOutput(terminal, output, options = {}) {
     if (!terminal || !output) {
-      return terminal?.model || null;
+      return terminal?.effectiveModel || terminal?.model || null;
     }
 
     const effectiveModel = inferEffectiveModelFromOutput(terminal.adapter, output);
     if (!effectiveModel) {
-      return terminal.model || null;
+      return terminal.effectiveModel || terminal.model || null;
     }
 
-    const previousModel = String(terminal.model || '').trim() || null;
+    const previousModel = String(terminal.effectiveModel || terminal.model || '').trim() || null;
+    const requestedModel = String(terminal.requestedModel || previousModel || '').trim() || null;
     const verifiedKey = `${terminal.activeRun?.runId || 'session'}:${effectiveModel}`;
     if (terminal._lastEffectiveModelVerificationKey === verifiedKey) {
-      return terminal.model || effectiveModel;
+      return terminal.effectiveModel || terminal.model || effectiveModel;
     }
     terminal._lastEffectiveModelVerificationKey = verifiedKey;
 
     if (previousModel !== effectiveModel) {
+      terminal.effectiveModel = effectiveModel;
       terminal.model = effectiveModel;
       if (this.db?.touchTerminalMessage) {
         this.db.touchTerminalMessage(terminal.terminalId, {
           model: effectiveModel,
+          effectiveModel,
+          requestedModel: terminal.requestedModel || null,
           timestamp: Date.now()
         });
       }
+    } else if (!terminal.effectiveModel) {
+      terminal.effectiveModel = effectiveModel;
     }
 
-    this._recordEffectiveModelVerification(terminal, effectiveModel, previousModel, options);
+    this._recordEffectiveModelVerification(terminal, effectiveModel, previousModel, {
+      ...options,
+      requestedModel
+    });
     return effectiveModel;
   }
 
@@ -2523,6 +2563,8 @@ class PersistentSessionManager extends EventEmitter {
       runtime: runtimeMetadata.runtime,
       workDir: terminal.workDir || null,
       model: terminal.model || null,
+      requestedModel: terminal.requestedModel || null,
+      effectiveModel: terminal.effectiveModel || terminal.model || null,
       sessionLabel: terminal.sessionMetadata?.sessionLabel || terminal.sessionLabel || null,
       sessionMetadata: terminal.sessionMetadata || null,
       deferredProviderStart: terminal.deferredProviderStart === true,
@@ -2888,6 +2930,7 @@ class PersistentSessionManager extends EventEmitter {
       throw new Error(`Adapter '${adapter}' is not collaborator-ready in the current child-session runtime`);
     }
     const effectiveModel = resolveTerminalModel(adapter, role, resolvedSessionKind, model);
+    const requestedModel = effectiveModel || null;
     const shouldHonorProviderResumeSessionId = (
       recoveredManagedRoot
       || resolvedSessionKind === 'main'
@@ -3080,6 +3123,8 @@ class PersistentSessionManager extends EventEmitter {
       role,
       workDir,
       model: effectiveModel,
+      requestedModel,
+      effectiveModel,
       systemPrompt,
       allowedTools: Array.isArray(allowedTools) ? [...allowedTools] : null,
       permissionMode: effectivePermissionMode,
@@ -3155,6 +3200,8 @@ class PersistentSessionManager extends EventEmitter {
           sessionMetadata: terminal.sessionMetadata,
           harnessSessionId: terminal.harnessSessionId,
           model: terminal.model || null,
+          requestedModel: terminal.requestedModel || null,
+          effectiveModel: terminal.effectiveModel || terminal.model || null,
           providerThreadRef: terminal.providerThreadRef,
           adoptedAt: terminal.adoptedAt,
           captureMode: terminal.captureMode,
@@ -3253,6 +3300,28 @@ class PersistentSessionManager extends EventEmitter {
     const adoptedAt = options.adoptedAt || new Date().toISOString();
     const captureMode = options.captureMode || 'raw-tty';
     const providerThreadRef = options.providerThreadRef || null;
+    const adoptedRequestedModel = normalizeBrokerModelAlias(
+      adapter,
+      options.requestedModel
+      ?? options.requested_model
+      ?? options.model
+      ?? dbTerminal?.requested_model
+      ?? dbTerminal?.model
+      ?? existingTerminal?.requestedModel
+      ?? existingTerminal?.model
+      ?? null
+    );
+    const adoptedEffectiveModel = normalizeBrokerModelAlias(
+      adapter,
+      options.effectiveModel
+      ?? options.effective_model
+      ?? dbTerminal?.effective_model
+      ?? dbTerminal?.model
+      ?? existingTerminal?.effectiveModel
+      ?? existingTerminal?.model
+      ?? adoptedRequestedModel
+      ?? null
+    );
     const runtimeMetadata = resolveRuntimeHostMetadata({
       sessionName,
       windowName,
@@ -3276,7 +3345,9 @@ class PersistentSessionManager extends EventEmitter {
           agentProfile: dbTerminal.agent_profile || dbTerminal.agentProfile || null,
           role: role || dbTerminal.role || 'main',
           workDir,
-          model: options.model || null,
+          model: adoptedEffectiveModel,
+          requestedModel: adoptedRequestedModel,
+          effectiveModel: adoptedEffectiveModel,
           logPath: dbTerminal.log_path || dbTerminal.logPath || logPath,
           status: dbTerminal.status || TerminalStatus.IDLE,
           createdAt: new Date(dbTerminal.created_at || dbTerminal.createdAt || Date.now()),
@@ -3321,7 +3392,9 @@ class PersistentSessionManager extends EventEmitter {
           agentProfile: null,
           role,
           workDir,
-          model: options.model || null,
+          model: adoptedEffectiveModel,
+          requestedModel: adoptedRequestedModel,
+          effectiveModel: adoptedEffectiveModel,
           logPath,
           status: TerminalStatus.IDLE,
           createdAt: new Date(),
@@ -3361,7 +3434,9 @@ class PersistentSessionManager extends EventEmitter {
       terminal.adapter = adapter || terminal.adapter;
       terminal.role = role || terminal.role;
       terminal.workDir = workDir || terminal.workDir;
-      terminal.model = options.model || terminal.model || null;
+      terminal.requestedModel = adoptedRequestedModel || terminal.requestedModel || null;
+      terminal.effectiveModel = adoptedEffectiveModel || terminal.effectiveModel || terminal.model || null;
+      terminal.model = terminal.effectiveModel || terminal.model || null;
       terminal.rootSessionId = rootSessionId;
       terminal.parentSessionId = parentSessionId;
       terminal.sessionKind = sessionKind;
@@ -3388,6 +3463,8 @@ class PersistentSessionManager extends EventEmitter {
           adapter: terminal.adapter,
           role: terminal.role,
           model: terminal.model || null,
+          requestedModel: terminal.requestedModel || null,
+          effectiveModel: terminal.effectiveModel || terminal.model || null,
           workDir: terminal.workDir,
           logPath: terminal.logPath,
           rootSessionId: terminal.rootSessionId,
@@ -3427,6 +3504,8 @@ class PersistentSessionManager extends EventEmitter {
             sessionMetadata: terminal.sessionMetadata,
             harnessSessionId: terminal.harnessSessionId,
             model: terminal.model || null,
+            requestedModel: terminal.requestedModel || null,
+            effectiveModel: terminal.effectiveModel || terminal.model || null,
             providerThreadRef: terminal.providerThreadRef,
             adoptedAt: terminal.adoptedAt,
             captureMode: terminal.captureMode,

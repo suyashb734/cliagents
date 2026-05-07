@@ -1700,7 +1700,19 @@ class OrchestrationDB {
     const providerThreadRef = terminalOptions.providerThreadRef || null;
     const adoptedAt = terminalOptions.adoptedAt || null;
     const captureMode = terminalOptions.captureMode || 'raw-tty';
-    const model = terminalOptions.model || null;
+    const model = String(terminalOptions.model || '').trim() || null;
+    const requestedModel = String(
+      terminalOptions.requestedModel
+      ?? terminalOptions.requested_model
+      ?? model
+      ?? ''
+    ).trim() || null;
+    const effectiveModel = String(
+      terminalOptions.effectiveModel
+      ?? terminalOptions.effective_model
+      ?? model
+      ?? ''
+    ).trim() || null;
     const lastMessageAt = Number.isFinite(terminalOptions.lastMessageAt) ? terminalOptions.lastMessageAt : null;
     const sessionControlMode = normalizeSessionControlMode(
       terminalOptions.sessionControlMode || terminalOptions.session_control_mode,
@@ -1793,6 +1805,14 @@ class OrchestrationDB {
     if (this._hasColumn('terminals', 'session_control_mode')) {
       columns.push('session_control_mode');
       values.push(sessionControlMode);
+    }
+    if (this._hasColumn('terminals', 'requested_model')) {
+      columns.push('requested_model');
+      values.push(requestedModel);
+    }
+    if (this._hasColumn('terminals', 'effective_model')) {
+      columns.push('effective_model');
+      values.push(effectiveModel);
     }
 
     this.db.run(`
@@ -1948,6 +1968,45 @@ class OrchestrationDB {
         SESSION_CONTROL_MODES.OPERATOR
       ),
       terminalId);
+    }
+
+    const hasModelStateInput = (
+      terminalOptions.model !== undefined
+      || terminalOptions.requestedModel !== undefined
+      || terminalOptions.requested_model !== undefined
+      || terminalOptions.effectiveModel !== undefined
+      || terminalOptions.effective_model !== undefined
+    );
+    if (hasModelStateInput) {
+      const requestedModel = String(
+        terminalOptions.requestedModel
+        ?? terminalOptions.requested_model
+        ?? terminalOptions.model
+        ?? ''
+      ).trim() || null;
+      const effectiveModel = String(
+        terminalOptions.effectiveModel
+        ?? terminalOptions.effective_model
+        ?? terminalOptions.model
+        ?? ''
+      ).trim() || null;
+      const modelStateUpdates = [];
+      const modelStateValues = [];
+      if (this._hasColumn('terminals', 'requested_model')) {
+        modelStateUpdates.push('requested_model = COALESCE(?, requested_model)');
+        modelStateValues.push(requestedModel);
+      }
+      if (this._hasColumn('terminals', 'effective_model')) {
+        modelStateUpdates.push('effective_model = COALESCE(?, effective_model)');
+        modelStateValues.push(effectiveModel);
+      }
+      if (modelStateUpdates.length > 0) {
+        this.db.run(`
+          UPDATE terminals
+          SET ${modelStateUpdates.join(', ')}, last_active = CURRENT_TIMESTAMP
+          WHERE terminal_id = ?
+        `, ...modelStateValues, terminalId);
+      }
     }
   }
 
@@ -2332,17 +2391,39 @@ class OrchestrationDB {
   touchTerminalMessage(terminalId, options = {}) {
     const timestamp = Number.isFinite(options.timestamp) ? options.timestamp : Date.now();
     const model = String(options.model || '').trim() || null;
+    const effectiveModel = String(
+      options.effectiveModel
+      ?? options.effective_model
+      ?? model
+      ?? ''
+    ).trim() || null;
+    const requestedModel = String(
+      options.requestedModel
+      ?? options.requested_model
+      ?? ''
+    ).trim() || null;
+    const updates = ['model = COALESCE(?, model)'];
+    const params = [model];
+    if (this._hasColumn('terminals', 'effective_model')) {
+      updates.push('effective_model = COALESCE(?, effective_model)');
+      params.push(effectiveModel);
+    }
+    if (this._hasColumn('terminals', 'requested_model')) {
+      updates.push('requested_model = COALESCE(?, requested_model)');
+      params.push(requestedModel);
+    }
+    params.push(timestamp, timestamp, terminalId);
     const result = this.db.run(`
       UPDATE terminals
       SET
-        model = COALESCE(?, model),
+        ${updates.join(',\n        ')},
         last_message_at = CASE
           WHEN last_message_at IS NULL OR last_message_at < ? THEN ?
           ELSE last_message_at
         END,
         last_active = CURRENT_TIMESTAMP
       WHERE terminal_id = ?
-    `, model, timestamp, timestamp, terminalId);
+    `, ...params);
     return result.changes > 0;
   }
 
