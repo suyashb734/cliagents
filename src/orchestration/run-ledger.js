@@ -264,15 +264,44 @@ class RunLedgerService {
     const runId = input.id || generateId('run');
     const startedAt = input.startedAt || Date.now();
     const messageHash = input.messageHash || computeMessageHash(input.kind, input.hashInput || {});
+    const hasProjectColumn = typeof this.db?._hasColumn === 'function'
+      ? this.db._hasColumn('runs', 'project_id')
+      : false;
+    const projectId = hasProjectColumn
+      ? (String(input.projectId || input.project_id || '').trim() || this.db._resolveSingleProjectId([
+        this.db._getTaskProjectId(input.taskId),
+        this.db._resolveProjectIdForWorkspaceRoot(input.workingDirectory, {
+          metadata: { source: 'run_create' },
+          createdAt: startedAt
+        })
+      ]))
+      : null;
 
-    this.db.db.prepare(`
-      INSERT INTO runs (
-        id, kind, status, message_hash, input_summary, working_directory, initiator,
-        trace_id, discussion_id, current_step, active_participant_count, decision_summary,
-        decision_source, failure_class, retry_count, metadata, started_at,
-        last_heartbeat_at, completed_at, duration_ms, root_session_id, task_id
-      ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-    `).run(
+    const columns = [
+      'id',
+      'kind',
+      'status',
+      'message_hash',
+      'input_summary',
+      'working_directory',
+      'initiator',
+      'trace_id',
+      'discussion_id',
+      'current_step',
+      'active_participant_count',
+      'decision_summary',
+      'decision_source',
+      'failure_class',
+      'retry_count',
+      'metadata',
+      'started_at',
+      'last_heartbeat_at',
+      'completed_at',
+      'duration_ms',
+      'root_session_id',
+      'task_id'
+    ];
+    const values = [
       runId,
       input.kind,
       input.status || 'pending',
@@ -295,7 +324,16 @@ class RunLedgerService {
       input.durationMs || null,
       input.rootSessionId || null,
       input.taskId || null
-    );
+    ];
+    if (hasProjectColumn) {
+      columns.push('project_id');
+      values.push(projectId);
+    }
+
+    this.db.db.prepare(`
+      INSERT INTO runs (${columns.join(', ')})
+      VALUES (${columns.map(() => '?').join(', ')})
+    `).run(...values);
 
     return runId;
   }
@@ -827,6 +865,15 @@ class RunLedgerService {
     const discussionMessages = discussionId && typeof this.db.getDiscussionMessages === 'function'
       ? this.db.getDiscussionMessages(discussionId)
       : [];
+    const blockedStates = typeof this.db.listRunBlockedStates === 'function'
+      ? this.db.listRunBlockedStates(runId)
+      : [];
+    const activeBlockedState = typeof this.db.getActiveBlockedState === 'function'
+      ? this.db.getActiveBlockedState(runId)
+      : null;
+    const operatorActions = typeof this.db.listOperatorActions === 'function'
+      ? this.db.listOperatorActions(runId)
+      : [];
 
     return {
       run: this._mapRunRow(run),
@@ -836,7 +883,11 @@ class RunLedgerService {
       steps,
       inputs,
       outputs,
-      toolEvents
+      toolEvents,
+      blockedStates,
+      activeBlockedState,
+      isBlocked: Boolean(activeBlockedState),
+      operatorActions
     };
   }
 
@@ -970,6 +1021,58 @@ class RunLedgerService {
       completedAt: row.completed_at,
       metadata: parseJson(row.metadata)
     };
+  }
+
+  appendOperatorAction(input) {
+    return this.db.appendOperatorAction({
+      actionId: input.actionId,
+      runId: input.runId,
+      terminalId: input.terminalId || null,
+      actionKind: input.actionKind,
+      payload: input.payload,
+      createdAt: input.createdAt
+    });
+  }
+
+  getOperatorAction(actionId) {
+    return this.db.getOperatorAction(actionId);
+  }
+
+  listOperatorActions(runId, options = {}) {
+    return this.db.listOperatorActions(runId, options);
+  }
+
+  getActiveBlockedState(runId) {
+    return this.db.getActiveBlockedState(runId);
+  }
+
+  getRunBlockedState(id) {
+    return this.db.getRunBlockedState(id);
+  }
+
+  listRunBlockedStates(runId, options = {}) {
+    return this.db.listRunBlockedStates(runId, options);
+  }
+
+  appendRunBlockedState(input) {
+    // Blocked state is a run-ledger overlay, not a runs.status value. Existing
+    // statuses continue to describe execution lifecycle while this side channel
+    // carries operator-facing blockage details.
+    return this.db.appendRunBlockedState({
+      id: input.id,
+      runId: input.runId,
+      blockedReason: input.blockedReason,
+      blockingDetail: input.blockingDetail || null,
+      metadata: input.metadata || {},
+      createdAt: input.createdAt
+    });
+  }
+
+  unblockRun(runId, input = {}) {
+    return this.db.unblockRun(runId, {
+      unblockedAt: input.unblockedAt,
+      unblockReason: input.unblockReason || null
+    });
   }
 }
 

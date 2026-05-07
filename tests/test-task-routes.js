@@ -350,6 +350,58 @@ async function runRouteAssertions() {
     assert.strictEqual(listAssignmentsRes.data.assignments[0].terminalStatus, 'processing');
     assert.strictEqual(listAssignmentsRes.data.assignments[0].usageSummary.totalTokens, 15);
 
+    const liveTerminal = sessionManager.state.terminals.get(startAssignmentRes.data.assignment.terminalId);
+    sessionManager.state.terminals.delete(startAssignmentRes.data.assignment.terminalId);
+    const missingTerminalTaskRes = await request(serverHandle.baseUrl, 'GET', `/orchestration/tasks/${taskId}`);
+    assert.strictEqual(missingTerminalTaskRes.status, 200);
+    assert.strictEqual(missingTerminalTaskRes.data.status, 'failed');
+    assert.strictEqual(missingTerminalTaskRes.data.assignmentCounts.failed, 1);
+    assert(missingTerminalTaskRes.data.task.projectId, 'new workspace-backed tasks should be linked to a project');
+    const missingTerminalAssignmentsRes = await request(serverHandle.baseUrl, 'GET', `/orchestration/tasks/${taskId}/assignments`);
+    assert.strictEqual(missingTerminalAssignmentsRes.status, 200);
+    assert.strictEqual(missingTerminalAssignmentsRes.data.assignments[0].status, 'failed');
+    assert.strictEqual(missingTerminalAssignmentsRes.data.assignments[0].terminalStatus, 'terminal_missing');
+    assert.strictEqual(missingTerminalAssignmentsRes.data.assignments[0].terminalMissing, true);
+
+    db.updateTaskAssignment(assignmentId, { status: 'completed', completedAt: Date.now() });
+    const reconciledAssignmentRes = await request(serverHandle.baseUrl, 'GET', `/orchestration/tasks/${taskId}/assignments`);
+    assert.strictEqual(reconciledAssignmentRes.status, 200);
+    assert.strictEqual(reconciledAssignmentRes.data.assignments[0].status, 'completed');
+    db.updateTaskAssignment(assignmentId, { status: 'running', completedAt: null });
+    sessionManager.state.terminals.set(startAssignmentRes.data.assignment.terminalId, liveTerminal);
+
+    liveTerminal.status = 'error';
+    liveTerminal.taskState = 'error';
+    const failedTaskRes = await request(serverHandle.baseUrl, 'GET', `/orchestration/tasks/${taskId}`);
+    assert.strictEqual(failedTaskRes.status, 200);
+    assert.strictEqual(failedTaskRes.data.status, 'failed');
+
+    const supersedeRes = await request(
+      serverHandle.baseUrl,
+      'POST',
+      `/orchestration/tasks/${taskId}/assignments/${assignmentId}/supersede`,
+      {
+        reason: 'provider model mismatch',
+        replacement: {
+          id: 'assignment-retry-gpt54',
+          model: 'gpt-5.4',
+          metadata: {
+            startPolicy: 'after-phase0-contract'
+          }
+        }
+      }
+    );
+    assert.strictEqual(supersedeRes.status, 200);
+    assert.strictEqual(supersedeRes.data.assignment.status, 'superseded');
+    assert.strictEqual(supersedeRes.data.assignment.terminalStatus, 'error');
+    assert.strictEqual(supersedeRes.data.replacement.id, 'assignment-retry-gpt54');
+    assert.strictEqual(supersedeRes.data.replacement.model, 'gpt-5.4');
+    assert.strictEqual(supersedeRes.data.replacement.metadata.supersedes, assignmentId);
+    assert.strictEqual(supersedeRes.data.replacement.metadata.startPolicy, 'after-phase0-contract');
+    assert.strictEqual(supersedeRes.data.task.status, 'pending');
+    assert.strictEqual(supersedeRes.data.task.assignmentCounts.superseded, 1);
+    assert.strictEqual(supersedeRes.data.task.assignmentCounts.queued, 1);
+
     const createRoomWithTaskRes = await request(serverHandle.baseUrl, 'POST', '/orchestration/rooms', {
       title: 'Task-linked room',
       taskId,

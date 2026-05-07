@@ -40,6 +40,7 @@ const CLIAGENTS_URL = process.env.CLIAGENTS_URL || 'http://localhost:4001';
 const CLIAGENTS_API_KEY = process.env.CLIAGENTS_API_KEY || process.env.CLI_AGENTS_API_KEY || null;
 const MCP_POLL_INTERVAL_MS = parseInt(process.env.CLIAGENTS_MCP_POLL_MS || '3000', 10);
 const MCP_SYNC_WAIT_MS = parseInt(process.env.CLIAGENTS_MCP_SYNC_WAIT_MS || '25000', 10);
+const MCP_ROOM_DISCUSSION_TIMEOUT_MS = parseInt(process.env.CLIAGENTS_MCP_ROOM_DISCUSSION_TIMEOUT_MS || '90000', 10);
 const MCP_STATUS_RETRY_AFTER_MS = parseInt(process.env.CLIAGENTS_MCP_RETRY_AFTER_MS || String(Math.max(MCP_POLL_INTERVAL_MS * 2, 8000)), 10);
 const SESSION_GRAPH_WRITES_ENABLED = process.env.SESSION_GRAPH_WRITES_ENABLED === '1';
 const REQUIRE_ROOT_ATTACH = process.env.CLIAGENTS_REQUIRE_ROOT_ATTACH === '1';
@@ -1450,6 +1451,10 @@ This calls cliagents' direct-session discussion route and returns the completed 
           type: 'string',
           description: 'Provider-native session ID to exact-resume into a new managed root.'
         },
+        providerResumePicker: {
+          type: 'boolean',
+          description: 'For Codex managed roots, request provider-session resume picker behavior when no exact providerSessionId is supplied.'
+        },
         sourceRootSessionId: {
           type: 'string',
           description: 'Optional source root session ID to link or carry context from when using exact or context resume.'
@@ -1556,6 +1561,36 @@ This calls cliagents' direct-session discussion route and returns the completed 
         limit: {
           type: 'number',
           description: 'Maximum number of root sessions to list. Default: 20'
+        }
+      }
+    }
+  },
+  {
+    name: 'get_remote_snapshot',
+    description: 'Get a runtime-neutral read-only broker snapshot for remote, web, or mobile clients.',
+    inputSchema: {
+      type: 'object',
+      properties: {
+        rootLimit: {
+          type: 'number',
+          description: 'Maximum root sessions to include. Default: 20'
+        },
+        taskLimit: {
+          type: 'number',
+          description: 'Maximum tasks to include. Default: 20'
+        },
+        roomLimit: {
+          type: 'number',
+          description: 'Maximum rooms to include. Default: 20'
+        },
+        includeUsage: {
+          type: 'boolean',
+          description: 'Include global usage totals. Default: true'
+        },
+        format: {
+          type: 'string',
+          enum: ['summary', 'json'],
+          description: 'Return a human summary or raw JSON. Default: summary'
         }
       }
     }
@@ -2042,6 +2077,10 @@ This calls cliagents' direct-session discussion route and returns the completed 
         judge: {
           type: ['object', 'null'],
           description: 'Optional final judge config. Pass null to skip judge synthesis.'
+        },
+        timeout: {
+          type: 'number',
+          description: 'Maximum server-side discussion time in milliseconds. Default for MCP calls is CLIAGENTS_MCP_ROOM_DISCUSSION_TIMEOUT_MS.'
         },
         writebackMode: {
           type: 'string',
@@ -3289,14 +3328,80 @@ async function handleListRootSessions(args) {
       : '';
     const modeSuffix = root.rootMode ? ` mode=${root.rootMode}` : '';
     const interactiveSuffix = root.interactiveTerminalId ? ` interactive=${root.interactiveTerminalId}` : '';
+    const runtimeSuffix = root.runtimeHost ? ` runtime=${root.runtimeHost}` : '';
+    const fidelitySuffix = root.runtimeFidelity ? ` fidelity=${root.runtimeFidelity}` : '';
     const activitySuffix = root.activitySummary ? ` summary="${truncateText(root.activitySummary, 100)}"` : '';
-    return `- ${root.rootSessionId} status=${root.status} events=${root.eventCount}${modeSuffix}${interactiveSuffix}${attentionSuffix}${activitySuffix}`;
+    return `- ${root.rootSessionId} status=${root.status} events=${root.eventCount}${modeSuffix}${interactiveSuffix}${runtimeSuffix}${fidelitySuffix}${attentionSuffix}${activitySuffix}`;
   });
 
   return {
     content: [{
       type: 'text',
       text: `## Root Sessions\n\n${lines.join('\n')}`
+    }]
+  };
+}
+
+async function handleGetRemoteSnapshot(args) {
+  const params = new URLSearchParams();
+  if (Number.isFinite(args?.rootLimit)) {
+    params.set('rootLimit', String(args.rootLimit));
+  }
+  if (Number.isFinite(args?.taskLimit)) {
+    params.set('taskLimit', String(args.taskLimit));
+  }
+  if (Number.isFinite(args?.roomLimit)) {
+    params.set('roomLimit', String(args.roomLimit));
+  }
+  if (typeof args?.includeUsage === 'boolean') {
+    params.set('includeUsage', args.includeUsage ? '1' : '0');
+  }
+
+  const res = await callCliagents('GET', `/orchestration/remote/snapshot${params.toString() ? `?${params.toString()}` : ''}`);
+  if (res.status !== 200) {
+    throw new Error(`Failed to get remote snapshot: ${JSON.stringify(res.data)}`);
+  }
+
+  if (args?.format === 'json') {
+    return {
+      content: [{
+        type: 'text',
+        text: JSON.stringify(res.data, null, 2)
+      }]
+    };
+  }
+
+  const data = res.data || {};
+  const roots = Array.isArray(data.roots) ? data.roots : [];
+  const actionableRoots = roots.filter((root) => root.attention?.requiresAttention).length;
+  const runningRoots = roots.filter((root) => ['running', 'processing', 'blocked'].includes(String(root.status || '').toLowerCase())).length;
+  const usageTokens = data.usage?.summary?.totalTokens || 0;
+
+  return {
+    content: [{
+      type: 'text',
+      text: [
+        '## Remote Broker Snapshot',
+        '',
+        `api_version: ${data.apiVersion || 'remote-v1'}`,
+        `generated_at: ${data.generatedAt || 'n/a'}`,
+        `bind_host: ${data.access?.bindHost || 'n/a'}`,
+        `local_only_default: ${data.access?.localOnlyDefault === true}`,
+        `auth_required: ${data.access?.authRequired === true}`,
+        `raw_terminal_input: ${data.access?.rawTerminalInput || 'runtime_capability_gated'}`,
+        `roots: ${data.counts?.roots ?? roots.length}`,
+        `running_roots: ${runningRoots}`,
+        `actionable_roots: ${actionableRoots}`,
+        `tasks: ${data.counts?.tasks ?? 0}`,
+        `rooms: ${data.counts?.rooms ?? 0}`,
+        data.usage ? `usage_total_tokens: ${usageTokens}` : null,
+        '',
+        'Routes:',
+        `roots: ${data.routes?.roots || '/orchestration/root-sessions'}`,
+        `tasks: ${data.routes?.tasks || '/orchestration/tasks'}`,
+        `rooms: ${data.routes?.rooms || '/orchestration/rooms'}`,
+        `session_events: ${data.routes?.sessionEvents || '/orchestration/session-events?normalized=1'}`
+      ].filter(Boolean).join('\n')
     }]
   };
 }
@@ -3441,6 +3546,7 @@ async function handleLaunchRootSession(args) {
     recoverLatest: args?.recoverLatest === true,
     resumeMode: args?.resumeMode || null,
     providerSessionId: args?.providerSessionId || null,
+    providerResumePicker: args?.providerResumePicker === true,
     sourceRootSessionId: args?.sourceRootSessionId || null,
     detach: true
   };
@@ -3450,6 +3556,12 @@ async function handleLaunchRootSession(args) {
   const hasExplicitResumeMode = Boolean(launchOptions.resumeMode);
   if (launchOptions.forceNewRoot && (hasResumeFlag || hasRecoverFlag)) {
     throw new Error('Cannot combine forceNewRoot with resume or recover options');
+  }
+  if (launchOptions.providerSessionId && launchOptions.providerResumePicker) {
+    throw new Error('Cannot combine providerSessionId with providerResumePicker');
+  }
+  if (launchOptions.providerResumePicker && launchOptions.adapter !== 'codex-cli') {
+    throw new Error('providerResumePicker is currently supported only for Codex managed roots');
   }
   if (launchOptions.externalSessionRef && (hasResumeFlag || hasRecoverFlag)) {
     throw new Error('Cannot combine externalSessionRef with resume or recover options');
@@ -3476,6 +3588,7 @@ async function handleLaunchRootSession(args) {
       allowedTools: launchOptions.allowedTools,
       resumeMode: launchOptions.resumeMode,
       providerSessionId: launchOptions.providerSessionId || null,
+      providerResumePicker: launchOptions.providerResumePicker === true,
       sourceRootSessionId: launchOptions.sourceRootSessionId || null
     });
     if (res.status !== 200) {
@@ -3495,6 +3608,7 @@ async function handleLaunchRootSession(args) {
           `terminal_id: ${data.terminalId || 'n/a'}`,
           `session_name: ${data.sessionName || 'n/a'}`,
           launchOptions.resumeMode === 'exact' ? `provider_session_id: ${launchOptions.providerSessionId}` : null,
+          launchOptions.providerResumePicker ? 'provider_resume: picker' : null,
           launchOptions.sourceRootSessionId ? `source_root_session_id: ${launchOptions.sourceRootSessionId}` : null,
           `external_session_ref: ${data.externalSessionRef || launchOptions.externalSessionRef || 'n/a'}`,
           `console_url: ${data.consoleUrl || 'n/a'}`,
@@ -3549,7 +3663,10 @@ async function handleLaunchRootSession(args) {
           `profile: ${recoveryOptions.profile}`,
           `recovery_reason: ${previousCandidate.recoveryReason || 'stale-root'}`,
           `external_session_ref: ${result.externalSessionRef || previousCandidate.externalSessionRef || 'n/a'}`,
-          `provider_resume_session_id: ${recoveryOptions.sessionMetadata?.providerResumeSessionId || 'latest'}`,
+          recoveryOptions.sessionMetadata?.providerResumePicker ? 'provider_resume: picker' : null,
+          recoveryOptions.sessionMetadata?.providerResumeSessionId
+            ? `provider_resume_session_id: ${recoveryOptions.sessionMetadata.providerResumeSessionId}`
+            : null,
           `console_url: ${result.consoleUrl || 'n/a'}`,
           result.attachCommand ? `attach_command: ${result.attachCommand}` : null
         ].filter(Boolean).join('\n')
@@ -3576,6 +3693,7 @@ async function handleLaunchRootSession(args) {
           `profile: ${contextOptions.profile}`,
           'resume_mode: context',
           `context_reason: ${contextOptions.sessionMetadata?.modelSwitch ? 'model-switch' : (previousCandidate.recoveryReason || 'stale-root')}`,
+          contextOptions.providerResumePicker ? 'provider_resume: picker' : null,
           `external_session_ref: ${result.externalSessionRef || previousCandidate.externalSessionRef || 'n/a'}`,
           `console_url: ${result.consoleUrl || 'n/a'}`,
           result.attachCommand ? `attach_command: ${result.attachCommand}` : null
@@ -3596,6 +3714,7 @@ async function handleLaunchRootSession(args) {
         `terminal_id: ${result.terminalId}`,
         `session_name: ${result.sessionName}`,
         `profile: ${launchOptions.profile}`,
+        launchOptions.providerResumePicker ? 'provider_resume: picker' : null,
         `external_session_ref: ${result.externalSessionRef || 'n/a'}`,
         `console_url: ${result.consoleUrl || 'n/a'}`,
         result.attachCommand ? `attach_command: ${result.attachCommand}` : null
@@ -3681,7 +3800,11 @@ async function handleListProviderSessions(args) {
         `## Provider Sessions (${adapter})`,
         '',
         sessions.map((session) => (
-          `- ${session.providerSessionId} title="${truncateText(session.title || session.preview || 'session', 80)}"${session.updatedAt ? ` updated=${session.updatedAt}` : ''}${session.cwd ? ` cwd=${session.cwd}` : ''}${session.resumeCapability ? ` resume=${session.resumeCapability}` : ''}`
+          [
+            `- ${session.providerSessionId} title="${truncateText(session.title || session.preview || 'session', 80)}"${session.updatedAt ? ` updated=${session.updatedAt}` : ''}${session.cwd ? ` cwd=${session.cwd}` : ''}${session.resumeCapability ? ` resume=${session.resumeCapability}` : ''}${session.messageCount ? ` messages=${session.messageCount}` : ''}`,
+            session.summary ? `  summary: ${truncateText(session.summary, 180)}` : null,
+            session.lastAssistantMessage ? `  last_assistant: ${truncateText(session.lastAssistantMessage, 160)}` : null
+          ].filter(Boolean).join('\n')
         )).join('\n')
       ].join('\n')
     }]
@@ -3711,6 +3834,14 @@ async function handleImportProviderSession(args) {
         `root_session_id: ${data.rootSessionId || 'n/a'}`,
         `reused: ${data.reusedImportedRoot ? 'yes' : 'no'}`,
         `external_session_ref: ${data.externalSessionRef || 'n/a'}`,
+        `runtime_host: ${data.runtimeHost || data.runtime?.host || 'n/a'}`,
+        `runtime_fidelity: ${data.runtimeFidelity || data.runtime?.fidelity || 'n/a'}`,
+        Array.isArray(data.runtimeCapabilities)
+          ? `runtime_capabilities: ${data.runtimeCapabilities.join(',') || 'none'}`
+          : null,
+        Array.isArray(data.controlLimitations) && data.controlLimitations.length > 0
+          ? `control_limitations: ${data.controlLimitations.join(',')}`
+          : null,
         data.descriptor?.title ? `title: ${data.descriptor.title}` : null
       ].filter(Boolean).join('\n')
     }]
@@ -4103,6 +4234,7 @@ async function handleDiscussRoom(args) {
     requestId: args?.requestId || null,
     rounds: Array.isArray(args?.rounds) ? args.rounds : undefined,
     judge: Object.prototype.hasOwnProperty.call(args || {}, 'judge') ? args.judge : null,
+    timeout: Number.isFinite(Number(args?.timeout)) ? Number(args.timeout) : MCP_ROOM_DISCUSSION_TIMEOUT_MS,
     writebackMode: args?.writebackMode || null
   });
   if (res.status !== 200) {
@@ -4165,7 +4297,9 @@ async function handleGetRootSessionStatus(args) {
     const adapter = session.adapter ? ` [${session.adapter}]` : '';
     const kind = session.sessionKind ? ` kind=${session.sessionKind}` : '';
     const profile = session.agentProfile ? ` profile=${session.agentProfile}` : '';
-    return `- ${session.sessionId} status=${session.status}${adapter}${kind}${profile}`;
+    const runtime = session.runtimeHost ? ` runtime=${session.runtimeHost}` : '';
+    const fidelity = session.runtimeFidelity ? ` fidelity=${session.runtimeFidelity}` : '';
+    return `- ${session.sessionId} status=${session.status}${adapter}${kind}${profile}${runtime}${fidelity}`;
   });
 
   return {
@@ -4176,8 +4310,14 @@ async function handleGetRootSessionStatus(args) {
         '',
         `status: ${snapshot.status}`,
         `root_mode: ${snapshot.rootMode || 'n/a'}`,
+        `runtime_host: ${snapshot.runtimeHost || 'n/a'}`,
+        `runtime_fidelity: ${snapshot.runtimeFidelity || 'n/a'}`,
         `interactive_terminal_id: ${snapshot.interactiveTerminalId || 'n/a'}`,
         `sessions: ${snapshot.counts?.sessions || 0}`,
+        `normalized_events: ${snapshot.normalizedEvents?.length || 0}`,
+        snapshot.eventNormalization?.skippedCount
+          ? `event_normalization_skipped: ${snapshot.eventNormalization.skippedCount}`
+          : null,
         `running: ${snapshot.counts?.running || 0}`,
         `blocked: ${snapshot.counts?.blocked || 0}`,
         `stale: ${snapshot.counts?.stale || 0}`,
@@ -4240,7 +4380,10 @@ async function handleListChildSessions(args) {
         agentProfile: session.agentProfile || null,
         status: session.status || null,
         lastActive: session.lastActive || null,
-        providerThreadRefPresent: Boolean(session.providerThreadRef)
+        providerThreadRefPresent: Boolean(session.providerThreadRef),
+        runtimeHost: session.runtimeHost || session.runtime?.host || null,
+        runtimeId: session.runtimeId || session.runtime?.id || null,
+        runtimeFidelity: session.runtimeFidelity || session.runtime?.fidelity || null
       }));
   } else {
     throw new Error(`Failed to list child sessions: ${JSON.stringify(childRouteRes.data)}`);
@@ -4262,8 +4405,10 @@ async function handleListChildSessions(args) {
     const profile = session.agentProfile ? ` profile=${session.agentProfile}` : '';
     const role = session.role ? ` role=${session.role}` : '';
     const providerThread = session.providerThreadRefPresent ? ' providerThread=present' : '';
+    const runtime = session.runtimeHost ? ` runtime=${session.runtimeHost}` : '';
+    const fidelity = session.runtimeFidelity ? ` fidelity=${session.runtimeFidelity}` : '';
     const lastActive = session.lastActive ? ` lastActive=${session.lastActive}` : '';
-    return `- ${session.terminalId} status=${session.status}${adapter}${kind}${label}${profile}${role}${providerThread}${lastActive}`;
+    return `- ${session.terminalId} status=${session.status}${adapter}${kind}${label}${profile}${role}${providerThread}${runtime}${fidelity}${lastActive}`;
   });
 
   return {
@@ -4853,6 +4998,9 @@ async function handleRequest(request) {
           case 'list_root_sessions':
             result = await handleListRootSessions(args);
             break;
+          case 'get_remote_snapshot':
+            result = await handleGetRemoteSnapshot(args);
+            break;
           case 'get_root_session_status':
             result = await handleGetRootSessionStatus(args);
             break;
@@ -4985,6 +5133,7 @@ module.exports = {
   handleReplyToTerminal,
   handleGetTerminalOutput,
   handleGetRootSessionStatus,
+  handleGetRemoteSnapshot,
   handleListChildSessions,
   handleGetUsageSummary,
   handleListAdapterReadiness,

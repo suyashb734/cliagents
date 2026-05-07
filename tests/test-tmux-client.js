@@ -7,6 +7,7 @@
 
 const assert = require('assert');
 const path = require('path');
+const fs = require('fs');
 
 // Import the TmuxClient
 const TmuxClient = require('../src/tmux/client');
@@ -85,9 +86,9 @@ async function testNameValidationSafe() {
   console.log('  ✅ All safe names accepted');
 }
 
-// Test: sendKeys writes literal newline-containing input through tmux
+// Test: sendKeys writes single-line input through literal tmux mode
 async function testSendKeysLiteralMode() {
-  console.log('\n📝 Test: sendKeys uses tmux literal mode for newline-containing input');
+  console.log('\n📝 Test: sendKeys uses tmux literal mode for single-line input');
 
   const stubClient = Object.create(TmuxClient.prototype);
   const calls = [];
@@ -97,17 +98,50 @@ async function testSendKeysLiteralMode() {
     return '';
   };
 
-  stubClient.sendKeys('test-session', 'test-window', 'line1\nline2; $(whoami)', false);
+  stubClient.sendKeys('test-session', 'test-window', 'line1; $(whoami)', false);
 
   assert.deepStrictEqual(calls, [[
     'send-keys',
     '-t',
     'test-session:test-window',
     '-l',
-    'line1\nline2; $(whoami)'
+    'line1; $(whoami)'
   ]]);
 
-  console.log('  ✅ sendKeys writes newline-containing input via literal mode');
+  console.log('  ✅ sendKeys writes single-line input via literal mode');
+}
+
+// Test: sendKeys writes newline-containing input through bracketed paste buffer
+async function testSendKeysMultilinePasteBuffer() {
+  console.log('\n📝 Test: sendKeys uses tmux paste-buffer for multiline input');
+
+  const stubClient = Object.create(TmuxClient.prototype);
+  const calls = [];
+  stubClient.logDir = path.join(process.cwd(), 'logs', 'test');
+  fs.mkdirSync(stubClient.logDir, { recursive: true });
+  stubClient._exec = (args) => {
+    calls.push(args);
+    return '';
+  };
+
+  stubClient.sendKeys('test-session', 'test-window', 'line1\nline2; $(whoami)', false);
+
+  assert.strictEqual(calls.length, 2);
+  assert.strictEqual(calls[0][0], 'load-buffer');
+  assert.strictEqual(calls[0][1], '-b');
+  assert(calls[0][2].startsWith('cli-'), `Expected generated buffer name, got ${calls[0][2]}`);
+  assert(calls[0][3].includes('.tmux-input-'), `Expected temp input path, got ${calls[0][3]}`);
+  assert.deepStrictEqual(calls[1], [
+    'paste-buffer',
+    '-t',
+    'test-session:test-window',
+    '-b',
+    calls[0][2],
+    '-d',
+    '-p'
+  ]);
+
+  console.log('  ✅ sendKeys writes multiline input via bracketed paste buffer');
 }
 
 // Test: Shell escaping for single quotes
@@ -220,6 +254,8 @@ async function testPreferredServerOptionsBootstrap() {
     'Expected focus-events bootstrap');
   assert(executed.some((entry) => entry.includes('set-option -g extended-keys on')),
     'Expected extended-keys bootstrap');
+  assert(executed.some((entry) => entry.includes('set-option -g assume-paste-time 10')),
+    'Expected assume-paste-time bootstrap');
 
   console.log('  ✅ tmux capability bootstrap requests RGB-friendly options');
 }
@@ -253,8 +289,10 @@ async function testInlineBootstrapOnFirstSessionCreate() {
     'Expected inline terminal-overrides bootstrap before first new-session');
   assert(initialCommand.includes('set-option -g focus-events on ;'),
     'Expected inline focus-events bootstrap before first new-session');
-  assert(initialCommand.includes('set-option -g extended-keys on ; new-session -d -s inline-session -n main'),
-    'Expected inline extended-keys bootstrap immediately before new-session');
+  assert(initialCommand.includes('set-option -g extended-keys on ;'),
+    'Expected inline extended-keys bootstrap before first new-session');
+  assert(initialCommand.includes('set-option -g assume-paste-time 10 ; new-session -d -s inline-session -n main'),
+    'Expected inline assume-paste-time bootstrap immediately before new-session');
 
   console.log('  ✅ first-session bootstrap is applied inline');
 }
@@ -488,6 +526,7 @@ async function runTests() {
     testNameValidation,
     testNameValidationSafe,
     testSendKeysLiteralMode,
+    testSendKeysMultilinePasteBuffer,
     testShellEscaping,
     testSessionLifecycle,
     testSessionEnvironmentRemoval,

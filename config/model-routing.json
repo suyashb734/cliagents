@@ -4,6 +4,36 @@
     "version": "1.0"
   },
   "adapters": {
+    "codex-cli": {
+      "description": "Pin Codex child execution to a known supported model instead of inheriting a user default that may require a newer CLI.",
+      "taskFamilies": {
+        "default": ["gpt5", "mini"],
+        "plan": ["gpt5", "mini"],
+        "architect": ["gpt5", "mini"],
+        "research": ["gpt5", "mini"],
+        "document": ["gpt5", "mini"],
+        "review": ["gpt5", "mini"],
+        "review-security": ["gpt5", "mini"],
+        "review-performance": ["gpt5", "mini"],
+        "implement": ["gpt5", "mini"],
+        "fix": ["gpt5", "mini"],
+        "test": ["gpt5", "mini"]
+      },
+      "families": {
+        "gpt5": {
+          "description": "High-capability Codex lane verified with the current installed CLI.",
+          "providers": {
+            "openai": ["gpt-5.4"]
+          }
+        },
+        "mini": {
+          "description": "Lower-cost fallback lanes for small bounded tasks.",
+          "providers": {
+            "openai": ["o4-mini", "o3-mini"]
+          }
+        }
+      }
+    },
     "opencode-cli": {
       "description": "Prefer coding-oriented MiniMax lanes for implementation, with Qwen and GLM fallback lanes for reasoning and degraded-provider recovery.",
       "taskFamilies": {

@@ -15,6 +15,33 @@ const {
 
 const MEMORY_BUNDLE_SCOPE_TYPES = new Set(['run', 'root', 'task']);
 const MESSAGE_ROLES = new Set(['user', 'assistant', 'system', 'tool']);
+const MEMORY_RECORD_TYPES = new Set([
+  'project',
+  'task',
+  'task_assignment',
+  'room',
+  'room_participant',
+  'room_turn',
+  'room_message',
+  'terminal',
+  'session_event',
+  'message',
+  'run',
+  'run_participant',
+  'run_step',
+  'run_input',
+  'run_output',
+  'run_tool_event',
+  'usage',
+  'discussion',
+  'discussion_message',
+  'artifact',
+  'finding',
+  'context',
+  'memory_snapshot',
+  'operator_action',
+  'run_blocked_state'
+]);
 
 function parseBooleanQuery(value, fallback = false) {
   if (typeof value === 'boolean') {
@@ -66,6 +93,51 @@ function sendRouteError(res, status, code, message, param) {
       ...(param ? { param } : {})
     }
   });
+}
+
+function parseCsvQuery(value) {
+  if (Array.isArray(value)) {
+    return value.flatMap((entry) => parseCsvQuery(entry));
+  }
+  return String(value || '')
+    .split(',')
+    .map((entry) => entry.trim())
+    .filter(Boolean);
+}
+
+function buildMemoryReadModelOptions(query = {}) {
+  return {
+    projectId: query.project_id || query.projectId || undefined,
+    workspaceRoot: query.workspace_root || query.workspaceRoot || undefined,
+    taskId: query.task_id || query.taskId || undefined,
+    rootSessionId: query.root_session_id || query.rootSessionId || undefined,
+    runId: query.run_id || query.runId || undefined,
+    roomId: query.room_id || query.roomId || undefined,
+    terminalId: query.terminal_id || query.terminalId || undefined,
+    taskAssignmentId: query.task_assignment_id || query.taskAssignmentId || undefined,
+    participantId: query.participant_id || query.participantId || undefined,
+    discussionId: query.discussion_id || query.discussionId || undefined,
+    traceId: query.trace_id || query.traceId || undefined
+  };
+}
+
+function normalizeReadModelError(error) {
+  if (error?.code === 'memory_read_model_unavailable') {
+    return {
+      status: 503,
+      code: error.code,
+      message: error.message
+    };
+  }
+  if (error?.code === 'invalid_request') {
+    return {
+      status: 400,
+      code: error.code,
+      message: error.message,
+      param: error.param
+    };
+  }
+  return null;
 }
 
 /**
@@ -626,6 +698,319 @@ function createMemoryRouter(options = {}) {
       res.json({ success: true, deleted });
     } catch (error) {
       console.error('[memory/cleanup] Error:', error.message);
+      res.status(500).json({
+        error: { code: 'internal_error', message: error.message }
+      });
+    }
+  });
+
+  // ============================================================
+  // Memory Read Model Endpoints
+  // ============================================================
+
+  /**
+   * GET /orchestration/memory/query
+   * Query the canonical memory read model with source provenance.
+   */
+  router.get('/query', (req, res) => {
+    try {
+      if (typeof db.queryMemoryRecords !== 'function') {
+        return sendRouteError(res, 503, 'service_unavailable', 'memory read model is not configured');
+      }
+
+      const requestedLimit = parseIntegerQuery(req.query.limit, {
+        fallback: 100,
+        min: 1,
+        max: 500,
+        param: 'limit'
+      });
+      const types = parseCsvQuery(req.query.types).map((type) => type.toLowerCase());
+      const invalidType = types.find((type) => !MEMORY_RECORD_TYPES.has(type));
+      if (invalidType) {
+        return sendRouteError(
+          res,
+          400,
+          'invalid_request',
+          `types must contain only supported memory record types: ${Array.from(MEMORY_RECORD_TYPES).join(', ')}`,
+          'types'
+        );
+      }
+
+      const since = parseIntegerQuery(req.query.since, {
+        fallback: undefined,
+        min: 0,
+        param: 'since'
+      });
+      const until = parseIntegerQuery(req.query.until, {
+        fallback: undefined,
+        min: 0,
+        param: 'until'
+      });
+      const filters = {
+        ...buildMemoryReadModelOptions(req.query),
+        types,
+        q: req.query.q || undefined,
+        since,
+        until,
+        limit: requestedLimit + 1
+      };
+
+      const rows = db.queryMemoryRecords(filters);
+      const hasMore = rows.length > requestedLimit;
+      const records = rows.slice(0, requestedLimit).map((record) => ({
+        ...record,
+        record: typeof db.getMemoryRecordSource === 'function'
+          ? db.getMemoryRecordSource(record.sourceTable, record.sourceId)
+          : null
+      }));
+
+      res.json({
+        records,
+        pagination: {
+          returned: records.length,
+          limit: requestedLimit,
+          hasMore
+        },
+        filters: {
+          projectId: filters.projectId || null,
+          workspaceRoot: filters.workspaceRoot || null,
+          taskId: filters.taskId || null,
+          rootSessionId: filters.rootSessionId || null,
+          runId: filters.runId || null,
+          roomId: filters.roomId || null,
+          terminalId: filters.terminalId || null,
+          taskAssignmentId: filters.taskAssignmentId || null,
+          participantId: filters.participantId || null,
+          discussionId: filters.discussionId || null,
+          traceId: filters.traceId || null,
+          types,
+          q: filters.q || null,
+          since: since ?? null,
+          until: until ?? null
+        }
+      });
+    } catch (error) {
+      console.error('[memory/query] Error:', error.message);
+      const routeError = normalizeReadModelError(error);
+      if (routeError) {
+        return sendRouteError(res, routeError.status, routeError.code, routeError.message, routeError.param);
+      }
+      res.status(500).json({
+        error: { code: 'internal_error', message: error.message }
+      });
+    }
+  });
+
+  /**
+   * GET /orchestration/memory/edges
+   * Query lineage edges from the canonical memory read model.
+   */
+  router.get('/edges', (req, res) => {
+    try {
+      if (typeof db.queryMemoryEdges !== 'function') {
+        return sendRouteError(res, 503, 'service_unavailable', 'memory read model is not configured');
+      }
+
+      const requestedLimit = parseIntegerQuery(req.query.limit, {
+        fallback: 100,
+        min: 1,
+        max: 500,
+        param: 'limit'
+      });
+      const since = parseIntegerQuery(req.query.since, {
+        fallback: undefined,
+        min: 0,
+        param: 'since'
+      });
+      const until = parseIntegerQuery(req.query.until, {
+        fallback: undefined,
+        min: 0,
+        param: 'until'
+      });
+      const filters = {
+        ...buildMemoryReadModelOptions(req.query),
+        edgeTypes: parseCsvQuery(req.query.edge_types || req.query.edgeTypes || req.query.types),
+        sourceTable: req.query.source_table || req.query.sourceTable || undefined,
+        sourceId: req.query.source_id || req.query.sourceId || undefined,
+        targetScopeType: req.query.target_scope_type || req.query.targetScopeType || undefined,
+        targetId: req.query.target_id || req.query.targetId || undefined,
+        since,
+        until,
+        limit: requestedLimit + 1
+      };
+
+      const rows = db.queryMemoryEdges(filters);
+      const hasMore = rows.length > requestedLimit;
+      const edges = rows.slice(0, requestedLimit);
+
+      res.json({
+        edges,
+        pagination: {
+          returned: edges.length,
+          limit: requestedLimit,
+          hasMore
+        },
+        filters: {
+          projectId: filters.projectId || null,
+          workspaceRoot: filters.workspaceRoot || null,
+          taskId: filters.taskId || null,
+          rootSessionId: filters.rootSessionId || null,
+          runId: filters.runId || null,
+          roomId: filters.roomId || null,
+          terminalId: filters.terminalId || null,
+          taskAssignmentId: filters.taskAssignmentId || null,
+          participantId: filters.participantId || null,
+          discussionId: filters.discussionId || null,
+          traceId: filters.traceId || null,
+          edgeTypes: filters.edgeTypes,
+          sourceTable: filters.sourceTable || null,
+          sourceId: filters.sourceId || null,
+          targetScopeType: filters.targetScopeType || null,
+          targetId: filters.targetId || null,
+          since: since ?? null,
+          until: until ?? null
+        }
+      });
+    } catch (error) {
+      console.error('[memory/edges] Error:', error.message);
+      const routeError = normalizeReadModelError(error);
+      if (routeError) {
+        return sendRouteError(res, routeError.status, routeError.code, routeError.message, routeError.param);
+      }
+      res.status(500).json({
+        error: { code: 'internal_error', message: error.message }
+      });
+    }
+  });
+
+  /**
+   * GET /orchestration/memory/insights
+   * Return aggregate task/project/root memory and usage diagnostics.
+   */
+  router.get('/insights', (req, res) => {
+    try {
+      if (typeof db.queryMemoryRecords !== 'function') {
+        return sendRouteError(res, 503, 'service_unavailable', 'memory read model is not configured');
+      }
+
+      const requestedLimit = parseIntegerQuery(req.query.limit, {
+        fallback: 20,
+        min: 1,
+        max: 100,
+        param: 'limit'
+      });
+      const filters = buildMemoryReadModelOptions(req.query);
+      const records = db.queryMemoryRecords({
+        ...filters,
+        limit: 500
+      });
+      const statusCounts = {};
+      const latestActivity = records[0] || null;
+      for (const record of records) {
+        if (record.recordType !== 'task_assignment' && record.recordType !== 'run') {
+          continue;
+        }
+        const source = typeof db.getMemoryRecordSource === 'function'
+          ? db.getMemoryRecordSource(record.sourceTable, record.sourceId)
+          : null;
+        const status = String(source?.status || 'unknown').trim().toLowerCase() || 'unknown';
+        const key = `${record.recordType}_${status}`;
+        statusCounts[key] = (statusCounts[key] || 0) + 1;
+      }
+
+      const usageOptions = {
+        taskId: filters.taskId,
+        rootSessionId: filters.rootSessionId,
+        runId: filters.runId,
+        terminalId: filters.terminalId,
+        taskAssignmentId: filters.taskAssignmentId,
+        participantId: filters.participantId
+      };
+      const tokenTotals = typeof db.summarizeUsage === 'function'
+        ? db.summarizeUsage(usageOptions)
+        : {
+          recordCount: 0,
+          inputTokens: 0,
+          outputTokens: 0,
+          reasoningTokens: 0,
+          cachedInputTokens: 0,
+          totalTokens: 0,
+          costUsd: 0,
+          durationMs: 0
+        };
+
+      const adapterUsage = typeof db.listUsageBreakdown === 'function'
+        ? db.listUsageBreakdown({ ...usageOptions, groupBy: 'adapter', limit: requestedLimit })
+        : [];
+      const modelUsage = typeof db.listUsageBreakdown === 'function'
+        ? db.listUsageBreakdown({ ...usageOptions, groupBy: 'model', limit: requestedLimit })
+        : [];
+      const usageAttribution = typeof db.summarizeUsageAttribution === 'function'
+        ? db.summarizeUsageAttribution(usageOptions)
+        : null;
+
+      const findings = filters.taskId && typeof db.getFindings === 'function'
+        ? db.getFindings(filters.taskId).slice(0, requestedLimit)
+        : records
+          .filter((record) => record.recordType === 'finding')
+          .slice(0, requestedLimit)
+          .map((record) => (typeof db.getMemoryRecordSource === 'function'
+            ? db.getMemoryRecordSource(record.sourceTable, record.sourceId)
+            : record));
+      const severityRank = new Map([
+        ['critical', 0],
+        ['high', 1],
+        ['medium', 2],
+        ['low', 3],
+        ['info', 4]
+      ]);
+      const topFindings = findings
+        .sort((left, right) => {
+          const leftRank = severityRank.get(String(left.severity || '').toLowerCase()) ?? 99;
+          const rightRank = severityRank.get(String(right.severity || '').toLowerCase()) ?? 99;
+          return leftRank - rightRank || (right.created_at || right.createdAt || 0) - (left.created_at || left.createdAt || 0);
+        })
+        .slice(0, requestedLimit);
+
+      const contexts = filters.taskId && typeof db.getContext === 'function'
+        ? db.getContext(filters.taskId)
+        : records
+          .filter((record) => record.recordType === 'context')
+          .slice(0, requestedLimit)
+          .map((record) => (typeof db.getMemoryRecordSource === 'function'
+            ? db.getMemoryRecordSource(record.sourceTable, record.sourceId)
+            : record));
+      const pendingItems = [];
+      for (const context of contexts) {
+        const items = Array.isArray(context.pendingItems)
+          ? context.pendingItems
+          : (Array.isArray(context.pending_items) ? context.pending_items : []);
+        pendingItems.push(...items);
+        if (pendingItems.length >= requestedLimit) {
+          break;
+        }
+      }
+
+      res.json({
+        statusCounts,
+        latestActivity,
+        adapterUsage,
+        modelUsage,
+        tokenTotals,
+        usageAttribution,
+        topFindings,
+        pendingItems: pendingItems.slice(0, requestedLimit),
+        missingLinkDiagnostics: typeof db.getMemoryLinkageDiagnostics === 'function'
+          ? db.getMemoryLinkageDiagnostics({ sampleLimit: Math.min(requestedLimit, 25) })
+          : null,
+        generatedAt: Date.now()
+      });
+    } catch (error) {
+      console.error('[memory/insights] Error:', error.message);
+      const routeError = normalizeReadModelError(error);
+      if (routeError) {
+        return sendRouteError(res, routeError.status, routeError.code, routeError.message, routeError.param);
+      }
       res.status(500).json({
         error: { code: 'internal_error', message: error.message }
       });

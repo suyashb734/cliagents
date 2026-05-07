@@ -129,6 +129,9 @@ async function run() {
   const repoDir = path.join(rootDir, 'repo');
   const worktreeDir = path.join(rootDir, 'repo-worktrees', 'task-exec');
   const escapedWorktreeDir = path.join(rootDir, 'escaped-worktrees', 'task-exec');
+  const repoNestedWorktreeDir = path.join(repoDir, 'nested-task-exec');
+  const invalidBranchWorktreeDir = path.join(rootDir, 'repo-worktrees', 'invalid-branch');
+  const unregisteredWorktreeDir = path.join(rootDir, 'repo-worktrees', 'unregistered');
   const branchName = 'task/task-exec';
   initRepo(repoDir);
 
@@ -174,6 +177,76 @@ async function run() {
     assert.strictEqual(escapedStartRes.status, 500);
     assert.strictEqual(escapedStartRes.data.error.code, 'task_assignment_start_failed');
     assert.match(escapedStartRes.data.error.message, /allowed worktree root/);
+    assert.strictEqual(sessionManager.state.createCalls.length, 0);
+
+    const repoNestedAssignmentRes = await request(serverHandle.baseUrl, 'POST', `/orchestration/tasks/${taskId}/assignments`, {
+      role: 'executor',
+      instructions: 'Attempt to run inside the primary repository.',
+      worktreePath: repoNestedWorktreeDir,
+      worktreeBranch: 'task/nested'
+    });
+    assert.strictEqual(repoNestedAssignmentRes.status, 200);
+    const repoNestedStartRes = await request(
+      serverHandle.baseUrl,
+      'POST',
+      `/orchestration/tasks/${taskId}/assignments/${repoNestedAssignmentRes.data.assignment.id}/start`,
+      {
+        rootSessionId: 'root-task-isolation',
+        parentSessionId: 'root-task-isolation',
+        originClient: 'test',
+        externalSessionRef: 'test:task-isolation'
+      }
+    );
+    assert.strictEqual(repoNestedStartRes.status, 500);
+    assert.strictEqual(repoNestedStartRes.data.error.code, 'task_assignment_start_failed');
+    assert.match(repoNestedStartRes.data.error.message, /allowed worktree root|outside the primary repository root/);
+    assert.strictEqual(sessionManager.state.createCalls.length, 0);
+
+    const invalidBranchAssignmentRes = await request(serverHandle.baseUrl, 'POST', `/orchestration/tasks/${taskId}/assignments`, {
+      role: 'executor',
+      instructions: 'Attempt to use an invalid branch name.',
+      worktreePath: invalidBranchWorktreeDir,
+      worktreeBranch: 'bad branch'
+    });
+    assert.strictEqual(invalidBranchAssignmentRes.status, 200);
+    const invalidBranchStartRes = await request(
+      serverHandle.baseUrl,
+      'POST',
+      `/orchestration/tasks/${taskId}/assignments/${invalidBranchAssignmentRes.data.assignment.id}/start`,
+      {
+        rootSessionId: 'root-task-isolation',
+        parentSessionId: 'root-task-isolation',
+        originClient: 'test',
+        externalSessionRef: 'test:task-isolation'
+      }
+    );
+    assert.strictEqual(invalidBranchStartRes.status, 500);
+    assert.strictEqual(invalidBranchStartRes.data.error.code, 'task_assignment_start_failed');
+    assert.match(invalidBranchStartRes.data.error.message, /Invalid worktreeBranch/);
+    assert.strictEqual(sessionManager.state.createCalls.length, 0);
+
+    fs.mkdirSync(unregisteredWorktreeDir, { recursive: true });
+    const unregisteredAssignmentRes = await request(serverHandle.baseUrl, 'POST', `/orchestration/tasks/${taskId}/assignments`, {
+      role: 'executor',
+      instructions: 'Attempt to reuse an unregistered directory.',
+      worktreePath: unregisteredWorktreeDir,
+      worktreeBranch: 'task/unregistered'
+    });
+    assert.strictEqual(unregisteredAssignmentRes.status, 200);
+    const unregisteredStartRes = await request(
+      serverHandle.baseUrl,
+      'POST',
+      `/orchestration/tasks/${taskId}/assignments/${unregisteredAssignmentRes.data.assignment.id}/start`,
+      {
+        rootSessionId: 'root-task-isolation',
+        parentSessionId: 'root-task-isolation',
+        originClient: 'test',
+        externalSessionRef: 'test:task-isolation'
+      }
+    );
+    assert.strictEqual(unregisteredStartRes.status, 500);
+    assert.strictEqual(unregisteredStartRes.data.error.code, 'task_assignment_start_failed');
+    assert.match(unregisteredStartRes.data.error.message, /registered git worktree/);
     assert.strictEqual(sessionManager.state.createCalls.length, 0);
 
     const createAssignmentRes = await request(serverHandle.baseUrl, 'POST', `/orchestration/tasks/${taskId}/assignments`, {

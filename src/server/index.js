@@ -50,7 +50,7 @@ function isProviderCapacityError(message) {
 class AgentServer {
   constructor(options = {}) {
     this.port = options.port ?? 4001;
-    this.host = options.host ?? '0.0.0.0';
+    this.host = options.host ?? '127.0.0.1';
     this.cleanupOrphans = options.cleanupOrphans ?? process.env.CLI_AGENTS_CLEANUP_ORPHANS === '1';
     this.destroyOrchestrationTerminalsOnStop = options.orchestration?.destroyTerminalsOnStop
       ?? process.env.CLI_AGENTS_DESTROY_TERMINALS_ON_STOP === '1';
@@ -197,7 +197,8 @@ class AgentServer {
         sessionManager: persistentSessionManager,
         apiSessionManager: this.sessionManager,
         db,
-        inboxService
+        inboxService,
+        host: this.host
       });
       this.app.use('/orchestration', orchestrationRouter);
 

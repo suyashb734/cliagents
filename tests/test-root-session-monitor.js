@@ -256,6 +256,12 @@ async function run() {
     assert.strictEqual(snapshot.replyCapability, 'partial');
     assert.strictEqual(snapshot.userFacing, true);
     assert.strictEqual(snapshot.activitySource, 'conclusion');
+    assert.strictEqual(snapshot.runtimeHost, null);
+    assert(snapshot.normalizedEvents.some((event) => event.type === 'permission_requested'));
+    assert.strictEqual(snapshot.eventNormalization.skippedCount, 1);
+    assert(
+      snapshot.eventNormalization.gaps.some((entry) => entry.gap === 'unmapped_session_event:consensus_recorded')
+    );
 
     const managedMainSnapshot = buildRootSessionSnapshot({
       db,
@@ -274,6 +280,10 @@ async function run() {
     assert.strictEqual(managedMainSnapshot.visibility, 'interactive');
     assert.strictEqual(managedMainSnapshot.replyCapability, 'full');
     assert.strictEqual(managedMainSnapshot.userFacing, true);
+    assert.strictEqual(managedMainSnapshot.runtimeHost, 'tmux');
+    assert.strictEqual(managedMainSnapshot.runtimeId, 'cliagents-managed-main:0');
+    assert.strictEqual(managedMainSnapshot.runtimeFidelity, 'managed');
+    assert(managedMainSnapshot.runtimeCapabilities.includes('send_input'));
     assert.strictEqual(managedMainSnapshot.rootSession.providerThreadRef, '019d94a6-2cd8-7742-8e4e-123456789abc');
     assert(managedMainSnapshot.activitySummary, 'managed main snapshot should expose an activity summary');
 
@@ -568,6 +578,8 @@ async function run() {
     assert.strictEqual(managedMainSummary.visibility, 'interactive');
     assert.strictEqual(managedMainSummary.replyCapability, 'full');
     assert.strictEqual(managedMainSummary.attention.requiresAttention, false);
+    assert.strictEqual(managedMainSummary.runtimeHost, 'tmux');
+    assert.strictEqual(managedMainSummary.runtimeId, 'cliagents-managed-main:0');
     assert.strictEqual(managedMainSummary.live, true);
     assert.strictEqual(managedMainSummary.counts.running, 0);
     assert.strictEqual(managedMainSummary.counts.idle, 1);

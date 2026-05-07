@@ -20,6 +20,23 @@ const { getParser } = require('./prompt-parsers');
 const { TerminalStatus } = require('../models/terminal-status');
 
 /**
+ * Deterministically stringify an object by sorting keys.
+ * Useful for consistent hashing.
+ * @param {Object} obj
+ * @returns {string}
+ */
+function stableStringify(obj) {
+  if (typeof obj !== 'object' || obj === null) {
+    return JSON.stringify(obj);
+  }
+  if (Array.isArray(obj)) {
+    return '[' + obj.map(stableStringify).join(',') + ']';
+  }
+  const keys = Object.keys(obj).sort();
+  return '{' + keys.map(key => JSON.stringify(key) + ':' + stableStringify(obj[key])).join(',') + '}';
+}
+
+/**
  * Default configuration
  */
 const DEFAULT_CONFIG = {
@@ -316,7 +333,7 @@ class PermissionInterceptor extends EventEmitter {
    * @private
    */
   _hashPrompt(promptInfo) {
-    return `${promptInfo.toolName}:${JSON.stringify(promptInfo.args)}`;
+    return `${promptInfo.toolName}:${stableStringify(promptInfo.args)}`;
   }
 
   /**

@@ -413,6 +413,25 @@ async function run() {
     const recoveredCodexFreshHistory = fakeTmux.getHistory(recoveredCodexFreshRoot.sessionName, recoveredCodexFreshRoot.windowName);
     assert(!recoveredCodexFreshHistory.includes('resume --last'), 'did not expect recovered Codex root without an exact handle to resume the latest provider session');
 
+    const codexProviderPickerRoot = await manager.createTerminal({
+      adapter: 'codex-cli',
+      role: 'main',
+      workDir: rootDir,
+      originClient: 'codex',
+      externalSessionRef: 'codex:managed:provider-picker-test',
+      sessionKind: 'main',
+      permissionMode: 'default',
+      sessionMetadata: {
+        clientName: 'codex',
+        attachMode: 'managed-root-launch',
+        managedLaunch: true,
+        providerResumePicker: true
+      }
+    });
+    const codexProviderPickerHistory = fakeTmux.getHistory(codexProviderPickerRoot.sessionName, codexProviderPickerRoot.windowName);
+    assert(codexProviderPickerHistory.includes('codex resume'), 'expected Codex provider resume picker launch to run codex resume');
+    assert(!codexProviderPickerHistory.includes('resume --last'), 'did not expect provider picker launch to skip the native picker');
+
     const recoveredClaudeRoot = await manager.createTerminal({
       adapter: 'claude-code',
       role: 'main',
@@ -769,7 +788,7 @@ async function run() {
     const beforeCodexResumeHistory = fakeTmux.getHistory(liveTerminal.sessionName, liveTerminal.windowName);
     await manager.sendInput(terminal.terminalId, 'Continue the same implementation review.');
     const resumedCodexWorkerHistory = fakeTmux.getHistory(liveTerminal.sessionName, liveTerminal.windowName).slice(beforeCodexResumeHistory.length);
-    assert(resumedCodexWorkerHistory.includes('codex exec --full-auto --json --skip-git-repo-check'), `expected stateless Codex worker command, got: ${resumedCodexWorkerHistory}`);
+    assert(resumedCodexWorkerHistory.includes('codex exec -m gpt-5.4 --full-auto --json --skip-git-repo-check'), `expected stateless Codex worker command with broker-safe model, got: ${resumedCodexWorkerHistory}`);
     assert(!resumedCodexWorkerHistory.includes('codex exec resume'), `did not expect resumed Codex worker command, got: ${resumedCodexWorkerHistory}`);
     assert(!resumedCodexWorkerHistory.includes(codexWorkerThreadRef), `did not expect Codex worker command to inject provider thread ref, got: ${resumedCodexWorkerHistory}`);
 
@@ -848,8 +867,8 @@ async function run() {
     await manager.sendInput(resumedCodexWorker.terminalId, 'Resume the interrupted codex worker session.');
     const recoveredCodexWorkerHistory = fakeTmux.getHistory(resumedCodexWorker.sessionName, resumedCodexWorker.windowName);
     assert(
-      recoveredCodexWorkerHistory.includes("codex exec --full-auto --json --skip-git-repo-check 'Resume the interrupted codex worker session.'"),
-      `expected codex worker recovery metadata to keep one-shot execution, got: ${recoveredCodexWorkerHistory}`
+      recoveredCodexWorkerHistory.includes("codex exec -m gpt-5.4 --full-auto --json --skip-git-repo-check 'Resume the interrupted codex worker session.'"),
+      `expected codex worker recovery metadata to keep broker-safe one-shot execution, got: ${recoveredCodexWorkerHistory}`
     );
     assert(
       !recoveredCodexWorkerHistory.includes('codex exec resume'),

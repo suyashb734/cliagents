@@ -1,6 +1,6 @@
 {
   "version": 1,
-  "lastReviewed": "2026-05-04",
+  "lastReviewed": "2026-05-06",
   "allowedStatuses": [
     "canonical",
     "active-plan",
@@ -58,6 +58,34 @@
       "last_reviewed": "2026-05-04"
     },
     {
+      "path": "docs/reference/EVENT-NORMALIZATION.md",
+      "status": "reference",
+      "type": "reference",
+      "scope": ["events", "adapters", "runtime-hosts", "observability"],
+      "related_code": [
+        "src/orchestration/event-normalizer.js",
+        "src/orchestration/root-session-monitor.js",
+        "src/server/orchestration-router.js",
+        "src/mcp/cliagents-mcp-server.js"
+      ],
+      "supersedes": [],
+      "last_reviewed": "2026-05-06"
+    },
+    {
+      "path": "docs/reference/REMOTE-API.md",
+      "status": "reference",
+      "type": "reference",
+      "scope": ["remote-api", "runtime-hosts", "mobile", "mcp"],
+      "related_code": [
+        "src/server/orchestration-router.js",
+        "src/mcp/cliagents-mcp-server.js",
+        "src/index.js",
+        "src/server/index.js"
+      ],
+      "supersedes": [],
+      "last_reviewed": "2026-05-06"
+    },
+    {
       "path": "docs/reference/MCP-TOOLS.md",
       "status": "reference",
       "type": "reference",
@@ -82,7 +110,7 @@
       "scope": ["roadmap", "active-plans"],
       "related_code": [],
       "supersedes": ["docs/research/CLIAGENTS-BROKER-PLAN.md"],
-      "last_reviewed": "2026-05-04"
+      "last_reviewed": "2026-05-06"
     },
     {
       "path": "docs/adr/README.md",
@@ -131,6 +159,36 @@
       "related_code": ["tests/test-child-adapter-reliability-live.js"],
       "supersedes": [],
       "last_reviewed": "2026-05-04"
+    },
+    {
+      "path": "docs/research/MEMORY-READ-MODEL-V1-PLAN.md",
+      "status": "active-plan",
+      "type": "plan",
+      "scope": ["memory", "persistence", "usage", "tasks", "rooms", "projects"],
+      "related_code": [
+        "src/database/db.js",
+        "src/routes/memory.js",
+        "src/mcp/cliagents-mcp-server.js"
+      ],
+      "supersedes": [],
+      "last_reviewed": "2026-05-05"
+    },
+    {
+      "path": "docs/research/RUNTIME-HOST-REMOTE-CONTROL-PLAN.md",
+      "status": "active-plan",
+      "type": "plan",
+      "scope": ["runtime-hosts", "remote-control", "roots", "tmux", "adopted-sessions"],
+      "related_code": [
+        "src/tmux/session-manager.js",
+        "src/tmux/client.js",
+        "src/server/orchestration-router.js",
+        "src/mcp/cliagents-mcp-server.js"
+      ],
+      "supersedes": [
+        "docs/research/SESSION-CONTROL-PLANE-PLAN.md",
+        "docs/research/REALTIME-REMOTE-UI-PLAN.md"
+      ],
+      "last_reviewed": "2026-05-06"
     },
     {
       "path": "docs/research/BROKER-NATIVE-ORCHESTRATION-UX-PROPOSAL.md",

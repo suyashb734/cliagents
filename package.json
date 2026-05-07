@@ -10,6 +10,7 @@
   "scripts": {
     "start": "node scripts/run-with-supported-node.js src/index.js",
     "dev": "node scripts/run-with-supported-node.js --node-arg=--watch src/index.js",
+    "supervise:task": "node scripts/run-with-supported-node.js scripts/task-supervisor-harness.js",
     "setup": "node src/scripts/setup-auth.js",
     "test": "node scripts/run-with-supported-node.js tests/test-focused-surface.js",
     "test:focused": "node scripts/run-with-supported-node.js tests/test-focused-surface.js",

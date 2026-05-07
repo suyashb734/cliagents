@@ -683,6 +683,66 @@ async function testFailedDiscussionRequestIdIsTerminal() {
   }
 }
 
+async function testTimedOutDiscussionSettlesTurn() {
+  const dataDir = makeTempDir('cliagents-room-discussion-timeout-');
+  const dbPath = path.join(dataDir, 'cliagents.db');
+  const neverSettles = createDeferred();
+  const roomDiscussionRunner = async () => neverSettles.promise;
+
+  const app = await openRoomApp({
+    dbPath,
+    dataDir,
+    sessionManager: createDirectSessionManager(),
+    roomDiscussionRunner
+  });
+
+  try {
+    const room = await createRoom(app.baseUrl, {
+      title: 'Timed out discussion room',
+      participants: [
+        { adapter: 'codex-cli', displayName: 'Codex timeout' }
+      ]
+    });
+    const roomId = room.room.id;
+
+    const timeoutRes = await request(
+      app.baseUrl,
+      'POST',
+      `/orchestration/rooms/${encodeURIComponent(roomId)}/discuss`,
+      {
+        message: 'This discussion runner will never settle.',
+        requestId: 'discussion-timeout-1',
+        timeout: 25,
+        judge: null
+      },
+      {},
+      5000
+    );
+    assert.strictEqual(timeoutRes.status, 500, JSON.stringify(timeoutRes.data));
+    assert.strictEqual(timeoutRes.data.error.code, 'internal_error');
+    assert(timeoutRes.data.error.message.includes('Room discussion timed out after 25ms'));
+
+    const failedTurn = app.db.getLatestRoomTurn(roomId);
+    assert(failedTurn, 'expected timed-out discussion turn to persist');
+    assert.strictEqual(failedTurn.requestId, 'discussion-timeout-1');
+    assert.strictEqual(failedTurn.status, 'failed');
+    assert(failedTurn.error.includes('Room discussion timed out after 25ms'));
+
+    const messages = app.db.listRoomMessages(roomId, { limit: 50 });
+    assert(messages.some((message) => (
+      message.role === 'system'
+      && message.content.includes('Room discussion failed: Room discussion timed out after 25ms')
+    )), 'expected failed discussion writeback message');
+
+    const roomAfterTimeout = await request(app.baseUrl, 'GET', `/orchestration/rooms/${encodeURIComponent(roomId)}`);
+    assert.strictEqual(roomAfterTimeout.status, 200);
+    assert.strictEqual(roomAfterTimeout.data.latestTurn.status, 'failed');
+  } finally {
+    await closeRoomApp(app);
+    fs.rmSync(dataDir, { recursive: true, force: true });
+  }
+}
+
 async function runTest(name, fn) {
   try {
     await fn();
@@ -704,6 +764,7 @@ async function main() {
   results.push(await runTest('discussion continuity, idempotency, and carried context survive restart', testDiscussionContinuityAndIdempotency));
   results.push(await runTest('concurrent room discussions return room_busy for different request ids', testDiscussionRoomBusyGuard));
   results.push(await runTest('failed discussion request ids stay terminal across restart', testFailedDiscussionRequestIdIsTerminal));
+  results.push(await runTest('timed-out room discussions settle failed turns', testTimedOutDiscussionSettlesTurn));
 
   const passed = results.filter(Boolean).length;
   const failed = results.length - passed;

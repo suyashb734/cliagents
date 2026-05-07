@@ -56,6 +56,16 @@ function seedCodexHome(homeDir) {
       type: 'message',
       role: 'user',
       content: [{ type: 'input_text', text: 'Build a finance tracker with durable summaries.' }]
+    },
+    {
+      type: 'message',
+      role: 'assistant',
+      content: [{ type: 'output_text', text: 'Implemented the finance tracker and added summary persistence notes.' }]
+    },
+    {
+      type: 'message',
+      role: 'user',
+      content: [{ type: 'input_text', text: 'Add a resume picker summary so I can choose the right session.' }]
     }
   ]);
 
@@ -202,7 +212,12 @@ async function runProviderRegistryAssertions(homeDir) {
   });
   assert(activeSession, 'expected active provider session descriptor');
   assert.strictEqual(activeSession.title, 'Finance tracker');
-  assert.strictEqual(activeSession.preview, 'Finance tracker');
+  assert.strictEqual(activeSession.preview, 'Add a resume picker summary so I can choose the right session.');
+  assert.strictEqual(activeSession.summary, 'Last user: Add a resume picker summary so I can choose the right session.');
+  assert.strictEqual(activeSession.firstUserMessage, 'Build a finance tracker with durable summaries.');
+  assert.strictEqual(activeSession.lastUserMessage, 'Add a resume picker summary so I can choose the right session.');
+  assert.strictEqual(activeSession.lastAssistantMessage, 'Implemented the finance tracker and added summary persistence notes.');
+  assert.strictEqual(activeSession.messageCount, 3);
 
   const unsupported = registry.listSessions({ adapter: 'claude-code' });
   assert.strictEqual(unsupported.supported, false);
@@ -276,11 +291,44 @@ async function runRouteAssertions(homeDir, fixture) {
     assert.strictEqual(importRes.data.importedRoot, true);
     assert.strictEqual(importRes.data.reusedImportedRoot, false);
     assert.strictEqual(importRes.data.descriptor.title, 'Finance tracker');
+    assert.strictEqual(importRes.data.runtimeHost, 'adopted');
+    assert.strictEqual(importRes.data.runtimeFidelity, 'adopted-partial');
+    assert(importRes.data.runtimeCapabilities.includes('inspect_history'));
+    assert(!importRes.data.runtimeCapabilities.includes('send_input'));
+    assert(importRes.data.controlLimitations.includes('remote_input_unavailable'));
 
     const importedTerminal = db.findRootTerminalByProviderThreadRef('codex-cli', fixture.activeId);
     assert(importedTerminal, 'expected imported provider session to bind a root terminal');
     assert.strictEqual(importedTerminal.root_session_id, importRes.data.rootSessionId);
     assert.strictEqual(importedTerminal.provider_thread_ref, fixture.activeId);
+    assert.strictEqual(importedTerminal.runtime_host, 'adopted');
+    assert.strictEqual(importedTerminal.runtime_fidelity, 'adopted-partial');
+    assert(JSON.parse(importedTerminal.runtime_capabilities).includes('inspect_history'));
+    assert(!JSON.parse(importedTerminal.runtime_capabilities).includes('send_input'));
+    assert.strictEqual(JSON.parse(importedTerminal.session_metadata).importedProviderSession, true);
+
+    const importedRootRes = await request(
+      serverHandle.baseUrl,
+      'GET',
+      `/orchestration/root-sessions/${encodeURIComponent(importRes.data.rootSessionId)}`
+    );
+    assert.strictEqual(importedRootRes.status, 200);
+    assert.strictEqual(importedRootRes.data.rootMode, 'adopted');
+    assert.strictEqual(importedRootRes.data.sessionKind, 'adopted');
+    assert.strictEqual(importedRootRes.data.visibility, 'read-only');
+    assert.strictEqual(importedRootRes.data.replyCapability, 'partial');
+    assert.strictEqual(importedRootRes.data.runtimeHost, 'adopted');
+    assert.strictEqual(importedRootRes.data.recoveryCapability, 'exact_provider_resume');
+
+    const importedInputRes = await request(
+      serverHandle.baseUrl,
+      'POST',
+      `/orchestration/terminals/${encodeURIComponent(importRes.data.rootSessionId)}/input`,
+      { message: 'This should not be delivered remotely.' }
+    );
+    assert.strictEqual(importedInputRes.status, 403);
+    assert.strictEqual(importedInputRes.data.error.code, 'runtime_capability_unsupported');
+    assert.strictEqual(importedInputRes.data.error.runtimeHost, 'adopted');
 
     const reimportRes = await request(
       serverHandle.baseUrl,

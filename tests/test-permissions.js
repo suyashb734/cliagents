@@ -293,6 +293,54 @@ async function testFactoryMethods() {
   });
 }
 
+async function testBashCommandRestrictions() {
+  console.log('\n📋 PermissionManager - Bash Command Restrictions');
+
+  const { PermissionManager } = require('../src/permissions');
+
+  await test('Allow simple bash command without restricted constructs', async () => {
+    const pm = new PermissionManager({ allowedPaths: ['/'] });
+    const result = await pm.checkPermission('Bash', { command: 'echo hello' });
+    assert(result.allowed === true, 'Simple echo should be allowed');
+  });
+
+  await test('Block shell command substitution forms', async () => {
+    const pm = new PermissionManager({ allowedPaths: ['/'] });
+
+    let result = await pm.checkPermission('Bash', { command: 'echo $(whoami)' });
+    assert(result.allowed === false, 'Should block $() command substitution');
+
+    result = await pm.checkPermission('Bash', { command: 'echo `whoami`' });
+    assert(result.allowed === false, 'Should block backtick command substitution');
+  });
+
+  await test('Block dangerous shell expansion and escape constructs', async () => {
+    const pm = new PermissionManager({ allowedPaths: ['/'] });
+
+    let result = await pm.checkPermission('Bash', { command: 'echo ${MISSING:-fallback}' });
+    assert(result.allowed === false, 'Should block default-value shell expansion');
+
+    result = await pm.checkPermission('Bash', { command: 'printf "\\x2fetc\\x2fpasswd"' });
+    assert(result.allowed === false, 'Should block hex escape construction');
+
+    result = await pm.checkPermission('Bash', { command: 'printf "\\u002fetc\\u002fpasswd"' });
+    assert(result.allowed === false, 'Should block unicode escape construction');
+  });
+
+  await test('Block shell separators and background operators', async () => {
+    const pm = new PermissionManager({ allowedPaths: ['/'] });
+
+    let result = await pm.checkPermission('Bash', { command: 'echo hello; echo world' });
+    assert(result.allowed === false, 'Should block semicolon chaining');
+
+    result = await pm.checkPermission('Bash', { command: 'echo hello && echo world' });
+    assert(result.allowed === false, 'Should block ampersand operators');
+
+    result = await pm.checkPermission('Bash', { command: 'echo hello!' });
+    assert(result.allowed === false, 'Should block shell history expansion marker');
+  });
+}
+
 // ============================================
 // MAIN
 // ============================================
@@ -307,6 +355,7 @@ async function main() {
   await testEvents();
   await testStatistics();
   await testFactoryMethods();
+  await testBashCommandRestrictions();
 
   // Summary
   console.log('\n' + '='.repeat(50));

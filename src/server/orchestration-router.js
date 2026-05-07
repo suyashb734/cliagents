@@ -17,6 +17,7 @@ const { runDiscussion } = require('../orchestration/discussion-runner');
 const { runPlanReview, runPrReview } = require('../orchestration/review-protocols');
 const { RunLedgerService } = require('../orchestration/run-ledger');
 const { buildRootSessionSnapshot, listRootSessionSummaries } = require('../orchestration/root-session-monitor');
+const { normalizeSessionEvents } = require('../orchestration/event-normalizer');
 const { getProviderSessionRegistry } = require('../orchestration/provider-session-registry');
 const { RoomService } = require('../orchestration/room-service');
 const {
@@ -32,6 +33,12 @@ const { sendMessage, broadcastMessage } = require('../orchestration/send-message
 const { getAgentProfiles, resolveProfile } = require('../services/agent-profiles');
 const { createMemoryRouter } = require('../routes/memory');
 const { isAdapterAuthenticated } = require('../utils/adapter-auth');
+const {
+  RUNTIME_HOSTS,
+  RUNTIME_FIDELITY,
+  normalizeRuntimeCapabilities,
+  resolveRuntimeHostMetadata
+} = require('../runtime/host-model');
 
 /**
  * Create the orchestration router
@@ -41,6 +48,8 @@ const { isAdapterAuthenticated } = require('../utils/adapter-auth');
 function createOrchestrationRouter(context) {
   const router = express.Router();
   const { sessionManager, apiSessionManager, db, inboxService, adapterAuthInspector } = context;
+  const configuredHost = String(context.host || process.env.CLIAGENTS_HOST || process.env.HOST || '127.0.0.1').trim() || '127.0.0.1';
+  const authConfigured = Boolean(process.env.CLI_AGENTS_API_KEY || process.env.CLIAGENTS_API_KEY);
   const sessionGraphWritesEnabled = process.env.SESSION_GRAPH_WRITES_ENABLED === '1';
   const sessionEventsEnabled = process.env.SESSION_EVENTS_ENABLED === '1';
   const runLedgerWritesEnabled = process.env.RUN_LEDGER_ENABLED === '1';
@@ -186,6 +195,10 @@ function createOrchestrationRouter(context) {
       || terminalRow?.provider_thread_ref
       || terminalRow?.providerThreadRef
       || null;
+    const runtimeMetadata = resolveRuntimeHostMetadata(liveTerminal || {
+      ...terminalRow,
+      sessionMetadata: metadata
+    });
 
     return {
       terminalId: terminalRow?.terminal_id || terminalRow?.terminalId || null,
@@ -197,7 +210,12 @@ function createOrchestrationRouter(context) {
       agentProfile: terminalRow?.agent_profile || terminalRow?.agentProfile || null,
       status: liveTerminal?.taskState || liveTerminal?.status || terminalRow?.status || null,
       lastActive: liveTerminal?.lastActive || terminalRow?.last_active || terminalRow?.lastActive || null,
-      providerThreadRefPresent: Boolean(providerThreadRef)
+      providerThreadRefPresent: Boolean(providerThreadRef),
+      runtimeHost: runtimeMetadata.runtimeHost,
+      runtimeId: runtimeMetadata.runtimeId,
+      runtimeCapabilities: runtimeMetadata.runtimeCapabilities,
+      runtimeFidelity: runtimeMetadata.runtimeFidelity,
+      runtime: runtimeMetadata.runtime
     };
   }
 
@@ -213,6 +231,16 @@ function createOrchestrationRouter(context) {
       return null;
     }
     return sessionManager.getTerminal(terminalId);
+  }
+
+  function getTerminalRuntimeMetadata(terminalId) {
+    const liveTerminal = getLiveTerminal(terminalId);
+    const terminalRow = liveTerminal || (typeof db?.getTerminal === 'function' ? db.getTerminal(terminalId) : null);
+    if (!terminalRow) {
+      return null;
+    }
+
+    return resolveRuntimeHostMetadata(terminalRow);
   }
 
   function getLiveOutput(terminalId, options = {}) {
@@ -561,6 +589,8 @@ function createOrchestrationRouter(context) {
       harnessSessionId: rootSessionId,
       providerThreadRef,
       captureMode: 'raw-tty',
+      runtimeHost: RUNTIME_HOSTS.ADOPTED,
+      runtimeFidelity: RUNTIME_FIDELITY.ADOPTED_PARTIAL,
       model: model || normalizedMetadata.model || null,
       status: 'idle'
     };
@@ -653,7 +683,11 @@ function createOrchestrationRouter(context) {
     ['completed', 'completed'],
     ['idle', 'completed'],
     ['failed', 'failed'],
-    ['error', 'failed']
+    ['error', 'failed'],
+    ['terminal_missing', 'failed'],
+    ['cancelled', 'cancelled'],
+    ['canceled', 'cancelled'],
+    ['superseded', 'superseded']
   ]);
 
   const TASK_ASSIGNMENT_ROLE_MAP = new Map([
@@ -693,7 +727,14 @@ function createOrchestrationRouter(context) {
       ? db.getTerminal(assignment.terminalId)
       : null;
     if (!persistedTerminal) {
-      return null;
+      return {
+        terminalId: assignment.terminalId,
+        status: 'terminal_missing',
+        adapter: assignment.adapter || null,
+        model: assignment.model || null,
+        role: null,
+        missing: true
+      };
     }
 
     return {
@@ -709,9 +750,12 @@ function createOrchestrationRouter(context) {
     const terminal = resolveTaskAssignmentTerminalSnapshot(assignment);
     const terminalStatus = terminal?.status || null;
     const storedStatus = String(assignment?.status || 'queued').trim().toLowerCase() || 'queued';
-    const status = assignment?.terminalId
+    const storedStatusOverridesTerminal = ['completed', 'failed', 'cancelled', 'superseded'].includes(storedStatus);
+    const status = storedStatusOverridesTerminal
+      ? normalizeTaskAssignmentStatus(storedStatus, 'queued')
+      : (assignment?.terminalId
       ? normalizeTaskAssignmentStatus(terminalStatus, normalizeTaskAssignmentStatus(storedStatus, 'queued'))
-      : normalizeTaskAssignmentStatus(storedStatus, 'queued');
+      : normalizeTaskAssignmentStatus(storedStatus, 'queued'));
     const usageSummary = typeof db?.summarizeUsage === 'function'
       ? db.summarizeUsage({ taskAssignmentId: assignment?.id || null })
       : null;
@@ -733,8 +777,10 @@ function createOrchestrationRouter(context) {
         status: terminal.status,
         adapter: terminal.adapter,
         model: terminal.model,
-        role: terminal.role
-      } : null
+        role: terminal.role,
+        missing: terminal.missing === true
+      } : null,
+      terminalMissing: terminal?.missing === true
     };
   }
 
@@ -744,7 +790,9 @@ function createOrchestrationRouter(context) {
       running: 0,
       blocked: 0,
       failed: 0,
-      completed: 0
+      completed: 0,
+      cancelled: 0,
+      superseded: 0
     };
 
     for (const assignment of assignments || []) {
@@ -759,16 +807,22 @@ function createOrchestrationRouter(context) {
     if (!Array.isArray(assignments) || assignments.length === 0) {
       return 'pending';
     }
-    if (assignments.some((assignment) => assignment.status === 'blocked')) {
+    const effectiveAssignments = assignments.filter((assignment) => (
+      assignment.status !== 'cancelled' && assignment.status !== 'superseded'
+    ));
+    if (effectiveAssignments.length === 0) {
+      return 'pending';
+    }
+    if (effectiveAssignments.some((assignment) => assignment.status === 'blocked')) {
       return 'blocked';
     }
-    if (assignments.some((assignment) => assignment.status === 'running')) {
+    if (effectiveAssignments.some((assignment) => assignment.status === 'running')) {
       return 'running';
     }
-    if (assignments.every((assignment) => assignment.status === 'completed')) {
+    if (effectiveAssignments.every((assignment) => assignment.status === 'completed')) {
       return 'completed';
     }
-    if (assignments.some((assignment) => assignment.status === 'failed')) {
+    if (effectiveAssignments.some((assignment) => assignment.status === 'failed')) {
       return 'failed';
     }
     return 'pending';
@@ -850,9 +904,162 @@ function createOrchestrationRouter(context) {
       || null;
   }
 
+  function buildRemoteApiSnapshot(req) {
+    const rootLimit = parseQueryInteger(req.query.rootLimit ?? req.query.root_limit, 20);
+    const taskLimit = parseQueryInteger(req.query.taskLimit ?? req.query.task_limit, 20);
+    const roomLimit = parseQueryInteger(req.query.roomLimit ?? req.query.room_limit, 20);
+    const terminalLimit = parseQueryInteger(req.query.terminalLimit ?? req.query.terminal_limit, 50);
+    const eventLimit = parseQueryInteger(req.query.eventLimit ?? req.query.event_limit, 80);
+    const includeUsage = parseQueryBoolean(req.query.includeUsage ?? req.query.include_usage, true);
+    const includeArchived = parseQueryBoolean(req.query.includeArchived ?? req.query.include_archived, false);
+    const workspaceRoot = req.query.workspace_root
+      ? String(req.query.workspace_root).trim()
+      : (req.query.workspaceRoot ? String(req.query.workspaceRoot).trim() : null);
+    const scope = String(req.query.scope || 'user').trim() || 'user';
+    const statusFilter = String(req.query.status || req.query.statusFilter || 'all').trim() || 'all';
+    const roomStatus = req.query.roomStatus ? String(req.query.roomStatus).trim().toLowerCase() : null;
+
+    const rootPayload = db?.listRootSessions
+      ? listRootSessionSummaries({
+        db,
+        limit: rootLimit,
+        eventLimit,
+        terminalLimit,
+        includeArchived,
+        scope,
+        statusFilter,
+        liveTerminalResolver: getLiveTerminal,
+        liveOutputResolver: null
+      })
+      : {
+        roots: [],
+        archivedCount: 0,
+        hiddenDetachedCount: 0,
+        hiddenNonUserCount: 0,
+        scope,
+        statusFilter
+      };
+
+    const tasks = db?.listTasks
+      ? db.listTasks({
+        limit: taskLimit,
+        workspaceRoot: workspaceRoot || null
+      }).map((task) => buildTaskPayload(task.id, { includeRecentRuns: false })).filter(Boolean)
+      : [];
+    const rooms = roomService
+      ? roomService.listRooms({
+        limit: roomLimit,
+        status: roomStatus
+      })
+      : [];
+    const usage = includeUsage && typeof db?.summarizeUsage === 'function'
+      ? {
+        summary: db.summarizeUsage({}),
+        attribution: typeof db.summarizeUsageAttribution === 'function'
+          ? db.summarizeUsageAttribution({})
+          : null
+      }
+      : null;
+
+    return {
+      apiVersion: 'remote-v1',
+      generatedAt: new Date().toISOString(),
+      access: {
+        bindHost: configuredHost,
+        localOnlyDefault: true,
+        authRequired: authConfigured,
+        unauthenticatedDevMode: !authConfigured,
+        rawTerminalInput: 'runtime_capability_gated'
+      },
+      capabilities: {
+        runtimeHosts: Object.values(RUNTIME_HOSTS),
+        read: [
+          'roots',
+          'children',
+          'tasks',
+          'assignments',
+          'rooms',
+          'runs',
+          'usage',
+          'memory',
+          'session_events',
+          'runtime_status'
+        ],
+        write: [
+          'task_assignment_start',
+          'room_message',
+          'room_discussion',
+          'root_launch',
+          'root_adopt',
+          'root_attach'
+        ],
+        terminalInput: {
+          route: '/orchestration/terminals/:id/input',
+          mode: 'runtime_capability_gated',
+          requiresRuntimeCapability: 'send_input'
+        }
+      },
+      routes: {
+        roots: '/orchestration/root-sessions',
+        rootDetail: '/orchestration/root-sessions/:rootSessionId',
+        children: '/orchestration/root-sessions/:rootSessionId/children',
+        tasks: '/orchestration/tasks',
+        taskAssignments: '/orchestration/tasks/:taskId/assignments',
+        rooms: '/orchestration/rooms',
+        runs: '/orchestration/runs',
+        usage: '/orchestration/usage/*',
+        memory: '/orchestration/memory/*',
+        sessionEvents: '/orchestration/session-events?normalized=1',
+        adapters: '/orchestration/adapters'
+      },
+      roots: rootPayload.roots,
+      rootMetadata: {
+        archivedCount: rootPayload.archivedCount,
+        hiddenDetachedCount: rootPayload.hiddenDetachedCount,
+        hiddenNonUserCount: rootPayload.hiddenNonUserCount,
+        scope: rootPayload.scope,
+        statusFilter: rootPayload.statusFilter
+      },
+      tasks,
+      rooms,
+      usage,
+      counts: {
+        roots: rootPayload.roots.length,
+        tasks: tasks.length,
+        rooms: rooms.length
+      },
+      pagination: {
+        rootLimit,
+        taskLimit,
+        roomLimit,
+        terminalLimit,
+        eventLimit
+      }
+    };
+  }
+
   // Mount shared memory routes at /orchestration/memory
   const memoryRouter = createMemoryRouter({ db });
   router.use('/memory', memoryRouter);
+
+  /**
+   * GET /orchestration/remote/snapshot
+   * Runtime-neutral read-only snapshot for remote and mobile clients.
+   */
+  router.get('/remote/snapshot', (req, res) => {
+    try {
+      if (!db) {
+        return res.status(503).json({
+          error: { code: 'unavailable', message: 'remote broker snapshot requires orchestration DB support' }
+        });
+      }
+      res.json(buildRemoteApiSnapshot(req));
+    } catch (error) {
+      res.status(500).json({
+        error: { code: 'internal_error', message: error.message }
+      });
+    }
+  });
 
   /**
    * POST /orchestration/tasks
@@ -1146,6 +1353,96 @@ function createOrchestrationRouter(context) {
   });
 
   /**
+   * POST /orchestration/tasks/:taskId/assignments/:assignmentId/supersede
+   * Mark an assignment as superseded and optionally create a queued replacement.
+   */
+  router.post('/tasks/:taskId/assignments/:assignmentId/supersede', (req, res) => {
+    try {
+      if (!db?.getTask || !db?.getTaskAssignment || !db?.updateTaskAssignment || !db?.createTaskAssignment) {
+        return res.status(503).json({
+          error: { code: 'unavailable', message: 'task assignments are not configured' }
+        });
+      }
+
+      const task = db.getTask(req.params.taskId);
+      if (!task) {
+        return res.status(404).json({
+          error: { code: 'task_not_found', message: `Task ${req.params.taskId} not found` }
+        });
+      }
+
+      const assignment = db.getTaskAssignment(req.params.assignmentId);
+      if (!assignment || assignment.taskId !== task.id) {
+        return res.status(404).json({
+          error: { code: 'task_assignment_not_found', message: `Assignment ${req.params.assignmentId} not found for task ${task.id}` }
+        });
+      }
+
+      const storedStatus = normalizeTaskAssignmentStatus(assignment.status, 'queued');
+      if (storedStatus === 'cancelled' || storedStatus === 'superseded') {
+        return res.status(409).json({
+          error: {
+            code: 'task_assignment_already_terminal',
+            message: `Assignment ${assignment.id} is already ${storedStatus}`
+          }
+        });
+      }
+
+      const now = Date.now();
+      const reason = String(req.body?.reason || '').trim() || null;
+      const replacementSpec = req.body?.replacement === false ? null : (req.body?.replacement || {});
+      let replacement = null;
+      if (replacementSpec) {
+        replacement = db.createTaskAssignment({
+          id: replacementSpec.id,
+          taskId: task.id,
+          role: replacementSpec.role || assignment.role,
+          instructions: replacementSpec.instructions || assignment.instructions,
+          adapter: replacementSpec.adapter !== undefined ? replacementSpec.adapter : assignment.adapter,
+          model: replacementSpec.model !== undefined ? replacementSpec.model : assignment.model,
+          worktreePath: replacementSpec.worktreePath !== undefined ? replacementSpec.worktreePath : assignment.worktreePath,
+          worktreeBranch: replacementSpec.worktreeBranch !== undefined ? replacementSpec.worktreeBranch : assignment.worktreeBranch,
+          acceptanceCriteria: replacementSpec.acceptanceCriteria !== undefined ? replacementSpec.acceptanceCriteria : assignment.acceptanceCriteria,
+          metadata: {
+            ...(assignment.metadata || {}),
+            ...(replacementSpec.metadata && typeof replacementSpec.metadata === 'object' && !Array.isArray(replacementSpec.metadata)
+              ? replacementSpec.metadata
+              : {}),
+            supersedes: assignment.id,
+            retryOf: assignment.id,
+            supersedeReason: reason,
+            supersededAt: now
+          },
+          createdAt: now
+        });
+      }
+
+      const superseded = db.updateTaskAssignment(assignment.id, {
+        status: 'superseded',
+        completedAt: now,
+        metadata: {
+          ...(assignment.metadata || {}),
+          supersededAt: now,
+          supersededBy: replacement?.id || null,
+          supersedeReason: reason
+        },
+        updatedAt: now
+      });
+      db.updateTask(task.id, { updatedAt: now });
+
+      res.json({
+        task: buildTaskPayload(task.id),
+        assignment: buildTaskAssignmentPayload(superseded),
+        replacement: replacement ? buildTaskAssignmentPayload(replacement) : null
+      });
+    } catch (error) {
+      res.status(500).json({
+        error: { code: 'task_assignment_supersede_failed', message: error.message }
+      });
+    }
+  });
+
+  /**
    * POST /orchestration/tasks/:taskId/assignments/:assignmentId/start
    * Launch a queued assignment via the broker task router.
    */
@@ -1347,6 +1644,9 @@ function createOrchestrationRouter(context) {
       sessionMetadata.importedProviderSessionId = providerSessionId;
       sessionMetadata.importedProviderSessionTitle = descriptor.title || null;
       sessionMetadata.providerResumeCapability = descriptor.resumeCapability || 'exact';
+      sessionMetadata.runtimeHost = RUNTIME_HOSTS.ADOPTED;
+      sessionMetadata.runtimeFidelity = RUNTIME_FIDELITY.ADOPTED_PARTIAL;
+      sessionMetadata.runtimeCapabilities = normalizeRuntimeCapabilities(null, RUNTIME_HOSTS.ADOPTED);
       if (descriptor.cwd && !sessionMetadata.workspaceRoot) {
         sessionMetadata.workspaceRoot = descriptor.cwd;
       }
@@ -1373,6 +1673,20 @@ function createOrchestrationRouter(context) {
         workDir: descriptor.cwd || null
       });
 
+      const importedTerminal = typeof db.getTerminal === 'function'
+        ? db.getTerminal(rootSessionId)
+        : null;
+      const runtimeMetadata = resolveRuntimeHostMetadata(importedTerminal || {
+        terminalId: rootSessionId,
+        runtimeHost: RUNTIME_HOSTS.ADOPTED,
+        runtimeFidelity: RUNTIME_FIDELITY.ADOPTED_PARTIAL,
+        runtimeCapabilities: normalizeRuntimeCapabilities(null, RUNTIME_HOSTS.ADOPTED),
+        sessionMetadata
+      });
+      const controlLimitations = runtimeMetadata.runtimeCapabilities.includes('send_input')
+        ? []
+        : ['read_only_import', 'remote_input_unavailable'];
+
       res.json({
         importedRoot: true,
         reusedImportedRoot: Boolean(existingRootTerminal),
@@ -1380,6 +1694,12 @@ function createOrchestrationRouter(context) {
         adapter,
         providerSessionId,
         externalSessionRef,
+        runtimeHost: runtimeMetadata.runtimeHost,
+        runtimeId: runtimeMetadata.runtimeId,
+        runtimeCapabilities: runtimeMetadata.runtimeCapabilities,
+        runtimeFidelity: runtimeMetadata.runtimeFidelity,
+        runtime: runtimeMetadata.runtime,
+        controlLimitations,
         descriptor
       });
     } catch (error) {
@@ -2331,7 +2651,12 @@ function createOrchestrationRouter(context) {
           taskState: t.taskState || t.status,
           processState: t.processState || null,
           createdAt: t.createdAt,
-          lastActive: t.lastActive
+          lastActive: t.lastActive,
+          runtimeHost: t.runtimeHost || null,
+          runtimeId: t.runtimeId || null,
+          runtimeCapabilities: t.runtimeCapabilities || [],
+          runtimeFidelity: t.runtimeFidelity || null,
+          runtime: t.runtime || null
         }))
       });
 
@@ -2654,6 +2979,19 @@ function createOrchestrationRouter(context) {
       }
 
       const rootSnapshot = resolveTerminalRootAccess(req.params.id);
+      const runtimeMetadata = getTerminalRuntimeMetadata(req.params.id);
+      if (runtimeMetadata && !runtimeMetadata.runtimeCapabilities.includes('send_input')) {
+        return res.status(403).json({
+          error: {
+            code: 'runtime_capability_unsupported',
+            message: `Runtime host ${runtimeMetadata.runtimeHost} does not support remote input for terminal ${req.params.id}.`,
+            terminalId: req.params.id,
+            runtimeHost: runtimeMetadata.runtimeHost,
+            runtimeCapabilities: runtimeMetadata.runtimeCapabilities
+          }
+        });
+      }
+
       if (rootSnapshot?.rootMode === 'attached') {
         const terminalSession = (rootSnapshot.sessions || []).find(s => s.sessionId === req.params.id);
         const liveTerminal = getLiveTerminal(req.params.id);
@@ -3201,7 +3539,18 @@ function createOrchestrationRouter(context) {
         limit: Number.isFinite(limit) ? limit : 200
       });
 
-      res.json({ events });
+      const normalized = parseQueryBoolean(req.query.normalized, false)
+        || String(req.query.format || '').trim().toLowerCase() === 'normalized';
+      if (!normalized) {
+        return res.json({ events });
+      }
+
+      const projection = normalizeSessionEvents(events);
+      res.json({
+        events,
+        normalizedEvents: projection.events,
+        eventNormalization: projection.diagnostics
+      });
     } catch (error) {
       res.status(500).json({
         error: { code: 'internal_error', message: error.message }
@@ -3323,6 +3672,7 @@ function createOrchestrationRouter(context) {
       const sessionMetadata = normalizeSessionMetadata(req.body?.sessionMetadata);
       const launchEnvironment = normalizeLaunchEnvironment(req.body?.launchEnvironment || sessionMetadata.launchEnvironment);
       const deferProviderStartUntilAttached = req.body?.deferProviderStartUntilAttached === true;
+      const providerResumePicker = adapter === 'codex-cli' && req.body?.providerResumePicker === true;
       if (!sessionMetadata.launchProfile) {
         sessionMetadata.launchProfile = String(req.body?.profile || 'guarded-root').trim() || 'guarded-root';
       }
@@ -3355,6 +3705,9 @@ function createOrchestrationRouter(context) {
       if (providerSessionId) {
         sessionMetadata.providerResumeSessionId = providerSessionId;
         sessionMetadata.providerResumeLatest = false;
+      }
+      if (providerResumePicker) {
+        sessionMetadata.providerResumePicker = true;
       }
       if (sourceRootSessionId) {
         sessionMetadata.sourceRootSessionId = sourceRootSessionId;
@@ -3493,7 +3846,9 @@ function createOrchestrationRouter(context) {
         sessionMetadata,
         harnessSessionId: req.body?.harnessSessionId || null,
         providerThreadRef: req.body?.providerThreadRef || null,
-        captureMode: req.body?.captureMode || 'raw-tty'
+        captureMode: req.body?.captureMode || 'raw-tty',
+        runtimeHost: RUNTIME_HOSTS.TMUX,
+        runtimeFidelity: RUNTIME_FIDELITY.ADOPTED_PARTIAL
       });
 
       res.json({

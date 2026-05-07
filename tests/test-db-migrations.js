@@ -6,6 +6,7 @@ const os = require('os');
 const path = require('path');
 
 const { OrchestrationDB } = require('../src/database/db');
+const { RunLedgerService } = require('../src/orchestration/run-ledger');
 
 function makeTempDir(prefix) {
   return fs.mkdtempSync(path.join(os.tmpdir(), prefix));
@@ -13,6 +14,10 @@ function makeTempDir(prefix) {
 
 function writeMigration(dir, version, sql) {
   fs.writeFileSync(path.join(dir, version), `${sql.trim()}\n`, 'utf8');
+}
+
+function copyMigration(sourceDir, targetDir, fileName) {
+  fs.copyFileSync(path.join(sourceDir, fileName), path.join(targetDir, fileName));
 }
 
 function getAppliedVersions(db) {
@@ -122,6 +127,418 @@ function runLegacyMessagesMigrationRegressionTest() {
   }
 }
 
+function runProjectAnchorMigrationRegressionTest() {
+  const rootDir = makeTempDir('cliagents-db-project-anchor-migrate-');
+  const dbPath = path.join(rootDir, 'cliagents.db');
+  const limitedMigrationsDir = path.join(rootDir, 'migrations-pre-0013');
+  const fullMigrationsDir = path.join(__dirname, '../src/database/migrations');
+  fs.mkdirSync(limitedMigrationsDir, { recursive: true });
+
+  try {
+    for (const fileName of [
+      '0001_run_ledger_core.sql',
+      '0002_run_ledger_inputs.sql',
+      '0003_session_control_plane_scaffold.sql',
+      '0004_terminal_identity_and_adoption.sql',
+      '0005_usage_records.sql',
+      '0006_memory_snapshots.sql',
+      '0007_resume_linkage_and_recency.sql',
+      '0008_provider_sessions_and_rooms.sql',
+      '0009_tasks_v1.sql',
+      '0010_task_observability_usage_scope.sql',
+      '0011_adapter_readiness_reports.sql',
+      '0012_run_blocked_state_and_operator_actions.sql'
+    ]) {
+      copyMigration(fullMigrationsDir, limitedMigrationsDir, fileName);
+    }
+
+    const workspaceRoot = path.join(rootDir, 'workspace-legacy');
+    fs.mkdirSync(workspaceRoot, { recursive: true });
+
+    const legacyDb = new OrchestrationDB({
+      dbPath,
+      dataDir: rootDir,
+      migrationsDir: limitedMigrationsDir
+    });
+
+    try {
+      const ledger = new RunLedgerService(legacyDb);
+
+      legacyDb.createTask({
+        id: 'task-legacy-project',
+        title: 'Legacy Project Task',
+        workspaceRoot
+      });
+      legacyDb.registerTerminal(
+        'term-legacy-project',
+        'legacy-project-session',
+        'legacy-project-window',
+        'codex-cli',
+        null,
+        'worker',
+        workspaceRoot,
+        null,
+        { rootSessionId: 'root-legacy-project' }
+      );
+      legacyDb.registerTerminal(
+        'term-legacy-metadata',
+        'legacy-meta-session',
+        'legacy-meta-window',
+        'codex-cli',
+        null,
+        'worker',
+        null,
+        null,
+        {
+          rootSessionId: 'root-legacy-meta',
+          sessionMetadata: { workspaceRoot }
+        }
+      );
+      legacyDb.createRoom({
+        id: 'room-legacy-project',
+        rootSessionId: 'root-room-legacy-project',
+        taskId: 'task-legacy-project',
+        title: 'Legacy project room'
+      });
+
+      ledger.createRun({
+        id: 'run-legacy-project',
+        kind: 'discussion',
+        status: 'completed',
+        inputSummary: 'Legacy project run',
+        workingDirectory: workspaceRoot,
+        rootSessionId: 'root-legacy-project',
+        taskId: 'task-legacy-project',
+        startedAt: Date.now() - 5000,
+        completedAt: Date.now() - 1000,
+        durationMs: 4000
+      });
+
+      legacyDb.upsertMemorySnapshot({
+        scope: 'run',
+        scopeId: 'run-legacy-project',
+        runId: 'run-legacy-project',
+        rootSessionId: 'root-legacy-project',
+        taskId: 'task-legacy-project',
+        brief: 'Legacy run snapshot',
+        generationTrigger: 'repair'
+      });
+
+      legacyDb.addUsageRecord({
+        terminalId: 'term-legacy-project',
+        rootSessionId: 'root-legacy-project',
+        runId: 'run-legacy-project',
+        taskId: 'task-legacy-project',
+        inputTokens: 11,
+        outputTokens: 7,
+        totalTokens: 18,
+        createdAt: Date.now()
+      });
+    } finally {
+      legacyDb.close();
+    }
+
+    const migratedDb = new OrchestrationDB({
+      dbPath,
+      dataDir: rootDir,
+      migrationsDir: fullMigrationsDir
+    });
+
+    try {
+      const projectColumns = migratedDb.db.prepare('PRAGMA table_info(projects)').all().map((column) => column.name);
+      assert.deepStrictEqual(
+        projectColumns,
+        ['id', 'workspace_root', 'metadata', 'created_at', 'updated_at'],
+        'projects table should use the Phase 1 anchor schema'
+      );
+
+      const projects = migratedDb.listProjects();
+      assert.strictEqual(projects.length, 1, 'migration should backfill one project anchor');
+      assert.strictEqual(projects[0].workspaceRoot, fs.realpathSync(workspaceRoot));
+
+      const projectId = projects[0].id;
+      assert.strictEqual(migratedDb.getTask('task-legacy-project').projectId, projectId);
+      assert.strictEqual(migratedDb.getRunById('run-legacy-project').projectId, projectId);
+      assert.strictEqual(migratedDb.getRoom('room-legacy-project').projectId, projectId);
+      assert.strictEqual(migratedDb.getMemorySnapshot('run', 'run-legacy-project').projectId, projectId);
+      assert.strictEqual(migratedDb.listUsageRecords({ runId: 'run-legacy-project' })[0].projectId, projectId);
+      assert.strictEqual(migratedDb.getTerminal('term-legacy-project').project_id, projectId);
+      assert.strictEqual(migratedDb.getTerminal('term-legacy-metadata').project_id, projectId);
+
+      const rerun = migratedDb.repairProjectAnchors();
+      assert.deepStrictEqual(
+        rerun,
+        {
+          projectsCreated: 0,
+          taskProjectsLinked: 0,
+          runProjectsLinked: 0,
+          roomProjectsLinked: 0,
+          usageProjectsLinked: 0,
+          memorySnapshotProjectsLinked: 0,
+          terminalProjectsLinked: 0
+        },
+        'Phase 1 project repair should be idempotent after migration backfill'
+      );
+    } finally {
+      migratedDb.close();
+    }
+
+    console.log('✅ Phase 1 migration backfills project anchors safely for migrated databases');
+  } finally {
+    fs.rmSync(rootDir, { recursive: true, force: true });
+  }
+}
+
+function runProjectAnchorRepairAndDiagnosticsTest() {
+  const rootDir = makeTempDir('cliagents-db-project-anchor-diagnostics-');
+  const db = new OrchestrationDB({
+    dbPath: path.join(rootDir, 'cliagents.db'),
+    dataDir: rootDir
+  });
+
+  try {
+    const ledger = new RunLedgerService(db);
+    const workspaceRoot = path.join(rootDir, 'workspace-known');
+    const conflictingWorkspaceRoot = path.join(rootDir, 'workspace-conflict');
+    fs.mkdirSync(workspaceRoot, { recursive: true });
+    fs.mkdirSync(conflictingWorkspaceRoot, { recursive: true });
+
+    db.createTask({
+      id: 'task-project-recoverable',
+      title: 'Recoverable Project Task',
+      workspaceRoot
+    });
+    db.createTask({
+      id: 'task-project-unknown',
+      title: 'Unknown Project Task'
+    });
+
+    db.registerTerminal(
+      'term-root-known',
+      'root-known-session',
+      'root-known-window',
+      'codex-cli',
+      null,
+      'worker',
+      workspaceRoot,
+      null,
+      { rootSessionId: 'root-known' }
+    );
+    db.registerTerminal(
+      'term-root-conflict',
+      'root-conflict-session',
+      'root-conflict-window',
+      'codex-cli',
+      null,
+      'worker',
+      workspaceRoot,
+      null,
+      {
+        rootSessionId: 'root-conflict',
+        sessionMetadata: { workspaceRoot: conflictingWorkspaceRoot }
+      }
+    );
+
+    ledger.createRun({
+      id: 'run-root-recoverable',
+      kind: 'discussion',
+      status: 'completed',
+      inputSummary: 'Recoverable root linkage',
+      workingDirectory: workspaceRoot,
+      taskId: 'task-project-recoverable',
+      startedAt: Date.now() - 4000,
+      completedAt: Date.now() - 1000,
+      durationMs: 3000
+    });
+    ledger.createRun({
+      id: 'run-root-unknown',
+      kind: 'discussion',
+      status: 'completed',
+      inputSummary: 'Unknown root linkage',
+      startedAt: Date.now() - 3000,
+      completedAt: Date.now() - 500,
+      durationMs: 2500
+    });
+    db.addSessionEvent({
+      rootSessionId: 'root-known',
+      sessionId: 'root-known',
+      runId: 'run-root-recoverable',
+      eventType: 'session_started',
+      idempotencyKey: 'recoverable-run-root-link'
+    });
+
+    db.createRoom({
+      id: 'room-project-recoverable',
+      rootSessionId: 'root-room-known',
+      taskId: 'task-project-recoverable',
+      title: 'Recoverable room'
+    });
+    db.createRoom({
+      id: 'room-project-unknown',
+      rootSessionId: 'root-room-unknown',
+      title: 'Unknown room'
+    });
+
+    db.upsertMemorySnapshot({
+      scope: 'run',
+      scopeId: 'run-root-recoverable',
+      runId: 'run-root-recoverable',
+      taskId: 'task-project-recoverable',
+      brief: 'Recoverable run snapshot',
+      generationTrigger: 'repair'
+    });
+
+    db.db.prepare(`
+      INSERT INTO messages (terminal_id, trace_id, root_session_id, role, content, metadata, created_at)
+      VALUES (?, ?, ?, ?, ?, ?, ?)
+    `).run(
+      'term-root-known',
+      'trace-recoverable-message',
+      null,
+      'assistant',
+      'recoverable root message',
+      '{}',
+      Date.now()
+    );
+    db.db.prepare(`
+      INSERT INTO messages (terminal_id, trace_id, root_session_id, role, content, metadata, created_at)
+      VALUES (?, ?, ?, ?, ?, ?, ?)
+    `).run(
+      'term-root-missing',
+      'trace-unknown-message',
+      null,
+      'assistant',
+      'unknown root message',
+      '{}',
+      Date.now()
+    );
+
+    db.addUsageRecord({
+      terminalId: 'term-root-known',
+      runId: 'run-root-recoverable',
+      inputTokens: 3,
+      outputTokens: 2,
+      totalTokens: 5,
+      createdAt: Date.now()
+    });
+    db.addUsageRecord({
+      terminalId: 'term-root-missing',
+      runId: 'run-missing',
+      taskId: 'task-missing',
+      inputTokens: 1,
+      outputTokens: 0,
+      totalTokens: 1,
+      createdAt: Date.now()
+    });
+    db.db.prepare(`
+      INSERT INTO usage_records (
+        root_session_id,
+        terminal_id,
+        run_id,
+        task_id,
+        task_assignment_id,
+        participant_id,
+        adapter,
+        provider,
+        model,
+        input_tokens,
+        output_tokens,
+        reasoning_tokens,
+        cached_input_tokens,
+        total_tokens,
+        cost_usd,
+        duration_ms,
+        source_confidence,
+        metadata,
+        project_id,
+        created_at
+      ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+    `).run(
+      null,
+      'term-root-known',
+      null,
+      null,
+      null,
+      null,
+      'codex-cli',
+      null,
+      null,
+      1,
+      1,
+      0,
+      0,
+      2,
+      null,
+      null,
+      'unknown',
+      '{}',
+      'project-missing',
+      Date.now()
+    );
+
+    const diagnostics = db.getMemoryLinkageDiagnostics({ sampleLimit: 10 });
+    assert.strictEqual(diagnostics.rootSessionId.recoverable.runs, 1);
+    assert.strictEqual(diagnostics.rootSessionId.unknown.runs, 1);
+    assert.strictEqual(diagnostics.rootSessionId.recoverable.messages, 1);
+    assert.strictEqual(diagnostics.rootSessionId.unknown.messages, 1);
+    assert.strictEqual(diagnostics.rootSessionId.recoverable.usageRecords, 2);
+    assert.strictEqual(diagnostics.rootSessionId.unknown.usageRecords, 1);
+    assert.strictEqual(diagnostics.taskId.recoverable.usageRecords, 1);
+    assert.strictEqual(diagnostics.taskId.unknown.runs, 1);
+    assert.strictEqual(diagnostics.taskId.unknown.rooms, 1);
+    assert.strictEqual(diagnostics.taskId.unknown.usageRecords, 1);
+    assert.strictEqual(diagnostics.projectId.recoverable.tasks, 0);
+    assert.strictEqual(diagnostics.projectId.unknown.tasks, 1);
+    assert.strictEqual(diagnostics.projectId.recoverable.terminals, 0);
+    assert.strictEqual(diagnostics.projectId.unknown.terminals, 1);
+    assert.strictEqual(diagnostics.projectId.recoverable.runs, 0);
+    assert.strictEqual(diagnostics.projectId.unknown.runs, 1);
+    assert.strictEqual(diagnostics.projectId.recoverable.rooms, 0);
+    assert.strictEqual(diagnostics.projectId.unknown.rooms, 1);
+    assert.strictEqual(diagnostics.projectId.recoverable.usageRecords, 0);
+    assert.strictEqual(diagnostics.projectId.unknown.usageRecords, 1);
+    assert.strictEqual(diagnostics.projectId.recoverable.memorySnapshots, 1);
+    assert.strictEqual(diagnostics.usageLinkage.missingTerminal, 1);
+    assert.strictEqual(diagnostics.usageLinkage.missingRun, 1);
+    assert.strictEqual(diagnostics.usageLinkage.missingTask, 1);
+    assert.strictEqual(diagnostics.usageLinkage.missingProject, 1);
+
+    const repair = db.repairProjectAnchors();
+    assert.strictEqual(repair.projectsCreated, 1, 'repair should create the conflicting metadata project only');
+    assert.strictEqual(repair.taskProjectsLinked, 0);
+    assert.strictEqual(repair.terminalProjectsLinked, 0);
+    assert.strictEqual(repair.runProjectsLinked, 0);
+    assert.strictEqual(repair.roomProjectsLinked, 0);
+    assert.strictEqual(repair.usageProjectsLinked, 1);
+    assert.strictEqual(repair.memorySnapshotProjectsLinked, 1);
+
+    const project = db.getTask('task-project-recoverable').projectId;
+    assert(project, 'recoverable task should link to a project after repair');
+    assert.strictEqual(db.getRunById('run-root-recoverable').projectId, project);
+    assert.strictEqual(db.getRoom('room-project-recoverable').projectId, project);
+    assert.strictEqual(db.getMemorySnapshot('run', 'run-root-recoverable').projectId, project);
+    assert.strictEqual(
+      db.listUsageRecords({ runId: 'run-root-recoverable' })[0].projectId,
+      project,
+      'recoverable usage record should backfill its project link'
+    );
+
+    const repairedDiagnostics = db.getMemoryLinkageDiagnostics({ sampleLimit: 10 });
+    assert.strictEqual(repairedDiagnostics.projectId.recoverable.tasks, 0);
+    assert.strictEqual(repairedDiagnostics.projectId.recoverable.runs, 0);
+    assert.strictEqual(repairedDiagnostics.projectId.recoverable.rooms, 0);
+    assert.strictEqual(repairedDiagnostics.projectId.recoverable.memorySnapshots, 0);
+    assert.strictEqual(repairedDiagnostics.projectId.recoverable.usageRecords, 0);
+    assert.strictEqual(repairedDiagnostics.projectId.unknown.tasks, 1);
+    assert.strictEqual(repairedDiagnostics.projectId.unknown.runs, 1);
+
+    console.log('✅ Phase 1 diagnostics separate safe backfills from unknown links on fresh databases');
+  } finally {
+    db.close();
+    fs.rmSync(rootDir, { recursive: true, force: true });
+  }
+}
+
 function run() {
   const rootDir = makeTempDir('cliagents-db-migrations-');
   const dbPath = path.join(rootDir, 'cliagents.db');
@@ -207,6 +624,8 @@ function run() {
 
   console.log('✅ Checksum mismatch is detected for mutated applied migrations');
   runLegacyMessagesMigrationRegressionTest();
+  runProjectAnchorMigrationRegressionTest();
+  runProjectAnchorRepairAndDiagnosticsTest();
 }
 
 try {

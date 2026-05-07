@@ -60,6 +60,14 @@ function assertManagedRootUiEnvPrefix(cmd) {
   assert(cmd.includes('CLICOLOR_FORCE=1'), `Expected CLICOLOR_FORCE in rich-UI env prefix, got: ${cmd}`);
 }
 
+function assertCodexNativeRootCommand(cmd) {
+  assert(cmd.startsWith('exec codex'), `Expected native Codex managed-root command, got: ${cmd}`);
+  assert(!cmd.includes('FORCE_COLOR'), `Codex native TUI should not force color through wrapper env, got: ${cmd}`);
+  assert(!cmd.includes('CLICOLOR_FORCE'), `Codex native TUI should not force color through wrapper env, got: ${cmd}`);
+  assert(!cmd.includes('TERM="${TERM:-tmux-256color}"'), `Codex native TUI should inherit tmux pane TERM, got: ${cmd}`);
+  assert(!cmd.includes('CI=true'), `Codex native TUI should not use CI mode, got: ${cmd}`);
+}
+
 console.log('\n📋 Supported CLI Command Construction Tests\n');
 
 console.log('--- Gemini CLI ---');
@@ -89,10 +97,31 @@ console.log('\n--- Codex CLI ---');
 test('Codex interactive command bypasses approvals by default', () => {
   const cmd = CLI_COMMANDS['codex-cli']({ role: 'main', model: 'o4-mini' });
 
-  assertManagedRootUiEnvPrefix(cmd);
+  assertCodexNativeRootCommand(cmd);
   assert(cmd.includes('exec codex'), `Expected managed root exec prefix, got: ${cmd}`);
   assert(cmd.includes('--dangerously-bypass-approvals-and-sandbox'), `Expected bypass flag, got: ${cmd}`);
   assert(cmd.includes('--model o4-mini'), `Expected model flag, got: ${cmd}`);
+});
+
+test('Codex guarded root command preserves native UI without bypass wrapper', () => {
+  const cmd = CLI_COMMANDS['codex-cli']({
+    role: 'main',
+    permissionMode: 'default'
+  });
+
+  assertCodexNativeRootCommand(cmd);
+  assert.strictEqual(cmd, 'exec codex');
+});
+
+test('Codex managed root can start the native resume picker', () => {
+  const cmd = CLI_COMMANDS['codex-cli']({
+    role: 'main',
+    permissionMode: 'default',
+    resumePicker: true
+  });
+
+  assertCodexNativeRootCommand(cmd);
+  assert.strictEqual(cmd, 'exec codex resume');
 });
 
 test('Codex interactive command can start by resuming a prior session', () => {
@@ -102,7 +131,7 @@ test('Codex interactive command can start by resuming a prior session', () => {
     resumeSessionId: '019d94a6-2cd8-7742-8e4e-123456789abc'
   });
 
-  assertManagedRootUiEnvPrefix(cmd);
+  assertCodexNativeRootCommand(cmd);
   assert(cmd.includes('exec codex resume 019d94a6-2cd8-7742-8e4e-123456789abc'), `Expected codex resume prefix, got: ${cmd}`);
   assert(cmd.includes('--dangerously-bypass-approvals-and-sandbox'), `Expected bypass flag, got: ${cmd}`);
   assert(cmd.includes('--model o4-mini'), `Expected model flag, got: ${cmd}`);
@@ -115,7 +144,7 @@ test('Codex orchestration command uses ready marker', () => {
 
 test('Codex recovered root can resume the latest provider session automatically', () => {
   const cmd = CLI_COMMANDS['codex-cli']({ role: 'main', resumeLatest: true });
-  assertManagedRootUiEnvPrefix(cmd);
+  assertCodexNativeRootCommand(cmd);
   assert(cmd.includes('exec codex resume --last'), `Expected codex latest resume prefix, got: ${cmd}`);
   assert(cmd.includes('--dangerously-bypass-approvals-and-sandbox'), `Expected bypass flag, got: ${cmd}`);
 });
@@ -228,6 +257,15 @@ test('Codex one-shot builder stays stateless and preserves JSON mode', () => {
   assert(cmd.includes('-m o4-mini'), `Expected model flag, got: ${cmd}`);
   assert(cmd.includes('--json'), `Expected JSON output, got: ${cmd}`);
   assert(!cmd.includes('019d94a6-2cd8-7742-8e4e-123456789abc'), `Did not expect worker thread id in command, got: ${cmd}`);
+});
+
+test('Codex one-shot builder pins a broker-safe default model', () => {
+  const cmd = buildCodexOneShotCommand('Continue review.', {
+    model: null,
+    messageCount: 0
+  });
+
+  assert(cmd.includes('-m gpt-5.4'), `Expected safe Codex worker model, got: ${cmd}`);
 });
 
 test('Qwen one-shot builder resumes provider thread and preserves allowed tools', () => {
@@ -508,6 +546,11 @@ test('Serve CLI parses broker isolation flags and explicit shutdown policy', () 
   assert.strictEqual(parsed.orchestration.tmuxSocketPath, '/tmp/cliagents.sock');
   assert.strictEqual(parsed.orchestration.workDir, '/tmp/project');
   assert.strictEqual(parsed.orchestration.destroyTerminalsOnStop, true);
+});
+
+test('Serve CLI binds locally by default', () => {
+  const parsed = parseServeArgs([], {});
+  assert.strictEqual(parsed.host, '127.0.0.1');
 });
 
 test('Serve CLI falls back to broker environment variables', () => {

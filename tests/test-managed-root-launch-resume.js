@@ -15,6 +15,7 @@ const {
   normalizeManagedRootResumeCandidate,
   normalizeManagedRootRecoveryCandidate,
   createManagedRootSelectionPrompt,
+  createProviderSessionSelectionPrompt,
   listOperatorRootSessions,
   getOperatorRootSession,
   listManagedRootLaunchCandidates,
@@ -22,7 +23,9 @@ const {
   listManagedRootRecoveryCandidates,
   resolveManagedRootLaunchTarget,
   buildManagedRootRecoveryLaunchOptions,
-  buildManagedRootContextLaunchOptions
+  buildManagedRootContextLaunchOptions,
+  shouldDefaultCodexProviderResumePicker,
+  applyCodexProviderResumePickerDefault
 } = require('../src/index');
 
 let passed = 0;
@@ -95,6 +98,12 @@ async function run() {
 
     const exactProviderResume = parseLaunchArgs(['codex', '--resume-provider-session', 'session-123']);
     assert.strictEqual(exactProviderResume.providerSessionId, 'session-123');
+
+    const providerPicker = parseLaunchArgs(['codex', '--resume-provider-picker']);
+    assert.strictEqual(providerPicker.providerResumePicker, true);
+
+    const freshProvider = parseLaunchArgs(['codex', '--fresh-provider-session']);
+    assert.strictEqual(freshProvider.freshProviderSession, true);
   });
 
   await test('Launch args reject mixed resume and recover combinations', async () => {
@@ -109,6 +118,18 @@ async function run() {
     assert.throws(
       () => parseLaunchArgs(['codex', '--resume-provider-session', 'session-123', '--resume-latest']),
       /Cannot combine --resume-provider-session with resume or recover flags/
+    );
+    assert.throws(
+      () => parseLaunchArgs(['codex', '--resume-provider-session', 'session-123', '--resume-provider-picker']),
+      /Cannot combine --resume-provider-session with --resume-provider-picker/
+    );
+    assert.throws(
+      () => parseLaunchArgs(['codex', '--fresh-provider-session', '--resume-provider-picker']),
+      /Cannot combine --fresh-provider-session with provider resume options/
+    );
+    assert.throws(
+      () => parseLaunchArgs(['claude', '--resume-provider-picker']),
+      /currently supported only for Codex/
     );
   });
 
@@ -537,8 +558,73 @@ async function run() {
     assert(prompt.text.includes('workdir: /tmp/project-alpha'));
     assert(prompt.text.includes('summary: Fixing the browser console so the current root view shows child terminals inline.'));
     assert(prompt.text.includes('recover'));
+    assert(prompt.text.includes('Enter  Start a new root'));
+    assert(prompt.text.includes('Select a root number to resume or recover, or press Enter for a new root:'));
     assert(prompt.text.includes('workdir: /tmp/project-beta'));
     assert(prompt.text.includes('summary: Gemini exited after finishing the last task and can likely be recovered.'));
+  });
+
+  await test('Managed root selection prompt suppresses Codex TUI noise', async () => {
+    const prompt = createManagedRootSelectionPrompt({
+      resumeCandidates: [{
+        rootSessionId: 'root-noisy-1234567890',
+        status: 'idle',
+        workDir: '/tmp/project-alpha',
+        launchProfile: 'guarded-root',
+        processState: 'alive',
+        currentCommand: 'node',
+        latestSummary: '› daf',
+        activityExcerpt: 'https://developers.openai.com/codex/hooks. › daf gpt-5.5 xhigh · ~/Documents/AI-projects'
+      }, {
+        rootSessionId: 'root-review-abcdef1234',
+        status: 'processing',
+        workDir: '/tmp/project-alpha',
+        launchProfile: 'supervised-root',
+        processState: 'alive',
+        currentCommand: 'node',
+        latestSummary: '• Working (28m 17s • esc to interrupt) · 2 background terminals run…',
+        activityExcerpt: '• Working (28m 17s • esc to interrupt) · 2 background terminals run… › Run /review on my current changes gpt-5.4 xhigh · ~/Documents/AI-projects'
+      }, {
+        rootSessionId: 'root-prompt-fedcba9876',
+        status: 'idle',
+        workDir: '/tmp/project-alpha',
+        launchProfile: 'guarded-root',
+        processState: 'alive',
+        currentCommand: 'node',
+        latestSummary: '› Explain this codebase gpt-5.4 xhigh · ~/Documents/AI-projects'
+      }]
+    }, {
+      adapter: 'codex-cli',
+      workDir: '/tmp/project-alpha'
+    });
+
+    assert(!prompt.text.includes('summary: › daf'));
+    assert(!prompt.text.includes('excerpt: https://developers.openai.com/codex/hooks.'));
+    assert(prompt.text.includes('summary: Run /review on my current changes'));
+    assert(prompt.text.includes('summary: Explain this codebase'));
+  });
+
+  await test('Provider session selection prompt includes transcript summary context', async () => {
+    const prompt = createProviderSessionSelectionPrompt([{
+      providerSessionId: '019df324-64ff-7192-aff1-b0684cd57387',
+      title: 'Analyze disk storage',
+      updatedAt: new Date().toISOString(),
+      cwd: '/tmp/disk-analysis',
+      model: 'gpt-5.4',
+      messageCount: 7,
+      summary: 'Last user: Check which folders are using the most disk and propose cleanup steps.',
+      lastAssistantMessage: 'Found that node_modules and video renders dominate disk usage.'
+    }], {
+      adapter: 'codex-cli'
+    });
+
+    assert(prompt.text.includes('Analyze disk storage'));
+    assert(prompt.text.includes('dir=disk-analysis'));
+    assert(prompt.text.includes('messages=7'));
+    assert(prompt.text.includes('summary: Last user: Check which folders are using the most disk and propose cleanup steps.'));
+    assert(prompt.text.includes('last assistant: Found that node_modules and video renders dominate disk usage.'));
+    assert(prompt.text.includes('Open native Codex resume picker'));
+    assert(prompt.text.includes('Start a fresh provider session'));
   });
 
   await test('List managed recovery candidates returns only recoverable roots', async () => {
@@ -938,6 +1024,48 @@ async function run() {
     });
     assert.strictEqual(fresh.action, 'launch');
     assert.strictEqual(fresh.reason, 'interactive-new-root');
+  });
+
+  await test('Interactive fresh Codex launch does not default to provider resume picker', async () => {
+    const launchOptions = parseLaunchArgs(['codex']);
+    const launchTarget = {
+      action: 'launch',
+      reason: 'interactive-new-root'
+    };
+
+    assert.strictEqual(
+      shouldDefaultCodexProviderResumePicker(launchOptions, launchTarget, { interactive: true }),
+      false
+    );
+
+    const defaulted = applyCodexProviderResumePickerDefault(launchOptions, launchTarget, { interactive: true });
+    assert.strictEqual(defaulted.providerResumePicker, false);
+    assert.strictEqual(defaulted.providerResumePickerDefaulted, undefined);
+
+    const explicitProviderPicker = applyCodexProviderResumePickerDefault(
+      parseLaunchArgs(['codex', '--resume-provider-picker']),
+      launchTarget,
+      { interactive: true }
+    );
+    assert.strictEqual(explicitProviderPicker.providerResumePicker, true);
+    assert.strictEqual(explicitProviderPicker.providerResumePickerDefaulted, undefined);
+
+    const nonInteractive = applyCodexProviderResumePickerDefault(launchOptions, launchTarget, { interactive: false });
+    assert.strictEqual(nonInteractive.providerResumePicker, false);
+
+    const freshProvider = applyCodexProviderResumePickerDefault(
+      parseLaunchArgs(['codex', '--fresh-provider-session']),
+      launchTarget,
+      { interactive: true }
+    );
+    assert.strictEqual(freshProvider.providerResumePicker, false);
+
+    const attachedRoot = applyCodexProviderResumePickerDefault(
+      launchOptions,
+      { action: 'resume', reason: 'interactive-selection' },
+      { interactive: true }
+    );
+    assert.strictEqual(attachedRoot.providerResumePicker, false);
   });
 
   await test('Context launch options carry root memory and preserve sticky identity', async () => {

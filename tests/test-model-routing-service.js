@@ -46,14 +46,14 @@ function run() {
   assert.strictEqual(reviewQwenProviderOrder.selectedModel, 'openrouter/qwen/qwen3.6-plus');
   assert.strictEqual(reviewQwenProviderOrder.selectedProvider, 'openrouter');
 
-  const noPolicy = service.recommendModel({
+  const codexRecommendation = service.recommendModel({
     adapter: 'codex-cli',
     role: 'implement',
-    availableModels: [{ id: 'o4-mini' }]
+    availableModels: [{ id: 'gpt-5.4' }, { id: 'o4-mini' }]
   });
 
-  assert.strictEqual(noPolicy.selectedModel, null);
-  assert.strictEqual(noPolicy.strategy, 'no-policy');
+  assert.strictEqual(codexRecommendation.selectedModel, 'gpt-5.4');
+  assert.strictEqual(codexRecommendation.selectedFamily, 'gpt5');
 
   // 1) implement role still preferring minimax when available
   const implMinimax = service.recommendModel({

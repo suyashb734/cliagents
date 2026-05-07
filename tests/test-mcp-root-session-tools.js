@@ -86,6 +86,7 @@ async function startFakeCliagentsServer() {
     },
     rootDetailResponse: null,
     rootDetailById: new Map(),
+    remoteSnapshotResponse: null,
     memoryBundleResponse: null,
     memoryBundleByScopeId: new Map(),
     memoryMessagesResponse: null,
@@ -192,6 +193,30 @@ async function startFakeCliagentsServer() {
       return writeJson(200, state.adaptersResponse);
     }
 
+    if (req.method === 'GET' && req.url.startsWith('/orchestration/remote/snapshot')) {
+      return writeJson(200, state.remoteSnapshotResponse || {
+        apiVersion: 'remote-v1',
+        generatedAt: '2026-05-06T00:00:00.000Z',
+        access: {
+          bindHost: '127.0.0.1',
+          localOnlyDefault: true,
+          authRequired: false,
+          rawTerminalInput: 'runtime_capability_gated'
+        },
+        routes: {
+          roots: '/orchestration/root-sessions',
+          tasks: '/orchestration/tasks',
+          rooms: '/orchestration/rooms',
+          sessionEvents: '/orchestration/session-events?normalized=1'
+        },
+        roots: [],
+        tasks: [],
+        rooms: [],
+        counts: { roots: 0, tasks: 0, rooms: 0 },
+        usage: null
+      });
+    }
+
     if (req.method === 'POST' && req.url === '/orchestration/model-routing/recommend') {
       return writeJson(200, state.recommendModelResponse);
     }
@@ -230,6 +255,10 @@ async function startFakeCliagentsServer() {
             adapter: body.adapter || 'codex-cli',
             providerSessionId: body.providerSessionId,
             externalSessionRef: body.externalSessionRef || `provider-import:${body.adapter || 'codex-cli'}:${body.providerSessionId}`,
+            runtimeHost: 'adopted',
+            runtimeFidelity: 'adopted-partial',
+            runtimeCapabilities: ['inspect_history', 'stream_events'],
+            controlLimitations: ['read_only_import', 'remote_input_unavailable'],
             descriptor: {
               title: 'Imported provider session'
             }
@@ -457,6 +486,54 @@ async function run() {
     assert(listText.includes('mode=attached'));
     assert(listText.includes('summary="Waiting for operator approval before continuing."'));
 
+    fakeServer.state.remoteSnapshotResponse = {
+      apiVersion: 'remote-v1',
+      generatedAt: '2026-05-06T00:00:00.000Z',
+      access: {
+        bindHost: '127.0.0.1',
+        localOnlyDefault: true,
+        authRequired: true,
+        rawTerminalInput: 'runtime_capability_gated'
+      },
+      routes: {
+        roots: '/orchestration/root-sessions',
+        tasks: '/orchestration/tasks',
+        rooms: '/orchestration/rooms',
+        sessionEvents: '/orchestration/session-events?normalized=1'
+      },
+      roots: [
+        {
+          rootSessionId: 'root-123',
+          status: 'blocked',
+          attention: { requiresAttention: true, reasons: [{ code: 'user_input_required' }] }
+        }
+      ],
+      tasks: [{ task: { id: 'task-1' } }],
+      rooms: [{ room: { id: 'room-1' } }],
+      counts: { roots: 1, tasks: 1, rooms: 1 },
+      usage: {
+        summary: { totalTokens: 42 }
+      }
+    };
+
+    const remoteSnapshot = await mod.handleGetRemoteSnapshot({
+      rootLimit: 5,
+      taskLimit: 5,
+      roomLimit: 5
+    });
+    const remoteText = remoteSnapshot.content[0].text;
+    assert(remoteText.includes('Remote Broker Snapshot'));
+    assert(remoteText.includes('api_version: remote-v1'));
+    assert(remoteText.includes('bind_host: 127.0.0.1'));
+    assert(remoteText.includes('auth_required: true'));
+    assert(remoteText.includes('raw_terminal_input: runtime_capability_gated'));
+    assert(remoteText.includes('roots: 1'));
+    assert(remoteText.includes('actionable_roots: 1'));
+    assert(remoteText.includes('usage_total_tokens: 42'));
+
+    const remoteJson = await mod.handleGetRemoteSnapshot({ format: 'json' });
+    assert.strictEqual(JSON.parse(remoteJson.content[0].text).apiVersion, 'remote-v1');
+
     fakeServer.state.rootDetailResponse = {
       rootSessionId: 'root-123',
       status: 'blocked',
@@ -478,6 +555,22 @@ async function run() {
       },
       latestConclusion: {
         summary: 'Proceed with async-first delegation.'
+      },
+      normalizedEvents: [
+        { type: 'session_started', sourceEventId: 'se_1' },
+        { type: 'permission_requested', sourceEventId: 'se_2' }
+      ],
+      eventNormalization: {
+        inputCount: 3,
+        normalizedCount: 2,
+        skippedCount: 1,
+        gaps: [
+          {
+            sourceEventId: 'se_3',
+            sourceEventType: 'consensus_recorded',
+            gap: 'unmapped_session_event:consensus_recorded'
+          }
+        ]
       },
       sessions: [
         {
@@ -505,6 +598,8 @@ async function run() {
     assert(detailText.includes('activity_summary: Waiting for operator approval before continuing.'));
     assert(detailText.includes('reuse_events: 2'));
     assert(detailText.includes('reused_sessions: 1'));
+    assert(detailText.includes('normalized_events: 2'));
+    assert(detailText.includes('event_normalization_skipped: 1'));
     assert(detailText.includes('latest_conclusion: Proceed with async-first delegation.'));
     assert(detailText.includes('child-review-1 status=blocked'));
 
@@ -565,6 +660,10 @@ async function run() {
         adapter: 'codex-cli',
         providerSessionId: 'session-abc',
         externalSessionRef: 'provider-import:codex-cli:session-abc',
+        runtimeHost: 'adopted',
+        runtimeFidelity: 'adopted-partial',
+        runtimeCapabilities: ['inspect_history', 'stream_events'],
+        controlLimitations: ['read_only_import', 'remote_input_unavailable'],
         descriptor: {
           title: 'Finance tracker'
         }
@@ -577,6 +676,9 @@ async function run() {
     const importProviderText = importProviderResult.content[0].text;
     assert(importProviderText.includes('Provider Session Imported'));
     assert(importProviderText.includes('provider_session_id: session-abc'));
+    assert(importProviderText.includes('runtime_host: adopted'));
+    assert(importProviderText.includes('runtime_fidelity: adopted-partial'));
+    assert(importProviderText.includes('control_limitations: read_only_import,remote_input_unavailable'));
     assert.strictEqual(fakeServer.state.providerSessionImportBodies.at(-1).adapter, 'codex-cli');
     assert.strictEqual(fakeServer.state.providerSessionImportBodies.at(-1).providerSessionId, 'session-abc');
 

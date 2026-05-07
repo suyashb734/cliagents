@@ -146,7 +146,9 @@ function parseLaunchArgs(rawArgs = []) {
     detach: false,
     profileExplicit: false,
     modelExplicit: false,
-    permissionModeExplicit: false
+    permissionModeExplicit: false,
+    providerResumePicker: false,
+    freshProviderSession: false
   };
 
   if (args[0] && !args[0].startsWith('-')) {
@@ -200,6 +202,13 @@ function parseLaunchArgs(rawArgs = []) {
       case '--resume-provider-session':
         parsed.providerSessionId = args.shift();
         break;
+      case '--resume-provider-picker':
+      case '--provider-resume-picker':
+        parsed.providerResumePicker = true;
+        break;
+      case '--fresh-provider-session':
+        parsed.freshProviderSession = true;
+        break;
       case '--allow-tool':
         parsed.allowedTools.push(args.shift());
         break;
@@ -220,11 +229,21 @@ function parseLaunchArgs(rawArgs = []) {
   const hasResumeFlag = Boolean(parsed.resumeRootSessionId || parsed.resumeLatest);
   const hasRecoverFlag = Boolean(parsed.recoverRootSessionId || parsed.recoverLatest);
   const hasProviderResume = Boolean(parsed.providerSessionId);
+  const hasProviderPicker = parsed.providerResumePicker === true;
   if (parsed.forceNewRoot && (hasResumeFlag || hasRecoverFlag)) {
     throw new Error('Cannot combine --new-root with resume or recover flags');
   }
   if (hasProviderResume && (hasResumeFlag || hasRecoverFlag)) {
     throw new Error('Cannot combine --resume-provider-session with resume or recover flags');
+  }
+  if (hasProviderResume && hasProviderPicker) {
+    throw new Error('Cannot combine --resume-provider-session with --resume-provider-picker');
+  }
+  if (parsed.freshProviderSession && (hasProviderResume || hasProviderPicker)) {
+    throw new Error('Cannot combine --fresh-provider-session with provider resume options');
+  }
+  if (hasProviderPicker && parsed.adapter !== 'codex-cli') {
+    throw new Error('--resume-provider-picker is currently supported only for Codex managed roots');
   }
   if (parsed.externalSessionRef && (hasResumeFlag || hasRecoverFlag)) {
     throw new Error('Cannot combine --external-session-ref with resume or recover flags');
@@ -253,6 +272,8 @@ function printLaunchUsage() {
   console.log('  --recover-root <id>           Recover a specific stale or shell-only managed root');
   console.log('  --recover-latest              Recover the most recent stale, interrupted, or shell-only root');
   console.log('  --resume-provider-session <id> Exact-resume a provider-local session into a new managed root');
+  console.log('  --resume-provider-picker      Show cliagents provider-session summaries before native picker fallback');
+  console.log('  --fresh-provider-session      Start Codex with a fresh provider session, bypassing the picker default');
   console.log('  --allow-tool <tool>           Restrict allowed tools (repeatable)');
   console.log('  --detach                      Create the terminal without attaching');
   console.log('');
@@ -508,7 +529,7 @@ function parseServePort(value, fallback = 4001) {
 function parseServeArgs(rawArgs = [], env = process.env) {
   const args = [...rawArgs];
   const parsed = {
-    host: String(env.CLIAGENTS_HOST || env.HOST || '0.0.0.0').trim() || '0.0.0.0',
+    host: String(env.CLIAGENTS_HOST || env.HOST || '127.0.0.1').trim() || '127.0.0.1',
     port: parseServePort(env.PORT, 4001),
     orchestration: {
       dataDir: env.CLIAGENTS_DATA_DIR || null,
@@ -564,7 +585,7 @@ function printServeUsage() {
   console.log('       cliagents [options]');
   console.log('');
   console.log('Options:');
-  console.log('  --host <host>                Host to bind (default: 0.0.0.0)');
+  console.log('  --host <host>                Host to bind (default: 127.0.0.1; use 0.0.0.0 for LAN)');
   console.log('  --port <port>                Port to bind (default: 4001)');
   console.log('  --data-dir <path>            Broker data directory');
   console.log('  --log-dir <path>             Broker terminal log directory');
@@ -750,6 +771,24 @@ function canRecoverManagedRootExactly(launchOptions = {}, candidate = null) {
     && hasExactManagedRootProviderResume(candidate);
 }
 
+function shouldDefaultCodexProviderResumePicker(launchOptions = {}, launchTarget = null, options = {}) {
+  void launchOptions;
+  void launchTarget;
+  void options;
+  return false;
+}
+
+function applyCodexProviderResumePickerDefault(launchOptions = {}, launchTarget = null, options = {}) {
+  if (!shouldDefaultCodexProviderResumePicker(launchOptions, launchTarget, options)) {
+    return launchOptions;
+  }
+  return {
+    ...launchOptions,
+    providerResumePicker: true,
+    providerResumePickerDefaulted: true
+  };
+}
+
 async function buildManagedRootContextLaunchOptions(launchOptions, candidate, dependencies = {}) {
   if (!candidate) {
     throw new Error('Context resume requires a managed root candidate');
@@ -801,6 +840,7 @@ async function buildManagedRootContextLaunchOptions(launchOptions, candidate, de
       previousProviderThreadRef: candidate.providerThreadRef || null,
       previousRecoveryCapability: candidate.recoveryCapability || null,
       recoveryReason: candidate.recoveryReason || null,
+      providerResumePicker: launchOptions.providerResumePicker === true,
       modelSwitch,
       carriedContextSource: 'root-bundle+message-window',
       carriedContextMessageCount: messageList.length,
@@ -1162,6 +1202,12 @@ function buildManagedRootLaunchCandidate(summary, snapshot, options = {}) {
   const processState = String(mainTerminal?.process_state || rootSession.processState || '').trim().toLowerCase() || null;
   const terminalStatus = String(mainTerminal?.status || rootSession.terminalStatus || '').trim().toLowerCase() || null;
   const currentCommand = normalizeManagedRootCurrentCommand(mainTerminal?.current_command || mainTerminal?.currentCommand || null);
+  const runtimeCapabilities = Array.isArray(snapshot?.runtimeCapabilities)
+    ? snapshot.runtimeCapabilities
+    : (Array.isArray(summary?.runtimeCapabilities)
+      ? summary.runtimeCapabilities
+      : (Array.isArray(rootSession.runtimeCapabilities) ? rootSession.runtimeCapabilities : []));
+  const runtimeInputCapable = runtimeCapabilities.length === 0 || runtimeCapabilities.includes('send_input');
   const recoveryHint = extractManagedRootRecoveryHint(snapshot, rootSessionId);
   const providerThreadRef = recoveryHint.providerThreadRef
     || rootSession.providerThreadRef
@@ -1175,6 +1221,7 @@ function buildManagedRootLaunchCandidate(summary, snapshot, options = {}) {
   const rootDestroyed = Boolean(mainSession?.destroyed || rootSession.destroyed);
   const rootTerminatedWithError = String(mainSession?.terminationStatus || rootSession.terminationStatus || '').trim().toLowerCase() === 'error';
   const hasLiveTerminal = Boolean(sessionName)
+    && runtimeInputCapable
     && processState !== 'exited'
     && terminalStatus !== 'orphaned';
   const providerInterrupted = hasExactProviderResume
@@ -1502,6 +1549,119 @@ function truncateManagedRootPromptText(value, maxLength = 140) {
   return `${normalized.slice(0, Math.max(0, maxLength - 1)).trimEnd()}…`;
 }
 
+function stripTerminalAnsi(value) {
+  return String(value || '').replace(/\u001b\[[0-9;?]*[ -/]*[@-~]/g, '');
+}
+
+function normalizeManagedRootDisplayText(value) {
+  let normalized = stripTerminalAnsi(value)
+    .replace(/\r/g, '\n')
+    .replace(/\s+/g, ' ')
+    .trim();
+  if (!normalized) {
+    return '';
+  }
+
+  normalized = normalized.replace(
+    /^[•◦]\s*Working\s*\([^)]*\)(?:\s*·\s*[^›\n\r]+)?\s*/i,
+    ''
+  ).trim();
+  normalized = normalized.replace(/^[›>]\s*/, '').trim();
+  normalized = normalized.replace(
+    /\s+[\w.-]+(?:\s+(?:none|minimal|low|medium|high|xhigh))?\s+·\s+(?:~|\/)[^\n\r]*$/i,
+    ''
+  ).trim();
+  normalized = normalized.replace(/\s+·\s+(?:~|\/)[^\n\r]*$/i, '').trim();
+  return normalized;
+}
+
+function isUsefulManagedRootDisplayText(value) {
+  const normalized = normalizeManagedRootDisplayText(value);
+  if (!normalized || !/[A-Za-z0-9]/.test(normalized)) {
+    return false;
+  }
+  if (/^[•◦]?\s*(?:Working|Processing|Thinking|Running)\b/i.test(normalized)) {
+    return false;
+  }
+  if (/^https?:\/\//i.test(normalized)) {
+    return false;
+  }
+
+  const words = normalized.split(/\s+/).filter(Boolean);
+  if (words.length === 1 && normalized.length < 8 && !/^[/@#]/.test(normalized)) {
+    return false;
+  }
+
+  return true;
+}
+
+function extractManagedRootPromptCandidates(value) {
+  const raw = stripTerminalAnsi(value).replace(/\r/g, '\n');
+  const candidates = [];
+  const markerPattern = /(?:^|\s)›\s*([^›\n\r]+)/g;
+  let match;
+  while ((match = markerPattern.exec(raw)) !== null) {
+    const candidate = normalizeManagedRootDisplayText(match[1]);
+    if (isUsefulManagedRootDisplayText(candidate)) {
+      candidates.push(candidate);
+    }
+  }
+  return candidates;
+}
+
+function chooseManagedRootDisplaySummary(candidate) {
+  const directSources = [
+    candidate.latestSummary
+  ];
+
+  for (const source of directSources) {
+    const normalized = normalizeManagedRootDisplayText(source);
+    if (isUsefulManagedRootDisplayText(normalized)) {
+      return normalized;
+    }
+  }
+
+  const promptSources = [
+    candidate.latestSummary,
+    candidate.activityExcerpt
+  ];
+  for (const source of promptSources) {
+    const prompts = extractManagedRootPromptCandidates(source);
+    if (prompts.length > 0) {
+      return prompts[prompts.length - 1];
+    }
+  }
+
+  const attention = normalizeManagedRootDisplayText(candidate.attentionMessage);
+  if (isUsefulManagedRootDisplayText(attention)) {
+    return attention;
+  }
+
+  return '';
+}
+
+function chooseManagedRootDisplayExcerpt(candidate, summary) {
+  const directSources = [
+    candidate.activityExcerpt
+  ];
+  for (const source of directSources) {
+    const normalized = normalizeManagedRootDisplayText(source);
+    if (isUsefulManagedRootDisplayText(normalized) && normalized !== summary) {
+      return normalized;
+    }
+
+    const prompts = extractManagedRootPromptCandidates(source);
+    if (prompts.length > 0) {
+      const prompt = prompts[prompts.length - 1];
+      if (prompt !== summary) {
+        return prompt;
+      }
+    }
+  }
+
+  return '';
+}
+
 function describeManagedRootSelectionCandidate(candidate) {
   const workDir = candidate.workDir ? resolveLaunchWorkDir(candidate.workDir) : null;
   const workDirName = workDir ? (path.basename(workDir) || workDir) : null;
@@ -1514,8 +1674,9 @@ function describeManagedRootSelectionCandidate(candidate) {
     candidate.recoveryReason ? `recovery=${candidate.recoveryReason}` : null,
     candidate.externalSessionRef ? candidate.externalSessionRef : null
   ].filter(Boolean).join(' • ');
-  const summary = truncateManagedRootPromptText(candidate.latestSummary || candidate.attentionMessage || '');
-  const excerpt = truncateManagedRootPromptText(candidate.activityExcerpt || '', 120);
+  const displaySummary = chooseManagedRootDisplaySummary(candidate);
+  const summary = truncateManagedRootPromptText(displaySummary);
+  const excerpt = truncateManagedRootPromptText(chooseManagedRootDisplayExcerpt(candidate, displaySummary), 120);
 
   return {
     age: formatManagedRootCandidateAge(candidate),
@@ -1604,6 +1765,73 @@ function createManagedRootSelectionPrompt(candidates, options = {}) {
   };
 }
 
+function formatProviderSessionCandidateAge(session) {
+  const timestamp = Date.parse(session?.updatedAt || 0);
+  if (!Number.isFinite(timestamp)) {
+    return 'recent';
+  }
+  const diffMs = Math.max(0, Date.now() - timestamp);
+  const diffMinutes = Math.floor(diffMs / 60000);
+  if (diffMinutes < 1) {
+    return 'just now';
+  }
+  if (diffMinutes < 60) {
+    return `${diffMinutes}m ago`;
+  }
+  const diffHours = Math.floor(diffMinutes / 60);
+  if (diffHours < 24) {
+    return `${diffHours}h ago`;
+  }
+  const diffDays = Math.floor(diffHours / 24);
+  return `${diffDays}d ago`;
+}
+
+function createProviderSessionSelectionPrompt(sessions, options = {}) {
+  const adapter = options.adapter || 'codex-cli';
+  const lines = [
+    `Recent ${adapter} provider sessions:`
+  ];
+  const selectionEntries = [];
+  let selectionIndex = 1;
+
+  for (const session of Array.isArray(sessions) ? sessions : []) {
+    const workDir = session.cwd ? resolveLaunchWorkDir(session.cwd) : null;
+    const workDirName = workDir ? (path.basename(workDir) || workDir) : null;
+    const metadata = [
+      formatProviderSessionCandidateAge(session),
+      workDirName ? `dir=${workDirName}` : null,
+      session.model ? `model=${session.model}` : null,
+      session.messageCount ? `messages=${session.messageCount}` : null
+    ].filter(Boolean).join(' • ');
+    const title = truncateManagedRootPromptText(session.title || session.providerSessionId || 'session', 96);
+    const summary = truncateManagedRootPromptText(session.summary || session.lastUserMessage || session.preview || '', 180);
+    const lastAssistant = truncateManagedRootPromptText(session.lastAssistantMessage || '', 160);
+
+    lines.push(`  ${selectionIndex}. ${title}${metadata ? ` (${metadata})` : ''}`);
+    lines.push(`     id: ${session.providerSessionId}`);
+    if (workDir) {
+      lines.push(`     workdir: ${workDir}`);
+    }
+    if (summary) {
+      lines.push(`     summary: ${summary}`);
+    }
+    if (lastAssistant && lastAssistant !== summary) {
+      lines.push(`     last assistant: ${lastAssistant}`);
+    }
+    selectionEntries.push({ selectionIndex, session });
+    selectionIndex += 1;
+  }
+
+  lines.push('  Enter  Open native Codex resume picker');
+  lines.push('  f      Start a fresh provider session');
+  lines.push('');
+  lines.push('Select a provider session number, press Enter for native picker, or type f for fresh: ');
+  return {
+    text: lines.join('\n'),
+    selectionEntries
+  };
+}
+
 async function promptForManagedRootSelection(candidates, options = {}) {
   const { resumeCandidates, recoverCandidates } = normalizeManagedRootSelectionGroups(candidates);
   if (resumeCandidates.length === 0 && recoverCandidates.length === 0) {
@@ -1632,6 +1860,54 @@ async function promptForManagedRootSelection(candidates, options = {}) {
       const selectedEntry = prompt.selectionEntries.find((entry) => entry.selectionIndex === selectedIndex);
       if (Number.isInteger(selectedIndex) && selectedEntry) {
         return selectedEntry.candidate;
+      }
+
+      output.write(`Invalid selection: ${trimmed}\n`);
+    }
+  } finally {
+    rl.close();
+  }
+}
+
+async function listProviderSessionsForLaunch(options = {}, dependencies = {}) {
+  const callJson = dependencies.callCliagentsJson || callCliagentsJson;
+  const params = new URLSearchParams();
+  params.set('adapter', options.adapter || 'codex-cli');
+  params.set('limit', String(options.limit || 12));
+  const result = await callJson(`/orchestration/provider-sessions?${params.toString()}`);
+  return Array.isArray(result?.sessions) ? result.sessions : [];
+}
+
+async function promptForProviderSessionSelection(sessions, options = {}) {
+  if (!Array.isArray(sessions) || sessions.length === 0) {
+    return null;
+  }
+
+  const input = options.input || process.stdin;
+  const output = options.output || process.stdout;
+  if (!input.isTTY || !output.isTTY) {
+    return null;
+  }
+
+  const rl = readline.createInterface({ input, output });
+  try {
+    for (;;) {
+      const prompt = createProviderSessionSelectionPrompt(sessions, options);
+      const answer = await new Promise((resolve) => {
+        rl.question(prompt.text, resolve);
+      });
+      const trimmed = String(answer || '').trim();
+      if (!trimmed) {
+        return null;
+      }
+      if (trimmed.toLowerCase() === 'f') {
+        return { freshProviderSession: true };
+      }
+
+      const selectedIndex = Number.parseInt(trimmed, 10);
+      const selectedEntry = prompt.selectionEntries.find((entry) => entry.selectionIndex === selectedIndex);
+      if (Number.isInteger(selectedIndex) && selectedEntry) {
+        return selectedEntry.session;
       }
 
       output.write(`Invalid selection: ${trimmed}\n`);
@@ -1795,6 +2071,12 @@ function printManagedRootLaunchResult(result, launchOptions) {
   if (result.providerStartMode) {
     console.log(`  provider_start: ${result.providerStartMode}`);
   }
+  if (launchOptions.providerResumePicker) {
+    console.log(`  provider_resume: picker${launchOptions.providerResumePickerDefaulted ? ' (default)' : ''}`);
+  }
+  if (launchOptions.providerSessionId) {
+    console.log(`  provider_session_id: ${launchOptions.providerSessionId}`);
+  }
   console.log(`  external_session_ref: ${result.externalSessionRef || 'n/a'}`);
   console.log(`  workdir: ${result.workDir || launchOptions.workDir || 'n/a'}`);
   console.log(`  console_url: ${new URL(result.consoleUrl || '/console', getCliagentsBaseUrl()).toString()}`);
@@ -1837,6 +2119,8 @@ function printManagedRootRecoveryResult(result, previousCandidate, launchOptions
   console.log(`  external_session_ref: ${result.externalSessionRef || previousCandidate.externalSessionRef || 'n/a'}`);
   if (automaticProviderResumeCommand) {
     console.log(`  provider_resume: automatic (${automaticProviderResumeCommand})`);
+  } else if (launchOptions.providerResumePicker) {
+    console.log('  provider_resume: picker');
   } else {
     console.log('  provider_resume: none (exact provider session unavailable; a fresh provider session was started)');
   }
@@ -1859,6 +2143,9 @@ function printManagedRootContextResult(result, previousCandidate, launchOptions)
   }
   console.log('  resume_mode: context');
   console.log(`  context_reason: ${launchOptions.sessionMetadata?.modelSwitch ? 'model-switch' : (previousCandidate.recoveryReason || 'stale-root')}`);
+  if (launchOptions.providerResumePicker) {
+    console.log('  provider_resume: picker');
+  }
   console.log(`  external_session_ref: ${result.externalSessionRef || previousCandidate.externalSessionRef || 'n/a'}`);
   console.log(`  console_url: ${new URL(result.consoleUrl || '/console', getCliagentsBaseUrl()).toString()}`);
   if (result.attachCommand) {
@@ -1960,6 +2247,7 @@ async function launchManagedRootSession(options = {}) {
   const extraSessionMetadata = options.sessionMetadata && typeof options.sessionMetadata === 'object'
     ? options.sessionMetadata
     : {};
+  const providerResumePicker = options.providerResumePicker === true || extraSessionMetadata.providerResumePicker === true;
   return callCliagentsJson('/orchestration/root-sessions/launch', {
     method: 'POST',
     body: {
@@ -1972,11 +2260,13 @@ async function launchManagedRootSession(options = {}) {
       sessionMetadata: {
         ...extraSessionMetadata,
         launchProfile: profile.id,
-        launchEnvironment
+        launchEnvironment,
+        providerResumePicker
       },
       resumeMode: options.resumeMode || 'new',
       providerSessionId: options.providerSessionId || null,
       sourceRootSessionId: options.sourceRootSessionId || null,
+      providerResumePicker,
       launchEnvironment,
       deferProviderStartUntilAttached: options.deferProviderStartUntilAttached === true,
       allowedTools: Array.isArray(options.allowedTools) && options.allowedTools.length > 0
@@ -2007,6 +2297,7 @@ function buildManagedRootRecoveryLaunchOptions(launchOptions, candidate) {
       previousCurrentCommand: candidate.currentCommand || null,
       providerResumeCommand: candidate.resumeCommand || null,
       providerResumeSessionId,
+      providerResumePicker: launchOptions.providerResumePicker === true && !providerResumeSessionId,
       providerResumeLatest: false
     }
   };
@@ -2034,6 +2325,9 @@ async function handleLaunchCommand(rawArgs = []) {
   }
 
   const launchTarget = await resolveManagedRootLaunchTarget(launchOptions);
+  let effectiveLaunchOptions = applyCodexProviderResumePickerDefault(launchOptions, launchTarget, {
+    interactive: deferProviderStartUntilAttached
+  });
   if (launchTarget.action === 'resume') {
     const candidate = launchTarget.candidate;
     printManagedRootResumeResult(candidate);
@@ -2044,7 +2338,7 @@ async function handleLaunchCommand(rawArgs = []) {
   }
 
   if (launchTarget.action === 'recover') {
-    const recoveryOptions = buildManagedRootRecoveryLaunchOptions(launchOptions, launchTarget.candidate);
+    const recoveryOptions = buildManagedRootRecoveryLaunchOptions(effectiveLaunchOptions, launchTarget.candidate);
     recoveryOptions.deferProviderStartUntilAttached = deferProviderStartUntilAttached;
     const result = await launchManagedRootSession(recoveryOptions);
     printManagedRootRecoveryResult(result, launchTarget.candidate, recoveryOptions);
@@ -2055,7 +2349,7 @@ async function handleLaunchCommand(rawArgs = []) {
   }
 
   if (launchTarget.action === 'context') {
-    const contextOptions = await buildManagedRootContextLaunchOptions(launchOptions, launchTarget.candidate);
+    const contextOptions = await buildManagedRootContextLaunchOptions(effectiveLaunchOptions, launchTarget.candidate);
     contextOptions.deferProviderStartUntilAttached = deferProviderStartUntilAttached;
     const result = await launchManagedRootSession(contextOptions);
     printManagedRootContextResult(result, launchTarget.candidate, contextOptions);
@@ -2065,11 +2359,48 @@ async function handleLaunchCommand(rawArgs = []) {
     return;
   }
 
+  if (launchTarget.action === 'launch' && effectiveLaunchOptions.providerResumePicker === true && deferProviderStartUntilAttached) {
+    try {
+      const providerSessions = await listProviderSessionsForLaunch({
+        adapter: effectiveLaunchOptions.adapter,
+        limit: 12
+      });
+      const providerSelection = await promptForProviderSessionSelection(providerSessions, {
+        adapter: effectiveLaunchOptions.adapter
+      });
+      if (providerSelection?.freshProviderSession === true) {
+        effectiveLaunchOptions = {
+          ...effectiveLaunchOptions,
+          providerResumePicker: false,
+          providerResumePickerDefaulted: false,
+          freshProviderSession: true
+        };
+      } else if (providerSelection?.providerSessionId) {
+        const exactOptions = {
+          ...effectiveLaunchOptions,
+          providerSessionId: providerSelection.providerSessionId,
+          providerResumePicker: false,
+          providerResumePickerDefaulted: false,
+          resumeMode: 'exact',
+          deferProviderStartUntilAttached
+        };
+        const result = await launchManagedRootSession(exactOptions);
+        printManagedRootLaunchResult(result, exactOptions);
+        if (!launchOptions.detach && process.stdout.isTTY) {
+          attachToManagedSession(result);
+        }
+        return;
+      }
+    } catch (error) {
+      console.warn(`[cliagents] Provider-session summary picker unavailable; falling back to native Codex picker: ${error.message}`);
+    }
+  }
+
   const result = await launchManagedRootSession({
-    ...launchOptions,
+    ...effectiveLaunchOptions,
     deferProviderStartUntilAttached
   });
-  printManagedRootLaunchResult(result, launchOptions);
+  printManagedRootLaunchResult(result, effectiveLaunchOptions);
   if (!launchOptions.detach && process.stdout.isTTY) {
     attachToManagedSession(result);
   }
@@ -2137,6 +2468,9 @@ module.exports = {
   normalizeManagedRootResumeCandidate,
   normalizeManagedRootRecoveryCandidate,
   createManagedRootSelectionPrompt,
+  createProviderSessionSelectionPrompt,
+  listProviderSessionsForLaunch,
+  promptForProviderSessionSelection,
   listManagedRootLaunchCandidates,
   listManagedRootResumeCandidates,
   listManagedRootRecoveryCandidates,
@@ -2147,6 +2481,8 @@ module.exports = {
   launchManagedRootSession,
   buildManagedRootRecoveryLaunchOptions,
   buildManagedRootContextLaunchOptions,
+  shouldDefaultCodexProviderResumePicker,
+  applyCodexProviderResumePickerDefault,
   attachToManagedSession,
   handleLaunchCommand,
   handleListRootsCommand,

@@ -42,6 +42,19 @@ function branchExists(repoRoot, branchName) {
   }
 }
 
+function assertValidBranchName(repoRoot, branchName) {
+  const normalizedBranch = String(branchName || '').trim();
+  if (!normalizedBranch) {
+    return;
+  }
+
+  try {
+    runGit(['-C', repoRoot, 'check-ref-format', '--branch', normalizedBranch]);
+  } catch (error) {
+    throw new Error(`Invalid worktreeBranch "${normalizedBranch}": ${describeGitError(error)}`);
+  }
+}
+
 function isPathInside(candidatePath, rootPath) {
   const relative = path.relative(rootPath, candidatePath);
   return relative === '' || (!!relative && !relative.startsWith('..') && !path.isAbsolute(relative));
@@ -130,10 +143,10 @@ function buildAllowedWorktreeRoots(workspaceRoot, repoRoot) {
     }
   };
 
-  addRoot(workspaceRoot);
-
   if (repoRoot) {
     addRoot(path.join(path.dirname(repoRoot), `${path.basename(repoRoot)}-worktrees`));
+  } else {
+    addRoot(workspaceRoot);
   }
 
   addRoot(process.env.CLIAGENTS_WORKTREE_ROOT);
@@ -152,6 +165,18 @@ function assertInsideAllowedWorktreeRoots(resolvedPath, allowedRoots) {
   );
 }
 
+function assertOutsidePrimaryRepo(resolvedPath, repoRoot) {
+  if (!repoRoot) {
+    return;
+  }
+
+  const normalizedPath = resolvePhysicalPath(resolvedPath);
+  const normalizedRepoRoot = resolvePhysicalPath(repoRoot);
+  if (isPathInside(normalizedPath, normalizedRepoRoot)) {
+    throw new Error(`worktreePath must be outside the primary repository root: ${normalizedRepoRoot}`);
+  }
+}
+
 function resolveRequestedWorktreePath(workspaceRoot, requestedPath, allowedRoots = []) {
   const trimmed = String(requestedPath || '').trim();
   if (!trimmed) {
@@ -163,6 +188,24 @@ function resolveRequestedWorktreePath(workspaceRoot, requestedPath, allowedRoots
     : path.resolve(workspaceRoot || process.cwd(), trimmed);
 
   return assertInsideAllowedWorktreeRoots(resolvedPath, allowedRoots);
+}
+
+function listRegisteredWorktreePaths(repoRoot) {
+  const output = runGit(['-C', repoRoot, 'worktree', 'list', '--porcelain']);
+  return output
+    .split('\n')
+    .filter((line) => line.startsWith('worktree '))
+    .map((line) => line.slice('worktree '.length).trim())
+    .filter(Boolean)
+    .map((worktreePath) => safeRealpath(worktreePath));
+}
+
+function assertRegisteredRepoWorktree(repoRoot, worktreePath) {
+  const normalizedWorktreePath = safeRealpath(worktreePath);
+  const registeredPaths = listRegisteredWorktreePaths(repoRoot);
+  if (!registeredPaths.includes(normalizedWorktreePath)) {
+    throw new Error(`Existing worktreePath must be a registered git worktree for ${repoRoot}: ${worktreePath}`);
+  }
 }
 
 function buildIsolationMetadata(existingMetadata, isolationPatch) {
@@ -206,20 +249,29 @@ function prepareTaskAssignmentWorktree(task, assignment) {
   if (!resolvedWorktreePath) {
     throw new Error('Unable to resolve worktree path');
   }
+  assertOutsidePrimaryRepo(resolvedWorktreePath, repoRoot);
+  if (requestedBranch && repoRoot) {
+    assertValidBranchName(repoRoot, requestedBranch);
+  }
 
   const existingWorktreeStat = pathExists(resolvedWorktreePath);
   if (existingWorktreeStat) {
     const realWorktreePath = safeRealpath(resolvedWorktreePath);
     assertInsideAllowedWorktreeRoots(realWorktreePath, allowedRoots.map(safeRealpath));
+    assertOutsidePrimaryRepo(realWorktreePath, repoRoot);
     if (!existingWorktreeStat.isDirectory()) {
       throw new Error(`worktreePath exists but is not a directory: ${resolvedWorktreePath}`);
     }
+    if (repoRoot) {
+      assertRegisteredRepoWorktree(repoRoot, realWorktreePath);
+    }
 
     const currentBranch = tryRunGit(['-C', resolvedWorktreePath, 'branch', '--show-current']) || requestedBranch || null;
-    const existingRepoRoot = tryRunGit(['-C', resolvedWorktreePath, 'rev-parse', '--show-toplevel']) || repoRoot || workspaceRoot;
+    const worktreeRepoRoot = tryRunGit(['-C', resolvedWorktreePath, 'rev-parse', '--show-toplevel']) || null;
     const metadata = buildIsolationMetadata(assignment?.metadata || {}, {
       mode: 'git_worktree',
-      repoRoot: existingRepoRoot,
+      repoRoot: repoRoot || worktreeRepoRoot || workspaceRoot,
+      worktreeRepoRoot,
       worktreePath: resolvedWorktreePath,
       branch: currentBranch,
       preparedAt: Date.now(),
@@ -246,6 +298,7 @@ function prepareTaskAssignmentWorktree(task, assignment) {
     }
 
     const parentPath = path.dirname(resolvedWorktreePath);
+    assertOutsidePrimaryRepo(parentPath, repoRoot);
     assertInsideAllowedWorktreeRoots(parentPath, allowedRoots);
     const parentExisted = !!pathExists(parentPath);
     fs.mkdirSync(parentPath, { recursive: true });

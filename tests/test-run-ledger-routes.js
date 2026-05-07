@@ -233,6 +233,7 @@ async function run() {
 
 run().then(() => {
   console.log('\nRun-ledger route tests passed');
+  process.exit(0);
 }).catch((error) => {
   if (String(error.message).startsWith('SKIP:')) {
     console.log(`\nRun-ledger route tests skipped: ${error.message.slice(5).trim()}`);

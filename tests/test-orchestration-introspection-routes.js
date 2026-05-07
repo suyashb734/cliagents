@@ -1098,6 +1098,7 @@ async function testRootSessionRoutesExposeAttentionSummary() {
     assert.strictEqual(detailRes.data.sessionKind, 'attached');
     assert.strictEqual(detailRes.data.visibility, 'read-only');
     assert.strictEqual(detailRes.data.replyCapability, 'partial');
+    assert.strictEqual(detailRes.data.runtimeHost, null);
     assert(detailRes.data.lastMessageAt, 'detail snapshot should expose message recency');
     assert.strictEqual(detailRes.data.messageCount, 1);
     assert.strictEqual(detailRes.data.recoveryCapability, 'exact_provider_resume');
@@ -1133,6 +1134,10 @@ async function testRootSessionRoutesExposeAttentionSummary() {
     assert.strictEqual(childrenRes.data.children[0].sessionKind, 'reviewer');
     assert.strictEqual(childrenRes.data.children[0].status, 'waiting_user_answer');
     assert.strictEqual(childrenRes.data.children[0].providerThreadRefPresent, true);
+    assert.strictEqual(childrenRes.data.children[0].runtimeHost, 'tmux');
+    assert.strictEqual(childrenRes.data.children[0].runtimeId, 'cliagents-root:0');
+    assert.strictEqual(childrenRes.data.children[0].runtimeFidelity, 'managed');
+    assert(childrenRes.data.children[0].runtimeCapabilities.includes('send_input'));
     assert(!childrenRes.data.children.some((child) => child.terminalId === 'child-monitor-other-root'));
 
     const missingRes = await request(baseUrl, 'GET', '/orchestration/root-sessions/does-not-exist');
@@ -1398,6 +1403,39 @@ async function testSessionEventsRouteReturnsReplayOrderedEvents() {
     idempotencyKey: `${rootSessionId}:cccccccccccccccccccccccccccccccc:session_started:child`,
     payloadSummary: 'child started'
   });
+  db.addSessionEvent({
+    rootSessionId,
+    sessionId: rootSessionId,
+    eventType: 'message_sent',
+    originClient: 'mcp',
+    idempotencyKey: `${rootSessionId}:${rootSessionId}:message_sent:1`,
+    payloadSummary: 'user requested implementation',
+    payloadJson: {
+      content: 'implement event normalization'
+    }
+  });
+  db.addSessionEvent({
+    rootSessionId,
+    sessionId: 'cccccccccccccccccccccccccccccccc',
+    parentSessionId: rootSessionId,
+    eventType: 'user_input_requested',
+    originClient: 'mcp',
+    idempotencyKey: `${rootSessionId}:cccccccccccccccccccccccccccccccc:user_input_requested:1`,
+    payloadSummary: 'approval required',
+    payloadJson: {
+      kind: 'permission',
+      question: 'Approve write?'
+    }
+  });
+  db.addSessionEvent({
+    rootSessionId,
+    sessionId: 'cccccccccccccccccccccccccccccccc',
+    parentSessionId: rootSessionId,
+    eventType: 'consensus_recorded',
+    originClient: 'mcp',
+    idempotencyKey: `${rootSessionId}:cccccccccccccccccccccccccccccccc:consensus_recorded:1`,
+    payloadSummary: 'discussion conclusion'
+  });
 
   const { server, baseUrl } = await startApp({
     sessionManager: {
@@ -1415,7 +1453,7 @@ async function testSessionEventsRouteReturnsReplayOrderedEvents() {
   try {
     const res = await request(baseUrl, 'GET', `/orchestration/session-events?rootSessionId=${rootSessionId}`);
     assert.strictEqual(res.status, 200);
-    assert.strictEqual(res.data.events.length, 2);
+    assert.strictEqual(res.data.events.length, 5);
     assert.strictEqual(res.data.events[0].sequence_no, 1);
     assert.strictEqual(res.data.events[0].payload_summary, 'root attached');
     assert.strictEqual(res.data.events[1].sequence_no, 2);
@@ -1423,9 +1461,127 @@ async function testSessionEventsRouteReturnsReplayOrderedEvents() {
 
     const cursorRes = await request(baseUrl, 'GET', `/orchestration/session-events?rootSessionId=${rootSessionId}&after_sequence_no=1`);
     assert.strictEqual(cursorRes.status, 200);
-    assert.strictEqual(cursorRes.data.events.length, 1);
+    assert.strictEqual(cursorRes.data.events.length, 4);
     assert.strictEqual(cursorRes.data.events[0].sequence_no, 2);
     assert.strictEqual(cursorRes.data.events[0].payload_summary, 'child started');
+
+    const normalizedRes = await request(baseUrl, 'GET', `/orchestration/session-events?rootSessionId=${rootSessionId}&normalized=1`);
+    assert.strictEqual(normalizedRes.status, 200);
+    assert.strictEqual(normalizedRes.data.events.length, 5);
+    assert.deepStrictEqual(
+      normalizedRes.data.normalizedEvents.map((event) => event.type),
+      ['session_started', 'session_started', 'prompt_submitted', 'permission_requested']
+    );
+    assert.strictEqual(normalizedRes.data.eventNormalization.inputCount, 5);
+    assert.strictEqual(normalizedRes.data.eventNormalization.normalizedCount, 4);
+    assert.strictEqual(normalizedRes.data.eventNormalization.skippedCount, 1);
+    assert(
+      normalizedRes.data.eventNormalization.gaps.some((entry) => entry.gap === 'unmapped_session_event:consensus_recorded')
+    );
+
+    const snapshotRes = await request(baseUrl, 'GET', `/orchestration/root-sessions/${rootSessionId}?eventLimit=10&terminalLimit=10`);
+    assert.strictEqual(snapshotRes.status, 200);
+    assert(snapshotRes.data.normalizedEvents.some((event) => event.type === 'prompt_submitted'));
+    assert.strictEqual(snapshotRes.data.eventNormalization.skippedCount, 1);
+  } finally {
+    await stopApp(server);
+    db.close();
+  }
+}
+
+async function testRemoteSnapshotRouteReturnsRuntimeNeutralBrokerState() {
+  const rootDir = makeTempDir('cliagents-remote-snapshot-route-');
+  const dbPath = path.join(rootDir, 'cliagents.db');
+  const db = new OrchestrationDB({ dbPath, dataDir: rootDir });
+  const rootSessionId = 'dddddddddddddddddddddddddddddddd';
+
+  db.addSessionEvent({
+    rootSessionId,
+    sessionId: rootSessionId,
+    eventType: 'session_started',
+    originClient: 'mcp',
+    idempotencyKey: `${rootSessionId}:session_started`,
+    payloadSummary: 'remote root started',
+    payloadJson: {
+      adapter: 'codex-cli',
+      sessionKind: 'main'
+    }
+  });
+  db.registerTerminal(
+    rootSessionId,
+    'cliagents-remote',
+    '0',
+    'codex-cli',
+    'main_codex-cli',
+    'main',
+    rootDir,
+    path.join(rootDir, 'remote.log'),
+    {
+      rootSessionId,
+      parentSessionId: null,
+      sessionKind: 'main',
+      originClient: 'mcp',
+      runtimeHost: 'tmux',
+      runtimeFidelity: 'managed'
+    }
+  );
+  const task = db.createTask({
+    id: 'task_remote_snapshot',
+    title: 'Remote snapshot test',
+    workspaceRoot: rootDir,
+    rootSessionId
+  });
+  db.createRoom({
+    id: 'room_remote_snapshot',
+    rootSessionId,
+    taskId: task.id,
+    title: 'Remote Snapshot Room'
+  });
+  db.addUsageRecord({
+    rootSessionId,
+    terminalId: rootSessionId,
+    taskId: task.id,
+    adapter: 'codex-cli',
+    model: 'gpt-5.4',
+    inputTokens: 10,
+    outputTokens: 5,
+    totalTokens: 15,
+    sourceConfidence: 'reported'
+  });
+
+  const { server, baseUrl } = await startApp({
+    sessionManager: {
+      getTerminal() {
+        return null;
+      },
+      async createTerminal() {
+        throw new Error('not used');
+      },
+      async sendInput() {
+        throw new Error('not used');
+      }
+    },
+    apiSessionManager: null,
+    db,
+    host: '127.0.0.1'
+  });
+
+  try {
+    const res = await request(baseUrl, 'GET', '/orchestration/remote/snapshot?rootLimit=5&taskLimit=5&roomLimit=5&includeUsage=1');
+    assert.strictEqual(res.status, 200);
+    assert.strictEqual(res.data.apiVersion, 'remote-v1');
+    assert.strictEqual(res.data.access.localOnlyDefault, true);
+    assert.strictEqual(res.data.access.bindHost, '127.0.0.1');
+    assert.strictEqual(res.data.access.rawTerminalInput, 'runtime_capability_gated');
+    assert.strictEqual(res.data.routes.sessionEvents, '/orchestration/session-events?normalized=1');
+    assert(res.data.capabilities.read.includes('runtime_status'));
+    assert.strictEqual(res.data.counts.roots, 1);
+    assert.strictEqual(res.data.counts.tasks, 1);
+    assert.strictEqual(res.data.counts.rooms, 1);
+    assert.strictEqual(res.data.roots[0].runtimeHost, 'tmux');
+    assert.strictEqual(res.data.tasks[0].task.id, task.id);
+    assert.strictEqual(res.data.rooms[0].room.id, 'room_remote_snapshot');
+    assert.strictEqual(res.data.usage.summary.totalTokens, 15);
   } finally {
     await stopApp(server);
     db.close();
@@ -1664,6 +1820,10 @@ async function testRootSessionAttachRouteCreatesAndReusesClientRoot() {
     assert.strictEqual(first.data.reusedAttachedRoot, false);
     assert.strictEqual(first.data.originClient, 'mcp');
     assert.strictEqual(first.data.sessionMetadata.attachMode, 'explicit-http-attach');
+    const attachedRootTerminal = db.getTerminal(first.data.rootSessionId);
+    assert.strictEqual(attachedRootTerminal.runtime_host, 'adopted');
+    assert.strictEqual(attachedRootTerminal.runtime_fidelity, 'adopted-partial');
+    assert(JSON.parse(attachedRootTerminal.runtime_capabilities).includes('inspect_history'));
 
     const second = await request(appHandle.baseUrl, 'POST', '/orchestration/root-sessions/attach', attachBody);
     assert.strictEqual(second.status, 200);
@@ -2211,6 +2371,8 @@ async function testRootAdoptRouteCreatesManagedRootFromExistingTmuxTarget() {
     assert.strictEqual(adoptCalls[0].sessionMetadata.launchSource, 'http-root-adopt');
     assert.strictEqual(adoptCalls[0].sessionMetadata.clientName, 'claude');
     assert.strictEqual(adoptCalls[0].sessionMetadata.tmuxTarget, 'workspace:agent');
+    assert.strictEqual(adoptCalls[0].runtimeHost, 'tmux');
+    assert.strictEqual(adoptCalls[0].runtimeFidelity, 'adopted-partial');
     assert.strictEqual(sessionEvents.length, 1);
     assert.strictEqual(sessionEvents[0].eventType, 'session_started');
     assert.strictEqual(response.data.adoptedRoot, true);
@@ -2344,6 +2506,9 @@ async function run() {
 
     await testSessionEventsRouteReturnsReplayOrderedEvents();
     console.log('  ✓ session-events route replays ordered control-plane events');
+
+    await testRemoteSnapshotRouteReturnsRuntimeNeutralBrokerState();
+    console.log('  ✓ remote snapshot route exposes runtime-neutral broker state');
 
     await testReconcileRouteRecoversStaleRuns();
     console.log('  ✓ stale-run reconciliation route recovers stuck runs');
