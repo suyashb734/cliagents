@@ -4,6 +4,7 @@
 
 const assert = require('assert');
 const { EventEmitter } = require('events');
+const { Readable } = require('stream');
 
 const QwenCliAdapter = require('../src/adapters/qwen-cli');
 
@@ -23,6 +24,15 @@ async function collect(generator) {
     output.push(item);
   }
   return output;
+}
+
+async function withTimeout(promise, timeoutMs, label) {
+  return Promise.race([
+    promise,
+    new Promise((_, reject) => {
+      setTimeout(() => reject(new Error(label)), timeoutMs);
+    })
+  ]);
 }
 
 (async () => {
@@ -113,6 +123,47 @@ async function collect(generator) {
     assert.strictEqual(first, null);
     assert.strictEqual(second, null);
     assert.strictEqual(spawnCount, 1);
+  });
+
+  await runTest('_runQwenCommandStreaming escalates to SIGKILL when timeout ignores SIGTERM', async () => {
+    const adapter = new QwenCliAdapter({ timeout: 20, terminationGraceMs: 10 });
+    const killSignals = [];
+
+    adapter._getQwenPath = async () => '/usr/local/bin/qwen';
+    adapter._spawnProcess = () => {
+      const proc = new EventEmitter();
+      proc.stdout = Readable.from([]);
+      proc.stderr = new EventEmitter();
+      proc.stdin = { end() {} };
+      proc.exitCode = null;
+      proc.signalCode = null;
+      proc.killed = false;
+      proc.kill = (signal) => {
+        killSignals.push(signal);
+        proc.killed = true;
+        if (signal === 'SIGKILL') {
+          proc.signalCode = 'SIGKILL';
+          process.nextTick(() => proc.emit('close', 137));
+        }
+        return true;
+      };
+      return proc;
+    };
+
+    const chunks = await withTimeout(collect(adapter._runQwenCommandStreaming(['-p', 'timeout-test'], {
+      timeout: 20,
+      sessionId: 'qwen-timeout-escalation',
+      workDir: process.cwd()
+    })), 1000, 'timeout path did not settle');
+
+    const errorChunk = chunks.find((chunk) => chunk.type === 'error');
+    assert(errorChunk, 'Expected an error chunk after timeout');
+    assert.strictEqual(errorChunk.timedOut, true, 'Timeout error should be marked timedOut=true');
+    assert.deepStrictEqual(
+      killSignals.slice(0, 2),
+      ['SIGTERM', 'SIGKILL'],
+      `Expected SIGTERM then SIGKILL escalation, got ${killSignals.join(', ')}`
+    );
   });
 
   await runTest('send rejects invalid allowedTools entries', async () => {

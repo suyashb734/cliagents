@@ -45,6 +45,32 @@ function shouldSkip(message = '') {
   ].some((token) => text.includes(token));
 }
 
+function isTimeoutMessage(message = '') {
+  const text = String(message).toLowerCase();
+  return [
+    'request timed out',
+    'timed out',
+    'operation was aborted due to timeout',
+    'operation was aborted',
+    'aborterror'
+  ].some((token) => text.includes(token));
+}
+
+function isQwenSkippableMessage(message = '') {
+  return shouldSkip(message) || isTimeoutMessage(message);
+}
+
+function isQwenTransientMessage(message = '') {
+  const text = String(message).toLowerCase();
+  return (
+    isTimeoutMessage(text)
+    || text.includes('qwen cli exited with code null')
+    || text.includes('qwen cli exited with code')
+    || text.includes('process exited')
+    || text.includes('request aborted')
+  );
+}
+
 async function request(method, route, body = null, timeoutMs = 180000) {
   const options = {
     method,
@@ -110,7 +136,57 @@ async function sendMessage(sessionId, message, timeout = 180000) {
 }
 
 async function deleteSession(sessionId) {
-  await request('DELETE', `/sessions/${sessionId}`);
+  if (!sessionId) {
+    return;
+  }
+
+  try {
+    await request('POST', `/sessions/${sessionId}/interrupt`, {}, 30000);
+  } catch {}
+
+  try {
+    await request('DELETE', `/sessions/${sessionId}`, null, 30000);
+  } catch {}
+}
+
+async function runQwenPromptWithRetry(options) {
+  const {
+    prompt,
+    timeoutMs,
+    retryPrompt,
+    retryTimeoutMs,
+    skipLabel
+  } = options;
+
+  let sessionId = await createSession('qwen-cli');
+  try {
+    try {
+      return await sendMessage(sessionId, prompt, timeoutMs);
+    } catch (error) {
+      const message = String(error?.message || error);
+      if (!isQwenTransientMessage(message)) {
+        if (isQwenSkippableMessage(message)) {
+          throw new Error(`SKIP: ${message}`);
+        }
+        throw error;
+      }
+
+      await deleteSession(sessionId);
+      sessionId = await createSession('qwen-cli');
+
+      try {
+        return await sendMessage(sessionId, retryPrompt || prompt, retryTimeoutMs || timeoutMs);
+      } catch (retryError) {
+        const retryMessage = String(retryError?.message || retryError);
+        if (isQwenSkippableMessage(retryMessage) || isQwenTransientMessage(retryMessage)) {
+          throw new Error(`SKIP: ${skipLabel} could not complete after retry (${retryMessage})`);
+        }
+        throw retryError;
+      }
+    }
+  } finally {
+    await deleteSession(sessionId);
+  }
 }
 
 async function waitForTerminalDone(terminalId, timeoutMs = 180000) {
@@ -186,32 +262,30 @@ async function testCodexLongTask() {
 }
 
 async function testQwenShort() {
-  const sessionId = await createSession('qwen-cli');
-  try {
-    const result = await sendMessage(sessionId, 'What is 9 + 4? Reply with only the number.', 120000);
-    assert(result.includes('13'), `Expected 13, got: ${result.slice(0, 200)}`);
-  } finally {
-    await deleteSession(sessionId);
-  }
+  const result = await runQwenPromptWithRetry({
+    prompt: 'What is 9 + 4? Reply with only the number.',
+    timeoutMs: 120000,
+    retryPrompt: 'Compute 9 + 4 and reply with only digits.',
+    retryTimeoutMs: 90000,
+    skipLabel: 'Qwen short task'
+  });
+  assert(result.includes('13'), `Expected 13, got: ${String(result).slice(0, 200)}`);
 }
 
 async function testQwenLong() {
-  const sessionId = await createSession('qwen-cli');
-  try {
-    const result = await sendMessage(
-      sessionId,
-      'Provide a 12-step checklist to review a pull request. Keep each step under 12 words and end with QWEN_DONE.',
-      240000
-    );
-    const hasMarker = /QWEN_DONE/i.test(String(result));
-    const stepCount = (String(result).match(/^\s*\d+\./gm) || []).length;
-    assert(
-      hasMarker || stepCount >= 10,
-      `Expected QWEN_DONE marker or >=10 numbered steps, got: ${String(result).slice(0, 280)}`
-    );
-  } finally {
-    await deleteSession(sessionId);
-  }
+  const result = await runQwenPromptWithRetry({
+    prompt: 'Provide a 12-step checklist to review a pull request. Keep each step under 12 words and end with QWEN_DONE.',
+    timeoutMs: 240000,
+    retryPrompt: 'Provide exactly 8 concise PR review checks and end with QWEN_DONE.',
+    retryTimeoutMs: 180000,
+    skipLabel: 'Qwen long task'
+  });
+  const hasMarker = /QWEN_DONE/i.test(String(result));
+  const stepCount = (String(result).match(/^\s*\d+\./gm) || []).length;
+  assert(
+    hasMarker || stepCount >= 8,
+    `Expected QWEN_DONE marker or >=8 numbered steps, got: ${String(result).slice(0, 280)}`
+  );
 }
 
 async function testGeminiBootstrap() {

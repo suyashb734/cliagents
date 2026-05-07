@@ -81,6 +81,7 @@ class QwenCliAdapter extends BaseLLMAdapter {
       workDir: '/tmp/agent',
       maxResponseSize: 10 * 1024 * 1024,
       model: null,
+      terminationGraceMs: 2000,
       ...config
     });
 
@@ -132,6 +133,41 @@ class QwenCliAdapter extends BaseLLMAdapter {
 
   getContract() {
     return this.contract;
+  }
+
+  _isProcessRunning(proc) {
+    return Boolean(proc) && proc.exitCode === null && proc.signalCode === null;
+  }
+
+  _signalProcess(proc, signal) {
+    if (!proc) {
+      return false;
+    }
+
+    // Qwen can spawn child node processes; detached mode lets us signal the full group.
+    if (process.platform !== 'win32' && proc.pid && proc.__cliagentsUseProcessGroupSignals) {
+      try {
+        process.kill(-proc.pid, signal);
+        return true;
+      } catch {}
+    }
+
+    try {
+      return proc.kill(signal);
+    } catch {
+      return false;
+    }
+  }
+
+  _spawnQwenProcess(command, args, options = {}) {
+    const useProcessGroupSignals = process.platform !== 'win32';
+    const proc = this._spawnProcess(command, args, {
+      ...options,
+      detached: useProcessGroupSignals
+    });
+
+    proc.__cliagentsUseProcessGroupSignals = useProcessGroupSignals;
+    return proc;
   }
 
   async isAvailable() {
@@ -237,6 +273,9 @@ class QwenCliAdapter extends BaseLLMAdapter {
 
   async *_runQwenCommandStreaming(args, options = {}) {
     const timeout = options.timeout || this.config.timeout;
+    const terminationGraceMs = Number.isFinite(this.config.terminationGraceMs)
+      ? Math.max(0, Number(this.config.terminationGraceMs))
+      : 2000;
     const workDir = options.workDir || process.cwd();
     const qwenPath = await this._getQwenPath();
 
@@ -249,7 +288,7 @@ class QwenCliAdapter extends BaseLLMAdapter {
       fs.mkdirSync(workDir, { recursive: true });
     }
 
-    const proc = spawn(qwenPath, args, {
+    const proc = this._spawnQwenProcess(qwenPath, args, {
       cwd: workDir,
       env: {
         ...process.env,
@@ -268,20 +307,30 @@ class QwenCliAdapter extends BaseLLMAdapter {
     let timedOut = false;
     let exitCode = null;
     let processError = null;
+    let hardKillTimeoutId = null;
+    const clearHardKillTimeout = () => {
+      if (hardKillTimeoutId) {
+        clearTimeout(hardKillTimeoutId);
+        hardKillTimeoutId = null;
+      }
+    };
+    const forceKillIfStillRunning = () => {
+      if (!this._isProcessRunning(proc)) {
+        return;
+      }
+      this._signalProcess(proc, 'SIGKILL');
+    };
 
     const timeoutId = setTimeout(() => {
       timedOut = true;
-      proc.kill('SIGTERM');
-      setTimeout(() => {
-        if (!proc.killed) {
-          proc.kill('SIGKILL');
-        }
-      }, 2000);
+      this._signalProcess(proc, 'SIGTERM');
+      hardKillTimeoutId = setTimeout(forceKillIfStillRunning, terminationGraceMs);
     }, timeout);
 
     const processComplete = new Promise((resolve) => {
       proc.on('close', (code) => {
         clearTimeout(timeoutId);
+        clearHardKillTimeout();
         exitCode = code;
         if (sessionId) {
           this.activeProcesses.delete(sessionId);
@@ -290,6 +339,7 @@ class QwenCliAdapter extends BaseLLMAdapter {
       });
       proc.on('error', (error) => {
         clearTimeout(timeoutId);
+        clearHardKillTimeout();
         processError = error;
         if (sessionId) {
           this.activeProcesses.delete(sessionId);
@@ -441,6 +491,8 @@ class QwenCliAdapter extends BaseLLMAdapter {
       };
     } catch (error) {
       clearTimeout(timeoutId);
+      clearHardKillTimeout();
+      forceKillIfStillRunning();
       yield { type: 'error', content: error.message, timedOut: false };
     }
   }
@@ -556,13 +608,16 @@ class QwenCliAdapter extends BaseLLMAdapter {
     if (!session) return;
 
     const proc = this.activeProcesses.get(sessionId);
-    if (proc && !proc.killed) {
-      proc.kill('SIGTERM');
+    if (proc && this._isProcessRunning(proc)) {
+      const terminationGraceMs = Number.isFinite(this.config.terminationGraceMs)
+        ? Math.max(0, Number(this.config.terminationGraceMs))
+        : 2000;
+      this._signalProcess(proc, 'SIGTERM');
       setTimeout(() => {
-        if (!proc.killed) {
-          proc.kill('SIGKILL');
+        if (this._isProcessRunning(proc)) {
+          this._signalProcess(proc, 'SIGKILL');
         }
-      }, 2000);
+      }, terminationGraceMs);
     }
     this.activeProcesses.delete(sessionId);
 
@@ -573,8 +628,8 @@ class QwenCliAdapter extends BaseLLMAdapter {
 
   killAllProcesses() {
     for (const proc of this.activeProcesses.values()) {
-      if (proc && !proc.killed) {
-        proc.kill('SIGKILL');
+      if (this._isProcessRunning(proc)) {
+        this._signalProcess(proc, 'SIGKILL');
       }
     }
     this.activeProcesses.clear();
