@@ -325,6 +325,9 @@ class QwenCliAdapter extends BaseLLMAdapter {
       timedOut = true;
       this._signalProcess(proc, 'SIGTERM');
       hardKillTimeoutId = setTimeout(forceKillIfStillRunning, terminationGraceMs);
+      if (proc.stdout && typeof proc.stdout.destroy === 'function') {
+        proc.stdout.destroy(new Error('Request timed out'));
+      }
     }, timeout);
 
     const processComplete = new Promise((resolve) => {
@@ -493,6 +496,10 @@ class QwenCliAdapter extends BaseLLMAdapter {
       clearTimeout(timeoutId);
       clearHardKillTimeout();
       forceKillIfStillRunning();
+      if (timedOut) {
+        yield { type: 'error', content: 'Request timed out', timedOut: true };
+        return;
+      }
       yield { type: 'error', content: error.message, timedOut: false };
     }
   }
