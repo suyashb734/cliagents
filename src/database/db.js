@@ -3052,6 +3052,52 @@ class OrchestrationDB {
     }));
   }
 
+  listSessionEventsForTask(taskId, options = {}) {
+    const normalizedTaskId = String(taskId || '').trim();
+    if (!normalizedTaskId) {
+      return [];
+    }
+
+    const limit = clampLimit(options.limit, 10, 50);
+    return this.db.prepare(`
+      WITH task_roots(root_session_id) AS (
+        SELECT root_session_id
+        FROM tasks
+        WHERE id = ?
+          AND root_session_id IS NOT NULL
+          AND TRIM(root_session_id) <> ''
+        UNION
+        SELECT root_session_id
+        FROM runs
+        WHERE task_id = ?
+          AND root_session_id IS NOT NULL
+          AND TRIM(root_session_id) <> ''
+        UNION
+        SELECT root_session_id
+        FROM rooms
+        WHERE task_id = ?
+          AND root_session_id IS NOT NULL
+          AND TRIM(root_session_id) <> ''
+        UNION
+        SELECT t.root_session_id
+        FROM task_assignments ta
+        JOIN terminals t ON t.terminal_id = ta.terminal_id
+        WHERE ta.task_id = ?
+          AND t.root_session_id IS NOT NULL
+          AND TRIM(t.root_session_id) <> ''
+      )
+      SELECT se.*
+      FROM session_events se
+      JOIN task_roots tr ON tr.root_session_id = se.root_session_id
+      ORDER BY se.occurred_at DESC, se.recorded_at DESC, se.id DESC
+      LIMIT ?
+    `).all(normalizedTaskId, normalizedTaskId, normalizedTaskId, normalizedTaskId, limit).map((row) => ({
+      ...row,
+      payload_json: parseJsonField(row.payload_json),
+      metadata: parseJsonField(row.metadata)
+    }));
+  }
+
   _parseRootIoEventRow(row) {
     if (!row) {
       return null;
@@ -5329,6 +5375,10 @@ class OrchestrationDB {
       clauses.push('status = ?');
       params.push(options.status);
     }
+    if (options.taskId || options.task_id) {
+      clauses.push('task_id = ?');
+      params.push(String(options.taskId || options.task_id).trim());
+    }
     const whereSql = clauses.length ? `WHERE ${clauses.join(' AND ')}` : '';
     const limit = clampLimit(options.limit, 20, 100);
     return this.db.prepare(`
@@ -6748,6 +6798,38 @@ class OrchestrationDB {
     }));
     const contextIds = this.getContext(scopeId).slice(0, 5).map((entry) => entry.id);
     const snapshotByRunId = new Map(runSnapshots.map((entry) => [entry.runId, entry]));
+    const assignments = this.listTaskAssignments(scopeId, { limit: 20 }).map((assignment) => ({
+      id: assignment.id,
+      role: assignment.role,
+      status: assignment.status,
+      terminalId: assignment.terminalId,
+      adapter: assignment.adapter,
+      model: assignment.model,
+      reasoningEffort: assignment.reasoningEffort || null,
+      worktreePath: assignment.worktreePath,
+      worktreeBranch: assignment.worktreeBranch,
+      startedAt: assignment.startedAt,
+      completedAt: assignment.completedAt,
+      updatedAt: assignment.updatedAt
+    }));
+    const rooms = this.listRooms({ taskId: scopeId, limit: 10 }).map((room) => ({
+      id: room.id,
+      rootSessionId: room.rootSessionId,
+      title: room.title,
+      status: room.status,
+      updatedAt: room.updatedAt
+    }));
+    const usage = this.summarizeUsage({ taskId: scopeId });
+    const usageAttribution = this.summarizeUsageAttribution({ taskId: scopeId });
+    const recentSessionEvents = this.listSessionEventsForTask(scopeId, { limit: 10 }).map((event) => ({
+      id: event.id,
+      rootSessionId: event.root_session_id,
+      sessionId: event.session_id,
+      eventType: event.event_type,
+      payloadSummary: event.payload_summary || null,
+      occurredAt: event.occurred_at,
+      recordedAt: event.recorded_at
+    }));
 
     return {
       scopeType: 'task',
@@ -6756,6 +6838,11 @@ class OrchestrationDB {
       keyDecisions,
       pendingItems,
       findings,
+      assignments,
+      rooms,
+      usage,
+      usageAttribution,
+      recentSessionEvents,
       recentRuns: latestRuns.slice(0, recentRunsLimit).map((run) => {
         const snapshot = snapshotByRunId.get(run.id);
         return {
@@ -6772,9 +6859,13 @@ class OrchestrationDB {
         ? null
         : {
             runIds: latestRuns.map((run) => run.id),
+            assignmentIds: assignments.map((assignment) => assignment.id),
+            roomIds: rooms.map((room) => room.id),
             artifactKeys: artifacts,
             findingIds: findings.map((finding) => finding.id),
-            contextIds
+            contextIds,
+            usageRecordCount: usage.recordCount,
+            sessionEventIds: recentSessionEvents.map((event) => event.id)
           },
       isStale: false
     };

@@ -164,7 +164,9 @@ work is broader room/task/project summary producers. Generated run and root
 snapshots now write idempotent `memory_summary_edges` back to the runs they
 summarize, repair backfills missing snapshot lineage without regenerating
 summary text, and `getStatus` persists bounded terminal-log `output` chunks
-with exact byte offsets so raw logs remain the audit fallback.
+with exact byte offsets so raw logs remain the audit fallback. Task memory
+bundles now surface assignments, linked rooms, task usage totals, role-aware
+usage attribution, and recent session events for linked roots.
 
 Write scope:
 

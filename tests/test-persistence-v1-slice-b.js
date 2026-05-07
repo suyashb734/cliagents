@@ -111,6 +111,50 @@ async function seedPersistenceFixture(db) {
     externalSessionRef: 'codex:linked-root'
   });
 
+  db.createTask({
+    id: taskId,
+    title: 'Persistence bundle smoke task',
+    workspaceRoot: process.cwd(),
+    rootSessionId,
+    metadata: {
+      fixture: true
+    }
+  });
+  db.createTaskAssignment({
+    id: 'assignment-456-review',
+    taskId,
+    terminalId: 'term-1',
+    role: 'review',
+    instructions: 'Review persistence bundle coverage.',
+    adapter: 'codex-cli',
+    model: 'gpt-5.4',
+    status: 'running',
+    worktreePath: process.cwd(),
+    metadata: {
+      fixture: true
+    }
+  });
+  db.createRoom({
+    id: 'room-456',
+    rootSessionId,
+    taskId,
+    title: 'Persistence task room',
+    metadata: {
+      fixture: true
+    }
+  });
+  db.addSessionEvent({
+    rootSessionId,
+    sessionId: rootSessionId,
+    eventType: 'session_started',
+    originClient: 'codex',
+    idempotencyKey: 'fixture-task-root-start',
+    payloadSummary: 'Fixture task root started',
+    payloadJson: {
+      taskId
+    }
+  });
+
   db.addMessage('term-1', 'system', 'System initialized', {
     traceId: 'trace-1',
     metadata: { stage: 'bootstrap' }
@@ -154,6 +198,24 @@ async function seedPersistenceFixture(db) {
     runId,
     outputKind: 'judge_final',
     content: 'Use persisted bundles and root rollups.'
+  });
+  db.addUsageRecord({
+    rootSessionId,
+    terminalId: 'term-1',
+    runId,
+    taskId,
+    taskAssignmentId: 'assignment-456-review',
+    adapter: 'codex-cli',
+    provider: 'openai',
+    model: 'gpt-5.4',
+    inputTokens: 30,
+    outputTokens: 10,
+    reasoningTokens: 2,
+    totalTokens: 42,
+    sourceConfidence: 'provider_reported',
+    metadata: {
+      role: 'review'
+    }
   });
   snapshotService.writeRunSnapshot(runId, { rootSessionId, taskId });
   await snapshotService.refreshRootSnapshot(rootSessionId);
@@ -354,7 +416,18 @@ async function runRouteTests() {
     assert.strictEqual(taskBundleRes.data.scopeId, fixture.taskId);
     assert(taskBundleRes.data.brief, 'task bundle should include a brief');
     assert.strictEqual(taskBundleRes.data.findings.length, 1);
+    assert(taskBundleRes.data.assignments.some((assignment) => assignment.id === 'assignment-456-review'), 'task bundle should include assignments');
+    assert(taskBundleRes.data.rooms.some((room) => room.id === 'room-456'), 'task bundle should include linked rooms');
+    assert.strictEqual(taskBundleRes.data.usage.totalTokens, 42, 'task bundle should include task usage totals');
+    assert.strictEqual(taskBundleRes.data.usageAttribution.executionTokens, 42, 'task bundle should include role-aware usage attribution');
+    assert(
+      taskBundleRes.data.recentSessionEvents.some((event) => event.eventType === 'session_started' && event.rootSessionId === fixture.rootSessionId),
+      'task bundle should include recent session events for linked roots'
+    );
     assert.strictEqual(taskBundleRes.data.rawPointers.artifactKeys.length, 1);
+    assert(taskBundleRes.data.rawPointers.assignmentIds.includes('assignment-456-review'));
+    assert(taskBundleRes.data.rawPointers.roomIds.includes('room-456'));
+    assert.strictEqual(taskBundleRes.data.rawPointers.usageRecordCount, 1);
     assert(taskBundleRes.data.recentRuns.some((run) => run.runId === fixture.runId));
 
     const invalidBundleRes = await request(

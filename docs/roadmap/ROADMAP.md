@@ -32,8 +32,9 @@ docs remain useful context, but this file is the current entrypoint.
      persistence tables. Foundation migration, helpers, projections, broker
      input producers, deduplicated screen snapshots, usage events, tool events,
      liveness events, generated run/root snapshot lineage edges, bounded
-     terminal-log output chunks with byte offsets, and tests landed; remaining
-     work is broader room/task/project summary producers.
+     terminal-log output chunks with byte offsets, task memory bundle enrichment,
+     and tests landed; remaining work is broader room/task/project summary
+     producers.
    - Improve live metadata completeness for model, duration, and cost where
      providers expose it.
 
