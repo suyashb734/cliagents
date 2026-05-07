@@ -100,6 +100,7 @@ function run() {
       inputSummary: 'What is 2 + 2?',
       workingDirectory: '/tmp/project',
       initiator: 'test-suite',
+      rootSessionId: 'root-run-ledger-service',
       metadata: { source: 'unit-test' }
     });
 
@@ -156,7 +157,7 @@ function run() {
       }
     });
 
-    ledger.appendToolEvent({
+    const toolEventId = ledger.appendToolEvent({
       runId,
       participantId,
       stepId,
@@ -208,6 +209,15 @@ function run() {
     assert.strictEqual(detail.toolEvents.length, 1);
     assert.strictEqual(detail.toolEvents[0].storageMode, 'preview_only');
     assert.strictEqual(detail.toolEvents[0].toolClass, 'cli');
+    const rootToolEvents = db.listRootIoEvents({
+      rootSessionId: 'root-run-ledger-service',
+      eventKind: 'tool_event',
+      limit: 10
+    });
+    assert.strictEqual(rootToolEvents.length, 1);
+    assert.strictEqual(rootToolEvents[0].metadata.sourceTable, 'run_tool_events');
+    assert.strictEqual(rootToolEvents[0].metadata.toolEventId, toolEventId);
+    assert.strictEqual(rootToolEvents[0].metadata.toolName, 'codex exec');
 
     const staleNow = Date.now();
 

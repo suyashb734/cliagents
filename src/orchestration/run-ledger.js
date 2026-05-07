@@ -584,6 +584,9 @@ class RunLedgerService {
     const eventId = input.id || generateId('tool');
     const payload = this.prepareToolEventPayload(input.content);
     const metadata = attachRedactionMetadata(sanitizeMetadata(input.metadata), payload.redaction);
+    const status = input.status || 'completed';
+    const startedAt = input.startedAt || Date.now();
+    const completedAt = input.completedAt || null;
 
     this.db.db.prepare(`
       INSERT INTO run_tool_events (
@@ -609,11 +612,47 @@ class RunLedgerService {
       payload.compression,
       payload.storageMode,
       payload.isTruncated,
-      input.status || 'completed',
-      input.startedAt || Date.now(),
-      input.completedAt || null,
+      status,
+      startedAt,
+      completedAt,
       serializeJson(metadata)
     );
+
+    if (typeof this.db.appendRootIoEvent === 'function' && typeof this.db.getRunById === 'function') {
+      const run = this.db.getRunById(input.runId);
+      if (run?.rootSessionId) {
+        try {
+          this.db.appendRootIoEvent({
+            idempotencyKey: `run_tool_events:${eventId}`,
+            rootSessionId: run.rootSessionId,
+            terminalId: input.participantId || null,
+            runId: input.runId,
+            taskId: run.taskId || null,
+            discussionId: run.discussionId || null,
+            traceId: run.traceId || null,
+            eventKind: 'tool_event',
+            source: 'provider_metadata',
+            contentPreview: payload.previewText || `${input.toolClass || 'tool'}:${input.toolName || 'unknown'} ${status}`,
+            contentFull: payload.fullText || null,
+            metadata: {
+              sourceTable: 'run_tool_events',
+              toolEventId: eventId,
+              participantId: input.participantId || null,
+              stepId: input.stepId || null,
+              toolClass: input.toolClass || null,
+              toolName: input.toolName || null,
+              idempotency: input.idempotency || 'unknown',
+              status
+            },
+            occurredAt: startedAt,
+            recordedAt: completedAt || startedAt,
+            retentionClass: 'metadata-indefinite'
+          });
+        } catch (error) {
+          console.warn('[RunLedgerService] Failed to append root IO event for tool event:', error.message);
+        }
+      }
+    }
 
     return eventId;
   }
