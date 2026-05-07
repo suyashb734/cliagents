@@ -43,6 +43,25 @@ input was deliverable or blocked.
 - `expired`: no longer deliverable.
 - `cancelled`: denied or cancelled before delivery.
 
+## Root IO Event Kind
+
+Root IO events are redacted before persistence and ordered per root session.
+
+- `input`: broker-sent or operator-sent input.
+- `output`: terminal output chunk with optional log offsets.
+- `screen_snapshot`: visible TUI/screen state sample.
+- `parsed_message`: best-effort parsed user, assistant, system, or tool turn.
+- `tool_event`: tool-call or tool-result metadata when exposed.
+- `usage`: provider usage metadata when exposed outside normal usage records.
+- `liveness`: heartbeat, blocked, or progress signal.
+
+## Memory Summary Edge
+
+Summary lineage edges connect derived memory to its sources. Edge namespaces are
+`structural`, `derivation`, or `execution`; edge kinds are `contains`,
+`continues`, `summarizes`, `supersedes`, `derived_from`, `blocks`, and
+`unblocks`. Direct cycles are rejected in the persistence helper.
+
 ## Task Status
 
 Task status is derived from assignment state:

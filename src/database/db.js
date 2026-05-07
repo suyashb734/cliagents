@@ -359,6 +359,16 @@ const TERMINAL_INPUT_KINDS = new Set(['message', 'approval', 'denial']);
 const ROOM_TURN_ACTIVE_STATUSES = new Set(['pending', 'running']);
 const ROOM_TURN_TERMINAL_STATUSES = new Set(['completed', 'partial', 'failed']);
 const DEFAULT_ROOM_TURN_STALE_MS = 30 * 60 * 1000;
+const ROOT_IO_EVENT_KINDS = new Set(['input', 'output', 'screen_snapshot', 'parsed_message', 'tool_event', 'usage', 'liveness']);
+const ROOT_IO_EVENT_SOURCES = new Set(['broker', 'terminal_log', 'provider_metadata', 'parser']);
+const ROOT_IO_RETENTION_CLASSES = new Set(['raw-bounded', 'summary-indefinite', 'metadata-indefinite']);
+const MEMORY_SUMMARY_EDGE_NAMESPACES = new Set(['structural', 'derivation', 'execution']);
+const MEMORY_SUMMARY_EDGE_KINDS = new Set(['contains', 'continues', 'summarizes', 'supersedes', 'derived_from', 'blocks', 'unblocks']);
+const MEMORY_RECORD_TYPE_ALIASES = new Map([
+  ['usage', 'usage_record'],
+  ['root_io', 'root_io_event'],
+  ['root_io_events', 'root_io_event']
+]);
 const MEMORY_PROJECTION_JSON_FIELDS = new Set([
   'metadata',
   'payload_json',
@@ -393,6 +403,8 @@ const MEMORY_PROJECTION_SOURCE_LOOKUPS = {
   findings: { primaryKey: 'id' },
   context: { primaryKey: 'id' },
   memory_snapshots: { primaryKey: 'id' },
+  root_io_events: { primaryKey: 'root_io_event_id' },
+  memory_summary_edges: { primaryKey: 'edge_id' },
   operator_actions: { primaryKey: 'action_id' },
   run_blocked_states: { primaryKey: 'id' }
 };
@@ -487,12 +499,102 @@ function normalizeProjectionList(value) {
     .filter(Boolean);
 }
 
+function normalizeMemoryRecordTypes(value) {
+  return normalizeProjectionList(value).map((entry) => {
+    const normalized = String(entry || '').trim().toLowerCase();
+    return MEMORY_RECORD_TYPE_ALIASES.get(normalized) || normalized;
+  });
+}
+
 function normalizeProjectionTimestamp(value) {
   if (value === undefined || value === null || value === '') {
     return null;
   }
   const parsed = Number(value);
   return Number.isFinite(parsed) ? parsed : null;
+}
+
+function normalizeEnumValue(value, allowedValues, fallback = null) {
+  const normalized = String(value || '').trim().toLowerCase();
+  if (allowedValues.has(normalized)) {
+    return normalized;
+  }
+  return fallback;
+}
+
+function normalizeOptionalInteger(value) {
+  if (value === undefined || value === null || value === '') {
+    return null;
+  }
+  const parsed = Number(value);
+  return Number.isFinite(parsed) ? Math.max(0, Math.round(parsed)) : null;
+}
+
+function normalizeConfidence(value) {
+  if (value === undefined || value === null || value === '') {
+    return null;
+  }
+  const parsed = Number(value);
+  if (!Number.isFinite(parsed)) {
+    return null;
+  }
+  return Math.min(1, Math.max(0, parsed));
+}
+
+function buildRedactedRootIoPayload(eventInput = {}) {
+  const metadata = eventInput.metadata && typeof eventInput.metadata === 'object' && !Array.isArray(eventInput.metadata)
+    ? redactSecretObject({ ...eventInput.metadata })
+    : {};
+  let contentFull = eventInput.contentFull ?? eventInput.content_full ?? eventInput.content ?? null;
+  let contentPreview = eventInput.contentPreview ?? eventInput.content_preview ?? null;
+  const redactionReasons = new Set();
+
+  if (contentFull !== null && contentFull !== undefined) {
+    const redaction = redactSecretsInText(contentFull);
+    contentFull = redaction.content;
+    if (redaction.redacted) {
+      redaction.reasons.forEach((reason) => redactionReasons.add(reason));
+    }
+  } else {
+    contentFull = null;
+  }
+
+  if (contentPreview !== null && contentPreview !== undefined) {
+    const redaction = redactSecretsInText(contentPreview);
+    contentPreview = redaction.content;
+    if (redaction.redacted) {
+      redaction.reasons.forEach((reason) => redactionReasons.add(reason));
+    }
+  } else if (contentFull) {
+    contentPreview = truncateText(contentFull, 500);
+  } else {
+    contentPreview = null;
+  }
+
+  if (redactionReasons.size > 0) {
+    const securityMetadata = metadata.security && typeof metadata.security === 'object'
+      ? { ...metadata.security }
+      : {};
+    securityMetadata.redactedSecretLikeContent = true;
+    securityMetadata.redactionReasonCodes = Array.from(redactionReasons);
+    metadata.security = securityMetadata;
+  }
+
+  return {
+    contentPreview,
+    contentFull,
+    metadata
+  };
+}
+
+function computeRootIoContentHash({ eventKind, source, contentPreview, contentFull, metadata }) {
+  return crypto.createHash('sha256').update(JSON.stringify({
+    eventKind,
+    source,
+    contentPreview: contentPreview || null,
+    contentFull: contentFull || null,
+    metadata: metadata || {}
+  }), 'utf8').digest('hex');
 }
 
 function parseProjectionSourceRow(row) {
@@ -2950,6 +3052,420 @@ class OrchestrationDB {
     }));
   }
 
+  _parseRootIoEventRow(row) {
+    if (!row) {
+      return null;
+    }
+
+    return {
+      ...row,
+      rootIoEventId: row.root_io_event_id,
+      idempotencyKey: row.idempotency_key || null,
+      rootSessionId: row.root_session_id || null,
+      terminalId: row.terminal_id || null,
+      runId: row.run_id || null,
+      taskId: row.task_id || null,
+      taskAssignmentId: row.task_assignment_id || null,
+      roomId: row.room_id || null,
+      discussionId: row.discussion_id || null,
+      traceId: row.trace_id || null,
+      projectId: row.project_id || null,
+      eventKind: row.event_kind,
+      contentPreview: row.content_preview || null,
+      contentFull: row.content_full || null,
+      contentSha256: row.content_sha256 || null,
+      retentionClass: row.retention_class,
+      occurredAt: row.occurred_at,
+      recordedAt: row.recorded_at,
+      metadata: parseJsonField(row.metadata) || {}
+    };
+  }
+
+  getNextRootIoEventSequence(rootSessionId) {
+    const normalizedRootSessionId = String(rootSessionId || '').trim();
+    if (!normalizedRootSessionId || !this._hasTable('root_io_events')) {
+      return 1;
+    }
+    const row = this.db.get(`
+      SELECT COALESCE(MAX(sequence_no), 0) + 1 AS next_sequence
+      FROM root_io_events
+      WHERE root_session_id = ?
+    `, normalizedRootSessionId);
+    return row?.next_sequence || 1;
+  }
+
+  _resolveProjectIdForRootIoEvent(eventInput = {}) {
+    const explicitProjectId = String(eventInput.projectId || eventInput.project_id || '').trim();
+    if (explicitProjectId) {
+      return explicitProjectId;
+    }
+
+    return this._resolveSingleProjectId([
+      this._getTaskProjectId(eventInput.taskId || eventInput.task_id),
+      this._getRunProjectId(eventInput.runId || eventInput.run_id),
+      this._getTerminalProjectId(eventInput.terminalId || eventInput.terminal_id)
+    ]);
+  }
+
+  appendRootIoEvent(event = {}) {
+    if (!this._hasTable('root_io_events')) {
+      return null;
+    }
+
+    const eventInput = event && typeof event === 'object' ? event : {};
+    const rootSessionId = String(eventInput.rootSessionId || eventInput.root_session_id || '').trim();
+    if (!rootSessionId) {
+      throw new Error('rootSessionId is required');
+    }
+
+    const eventKind = normalizeEnumValue(
+      eventInput.eventKind || eventInput.event_kind,
+      ROOT_IO_EVENT_KINDS
+    );
+    if (!eventKind) {
+      throw new Error(`eventKind must be one of ${Array.from(ROOT_IO_EVENT_KINDS).join(', ')}`);
+    }
+
+    const source = normalizeEnumValue(
+      eventInput.source,
+      ROOT_IO_EVENT_SOURCES,
+      'broker'
+    );
+    const retentionClass = normalizeEnumValue(
+      eventInput.retentionClass || eventInput.retention_class,
+      ROOT_IO_RETENTION_CLASSES,
+      'raw-bounded'
+    );
+    const terminalId = String(eventInput.terminalId || eventInput.terminal_id || '').trim() || null;
+    const runId = String(eventInput.runId || eventInput.run_id || '').trim() || null;
+    const taskId = String(eventInput.taskId || eventInput.task_id || '').trim() || null;
+    const taskAssignmentId = String(eventInput.taskAssignmentId || eventInput.task_assignment_id || '').trim() || null;
+    const roomId = String(eventInput.roomId || eventInput.room_id || '').trim() || null;
+    const discussionId = String(eventInput.discussionId || eventInput.discussion_id || '').trim() || null;
+    const traceId = String(eventInput.traceId || eventInput.trace_id || '').trim() || null;
+    const logPath = String(eventInput.logPath || eventInput.log_path || '').trim() || null;
+    const logOffsetStart = normalizeOptionalInteger(eventInput.logOffsetStart ?? eventInput.log_offset_start);
+    const logOffsetEnd = normalizeOptionalInteger(eventInput.logOffsetEnd ?? eventInput.log_offset_end);
+    const idempotencyKey = String(eventInput.idempotencyKey || eventInput.idempotency_key || (
+      logPath && logOffsetStart !== null && logOffsetEnd !== null
+        ? `${rootSessionId}:${source}:${eventKind}:${logPath}:${logOffsetStart}:${logOffsetEnd}`
+        : ''
+    )).trim() || null;
+    const occurredAt = Number.isFinite(eventInput.occurredAt)
+      ? eventInput.occurredAt
+      : (Number.isFinite(eventInput.occurred_at) ? eventInput.occurred_at : Date.now());
+    const recordedAt = Number.isFinite(eventInput.recordedAt)
+      ? eventInput.recordedAt
+      : (Number.isFinite(eventInput.recorded_at) ? eventInput.recorded_at : Date.now());
+    const redactedPayload = buildRedactedRootIoPayload(eventInput);
+    const contentSha256 = String(eventInput.contentSha256 || eventInput.content_sha256 || '').trim()
+      || computeRootIoContentHash({
+        eventKind,
+        source,
+        contentPreview: redactedPayload.contentPreview,
+        contentFull: redactedPayload.contentFull,
+        metadata: redactedPayload.metadata
+      });
+    const projectId = this._resolveProjectIdForRootIoEvent({
+      ...eventInput,
+      terminalId,
+      runId,
+      taskId
+    });
+
+    const insertEvent = this.db.transaction(() => {
+      if (idempotencyKey) {
+        const existing = this.db.get(`
+          SELECT *
+          FROM root_io_events
+          WHERE idempotency_key = ?
+        `, idempotencyKey);
+        if (existing) {
+          return existing;
+        }
+      }
+
+      const rootIoEventId = String(eventInput.rootIoEventId || eventInput.root_io_event_id || eventInput.id || `rio_${generateId()}`).trim();
+      const sequenceNo = Number.isInteger(eventInput.sequenceNo) && eventInput.sequenceNo > 0
+        ? eventInput.sequenceNo
+        : (Number.isInteger(eventInput.sequence_no) && eventInput.sequence_no > 0
+          ? eventInput.sequence_no
+          : this.getNextRootIoEventSequence(rootSessionId));
+
+      this.db.run(`
+        INSERT INTO root_io_events (
+          root_io_event_id,
+          idempotency_key,
+          root_session_id,
+          terminal_id,
+          run_id,
+          task_id,
+          task_assignment_id,
+          room_id,
+          discussion_id,
+          trace_id,
+          project_id,
+          event_kind,
+          source,
+          sequence_no,
+          content_preview,
+          content_full,
+          content_sha256,
+          log_path,
+          log_offset_start,
+          log_offset_end,
+          screen_rows,
+          screen_cols,
+          parsed_role,
+          confidence,
+          retention_class,
+          expires_at,
+          metadata,
+          occurred_at,
+          recorded_at
+        )
+        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+      `,
+      rootIoEventId,
+      idempotencyKey,
+      rootSessionId,
+      terminalId,
+      runId,
+      taskId,
+      taskAssignmentId,
+      roomId,
+      discussionId,
+      traceId,
+      projectId,
+      eventKind,
+      source,
+      sequenceNo,
+      redactedPayload.contentPreview,
+      redactedPayload.contentFull,
+      contentSha256,
+      logPath,
+      logOffsetStart,
+      logOffsetEnd,
+      normalizeOptionalInteger(eventInput.screenRows ?? eventInput.screen_rows),
+      normalizeOptionalInteger(eventInput.screenCols ?? eventInput.screen_cols),
+      String(eventInput.parsedRole || eventInput.parsed_role || '').trim() || null,
+      normalizeConfidence(eventInput.confidence),
+      retentionClass,
+      normalizeOptionalInteger(eventInput.expiresAt ?? eventInput.expires_at),
+      JSON.stringify(redactedPayload.metadata),
+      occurredAt,
+      recordedAt);
+
+      return this.db.get('SELECT * FROM root_io_events WHERE root_io_event_id = ?', rootIoEventId);
+    });
+
+    return this._parseRootIoEventRow(insertEvent.immediate());
+  }
+
+  listRootIoEvents(options = {}) {
+    if (!this._hasTable('root_io_events')) {
+      return [];
+    }
+
+    const eventOptions = options && typeof options === 'object' ? options : {};
+    const clauses = [];
+    const params = [];
+    const pushTextMatch = (column, value) => {
+      const normalized = String(value || '').trim();
+      if (!normalized) {
+        return;
+      }
+      clauses.push(`${column} = ?`);
+      params.push(normalized);
+    };
+
+    pushTextMatch('root_session_id', eventOptions.rootSessionId || eventOptions.root_session_id);
+    pushTextMatch('terminal_id', eventOptions.terminalId || eventOptions.terminal_id);
+    pushTextMatch('run_id', eventOptions.runId || eventOptions.run_id);
+    pushTextMatch('task_id', eventOptions.taskId || eventOptions.task_id);
+    pushTextMatch('task_assignment_id', eventOptions.taskAssignmentId || eventOptions.task_assignment_id);
+    pushTextMatch('room_id', eventOptions.roomId || eventOptions.room_id);
+    pushTextMatch('discussion_id', eventOptions.discussionId || eventOptions.discussion_id);
+    pushTextMatch('trace_id', eventOptions.traceId || eventOptions.trace_id);
+    pushTextMatch('project_id', eventOptions.projectId || eventOptions.project_id);
+    pushTextMatch('event_kind', eventOptions.eventKind || eventOptions.event_kind);
+    pushTextMatch('source', eventOptions.source);
+
+    const since = normalizeProjectionTimestamp(eventOptions.since);
+    if (since !== null) {
+      clauses.push('occurred_at >= ?');
+      params.push(since);
+    }
+    const until = normalizeProjectionTimestamp(eventOptions.until);
+    if (until !== null) {
+      clauses.push('occurred_at <= ?');
+      params.push(until);
+    }
+
+    const whereSql = clauses.length ? `WHERE ${clauses.join(' AND ')}` : '';
+    const limit = clampLimit(eventOptions.limit, 100, 500);
+    return this.db.all(`
+      SELECT *
+      FROM root_io_events
+      ${whereSql}
+      ORDER BY occurred_at ASC, sequence_no ASC, recorded_at ASC, root_io_event_id ASC
+      LIMIT ?
+    `, ...params, limit).map((row) => this._parseRootIoEventRow(row));
+  }
+
+  _parseMemorySummaryEdgeRow(row) {
+    if (!row) {
+      return null;
+    }
+    return {
+      ...row,
+      edgeId: row.edge_id,
+      edgeNamespace: row.edge_namespace,
+      parentScopeType: row.parent_scope_type,
+      parentScopeId: row.parent_scope_id,
+      childScopeType: row.child_scope_type,
+      childScopeId: row.child_scope_id,
+      edgeKind: row.edge_kind,
+      metadata: parseJsonField(row.metadata) || {},
+      createdAt: row.created_at,
+      updatedAt: row.updated_at
+    };
+  }
+
+  appendMemorySummaryEdge(edge = {}) {
+    if (!this._hasTable('memory_summary_edges')) {
+      return null;
+    }
+
+    const edgeInput = edge && typeof edge === 'object' ? edge : {};
+    const edgeNamespace = normalizeEnumValue(
+      edgeInput.edgeNamespace || edgeInput.edge_namespace,
+      MEMORY_SUMMARY_EDGE_NAMESPACES,
+      'derivation'
+    );
+    const edgeKind = normalizeEnumValue(
+      edgeInput.edgeKind || edgeInput.edge_kind,
+      MEMORY_SUMMARY_EDGE_KINDS,
+      'summarizes'
+    );
+    const parentScopeType = String(edgeInput.parentScopeType || edgeInput.parent_scope_type || '').trim();
+    const parentScopeId = String(edgeInput.parentScopeId || edgeInput.parent_scope_id || '').trim();
+    const childScopeType = String(edgeInput.childScopeType || edgeInput.child_scope_type || '').trim();
+    const childScopeId = String(edgeInput.childScopeId || edgeInput.child_scope_id || '').trim();
+    if (!parentScopeType || !parentScopeId || !childScopeType || !childScopeId) {
+      throw new Error('parentScopeType, parentScopeId, childScopeType, and childScopeId are required');
+    }
+    if (parentScopeType === childScopeType && parentScopeId === childScopeId) {
+      throw new Error('memory summary edges cannot point to themselves');
+    }
+
+    const reverse = this.db.get(`
+      SELECT edge_id
+      FROM memory_summary_edges
+      WHERE parent_scope_type = ?
+        AND parent_scope_id = ?
+        AND child_scope_type = ?
+        AND child_scope_id = ?
+      LIMIT 1
+    `, childScopeType, childScopeId, parentScopeType, parentScopeId);
+    if (reverse) {
+      throw new Error('memory summary edges cannot create a direct cycle');
+    }
+
+    const now = Date.now();
+    const createdAt = Number.isFinite(edgeInput.createdAt)
+      ? edgeInput.createdAt
+      : (Number.isFinite(edgeInput.created_at) ? edgeInput.created_at : now);
+    const updatedAt = Number.isFinite(edgeInput.updatedAt)
+      ? edgeInput.updatedAt
+      : (Number.isFinite(edgeInput.updated_at) ? edgeInput.updated_at : createdAt);
+    const metadata = edgeInput.metadata && typeof edgeInput.metadata === 'object' && !Array.isArray(edgeInput.metadata)
+      ? redactSecretObject({ ...edgeInput.metadata })
+      : {};
+
+    const insertEdge = this.db.transaction(() => {
+      const existing = this.db.get(`
+        SELECT *
+        FROM memory_summary_edges
+        WHERE edge_namespace = ?
+          AND parent_scope_type = ?
+          AND parent_scope_id = ?
+          AND child_scope_type = ?
+          AND child_scope_id = ?
+          AND edge_kind = ?
+      `, edgeNamespace, parentScopeType, parentScopeId, childScopeType, childScopeId, edgeKind);
+      if (existing) {
+        return existing;
+      }
+
+      const edgeId = String(edgeInput.edgeId || edgeInput.edge_id || edgeInput.id || `mse_${generateId()}`).trim();
+      this.db.run(`
+        INSERT INTO memory_summary_edges (
+          edge_id,
+          edge_namespace,
+          parent_scope_type,
+          parent_scope_id,
+          child_scope_type,
+          child_scope_id,
+          edge_kind,
+          metadata,
+          created_at,
+          updated_at
+        )
+        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+      `,
+      edgeId,
+      edgeNamespace,
+      parentScopeType,
+      parentScopeId,
+      childScopeType,
+      childScopeId,
+      edgeKind,
+      JSON.stringify(metadata),
+      createdAt,
+      updatedAt);
+
+      return this.db.get('SELECT * FROM memory_summary_edges WHERE edge_id = ?', edgeId);
+    });
+
+    return this._parseMemorySummaryEdgeRow(insertEdge.immediate());
+  }
+
+  listMemorySummaryEdges(options = {}) {
+    if (!this._hasTable('memory_summary_edges')) {
+      return [];
+    }
+
+    const edgeOptions = options && typeof options === 'object' ? options : {};
+    const clauses = [];
+    const params = [];
+    const pushTextMatch = (column, value) => {
+      const normalized = String(value || '').trim();
+      if (!normalized) {
+        return;
+      }
+      clauses.push(`${column} = ?`);
+      params.push(normalized);
+    };
+
+    pushTextMatch('edge_namespace', edgeOptions.edgeNamespace || edgeOptions.edge_namespace);
+    pushTextMatch('edge_kind', edgeOptions.edgeKind || edgeOptions.edge_kind);
+    pushTextMatch('parent_scope_type', edgeOptions.parentScopeType || edgeOptions.parent_scope_type);
+    pushTextMatch('parent_scope_id', edgeOptions.parentScopeId || edgeOptions.parent_scope_id);
+    pushTextMatch('child_scope_type', edgeOptions.childScopeType || edgeOptions.child_scope_type);
+    pushTextMatch('child_scope_id', edgeOptions.childScopeId || edgeOptions.child_scope_id);
+
+    const whereSql = clauses.length ? `WHERE ${clauses.join(' AND ')}` : '';
+    const limit = clampLimit(edgeOptions.limit, 100, 500);
+    return this.db.all(`
+      SELECT *
+      FROM memory_summary_edges
+      ${whereSql}
+      ORDER BY created_at DESC, edge_id ASC
+      LIMIT ?
+    `, ...params, limit).map((row) => this._parseMemorySummaryEdgeRow(row));
+  }
+
   /**
    * Clean up stale terminals
    */
@@ -3416,11 +3932,41 @@ class OrchestrationDB {
       JSON.stringify(normalizedMetadata),
       createdAt
     );
+    const persistedRootSessionId = explicitRootSessionId || terminalRow?.root_session_id || null;
 
     this.touchTerminalMessage(terminalId, {
       timestamp: createdAt,
       model: normalizedMetadata?.model || null
     });
+
+    if (persistedRootSessionId && this._hasTable('root_io_events')) {
+      try {
+        this.appendRootIoEvent({
+          idempotencyKey: `message:${result.lastInsertRowid}`,
+          rootSessionId: persistedRootSessionId,
+          terminalId,
+          runId: normalizedMetadata.runId || normalizedMetadata.run_id || null,
+          taskId: normalizedMetadata.taskId || normalizedMetadata.task_id || null,
+          taskAssignmentId: normalizedMetadata.taskAssignmentId || normalizedMetadata.task_assignment_id || null,
+          roomId: normalizedMetadata.roomId || normalizedMetadata.room_id || null,
+          discussionId: normalizedMetadata.discussionId || normalizedMetadata.discussion_id || null,
+          traceId,
+          eventKind: 'parsed_message',
+          source: 'broker',
+          contentFull: persistedContent,
+          parsedRole: normalizedRole,
+          metadata: {
+            sourceTable: 'messages',
+            messageId: result.lastInsertRowid
+          },
+          occurredAt: createdAt,
+          recordedAt: createdAt,
+          retentionClass: 'raw-bounded'
+        });
+      } catch (error) {
+        console.warn('[db] Failed to append root IO event for message:', error.message);
+      }
+    }
 
     const usageRecord = buildUsageRecordFromMessage(terminalRow, terminalId, normalizedRole, normalizedMetadata, {
       traceId
@@ -6294,10 +6840,30 @@ class OrchestrationDB {
     };
   }
 
+  _memoryRecordsProjectionSql() {
+    if (this._memoryReadModelHasRelation('memory_records_root_io_v1')) {
+      return `(SELECT * FROM memory_records_v1 UNION ALL SELECT * FROM memory_records_root_io_v1)`;
+    }
+    return 'memory_records_v1';
+  }
+
+  _memoryEdgesProjectionSql() {
+    const projections = ['SELECT * FROM memory_edges_v1'];
+    if (this._memoryReadModelHasRelation('memory_root_io_edges_v1')) {
+      projections.push('SELECT * FROM memory_root_io_edges_v1');
+    }
+    if (this._memoryReadModelHasRelation('memory_summary_edges_v1')) {
+      projections.push('SELECT * FROM memory_summary_edges_v1');
+    }
+    return projections.length === 1
+      ? 'memory_edges_v1'
+      : `(${projections.join(' UNION ALL ')})`;
+  }
+
   queryMemoryRecords(options = {}) {
     this._assertMemoryReadModelReady('memory_records_v1');
     const { clauses, params } = this._buildMemoryReadModelFilters(options);
-    const types = normalizeProjectionList(options.types);
+    const types = normalizeMemoryRecordTypes(options.types);
     const sourceTable = String(options.sourceTable || options.source_table || '').trim();
     const sourceId = options.sourceId ?? options.source_id;
     const queryText = String(options.q || '').trim().toLowerCase();
@@ -6321,9 +6887,10 @@ class OrchestrationDB {
 
     const whereSql = clauses.length ? `WHERE ${clauses.join(' AND ')}` : '';
     const limit = clampLimit(options.limit, 100, 500);
+    const projectionSql = this._memoryRecordsProjectionSql();
     const rows = this.db.prepare(`
       SELECT *
-      FROM memory_records_v1
+      FROM ${projectionSql}
       ${whereSql}
       ORDER BY activity_at DESC, created_at DESC, source_table ASC, source_id ASC
       LIMIT ?
@@ -6409,9 +6976,10 @@ class OrchestrationDB {
 
     const whereSql = clauses.length ? `WHERE ${clauses.join(' AND ')}` : '';
     const limit = clampLimit(options.limit, 100, 500);
+    const projectionSql = this._memoryEdgesProjectionSql();
     const rows = this.db.prepare(`
       SELECT *
-      FROM memory_edges_v1
+      FROM ${projectionSql}
       ${whereSql}
       ORDER BY activity_at DESC, created_at DESC, source_table ASC, source_id ASC, edge_type ASC
       LIMIT ?

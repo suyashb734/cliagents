@@ -149,6 +149,13 @@ Acceptance:
 
 Preferred executor: strong coding model after Phase 0.
 
+Status: foundation implemented in `0019_root_io_events_memory_lineage.sql` with
+DB helpers, read-model projections, redaction-on-write, idempotency, direct
+cycle checks, automatic broker parsed-message events from `addMessage`, and
+focused regression coverage in `tests/test-root-io-events.js`. Remaining work is
+runtime-host/native-output ingestion, usage/tool/liveness producers, and summary
+services that actively write lineage edges.
+
 Write scope:
 
 - ordered migration for `root_io_events` and summary-lineage storage

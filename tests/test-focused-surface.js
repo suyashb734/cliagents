@@ -20,6 +20,7 @@ const TEST_FILES = [
   'test-event-normalizer.js',
   'test-handoff-init-prompts.js',
   'test-db-migrations.js',
+  'test-root-io-events.js',
   'test-memory-read-model-projections.js',
   'test-memory-query-insights.js',
   'test-usage-ledger.js',
