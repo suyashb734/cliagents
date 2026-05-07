@@ -97,6 +97,7 @@ function generateRunId() {
 const SAFE_TMUX_NAME_PATTERN = /^[a-zA-Z0-9_-]+$/;
 const MIN_ORPHANED_LOG_TAIL_BYTES = 5000;
 const MAX_ORPHANED_LOG_TAIL_BYTES = 50000;
+const MAX_ROOT_IO_OUTPUT_CHUNK_BYTES = 12000;
 const DEFAULT_MANAGED_ROOT_STARTUP_DELAY_MS = 1500;
 const DEFAULT_WORKER_STARTUP_DELAY_MS = 250;
 const DEFAULT_DEFERRED_PROVIDER_ATTACH_TIMEOUT_MS = 20000;
@@ -1709,7 +1710,13 @@ class PersistentSessionManager extends EventEmitter {
         source: event.source || 'broker',
         contentPreview: event.contentPreview,
         contentFull: event.contentFull,
+        logPath: event.logPath || null,
+        logOffsetStart: event.logOffsetStart ?? null,
+        logOffsetEnd: event.logOffsetEnd ?? null,
+        screenRows: event.screenRows ?? null,
+        screenCols: event.screenCols ?? null,
         parsedRole: event.parsedRole || null,
+        confidence: event.confidence ?? null,
         metadata: {
           adapter: terminal.adapter,
           role: terminal.role || null,
@@ -1725,6 +1732,97 @@ class PersistentSessionManager extends EventEmitter {
       console.warn('[SessionManager] Failed to record root IO event:', error.message);
       return null;
     }
+  }
+
+  _getRootLogOffsetStart(terminal, logSize) {
+    if (Number.isInteger(terminal._lastRootIoLogOffset)) {
+      return terminal._lastRootIoLogOffset > logSize ? 0 : terminal._lastRootIoLogOffset;
+    }
+
+    let persistedOffset = null;
+    if (typeof this.db?.getLatestRootIoLogOffset === 'function') {
+      persistedOffset = this.db.getLatestRootIoLogOffset({
+        rootSessionId: terminal.rootSessionId || terminal.terminalId,
+        terminalId: terminal.terminalId,
+        logPath: terminal.logPath
+      });
+    }
+
+    const offset = Number.isInteger(persistedOffset) && persistedOffset >= 0
+      ? Math.min(persistedOffset, logSize)
+      : 0;
+    terminal._lastRootIoLogOffset = offset;
+    return offset;
+  }
+
+  _readLogByteRange(terminal, start, end) {
+    if (!terminal?.logPath || !Number.isInteger(start) || !Number.isInteger(end) || end <= start) {
+      return '';
+    }
+
+    try {
+      const length = end - start;
+      const buffer = Buffer.alloc(length);
+      const fd = fs.openSync(terminal.logPath, 'r');
+      try {
+        fs.readSync(fd, buffer, 0, length, start);
+      } finally {
+        fs.closeSync(fd);
+      }
+      return buffer.toString('utf8');
+    } catch {
+      return '';
+    }
+  }
+
+  _recordRootOutputChunk(terminal) {
+    if (!terminal?.logPath || !this.db?.appendRootIoEvent) {
+      return null;
+    }
+
+    let stats = null;
+    try {
+      stats = fs.statSync(terminal.logPath);
+    } catch {
+      return null;
+    }
+
+    const logOffsetStart = this._getRootLogOffsetStart(terminal, stats.size);
+    const logOffsetEnd = stats.size;
+    if (logOffsetEnd <= logOffsetStart) {
+      return null;
+    }
+
+    const storedOffsetStart = Math.max(logOffsetStart, logOffsetEnd - MAX_ROOT_IO_OUTPUT_CHUNK_BYTES);
+    const contentFull = this._readLogByteRange(terminal, storedOffsetStart, logOffsetEnd);
+    if (!contentFull) {
+      terminal._lastRootIoLogOffset = logOffsetEnd;
+      return null;
+    }
+
+    const event = this._recordRootIoEvent(terminal, {
+      idempotencyKey: `output:${terminal.terminalId}:${terminal.logPath}:${logOffsetStart}:${logOffsetEnd}`,
+      eventKind: 'output',
+      source: 'terminal_log',
+      contentPreview: summarizeMessage(stripAnsiCodes(contentFull), 500),
+      contentFull,
+      logPath: terminal.logPath,
+      logOffsetStart,
+      logOffsetEnd,
+      metadata: {
+        source: 'session-manager.getStatus',
+        logByteLength: logOffsetEnd - logOffsetStart,
+        storedLogOffsetStart: storedOffsetStart,
+        storedLogOffsetEnd: logOffsetEnd,
+        truncated: storedOffsetStart > logOffsetStart
+      },
+      retentionClass: 'raw-bounded'
+    });
+
+    if (event) {
+      terminal._lastRootIoLogOffset = logOffsetEnd;
+    }
+    return event;
   }
 
   _recordRootOutputSnapshot(terminal, output, options = {}) {
@@ -4452,6 +4550,7 @@ class PersistentSessionManager extends EventEmitter {
     this._restoreTrackedRunFromPersistence(reconciledTerminal, output, detector);
     const trackedRunStatus = this._detectTrackedRunStatus(reconciledTerminal, output, detector);
     const attention = this._getTerminalAttention(reconciledTerminal, { output });
+    this._recordRootOutputChunk(reconciledTerminal);
     if (trackedRunStatus) {
       this._recordRootOutputSnapshot(reconciledTerminal, output, { detectedStatus: trackedRunStatus });
       this._syncInteractiveTranscript(reconciledTerminal, output, trackedRunStatus);

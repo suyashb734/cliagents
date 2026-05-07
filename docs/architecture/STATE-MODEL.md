@@ -48,7 +48,7 @@ input was deliverable or blocked.
 Root IO events are redacted before persistence and ordered per root session.
 
 - `input`: broker-sent or operator-sent input.
-- `output`: terminal output chunk with optional log offsets.
+- `output`: bounded terminal-log chunk with byte offsets back to the raw log.
 - `screen_snapshot`: visible TUI/screen state sample.
 - `parsed_message`: best-effort parsed user, assistant, system, or tool turn.
 - `tool_event`: tool-call or tool-result metadata when exposed.

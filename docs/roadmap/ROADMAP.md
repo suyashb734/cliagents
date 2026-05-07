@@ -31,9 +31,9 @@ docs remain useful context, but this file is the current entrypoint.
      branch so Long-Horizon orchestration does not introduce competing
      persistence tables. Foundation migration, helpers, projections, broker
      input producers, deduplicated screen snapshots, usage events, tool events,
-     liveness events, generated run/root snapshot lineage edges, and tests
-     landed; remaining work is precise raw-log offset ingestion and broader
-     room/task/project summary producers.
+     liveness events, generated run/root snapshot lineage edges, bounded
+     terminal-log output chunks with byte offsets, and tests landed; remaining
+     work is broader room/task/project summary producers.
    - Improve live metadata completeness for model, duration, and cost where
      providers expose it.
 

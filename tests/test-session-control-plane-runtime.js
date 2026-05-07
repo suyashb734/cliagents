@@ -762,16 +762,13 @@ async function run() {
     );
     assert(liveTerminal.activeRun, 'tracked one-shot run should be active');
 
-    fs.writeFileSync(
-      liveTerminal.logPath,
-      [
-        liveTerminal.activeRun.startMarker,
-        `{"type":"thread.started","thread_id":"${codexWorkerThreadRef}"}`,
-        '{"type":"item.completed","item":{"type":"agent_message","text":"Running review..."}}',
-        `${liveTerminal.activeRun.exitMarkerPrefix}0`
-      ].join('\n'),
-      'utf8'
-    );
+    const codexWorkerLog = [
+      liveTerminal.activeRun.startMarker,
+      `{"type":"thread.started","thread_id":"${codexWorkerThreadRef}"}`,
+      '{"type":"item.completed","item":{"type":"agent_message","text":"Running review..."}}',
+      `${liveTerminal.activeRun.exitMarkerPrefix}0`
+    ].join('\n');
+    fs.writeFileSync(liveTerminal.logPath, codexWorkerLog, 'utf8');
     fakeTmux.setHistory(
       liveTerminal.sessionName,
       liveTerminal.windowName,
@@ -800,12 +797,31 @@ async function run() {
       screenSnapshots.some((event) => event.contentFull.includes('Running review') && event.metadata.source === 'session-manager.getStatus'),
       'getStatus should persist a deduplicated screen snapshot root IO event'
     );
+    const logOutputEvents = db.listRootIoEvents({
+      terminalId: terminal.terminalId,
+      eventKind: 'output',
+      limit: 10
+    });
+    const codexOutputEvent = logOutputEvents.find((event) => (
+      event.logPath === liveTerminal.logPath
+      && event.logOffsetStart === 0
+      && event.logOffsetEnd === Buffer.byteLength(codexWorkerLog, 'utf8')
+      && event.contentFull.includes('Running review')
+    ));
+    assert(codexOutputEvent, 'getStatus should persist terminal-log output chunks with byte offsets');
+    assert.strictEqual(codexOutputEvent.metadata.storedLogOffsetEnd, Buffer.byteLength(codexWorkerLog, 'utf8'));
     const screenSnapshotCount = screenSnapshots.length;
+    const logOutputEventCount = logOutputEvents.length;
     assert.strictEqual(manager.getStatus(terminal.terminalId), TerminalStatus.COMPLETED);
     assert.strictEqual(
       db.listRootIoEvents({ terminalId: terminal.terminalId, eventKind: 'screen_snapshot', limit: 10 }).length,
       screenSnapshotCount,
       'unchanged getStatus output should not duplicate screen snapshot root IO events'
+    );
+    assert.strictEqual(
+      db.listRootIoEvents({ terminalId: terminal.terminalId, eventKind: 'output', limit: 10 }).length,
+      logOutputEventCount,
+      'unchanged getStatus output should not duplicate terminal-log output root IO events'
     );
 
     const persistedCodexWorker = db.getTerminal(terminal.terminalId);

@@ -3074,6 +3074,13 @@ class OrchestrationDB {
       contentPreview: row.content_preview || null,
       contentFull: row.content_full || null,
       contentSha256: row.content_sha256 || null,
+      logPath: row.log_path || null,
+      logOffsetStart: row.log_offset_start,
+      logOffsetEnd: row.log_offset_end,
+      screenRows: row.screen_rows,
+      screenCols: row.screen_cols,
+      parsedRole: row.parsed_role || null,
+      confidence: row.confidence,
       retentionClass: row.retention_class,
       occurredAt: row.occurred_at,
       recordedAt: row.recorded_at,
@@ -3311,6 +3318,32 @@ class OrchestrationDB {
       ORDER BY occurred_at ASC, sequence_no ASC, recorded_at ASC, root_io_event_id ASC
       LIMIT ?
     `, ...params, limit).map((row) => this._parseRootIoEventRow(row));
+  }
+
+  getLatestRootIoLogOffset(options = {}) {
+    if (!this._hasTable('root_io_events')) {
+      return null;
+    }
+
+    const offsetOptions = options && typeof options === 'object' ? options : {};
+    const rootSessionId = String(offsetOptions.rootSessionId || offsetOptions.root_session_id || '').trim();
+    const terminalId = String(offsetOptions.terminalId || offsetOptions.terminal_id || '').trim();
+    const logPath = String(offsetOptions.logPath || offsetOptions.log_path || '').trim();
+    if (!rootSessionId || !terminalId || !logPath) {
+      return null;
+    }
+
+    const row = this.db.get(`
+      SELECT MAX(log_offset_end) AS log_offset_end
+      FROM root_io_events
+      WHERE root_session_id = ?
+        AND terminal_id = ?
+        AND log_path = ?
+        AND source = 'terminal_log'
+        AND event_kind = 'output'
+        AND log_offset_end IS NOT NULL
+    `, rootSessionId, terminalId, logPath);
+    return Number.isFinite(row?.log_offset_end) ? row.log_offset_end : null;
   }
 
   _parseMemorySummaryEdgeRow(row) {

@@ -160,10 +160,11 @@ root-timeline usage events from `addUsageRecord`, tool events from
 Focused regression coverage lives in `tests/test-root-io-events.js`,
 `tests/test-session-reuse.js`, `tests/test-session-control-plane-runtime.js`,
 `tests/test-usage-ledger.js`, and `tests/test-run-ledger-service.js`. Remaining
-work is precise raw-log offset ingestion and broader room/task/project summary
-producers. Generated run and root snapshots now write idempotent
-`memory_summary_edges` back to the runs they summarize, and repair backfills
-missing snapshot lineage without regenerating summary text.
+work is broader room/task/project summary producers. Generated run and root
+snapshots now write idempotent `memory_summary_edges` back to the runs they
+summarize, repair backfills missing snapshot lineage without regenerating
+summary text, and `getStatus` persists bounded terminal-log `output` chunks
+with exact byte offsets so raw logs remain the audit fallback.
 
 Write scope:
 
