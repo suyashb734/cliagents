@@ -773,6 +773,22 @@ async function run() {
     const status = manager.getStatus(terminal.terminalId);
     assert.strictEqual(status, TerminalStatus.COMPLETED);
     assert.strictEqual(liveTerminal.providerThreadRef, codexWorkerThreadRef);
+    const screenSnapshots = db.listRootIoEvents({
+      terminalId: terminal.terminalId,
+      eventKind: 'screen_snapshot',
+      limit: 10
+    });
+    assert(
+      screenSnapshots.some((event) => event.contentFull.includes('Running review') && event.metadata.source === 'session-manager.getStatus'),
+      'getStatus should persist a deduplicated screen snapshot root IO event'
+    );
+    const screenSnapshotCount = screenSnapshots.length;
+    assert.strictEqual(manager.getStatus(terminal.terminalId), TerminalStatus.COMPLETED);
+    assert.strictEqual(
+      db.listRootIoEvents({ terminalId: terminal.terminalId, eventKind: 'screen_snapshot', limit: 10 }).length,
+      screenSnapshotCount,
+      'unchanged getStatus output should not duplicate screen snapshot root IO events'
+    );
 
     const persistedCodexWorker = db.getTerminal(terminal.terminalId);
     assert.strictEqual(persistedCodexWorker.provider_thread_ref, codexWorkerThreadRef);

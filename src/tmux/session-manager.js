@@ -1696,6 +1696,7 @@ class PersistentSessionManager extends EventEmitter {
       : {};
     try {
       return this.db.appendRootIoEvent({
+        idempotencyKey: event.idempotencyKey || null,
         rootSessionId,
         terminalId: terminal.terminalId,
         runId: event.runId || sessionMetadata.runId || null,
@@ -1724,6 +1725,43 @@ class PersistentSessionManager extends EventEmitter {
       console.warn('[SessionManager] Failed to record root IO event:', error.message);
       return null;
     }
+  }
+
+  _recordRootOutputSnapshot(terminal, output, options = {}) {
+    if (!terminal || !this.db?.appendRootIoEvent) {
+      return null;
+    }
+
+    const normalizedOutput = this._normalizeInteractiveOutput(output);
+    if (!normalizedOutput) {
+      return null;
+    }
+
+    const outputSha256 = crypto.createHash('sha256').update(normalizedOutput, 'utf8').digest('hex');
+    if (terminal._lastRootIoOutputSha256 === outputSha256) {
+      return null;
+    }
+    terminal._lastRootIoOutputSha256 = outputSha256;
+
+    const maxStoredChars = 4000;
+    const contentFull = normalizedOutput.length > maxStoredChars
+      ? normalizedOutput.slice(-maxStoredChars)
+      : normalizedOutput;
+
+    return this._recordRootIoEvent(terminal, {
+      idempotencyKey: `screen_snapshot:${terminal.terminalId}:${outputSha256}`,
+      eventKind: 'screen_snapshot',
+      source: 'terminal_log',
+      contentPreview: summarizeMessage(normalizedOutput, 500),
+      contentFull,
+      metadata: {
+        source: 'session-manager.getStatus',
+        detectedStatus: options.detectedStatus || null,
+        outputSha256,
+        truncated: normalizedOutput.length > maxStoredChars
+      },
+      retentionClass: 'raw-bounded'
+    });
   }
 
   _syncInteractiveTranscript(terminal, output, nextStatus) {
@@ -4378,6 +4416,7 @@ class PersistentSessionManager extends EventEmitter {
     const trackedRunStatus = this._detectTrackedRunStatus(reconciledTerminal, output, detector);
     const attention = this._getTerminalAttention(reconciledTerminal, { output });
     if (trackedRunStatus) {
+      this._recordRootOutputSnapshot(reconciledTerminal, output, { detectedStatus: trackedRunStatus });
       this._syncInteractiveTranscript(reconciledTerminal, output, trackedRunStatus);
       this._applyStatusUpdate(reconciledTerminal, trackedRunStatus, {
         exitCode: reconciledTerminal.activeRun?.exitCode ?? null,
@@ -4389,6 +4428,7 @@ class PersistentSessionManager extends EventEmitter {
 
     if (detector) {
       const detectedStatus = detector.detectStatus(output);
+      this._recordRootOutputSnapshot(reconciledTerminal, output, { detectedStatus });
       this._syncInteractiveTranscript(reconciledTerminal, output, detectedStatus);
 
       // Update cached status
@@ -4398,6 +4438,7 @@ class PersistentSessionManager extends EventEmitter {
     }
 
     // Return cached status if no detector
+    this._recordRootOutputSnapshot(reconciledTerminal, output, { detectedStatus: reconciledTerminal.status });
     return reconciledTerminal.status;
   }
 

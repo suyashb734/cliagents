@@ -152,11 +152,12 @@ Preferred executor: strong coding model after Phase 0.
 Status: foundation implemented in `0019_root_io_events_memory_lineage.sql` with
 DB helpers, read-model projections, redaction-on-write, idempotency, direct
 cycle checks, automatic broker parsed-message events from `addMessage`,
-broker-sent input events from `PersistentSessionManager.sendInput`, and focused
-regression coverage in `tests/test-root-io-events.js` plus
-`tests/test-session-reuse.js`. Remaining work is runtime-host/native-output
-ingestion, usage/tool/liveness producers, and summary services that actively
-write lineage edges.
+broker-sent input events from `PersistentSessionManager.sendInput`, and
+deduplicated screen snapshots from `PersistentSessionManager.getStatus`.
+Focused regression coverage lives in `tests/test-root-io-events.js`,
+`tests/test-session-reuse.js`, and `tests/test-session-control-plane-runtime.js`.
+Remaining work is precise raw-log offset ingestion, usage/tool/liveness
+producers, and summary services that actively write lineage edges.
 
 Write scope:
 
