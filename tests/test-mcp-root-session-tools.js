@@ -43,6 +43,7 @@ async function startFakeCliagentsServer() {
           description: 'Codex CLI',
           models: [
             { id: 'default', name: 'Default', description: 'Uses the CLI default model' },
+            { id: 'gpt-5.5', name: 'GPT-5.5', description: 'Frontier model' },
             { id: 'o4-mini', name: 'o4-mini', description: 'Fast reasoning model' }
           ],
           runtimeProviders: []
@@ -51,7 +52,7 @@ async function startFakeCliagentsServer() {
           description: 'Claude Code',
           models: [
             { id: 'default', name: 'Default', description: 'Uses Claude default model' },
-            { id: 'claude-opus-4-5-20250514', name: 'Claude Opus 4.5', description: 'Most capable Claude model' }
+            { id: 'claude-opus-4-7', name: 'Claude Opus 4.7', description: 'Latest Opus model' }
           ],
           runtimeProviders: [
             { name: 'anthropic' }
@@ -679,12 +680,12 @@ async function run() {
     const modelsSummary = await mod.handleListModels({});
     const modelsSummaryText = modelsSummary.content[0].text;
     assert(modelsSummaryText.includes('Adapter Models'));
-    assert(modelsSummaryText.includes('codex-cli: 2 models'));
+    assert(modelsSummaryText.includes('codex-cli: 3 models'));
 
     const claudeModels = await mod.handleListModels({ adapter: 'claude-code' });
     const claudeModelsText = claudeModels.content[0].text;
     assert(claudeModelsText.includes('Models: claude-code'));
-    assert(claudeModelsText.includes('claude-opus-4-5-20250514'));
+    assert(claudeModelsText.includes('claude-opus-4-7'));
     assert(claudeModelsText.includes('runtime_providers: anthropic'));
 
     const recommended = await mod.handleRecommendModel({

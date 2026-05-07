@@ -13,6 +13,20 @@ const { createAdapterContract, defineAdapterCapabilities, EXECUTION_MODES } = re
 const { logConversation, logSessionStart } = require('../utils/conversation-logger');
 const { resolveClaudeCliPath } = require('../utils/claude-cli-path');
 
+const CLAUDE_MODEL_ALIASES = Object.freeze({
+  opus: 'claude-opus-4-7',
+  sonnet: 'claude-sonnet-4-6',
+  haiku: 'claude-haiku-4-5'
+});
+
+function normalizeClaudeModelAlias(model) {
+  const normalized = String(model || '').trim();
+  if (!normalized) {
+    return null;
+  }
+  return CLAUDE_MODEL_ALIASES[normalized.toLowerCase()] || normalized;
+}
+
 class ClaudeCodeAdapter extends BaseLLMAdapter {
   constructor(config = {}) {
     super({
@@ -68,11 +82,17 @@ class ClaudeCodeAdapter extends BaseLLMAdapter {
       ]
     });
 
-    // Available models for Claude Code CLI
+    // Prefer exact model IDs over aliases such as "opus". Claude Code aliases
+    // can resolve differently across CLI versions, which makes broker audit
+    // and usage attribution ambiguous.
     this.availableModels = [
       { id: 'default', name: 'Default', description: 'Uses Claude default model' },
-      { id: 'claude-sonnet-4-5-20250514', name: 'Claude Sonnet 4.5', description: 'Latest Sonnet model' },
-      { id: 'claude-opus-4-5-20250514', name: 'Claude Opus 4.5', description: 'Most capable Claude model' },
+      { id: 'claude-opus-4-7', name: 'Claude Opus 4.7', description: 'Latest Opus model for complex reasoning and agentic coding' },
+      { id: 'claude-opus-4-6', name: 'Claude Opus 4.6', description: 'Previous Opus model' },
+      { id: 'claude-sonnet-4-6', name: 'Claude Sonnet 4.6', description: 'Latest Sonnet model' },
+      { id: 'claude-sonnet-4-5-20250514', name: 'Claude Sonnet 4.5', description: 'Legacy dated Sonnet 4.5 model ID' },
+      { id: 'claude-opus-4-5-20250514', name: 'Claude Opus 4.5', description: 'Legacy dated Opus 4.5 model ID' },
+      { id: 'claude-haiku-4-5', name: 'Claude Haiku 4.5', description: 'Fast Claude 4.5 model' },
       { id: 'claude-3-5-sonnet-20241022', name: 'Claude 3.5 Sonnet', description: 'Balanced performance and speed' },
       { id: 'claude-3-5-haiku-20241022', name: 'Claude 3.5 Haiku', description: 'Fast and cost-effective' }
     ];
@@ -130,7 +150,7 @@ class ClaudeCodeAdapter extends BaseLLMAdapter {
     }
 
     const workDir = options.workDir || this.config.workDir;
-    const model = options.model || this.config.model; // null = default
+    const model = normalizeClaudeModelAlias(options.model || this.config.model); // null = default
     const maxOutputTokens = options.max_output_tokens || this.config.max_output_tokens; // null = default
     const providerSessionId = String(options.providerSessionId || '').trim() || null;
 

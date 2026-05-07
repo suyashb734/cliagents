@@ -104,6 +104,20 @@ const DEFAULT_POST_ATTACH_PROVIDER_START_DELAY_MS = 120;
 const DEFAULT_CODEX_ORCHESTRATION_MODEL = process.env.CLIAGENTS_CODEX_ORCHESTRATION_MODEL || 'gpt-5.4';
 const ENABLE_STATUS_DEBUG_LOGS = process.env.CLIAGENTS_STATUS_DEBUG === '1';
 
+const BROKER_MODEL_ALIASES = Object.freeze({
+  'claude-code': Object.freeze({
+    opus: 'claude-opus-4-7',
+    sonnet: 'claude-sonnet-4-6',
+    haiku: 'claude-haiku-4-5'
+  }),
+  'codex-cli': Object.freeze({
+    gpt5: 'gpt-5.5',
+    gpt5mini: 'gpt-5.4-mini',
+    codex: 'gpt-5.5',
+    codexmini: 'gpt-5.4-mini'
+  })
+});
+
 function hashSessionShape(value) {
   return crypto.createHash('sha256').update(String(value || ''), 'utf8').digest('hex');
 }
@@ -189,17 +203,28 @@ function resolveGeminiCommandModel(model) {
 }
 
 function resolveCodexOneShotModel(model) {
-  if (model && model !== 'default') {
-    return model;
+  const normalizedModel = normalizeBrokerModelAlias('codex-cli', model);
+  if (normalizedModel && normalizedModel !== 'default') {
+    return normalizedModel;
   }
   return DEFAULT_CODEX_ORCHESTRATION_MODEL || null;
 }
 
-function resolveTerminalModel(adapter, role, sessionKind, model) {
-  if (adapter === 'codex-cli' && (role === 'worker' || sessionKind === 'child')) {
-    return resolveCodexOneShotModel(model);
+function normalizeBrokerModelAlias(adapter, model) {
+  const normalizedModel = String(model || '').trim();
+  if (!normalizedModel) {
+    return null;
   }
-  return model || null;
+  const aliases = BROKER_MODEL_ALIASES[adapter] || null;
+  return aliases?.[normalizedModel.toLowerCase()] || normalizedModel;
+}
+
+function resolveTerminalModel(adapter, role, sessionKind, model) {
+  const normalizedModel = normalizeBrokerModelAlias(adapter, model);
+  if (adapter === 'codex-cli' && (role === 'worker' || sessionKind === 'child')) {
+    return resolveCodexOneShotModel(normalizedModel);
+  }
+  return normalizedModel || null;
 }
 
 function normalizeUuid(value) {
@@ -424,8 +449,9 @@ function buildClaudeOneShotCommand(message, terminal) {
     `"${escapeForDoubleQuotes(claudePath)}"`
   ];
 
-  if (terminal.model) {
-    args.push('--model', `"${escapeForDoubleQuotes(terminal.model)}"`);
+  const resolvedModel = normalizeBrokerModelAlias('claude-code', terminal.model);
+  if (resolvedModel) {
+    args.push('--model', `"${escapeForDoubleQuotes(resolvedModel)}"`);
   }
 
   args.push(
@@ -777,8 +803,9 @@ const CLI_COMMANDS = {
     args.push('--output-format', 'stream-json');
 
     // Model selection
-    if (options.model) {
-      args.push('--model', options.model);
+    const resolvedModel = normalizeBrokerModelAlias('claude-code', options.model);
+    if (resolvedModel) {
+      args.push('--model', resolvedModel);
     }
 
     if (resumeSessionId) {
@@ -883,8 +910,9 @@ const CLI_COMMANDS = {
     }
 
     // Model selection
-    if (options.model) {
-      args.push('--model', options.model);
+    const resolvedModel = normalizeBrokerModelAlias('codex-cli', options.model);
+    if (resolvedModel) {
+      args.push('--model', resolvedModel);
     }
 
     return wrapManagedRootProviderCommand(args.join(' '), {

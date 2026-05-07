@@ -11,11 +11,13 @@ const {
   resolveTerminalStartupDelayMs,
   extractProviderThreadRefFromOutput,
   buildGeminiOneShotRunnerCommand,
+  buildClaudeOneShotCommand,
   buildCodexOneShotCommand,
   buildQwenOneShotCommand,
   buildOpencodeOneShotCommand
 } = require('../src/tmux/session-manager');
 const ClaudeCodeAdapter = require('../src/adapters/claude-code');
+const CodexCliAdapter = require('../src/adapters/codex-cli');
 const {
   parseAdoptArgs,
   parseServeArgs,
@@ -259,6 +261,15 @@ test('Codex one-shot builder stays stateless and preserves JSON mode', () => {
   assert(!cmd.includes('019d94a6-2cd8-7742-8e4e-123456789abc'), `Did not expect worker thread id in command, got: ${cmd}`);
 });
 
+test('Codex model aliases resolve to exact broker model ids', () => {
+  const cmd = buildCodexOneShotCommand('Continue review.', {
+    model: 'gpt5mini',
+    messageCount: 0
+  });
+
+  assert(cmd.includes('-m gpt-5.4-mini'), `Expected exact mini model id, got: ${cmd}`);
+});
+
 test('Codex one-shot builder pins a broker-safe default model', () => {
   const cmd = buildCodexOneShotCommand('Continue review.', {
     model: null,
@@ -338,6 +349,28 @@ test('Claude interactive command respects explicit default permission mode', () 
   assert(cmd.includes('--model claude-sonnet-4-5-20250514'), `Expected model flag, got: ${cmd}`);
 });
 
+test('Claude broker aliases resolve to exact current model ids', () => {
+  const cmd = CLI_COMMANDS['claude-code']({
+    role: 'main',
+    permissionMode: 'default',
+    model: 'opus'
+  });
+
+  assert(cmd.includes('--model claude-opus-4-7'), `Expected Opus alias to resolve to 4.7, got: ${cmd}`);
+});
+
+test('Claude one-shot command resolves aliases before launch', () => {
+  const { command } = buildClaudeOneShotCommand('Review this diff.', {
+    workDir: '/tmp/project',
+    model: 'sonnet',
+    providerThreadRef: null,
+    messageCount: 0,
+    permissionMode: 'default'
+  });
+
+  assert(command.includes('--model "claude-sonnet-4-6"'), `Expected Sonnet alias to resolve to 4.6, got: ${command}`);
+});
+
 test('Claude interactive command omits allowedTools when the list is empty', () => {
   const cmd = CLI_COMMANDS['claude-code']({
     role: 'main',
@@ -346,6 +379,14 @@ test('Claude interactive command omits allowedTools when the list is empty', () 
   });
 
   assert(!cmd.includes('--allowedTools'), `Did not expect empty allowedTools flag, got: ${cmd}`);
+});
+
+test('Adapter model catalogs include current exact Codex and Claude ids', () => {
+  const codexModels = new CodexCliAdapter().getAvailableModels().map((model) => model.id);
+  const claudeModels = new ClaudeCodeAdapter().getAvailableModels().map((model) => model.id);
+
+  assert(codexModels.includes('gpt-5.5'), `Expected Codex catalog to include gpt-5.5, got: ${codexModels.join(', ')}`);
+  assert(claudeModels.includes('claude-opus-4-7'), `Expected Claude catalog to include claude-opus-4-7, got: ${claudeModels.join(', ')}`);
 });
 
 test('Claude managed root binds a provider session id on first launch', () => {
