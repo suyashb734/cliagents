@@ -4048,7 +4048,49 @@ class OrchestrationDB {
       VALUES (${columns.map(() => '?').join(', ')})
     `, ...values);
 
-    return result.lastID;
+    const usageRecordId = result.lastID;
+    const rootSessionId = usage.rootSessionId || usage.root_session_id || null;
+    if (rootSessionId && this._hasTable('root_io_events')) {
+      try {
+        this.appendRootIoEvent({
+          idempotencyKey: `usage_records:${usageRecordId}`,
+          rootSessionId,
+          terminalId: usage.terminalId,
+          runId: usage.runId || null,
+          taskId: usage.taskId || null,
+          taskAssignmentId: usage.taskAssignmentId || null,
+          eventKind: 'usage',
+          source: 'provider_metadata',
+          contentPreview: `${usage.model || usage.adapter || 'usage'} ${normalizeUsageTotalTokens(
+            usage.totalTokens,
+            normalizeInteger(usage.inputTokens, 0) + normalizeInteger(usage.outputTokens, 0) + normalizeInteger(usage.reasoningTokens, 0)
+          )} tokens`,
+          metadata: {
+            sourceTable: 'usage_records',
+            usageRecordId,
+            adapter: usage.adapter || null,
+            provider: usage.provider || null,
+            model: usage.model || null,
+            sourceConfidence: normalizeUsageConfidence(usage.sourceConfidence || 'unknown'),
+            inputTokens: normalizeInteger(usage.inputTokens, 0),
+            outputTokens: normalizeInteger(usage.outputTokens, 0),
+            reasoningTokens: normalizeInteger(usage.reasoningTokens, 0),
+            cachedInputTokens: normalizeInteger(usage.cachedInputTokens, 0),
+            totalTokens: normalizeUsageTotalTokens(
+              usage.totalTokens,
+              normalizeInteger(usage.inputTokens, 0) + normalizeInteger(usage.outputTokens, 0) + normalizeInteger(usage.reasoningTokens, 0)
+            )
+          },
+          occurredAt: createdAt,
+          recordedAt: createdAt,
+          retentionClass: 'metadata-indefinite'
+        });
+      } catch (error) {
+        console.warn('[db] Failed to append root IO event for usage record:', error.message);
+      }
+    }
+
+    return usageRecordId;
   }
 
   addUsageRecordFromMetadata(input = {}) {

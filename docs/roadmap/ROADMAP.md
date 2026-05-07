@@ -29,9 +29,10 @@ docs remain useful context, but this file is the current entrypoint.
      conversation/run summaries.
    - Own `root_io_events` and summary-lineage edges in the Memory Read Model
      branch so Long-Horizon orchestration does not introduce competing
-     persistence tables. Foundation migration, helpers, projections, and tests
-     landed; remaining work is broader native-output ingestion and summary
-     producers that write lineage edges.
+     persistence tables. Foundation migration, helpers, projections, broker
+     input producers, deduplicated screen snapshots, usage events, and tests
+     landed; remaining work is precise raw-log offset ingestion, tool/liveness
+     producers, and summary producers that write lineage edges.
    - Improve live metadata completeness for model, duration, and cost where
      providers expose it.
 
