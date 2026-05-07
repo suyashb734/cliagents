@@ -1,6 +1,6 @@
 {
   "version": 1,
-  "lastReviewed": "2026-05-06",
+  "lastReviewed": "2026-05-07",
   "allowedStatuses": [
     "canonical",
     "active-plan",
@@ -95,6 +95,29 @@
         "src/mcp/cliagents-mcp-server.js",
         "src/database/db.js",
         "src/database/migrations/0016_terminal_input_queue.sql"
+      ],
+      "supersedes": [],
+      "last_reviewed": "2026-05-07"
+    },
+    {
+      "path": "docs/reference/LAUNCH-PROFILE.md",
+      "status": "reference",
+      "type": "reference",
+      "scope": ["onboarding", "deployment-profile", "validation"],
+      "related_code": [
+        "scripts/track-a-launch-smoke.js",
+        "tests/test-track-a-launch-smoke.js"
+      ],
+      "supersedes": [],
+      "last_reviewed": "2026-05-07"
+    },
+    {
+      "path": "docs/reference/FAILURE-RETRY-TAXONOMY.md",
+      "status": "reference",
+      "type": "reference",
+      "scope": ["error-taxonomy", "retry-policy", "operations"],
+      "related_code": [
+        "scripts/track-a-launch-smoke.js"
       ],
       "supersedes": [],
       "last_reviewed": "2026-05-07"

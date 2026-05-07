@@ -32,6 +32,8 @@ older planning notes in `docs/research/`.
 - [Event Normalization](./reference/EVENT-NORMALIZATION.md)
 - [Remote API](./reference/REMOTE-API.md)
 - [Terminal Input Queue](./reference/INPUT-QUEUE.md)
+- [Track A Launch Profile](./reference/LAUNCH-PROFILE.md)
+- [Failure And Retry Taxonomy](./reference/FAILURE-RETRY-TAXONOMY.md)
 - [Troubleshooting](./TROUBLESHOOTING.md)
 - [Adding Adapters](./adding-adapters.md)
 - [Historical Adapter Notes](./adapters.md)
