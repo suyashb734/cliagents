@@ -29,6 +29,8 @@ const ACTION_REJECTION_STATUSES = new Set([
   'failed_policy',
   'policy_blocked'
 ]);
+const CANONICAL_DETERMINISTIC_TARGET_NAME = 'more information...';
+const RISKY_TARGET_NAME_PATTERN = /\b(delete|remove|destroy|drop|purchase|pay|transfer|confirm|submit|execute)\b/i;
 
 function parseMaybeNumber(value) {
   if (typeof value === 'number' && Number.isFinite(value)) {
@@ -434,6 +436,7 @@ function buildScenarioTarget(interaction = {}, state = {}) {
   const explicitTarget = interaction && typeof interaction.target === 'object' && interaction.target
     ? interaction.target
     : null;
+  const stateElements = Array.isArray(state.elements) ? state.elements : [];
 
   const explicitElementId = firstString(
     explicitTarget?.element_id,
@@ -441,35 +444,89 @@ function buildScenarioTarget(interaction = {}, state = {}) {
     explicitTarget?.id
   );
   if (explicitElementId) {
-    return { element_id: explicitElementId };
+    const explicitIdMatches = stateElements.filter((element) => firstString(element?.id) === explicitElementId);
+    if (explicitIdMatches.length !== 1 || !explicitIdMatches[0]?.id) {
+      const reason = explicitIdMatches.length > 1
+        ? 'explicit_element_id_ambiguous'
+        : 'explicit_element_id_not_resolved';
+      throw new BrowserPerceptionEngineError('Explicit element_id target was not found in state payload', {
+        failureClass: FAILURE_CLASSES.ACTION_REJECTION,
+        terminalFailureReason: FAILURE_CLASSES.ACTION_REJECTION,
+        details: {
+          reason,
+          elementId: explicitElementId,
+          matchCount: explicitIdMatches.length
+        }
+      });
+    }
+    return {
+      target: { element_id: explicitIdMatches[0].id },
+      resolvedElement: explicitIdMatches[0],
+      selectionSource: 'explicit_element_id'
+    };
   }
 
   const explicitName = firstString(explicitTarget?.name, explicitTarget?.label, interaction?.targetName);
   const explicitRole = firstString(explicitTarget?.role, interaction?.targetRole);
-  const stateElements = Array.isArray(state.elements) ? state.elements : [];
 
-  const byExplicit = stateElements.find((element) => {
-    if (!element) {
-      return false;
+  const hasExplicitSelector = Boolean(explicitName || explicitRole);
+  if (hasExplicitSelector) {
+    const explicitNameLower = explicitName ? explicitName.toLowerCase() : null;
+    const explicitRoleLower = explicitRole ? explicitRole.toLowerCase() : null;
+    const explicitMatches = stateElements.filter((element) => {
+      if (!element || typeof element !== 'object') {
+        return false;
+      }
+      const nameMatches = explicitNameLower
+        ? String(element.name || '').trim().toLowerCase() === explicitNameLower
+        : true;
+      const roleMatches = explicitRoleLower
+        ? String(element.role || '').trim().toLowerCase() === explicitRoleLower
+        : true;
+      return nameMatches && roleMatches;
+    });
+    if (explicitMatches.length !== 1 || !explicitMatches[0]?.id) {
+      const reason = explicitMatches.length > 1 ? 'explicit_target_ambiguous' : 'explicit_target_not_resolved';
+      throw new BrowserPerceptionEngineError('Requested interaction target could not be resolved safely', {
+        failureClass: FAILURE_CLASSES.ACTION_REJECTION,
+        terminalFailureReason: FAILURE_CLASSES.ACTION_REJECTION,
+        details: {
+          reason,
+          requestedTarget: explicitTarget || null,
+          explicitName: explicitName || null,
+          explicitRole: explicitRole || null,
+          matchCount: explicitMatches.length
+        }
+      });
     }
-    const nameMatches = explicitName
-      ? String(element.name || '').trim().toLowerCase() === explicitName.toLowerCase()
-      : true;
-    const roleMatches = explicitRole
-      ? String(element.role || '').trim().toLowerCase() === explicitRole.toLowerCase()
-      : true;
-    return nameMatches && roleMatches;
-  });
-
-  if (byExplicit?.id) {
-    return { element_id: byExplicit.id };
+    return {
+      target: { element_id: explicitMatches[0].id },
+      resolvedElement: explicitMatches[0],
+      selectionSource: 'explicit_name_role'
+    };
   }
 
-  const canonicalDeterministicTarget = stateElements.find((element) => {
-    return String(element?.name || '').trim().toLowerCase() === 'more information...';
+  const canonicalDeterministicCandidates = stateElements.filter((element) => {
+    return String(element?.name || '').trim().toLowerCase() === CANONICAL_DETERMINISTIC_TARGET_NAME;
   });
-  if (canonicalDeterministicTarget?.id) {
-    return { element_id: canonicalDeterministicTarget.id };
+  if (canonicalDeterministicCandidates.length === 1 && canonicalDeterministicCandidates[0]?.id) {
+    return {
+      target: { element_id: canonicalDeterministicCandidates[0].id },
+      resolvedElement: canonicalDeterministicCandidates[0],
+      selectionSource: 'canonical_deterministic'
+    };
+  }
+  if (canonicalDeterministicCandidates.length > 1) {
+    throw new BrowserPerceptionEngineError('Canonical deterministic target is ambiguous in state payload', {
+      failureClass: FAILURE_CLASSES.ACTION_REJECTION,
+      terminalFailureReason: FAILURE_CLASSES.ACTION_REJECTION,
+      details: {
+        reason: 'canonical_target_ambiguous',
+        requestedTarget: explicitTarget || null,
+        canonicalTargetName: CANONICAL_DETERMINISTIC_TARGET_NAME,
+        matchCount: canonicalDeterministicCandidates.length
+      }
+    });
   }
 
   throw new BrowserPerceptionEngineError('No actionable target found in state payload', {
@@ -480,6 +537,10 @@ function buildScenarioTarget(interaction = {}, state = {}) {
       requestedTarget: explicitTarget || null
     }
   });
+}
+
+function requiresRiskyTargetOverride(elementName) {
+  return typeof elementName === 'string' && RISKY_TARGET_NAME_PATTERN.test(elementName);
 }
 
 class BrowserPerceptionEngineClient {
@@ -1025,24 +1086,85 @@ class BrowserPerceptionEngineClient {
         }
       );
     }
-    const target = buildScenarioTarget(interaction, state);
-    const riskyTargetPattern = /\b(delete|remove|destroy|drop|purchase|pay|transfer|confirm|submit|execute)\b/i;
+    const selectedTarget = buildScenarioTarget(interaction, state);
+    const selectedElementName = firstString(selectedTarget?.resolvedElement?.name);
     const requestedTargetName = firstString(
       interaction?.target?.name,
       interaction?.target?.label,
       interaction?.targetName
     );
-    if (requestedTargetName && riskyTargetPattern.test(requestedTargetName)) {
+    const riskyPolicyOverride = (options.interactionPolicy && typeof options.interactionPolicy === 'object')
+      ? options.interactionPolicy
+      : (interaction?.policyOverride && typeof interaction.policyOverride === 'object')
+        ? interaction.policyOverride
+        : (interaction?.policy && typeof interaction.policy === 'object' ? interaction.policy : {});
+    const riskyElement = requiresRiskyTargetOverride(selectedElementName);
+    const allowRiskyOverride = riskyPolicyOverride?.allowRiskyTarget === true;
+    const riskyOverrideReason = firstString(
+      riskyPolicyOverride?.reason,
+      riskyPolicyOverride?.justification,
+      riskyPolicyOverride?.ticket
+    );
+    if (!selectedElementName) {
       throw new BrowserPerceptionEngineError(
-        `Target "${requestedTargetName}" blocked by untrusted-state action policy`,
+        'Resolved target is missing name metadata required for policy evaluation',
         {
           failureClass: FAILURE_CLASSES.ACTION_REJECTION,
           terminalFailureReason: FAILURE_CLASSES.ACTION_REJECTION,
           sessionId: session.sessionId,
           details: {
-            reason: 'target_name_blocked_by_policy'
+            reason: 'target_metadata_missing',
+            selectionSource: selectedTarget.selectionSource,
+            targetId: selectedTarget?.resolvedElement?.id || null
           }
         }
+      );
+    }
+    if (riskyElement && !allowRiskyOverride) {
+      throw new BrowserPerceptionEngineError(
+        `Target "${selectedElementName}" blocked by untrusted-state action policy`,
+        {
+          failureClass: FAILURE_CLASSES.ACTION_REJECTION,
+          terminalFailureReason: FAILURE_CLASSES.ACTION_REJECTION,
+          sessionId: session.sessionId,
+          details: {
+            reason: 'resolved_target_blocked_by_policy',
+            selectionSource: selectedTarget.selectionSource,
+            targetName: selectedElementName,
+            targetId: selectedTarget?.resolvedElement?.id || null,
+            requestedTargetName: requestedTargetName || null
+          }
+        }
+      );
+    }
+    if (riskyElement && allowRiskyOverride && !riskyOverrideReason) {
+      throw new BrowserPerceptionEngineError(
+        'Risky target override requires a justification',
+        {
+          failureClass: FAILURE_CLASSES.ACTION_REJECTION,
+          terminalFailureReason: FAILURE_CLASSES.ACTION_REJECTION,
+          sessionId: session.sessionId,
+          details: {
+            reason: 'risky_target_override_justification_required',
+            selectionSource: selectedTarget.selectionSource,
+            targetName: selectedElementName,
+            targetId: selectedTarget?.resolvedElement?.id || null
+          }
+        }
+      );
+    }
+    if (riskyElement && allowRiskyOverride && riskyOverrideReason) {
+      console.warn(
+        `[orchestration][bpe][risky_target_override] ${JSON.stringify({
+          session_id: session.sessionId,
+          owner_company_id: owner.companyId,
+          owner_run_id: owner.runId,
+          owner_agent_id: owner.agentId,
+          target_id: selectedTarget?.resolvedElement?.id || null,
+          target_name: selectedElementName,
+          selection_source: selectedTarget.selectionSource,
+          reason: riskyOverrideReason
+        })}`
       );
     }
     const actionPayload = {
@@ -1052,12 +1174,20 @@ class BrowserPerceptionEngineClient {
         : state.stateVersion,
       action: {
         type: actionType,
-        target
+        target: selectedTarget.target
       },
       timeout_ms: Number.isFinite(options.actionTimeoutMs)
         ? Number(options.actionTimeoutMs)
         : DEFAULT_SCENARIO_ACTION_TIMEOUT_MS
     };
+    if (allowRiskyOverride && riskyOverrideReason) {
+      actionPayload.policy_override = {
+        allow_risky_target: true,
+        reason: riskyOverrideReason,
+        selection_source: selectedTarget.selectionSource,
+        target_name: selectedElementName || requestedTargetName || null
+      };
+    }
     const action = await this.issueAction(session.sessionId, actionPayload, {
       owner,
       timeoutMs: options.timeoutMs
@@ -1068,7 +1198,9 @@ class BrowserPerceptionEngineClient {
       scenario: {
         kind: 'deterministic_single_interaction',
         targetUrl,
-        interactionType: actionType
+        interactionType: actionType,
+        targetSource: selectedTarget.selectionSource,
+        riskyTargetOverrideUsed: riskyElement && allowRiskyOverride && Boolean(riskyOverrideReason)
       },
       session: {
         sessionId: session.sessionId,
@@ -1091,7 +1223,8 @@ class BrowserPerceptionEngineClient {
       evidence: {
         session_id: session.sessionId,
         action_id: action.actionId,
-        terminal_failure_reason: null
+        terminal_failure_reason: null,
+        risky_target_override_used: riskyElement && allowRiskyOverride && Boolean(riskyOverrideReason)
       },
       raw: {
         session: session.raw,

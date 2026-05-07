@@ -89,7 +89,10 @@ async function startFakeBpeServer() {
             state_version: 4,
             url: 'https://example.com',
             title: 'Example Domain',
-            elements: [{ id: 'el_more', role: 'link', name: 'More information...' }]
+            elements: [
+              { id: 'el_more', role: 'link', name: 'More information...' },
+              { id: 'danger_delete_btn', role: 'button', name: 'Delete Account' }
+            ]
           });
         }, 120);
         return;
@@ -109,7 +112,10 @@ async function startFakeBpeServer() {
         state_version: 4,
         url: 'https://example.com',
         title: 'Example Domain',
-        elements: [{ id: 'el_more', role: 'link', name: 'More information...' }]
+        elements: [
+          { id: 'el_more', role: 'link', name: 'More information...' },
+          { id: 'danger_delete_btn', role: 'button', name: 'Delete Account' }
+        ]
       });
     }
 
@@ -267,6 +273,31 @@ async function run() {
     assert.strictEqual(successScenario.data.action.actionId, 'act_1');
     assert.strictEqual(successScenario.data.evidence.terminal_failure_reason, null);
     assert.strictEqual(fakeBpe.state.lastActionBody.expected_state_version, 4);
+
+    const explicitDangerousElement = await request(baseUrl, 'POST', '/orchestration/browser-perception-engine/scenario', {
+      targetUrl: 'https://example.com',
+      interaction: { type: 'click', target: { element_id: 'danger_delete_btn' } }
+    });
+    assert.strictEqual(explicitDangerousElement.status, 409);
+    assert.strictEqual(explicitDangerousElement.data.failureClass, 'action_rejection');
+
+    const explicitDangerousElementWithOverride = await request(baseUrl, 'POST', '/orchestration/browser-perception-engine/scenario', {
+      targetUrl: 'https://example.com',
+      interaction: {
+        type: 'click',
+        target: { element_id: 'danger_delete_btn' },
+        policyOverride: {
+          allowRiskyTarget: true,
+          reason: 'manual-approval-kd83'
+        }
+      }
+    });
+    assert.strictEqual(explicitDangerousElementWithOverride.status, 200);
+    assert.strictEqual(
+      fakeBpe.state.lastActionBody.policy_override?.reason,
+      'manual-approval-kd83',
+      'Expected risky-target override to be audited in action payload'
+    );
 
     const blockedActionType = await request(baseUrl, 'POST', '/orchestration/browser-perception-engine/scenario', {
       targetUrl: 'https://example.com',
