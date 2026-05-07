@@ -30,9 +30,15 @@ const { getChildSessionSupport } = require('../orchestration/child-session-suppo
 const { AdapterReadinessService } = require('../orchestration/adapter-readiness');
 const { prepareTaskAssignmentWorktree } = require('../orchestration/task-worktree');
 const { sendMessage, broadcastMessage } = require('../orchestration/send-message');
+const {
+  createBrowserPerceptionEngineClient,
+  BrowserPerceptionEngineError,
+  FAILURE_CLASSES: BPE_FAILURE_CLASSES
+} = require('../orchestration/browser-perception-engine');
 const { getAgentProfiles, resolveProfile } = require('../services/agent-profiles');
 const { createMemoryRouter } = require('../routes/memory');
 const { isAdapterAuthenticated } = require('../utils/adapter-auth');
+const { redactSecretsInText } = require('../security/secret-redaction');
 const {
   RUNTIME_HOSTS,
   RUNTIME_FIDELITY,
@@ -59,6 +65,11 @@ function createOrchestrationRouter(context) {
   const requireRootAttach = process.env.CLIAGENTS_REQUIRE_ROOT_ATTACH === '1';
   const runLedger = runLedgerWritesEnabled || runLedgerReadsEnabled ? new RunLedgerService(db) : null;
   const providerSessionRegistry = getProviderSessionRegistry();
+  const bpeClient = createBrowserPerceptionEngineClient({
+    baseUrl: context.browserPerceptionEngine?.baseUrl,
+    apiKey: context.browserPerceptionEngine?.apiKey,
+    defaultTimeoutMs: context.browserPerceptionEngine?.defaultTimeoutMs
+  });
   const adapterReadinessService = new AdapterReadinessService({
     db,
     apiSessionManager,
@@ -424,6 +435,173 @@ function createOrchestrationRouter(context) {
       rootSnapshot,
       runtimeMetadata,
       sessionControlMode
+    };
+  }
+
+  function buildTerminalInputOwnershipDeniedBody() {
+    return {
+      error: {
+        code: 'terminal_input_forbidden',
+        message: 'Terminal input access denied.'
+      }
+    };
+  }
+
+  function auditTerminalInputOwnershipDenied(details = {}) {
+    const payload = {
+      terminalId: details.terminalId || null,
+      callerRootSessionId: details.callerRootSessionId || null,
+      ownerRootSessionId: details.ownerRootSessionId || null,
+      reason: details.reason || 'forbidden'
+    };
+    console.warn('[orchestration][terminal-input-ownership-denied]', JSON.stringify(payload));
+  }
+
+  function denyTerminalInputOwnership(res, details = {}) {
+    auditTerminalInputOwnershipDenied(details);
+    res.status(403).json(buildTerminalInputOwnershipDeniedBody());
+    return null;
+  }
+
+  function resolveTerminalOwnerContext(terminalId) {
+    if (!terminalId) {
+      return {
+        terminalRow: null,
+        ownerRootSessionId: null
+      };
+    }
+
+    const liveTerminal = getLiveTerminal(terminalId);
+    const terminalRow = liveTerminal || (typeof db?.getTerminal === 'function' ? db.getTerminal(terminalId) : null);
+    const ownerRootSessionId = String(
+      liveTerminal?.rootSessionId
+      || liveTerminal?.root_session_id
+      || terminalRow?.root_session_id
+      || terminalRow?.rootSessionId
+      || ''
+    ).trim() || null;
+
+    return {
+      terminalRow,
+      ownerRootSessionId
+    };
+  }
+
+  function resolveCallerRootForTerminalInput(req, res, endpoint) {
+    const resolvedControlPlane = resolveRequestControlPlaneContext(req, {
+      rootSessionId: req.body?.rootSessionId || req.body?.root_session_id || null,
+      parentSessionId: req.body?.parentSessionId || req.body?.parent_session_id || null,
+      originClient: req.body?.originClient || req.body?.origin_client || null,
+      externalSessionRef: req.body?.externalSessionRef || req.body?.external_session_ref || null,
+      sessionMetadata: req.body?.sessionMetadata || req.body?.session_metadata || null
+    }, {
+      defaultParentToRoot: true
+    });
+
+    if (requireConsistentRootBinding(res, endpoint, resolvedControlPlane)) {
+      return null;
+    }
+
+    const callerRootSessionId = String(resolvedControlPlane?.rootSessionId || '').trim() || null;
+    if (!callerRootSessionId) {
+      return denyTerminalInputOwnership(res, {
+        terminalId: null,
+        callerRootSessionId: null,
+        ownerRootSessionId: null,
+        reason: 'missing_root_context'
+      });
+    }
+
+    return {
+      callerRootSessionId,
+      resolvedControlPlane
+    };
+  }
+
+  function requireTerminalInputOwnershipByTerminalId(req, res, endpoint, terminalId) {
+    const caller = resolveCallerRootForTerminalInput(req, res, endpoint);
+    if (!caller) {
+      return null;
+    }
+
+    const owner = resolveTerminalOwnerContext(terminalId);
+    if (!owner.terminalRow) {
+      return denyTerminalInputOwnership(res, {
+        terminalId,
+        callerRootSessionId: caller.callerRootSessionId,
+        ownerRootSessionId: null,
+        reason: 'unknown_terminal'
+      });
+    }
+
+    if (!owner.ownerRootSessionId) {
+      return denyTerminalInputOwnership(res, {
+        terminalId,
+        callerRootSessionId: caller.callerRootSessionId,
+        ownerRootSessionId: null,
+        reason: 'missing_owner_root'
+      });
+    }
+
+    if (owner.ownerRootSessionId !== caller.callerRootSessionId) {
+      return denyTerminalInputOwnership(res, {
+        terminalId,
+        callerRootSessionId: caller.callerRootSessionId,
+        ownerRootSessionId: owner.ownerRootSessionId,
+        reason: 'root_mismatch'
+      });
+    }
+
+    return {
+      callerRootSessionId: caller.callerRootSessionId,
+      ownerRootSessionId: owner.ownerRootSessionId,
+      terminalRow: owner.terminalRow
+    };
+  }
+
+  function requireTerminalInputOwnershipByQueueItem(req, res, endpoint, queueItem, details = {}) {
+    const caller = resolveCallerRootForTerminalInput(req, res, endpoint);
+    if (!caller) {
+      return null;
+    }
+
+    if (!queueItem || !queueItem.terminalId) {
+      return denyTerminalInputOwnership(res, {
+        terminalId: null,
+        callerRootSessionId: caller.callerRootSessionId,
+        ownerRootSessionId: null,
+        reason: details.reason || 'unknown_input'
+      });
+    }
+
+    const owner = resolveTerminalOwnerContext(queueItem.terminalId);
+    const ownerRootSessionId = owner.ownerRootSessionId
+      || String(queueItem.rootSessionId || '').trim()
+      || null;
+
+    if (!owner.terminalRow || !ownerRootSessionId) {
+      return denyTerminalInputOwnership(res, {
+        terminalId: queueItem.terminalId,
+        callerRootSessionId: caller.callerRootSessionId,
+        ownerRootSessionId: ownerRootSessionId || null,
+        reason: owner.terminalRow ? 'missing_owner_root' : 'unknown_terminal'
+      });
+    }
+
+    if (ownerRootSessionId !== caller.callerRootSessionId) {
+      return denyTerminalInputOwnership(res, {
+        terminalId: queueItem.terminalId,
+        callerRootSessionId: caller.callerRootSessionId,
+        ownerRootSessionId,
+        reason: 'root_mismatch'
+      });
+    }
+
+    return {
+      callerRootSessionId: caller.callerRootSessionId,
+      ownerRootSessionId,
+      terminalRow: owner.terminalRow,
+      item: queueItem
     };
   }
 
@@ -1188,7 +1366,8 @@ function createOrchestrationRouter(context) {
         memory: '/orchestration/memory/*',
         inputQueue: '/orchestration/input-queue',
         sessionEvents: '/orchestration/session-events?normalized=1',
-        adapters: '/orchestration/adapters'
+        adapters: '/orchestration/adapters',
+        bpeScenario: '/orchestration/browser-perception-engine/scenario'
       },
       roots: rootPayload.roots,
       rootMetadata: {
@@ -1216,9 +1395,328 @@ function createOrchestrationRouter(context) {
     };
   }
 
+  function parseOptionalTimeoutMs(value) {
+    const parsed = Number.parseInt(String(value ?? '').trim(), 10);
+    if (!Number.isFinite(parsed) || parsed <= 0) {
+      return null;
+    }
+    return parsed;
+  }
+
+  function firstNonEmptyString(...values) {
+    for (const value of values) {
+      if (typeof value !== 'string') {
+        continue;
+      }
+      const normalized = value.trim();
+      if (normalized) {
+        return normalized;
+      }
+    }
+    return null;
+  }
+
+  function readHeaderString(req, name) {
+    const value = req.headers?.[name.toLowerCase()];
+    if (Array.isArray(value)) {
+      return firstNonEmptyString(...value);
+    }
+    return firstNonEmptyString(value);
+  }
+
+  function resolveBpeOwnershipContext(req) {
+    const trace = req.body?.trace && typeof req.body.trace === 'object'
+      ? req.body.trace
+      : {};
+    const query = req.query || {};
+
+    const companyId = firstNonEmptyString(
+      readHeaderString(req, 'x-paperclip-company-id'),
+      readHeaderString(req, 'x-company-id'),
+      req.body?.companyId,
+      req.body?.company_id,
+      trace.companyId,
+      trace.company_id,
+      process.env.PAPERCLIP_COMPANY_ID,
+      process.env.CLIAGENTS_BPE_DEFAULT_COMPANY_ID,
+      'local-company'
+    );
+    const runId = firstNonEmptyString(
+      readHeaderString(req, 'x-paperclip-run-id'),
+      readHeaderString(req, 'x-run-id'),
+      req.body?.runId,
+      req.body?.run_id,
+      query.runId,
+      query.run_id,
+      trace.runId,
+      trace.run_id,
+      trace.rootSessionId,
+      trace.root_session_id,
+      process.env.PAPERCLIP_RUN_ID,
+      process.env.CLIAGENTS_BPE_DEFAULT_RUN_ID,
+      'local-run'
+    );
+    const agentId = firstNonEmptyString(
+      readHeaderString(req, 'x-paperclip-agent-id'),
+      readHeaderString(req, 'x-agent-id'),
+      req.body?.agentId,
+      req.body?.agent_id,
+      query.agentId,
+      query.agent_id,
+      trace.agentId,
+      trace.agent_id,
+      process.env.PAPERCLIP_AGENT_ID,
+      process.env.CLIAGENTS_BPE_DEFAULT_AGENT_ID,
+      'local-agent'
+    );
+
+    return {
+      companyId,
+      runId,
+      agentId
+    };
+  }
+
+  function mapBpeFailureToStatusCode(failureClass, fallback = null) {
+    if (Number.isInteger(fallback) && fallback >= 400 && fallback <= 599) {
+      return fallback;
+    }
+    switch (failureClass) {
+      case BPE_FAILURE_CLASSES.TIMEOUT:
+        return 504;
+      case BPE_FAILURE_CLASSES.VALIDATION_ERROR:
+        return 400;
+      case BPE_FAILURE_CLASSES.AUTHZ_ERROR:
+        return 403;
+      case BPE_FAILURE_CLASSES.ACTION_REJECTION:
+        return 409;
+      case BPE_FAILURE_CLASSES.NOT_CONFIGURED:
+        return 503;
+      case BPE_FAILURE_CLASSES.INVALID_STATE_PAYLOAD:
+      case BPE_FAILURE_CLASSES.TRANSPORT_ERROR:
+      default:
+        return 502;
+    }
+  }
+
+  function emitBpeTelemetry({
+    operation,
+    sessionId = null,
+    actionId = null,
+    terminalFailureReason = null
+  }) {
+    const payload = {
+      operation,
+      provider: 'browser_perception_engine',
+      session_id: sessionId || null,
+      action_id: actionId || null,
+      terminal_failure_reason: terminalFailureReason || null
+    };
+    console.info(`[orchestration][bpe] ${JSON.stringify(payload)}`);
+  }
+
+  function sendBpeFailureResponse(res, error, extras = {}) {
+    const normalizedError = error instanceof BrowserPerceptionEngineError
+      ? error
+      : new BrowserPerceptionEngineError(error?.message || 'Unknown BPE integration error');
+    const failureClass = normalizedError.failureClass || BPE_FAILURE_CLASSES.TRANSPORT_ERROR;
+    const terminalFailureReason = normalizedError.terminalFailureReason || failureClass;
+    const sessionId = extras.sessionId || normalizedError.sessionId || null;
+    const actionId = extras.actionId || normalizedError.actionId || null;
+    emitBpeTelemetry({
+      operation: extras.operation || 'unknown',
+      sessionId,
+      actionId,
+      terminalFailureReason
+    });
+    return res.status(mapBpeFailureToStatusCode(failureClass, normalizedError.statusCode)).json({
+      ok: false,
+      provider: 'browser_perception_engine',
+      failureClass,
+      terminalFailureReason,
+      sessionId,
+      actionId,
+      message: normalizedError.message,
+      details: normalizedError.details || null
+    });
+  }
+
   // Mount shared memory routes at /orchestration/memory
   const memoryRouter = createMemoryRouter({ db });
   router.use('/memory', memoryRouter);
+
+  /**
+   * POST /orchestration/browser-perception-engine/session
+   * Create or resume a BPE session.
+   */
+  router.post('/browser-perception-engine/session', async (req, res) => {
+    try {
+      const timeoutMs = parseOptionalTimeoutMs(req.body?.timeoutMs ?? req.body?.timeout_ms);
+      const owner = resolveBpeOwnershipContext(req);
+      const session = await bpeClient.createSession({
+        target: req.body?.target || {},
+        runtime: req.body?.runtime || {},
+        trace: req.body?.trace || {},
+        owner,
+        resumeSessionId: req.body?.resumeSessionId ?? req.body?.resume_session_id,
+        timeoutMs
+      });
+      emitBpeTelemetry({
+        operation: 'create_or_resume_session',
+        sessionId: session.sessionId,
+        actionId: null,
+        terminalFailureReason: null
+      });
+      return res.json({
+        ok: true,
+        provider: 'browser_perception_engine',
+        session: {
+          sessionId: session.sessionId,
+          resumed: session.resumed,
+          createdAt: session.createdAt,
+          capabilities: session.capabilities
+        },
+        evidence: {
+          session_id: session.sessionId,
+          action_id: null,
+          terminal_failure_reason: null
+        }
+      });
+    } catch (error) {
+      return sendBpeFailureResponse(res, error, {
+        operation: 'create_or_resume_session'
+      });
+    }
+  });
+
+  /**
+   * GET /orchestration/browser-perception-engine/sessions/:sessionId/state
+   * Read current BPE state snapshot.
+   */
+  router.get('/browser-perception-engine/sessions/:sessionId/state', async (req, res) => {
+    try {
+      const timeoutMs = parseOptionalTimeoutMs(req.query?.timeoutMs ?? req.query?.timeout_ms);
+      const owner = resolveBpeOwnershipContext(req);
+      const state = await bpeClient.readState(req.params.sessionId, { timeoutMs, owner });
+      emitBpeTelemetry({
+        operation: 'read_state',
+        sessionId: req.params.sessionId,
+        actionId: null,
+        terminalFailureReason: null
+      });
+      return res.json({
+        ok: true,
+        provider: 'browser_perception_engine',
+        sessionId: req.params.sessionId,
+        state: {
+          stateVersion: state.stateVersion,
+          url: state.url,
+          title: state.title,
+          elements: state.elements
+        },
+        evidence: {
+          session_id: req.params.sessionId,
+          action_id: null,
+          terminal_failure_reason: null
+        }
+      });
+    } catch (error) {
+      return sendBpeFailureResponse(res, error, {
+        operation: 'read_state',
+        sessionId: req.params.sessionId
+      });
+    }
+  });
+
+  /**
+   * POST /orchestration/browser-perception-engine/sessions/:sessionId/action
+   * Submit one BPE action step.
+   */
+  router.post('/browser-perception-engine/sessions/:sessionId/action', async (req, res) => {
+    try {
+      const timeoutMs = parseOptionalTimeoutMs(req.body?.timeoutMs ?? req.body?.timeout_ms);
+      const owner = resolveBpeOwnershipContext(req);
+      const action = await bpeClient.issueAction(req.params.sessionId, req.body || {}, { timeoutMs, owner });
+      emitBpeTelemetry({
+        operation: 'issue_action',
+        sessionId: req.params.sessionId,
+        actionId: action.actionId,
+        terminalFailureReason: null
+      });
+      return res.json({
+        ok: true,
+        provider: 'browser_perception_engine',
+        sessionId: req.params.sessionId,
+        action: {
+          actionId: action.actionId,
+          status: action.status,
+          stateVersion: action.stateVersion,
+          events: action.events
+        },
+        evidence: {
+          session_id: req.params.sessionId,
+          action_id: action.actionId,
+          terminal_failure_reason: null
+        }
+      });
+    } catch (error) {
+      return sendBpeFailureResponse(res, error, {
+        operation: 'issue_action',
+        sessionId: req.params.sessionId
+      });
+    }
+  });
+
+  /**
+   * POST /orchestration/browser-perception-engine/scenario
+   * Run one deterministic BPE scenario: session -> state -> action.
+   */
+  router.post('/browser-perception-engine/scenario', async (req, res) => {
+    try {
+      const timeoutMs = parseOptionalTimeoutMs(req.body?.timeoutMs ?? req.body?.timeout_ms);
+      const trace = req.body?.trace && typeof req.body.trace === 'object'
+        ? { ...req.body.trace }
+        : {};
+      const owner = resolveBpeOwnershipContext(req);
+      trace.source = trace.source || 'cliagents';
+      trace.route = trace.route || '/orchestration/browser-perception-engine/scenario';
+      trace.ownership = trace.ownership && typeof trace.ownership === 'object'
+        ? { ...trace.ownership }
+        : {
+            company_id: owner.companyId,
+            run_id: owner.runId,
+            agent_id: owner.agentId
+          };
+
+      const result = await bpeClient.runDeterministicScenario({
+        targetUrl: req.body?.targetUrl ?? req.body?.target?.url,
+        target: req.body?.target && typeof req.body.target === 'object' ? req.body.target : {},
+        runtime: req.body?.runtime && typeof req.body.runtime === 'object' ? req.body.runtime : {},
+        trace,
+        owner,
+        resumeSessionId: req.body?.resumeSessionId ?? req.body?.resume_session_id,
+        interaction: req.body?.interaction && typeof req.body.interaction === 'object' ? req.body.interaction : {},
+        timeoutMs,
+        actionTimeoutMs: req.body?.actionTimeoutMs ?? req.body?.action_timeout_ms,
+        idempotencyKey: req.body?.idempotencyKey ?? req.body?.idempotency_key,
+        expectedStateVersion: req.body?.expectedStateVersion ?? req.body?.expected_state_version
+      });
+      emitBpeTelemetry({
+        operation: 'deterministic_scenario',
+        sessionId: result?.session?.sessionId || null,
+        actionId: result?.action?.actionId || null,
+        terminalFailureReason: null
+      });
+      return res.json({
+        ok: true,
+        ...result
+      });
+    } catch (error) {
+      return sendBpeFailureResponse(res, error, {
+        operation: 'deterministic_scenario'
+      });
+    }
+  });
 
   /**
    * GET /orchestration/remote/snapshot
@@ -2974,7 +3472,24 @@ function createOrchestrationRouter(context) {
         });
       }
 
-      const messages = db.getHistory(terminalId, { limit, offset, traceId, role });
+      const messages = db.getHistory(terminalId, { limit, offset, traceId, role }).map((entry) => {
+        const redaction = redactSecretsInText(entry.content || '');
+        if (!redaction.redacted) {
+          return entry;
+        }
+        return {
+          ...entry,
+          content: redaction.content,
+          metadata: {
+            ...(entry.metadata || {}),
+            security: {
+              ...((entry.metadata || {}).security || {}),
+              redactedSecretLikeContent: true,
+              redactionReasonCodes: redaction.reasons
+            }
+          }
+        };
+      });
       const totalCount = db.getMessageCount(terminalId);
 
       res.json({
@@ -3184,6 +3699,123 @@ function createOrchestrationRouter(context) {
     return ['message', 'approval', 'denial'].includes(normalized) ? normalized : 'message';
   }
 
+  const TERMINAL_INPUT_COMMAND_CANDIDATES = new Set([
+    'awk',
+    'bash',
+    'brew',
+    'bun',
+    'cargo',
+    'cat',
+    'chmod',
+    'chown',
+    'cmake',
+    'cp',
+    'curl',
+    'dd',
+    'deno',
+    'docker',
+    'echo',
+    'env',
+    'find',
+    'git',
+    'go',
+    'grep',
+    'head',
+    'id',
+    'jq',
+    'kubectl',
+    'ln',
+    'ls',
+    'make',
+    'mkdir',
+    'mv',
+    'node',
+    'npm',
+    'perl',
+    'php',
+    'pip',
+    'pnpm',
+    'powershell',
+    'printenv',
+    'ps',
+    'pwd',
+    'python',
+    'python3',
+    'rg',
+    'rm',
+    'rsync',
+    'ruby',
+    'sed',
+    'sh',
+    'sudo',
+    'tail',
+    'tar',
+    'tee',
+    'touch',
+    'truncate',
+    'uname',
+    'wget',
+    'whoami',
+    'xargs',
+    'yarn',
+    'zsh'
+  ]);
+
+  const UNAPPROVED_TERMINAL_INPUT_ALLOWLIST = [
+    { id: 'read_pwd', pattern: /^pwd$/i },
+    { id: 'read_ls', pattern: /^ls(?:\s+[-\w./~]+)*$/i },
+    { id: 'read_whoami', pattern: /^whoami$/i },
+    { id: 'read_id', pattern: /^id(?:\s+[-\w]+)?$/i },
+    { id: 'read_date', pattern: /^date(?:\s+[-+:%\w]+)?$/i },
+    { id: 'read_uname', pattern: /^uname(?:\s+[-\w]+)?$/i },
+    { id: 'git_read_only', pattern: /^git\s+(?:status|diff|log|show|branch)(?:\s+[-\w./:]+)*$/i },
+    { id: 'rg_search', pattern: /^rg\s+.+$/i }
+  ];
+
+  function looksLikeShellCommandInput(text) {
+    if (!text) {
+      return false;
+    }
+    if (/[\r\n`$><;&|]/.test(text)) {
+      return true;
+    }
+    const firstToken = text.split(/\s+/)[0] || '';
+    if (!firstToken) {
+      return false;
+    }
+    if (/^(?:\.\/|~\/|\/)/.test(firstToken)) {
+      return true;
+    }
+    return TERMINAL_INPUT_COMMAND_CANDIDATES.has(firstToken.toLowerCase());
+  }
+
+  function detectSensitiveTerminalInput(message) {
+    const text = String(message || '').trim();
+    if (!text) {
+      return null;
+    }
+    if (!looksLikeShellCommandInput(text)) {
+      return null;
+    }
+    for (const rule of UNAPPROVED_TERMINAL_INPUT_ALLOWLIST) {
+      if (rule.pattern.test(text)) {
+        return null;
+      }
+    }
+    return {
+      id: 'shell_command_not_allowlisted',
+      reason: 'shell-like command is not in the unapproved input allowlist'
+    };
+  }
+
+  function parseActionActorIdentity(value) {
+    if (typeof value !== 'string') {
+      return null;
+    }
+    const normalized = value.trim();
+    return normalized || null;
+  }
+
   function parseInputQueueTimestamp(value) {
     if (value === null || value === undefined || value === '') {
       return null;
@@ -3203,8 +3835,23 @@ function createOrchestrationRouter(context) {
     if (!item) {
       return null;
     }
+    const redaction = redactSecretsInText(item.message || '');
+    const safeInput = redaction.redacted
+      ? {
+        ...item,
+        message: redaction.content,
+        metadata: {
+          ...(item.metadata || {}),
+          security: {
+            ...((item.metadata || {}).security || {}),
+            redactedSecretLikeContent: true,
+            redactionReasonCodes: redaction.reasons
+          }
+        }
+      }
+      : item;
     return {
-      input: item,
+      input: safeInput,
       terminal: typeof db?.getTerminal === 'function' ? db.getTerminal(item.terminalId) : null
     };
   }
@@ -3239,6 +3886,28 @@ function createOrchestrationRouter(context) {
         });
       }
 
+      const ownership = requireTerminalInputOwnershipByTerminalId(
+        req,
+        res,
+        '/orchestration/terminals/:id/input',
+        req.params.id
+      );
+      if (!ownership) {
+        return;
+      }
+
+      const sensitiveInput = detectSensitiveTerminalInput(message);
+      if (sensitiveInput) {
+        return res.status(403).json({
+          error: {
+            code: 'approval_required_for_sensitive_input',
+            message: `Terminal input matched sensitive policy '${sensitiveInput.id}'. Queue this input with approvalRequired=true before delivery.`,
+            terminalId: req.params.id,
+            ruleId: sensitiveInput.id
+          }
+        });
+      }
+
       const access = validateTerminalRemoteControlAccess(req.params.id, { inputKind: 'message' });
       if (!access.ok) {
         return res.status(access.status).json(access.body);
@@ -3254,8 +3923,11 @@ function createOrchestrationRouter(context) {
 
     } catch (error) {
       if (error.message.includes('not found')) {
-        return res.status(404).json({
-          error: { code: 'terminal_not_found', message: error.message }
+        return denyTerminalInputOwnership(res, {
+          terminalId: req.params.id,
+          callerRootSessionId: String(req.body?.rootSessionId || req.body?.root_session_id || '').trim() || null,
+          ownerRootSessionId: null,
+          reason: 'unknown_terminal'
         });
       }
 
@@ -3290,28 +3962,44 @@ function createOrchestrationRouter(context) {
         });
       }
 
+      const ownership = requireTerminalInputOwnershipByTerminalId(
+        req,
+        res,
+        '/orchestration/terminals/:id/input-queue',
+        req.params.id
+      );
+      if (!ownership) {
+        return;
+      }
+
       const inputKind = normalizeInputQueueKind(req.body?.inputKind || req.body?.input_kind);
       const message = req.body?.message
         || (inputKind === 'approval' ? 'y' : null)
         || (inputKind === 'denial' ? 'n' : null);
+      const approvalRequired = parseQueryBoolean(req.body?.approvalRequired ?? req.body?.approval_required, false);
       if (!message && inputKind === 'message') {
         return res.status(400).json({
           error: { code: 'missing_parameter', message: 'message is required', param: 'message' }
         });
       }
-
-      const terminalRow = typeof db?.getTerminal === 'function' ? db.getTerminal(req.params.id) : null;
-      if (!terminalRow) {
-        return res.status(404).json({
-          error: { code: 'terminal_not_found', message: `Terminal not found: ${req.params.id}` }
-        });
+      if (inputKind === 'message') {
+        const sensitiveInput = detectSensitiveTerminalInput(message);
+        if (sensitiveInput && !approvalRequired) {
+          return res.status(403).json({
+            error: {
+              code: 'approval_required_for_sensitive_input',
+              message: `Input queue item matched sensitive policy '${sensitiveInput.id}'. Re-submit with approvalRequired=true.`,
+              terminalId: req.params.id,
+              ruleId: sensitiveInput.id
+            }
+          });
+        }
       }
 
-      const approvalRequired = parseQueryBoolean(req.body?.approvalRequired ?? req.body?.approval_required, false);
       const item = db.enqueueTerminalInput({
         id: req.body?.inputId || req.body?.id || null,
         terminalId: req.params.id,
-        rootSessionId: req.body?.rootSessionId || req.body?.root_session_id || terminalRow.root_session_id || null,
+        rootSessionId: ownership.ownerRootSessionId,
         runId: req.body?.runId || req.body?.run_id || null,
         taskId: req.body?.taskId || req.body?.task_id || null,
         taskAssignmentId: req.body?.taskAssignmentId || req.body?.task_assignment_id || null,
@@ -3410,18 +4098,22 @@ function createOrchestrationRouter(context) {
 
   router.post('/input-queue/:inputId/approve', (req, res) => {
     try {
-      if (!db?.updateTerminalInputQueueItem) {
+      if (!db?.updateTerminalInputQueueItem || !db?.getTerminalInputQueueItem) {
         return res.status(503).json({
           error: { code: 'unavailable', message: 'terminal input queue is not configured' }
         });
       }
 
-      const item = db.getTerminalInputQueueItem(req.params.inputId);
-      if (!item) {
-        return res.status(404).json({
-          error: { code: 'input_queue_item_not_found', message: `Input queue item not found: ${req.params.inputId}` }
-        });
+      const ownership = requireTerminalInputOwnershipByQueueItem(
+        req,
+        res,
+        '/orchestration/input-queue/:inputId/approve',
+        db.getTerminalInputQueueItem(req.params.inputId)
+      );
+      if (!ownership) {
+        return;
       }
+      const item = ownership.item;
       if (item.status !== 'held_for_approval') {
         return res.status(409).json({
           error: {
@@ -3432,9 +4124,16 @@ function createOrchestrationRouter(context) {
         });
       }
 
+      const approvedBy = parseActionActorIdentity(req.body?.approvedBy || req.body?.approved_by || req.body?.operator);
+      if (!approvedBy) {
+        return res.status(400).json({
+          error: { code: 'missing_parameter', message: 'approvedBy is required', param: 'approvedBy' }
+        });
+      }
+
       const updated = db.updateTerminalInputQueueItem(req.params.inputId, {
         status: 'pending',
-        approvedBy: req.body?.approvedBy || req.body?.approved_by || req.body?.operator || null,
+        approvedBy,
         approvedAt: Date.now(),
         decision: 'approved',
         holdReason: null
@@ -3449,18 +4148,22 @@ function createOrchestrationRouter(context) {
 
   router.post('/input-queue/:inputId/deny', (req, res) => {
     try {
-      if (!db?.updateTerminalInputQueueItem) {
+      if (!db?.updateTerminalInputQueueItem || !db?.getTerminalInputQueueItem) {
         return res.status(503).json({
           error: { code: 'unavailable', message: 'terminal input queue is not configured' }
         });
       }
 
-      const item = db.getTerminalInputQueueItem(req.params.inputId);
-      if (!item) {
-        return res.status(404).json({
-          error: { code: 'input_queue_item_not_found', message: `Input queue item not found: ${req.params.inputId}` }
-        });
+      const ownership = requireTerminalInputOwnershipByQueueItem(
+        req,
+        res,
+        '/orchestration/input-queue/:inputId/deny',
+        db.getTerminalInputQueueItem(req.params.inputId)
+      );
+      if (!ownership) {
+        return;
       }
+      const item = ownership.item;
       if (!['pending', 'held_for_approval'].includes(item.status)) {
         return res.status(409).json({
           error: {
@@ -3471,9 +4174,16 @@ function createOrchestrationRouter(context) {
         });
       }
 
+      const deniedBy = parseActionActorIdentity(req.body?.deniedBy || req.body?.denied_by || req.body?.operator);
+      if (!deniedBy) {
+        return res.status(400).json({
+          error: { code: 'missing_parameter', message: 'deniedBy is required', param: 'deniedBy' }
+        });
+      }
+
       const updated = db.updateTerminalInputQueueItem(req.params.inputId, {
         status: 'cancelled',
-        approvedBy: req.body?.deniedBy || req.body?.denied_by || req.body?.operator || null,
+        approvedBy: deniedBy,
         approvedAt: Date.now(),
         decision: 'denied',
         cancelledAt: Date.now(),
@@ -3489,18 +4199,22 @@ function createOrchestrationRouter(context) {
 
   router.post('/input-queue/:inputId/cancel', (req, res) => {
     try {
-      if (!db?.updateTerminalInputQueueItem) {
+      if (!db?.updateTerminalInputQueueItem || !db?.getTerminalInputQueueItem) {
         return res.status(503).json({
           error: { code: 'unavailable', message: 'terminal input queue is not configured' }
         });
       }
 
-      const item = db.getTerminalInputQueueItem(req.params.inputId);
-      if (!item) {
-        return res.status(404).json({
-          error: { code: 'input_queue_item_not_found', message: `Input queue item not found: ${req.params.inputId}` }
-        });
+      const ownership = requireTerminalInputOwnershipByQueueItem(
+        req,
+        res,
+        '/orchestration/input-queue/:inputId/cancel',
+        db.getTerminalInputQueueItem(req.params.inputId)
+      );
+      if (!ownership) {
+        return;
       }
+      const item = ownership.item;
       if (!['pending', 'held_for_approval'].includes(item.status)) {
         return res.status(409).json({
           error: {
@@ -3533,12 +4247,16 @@ function createOrchestrationRouter(context) {
       }
 
       db.expireTerminalInputQueueItems?.();
-      const item = db.getTerminalInputQueueItem(req.params.inputId);
-      if (!item) {
-        return res.status(404).json({
-          error: { code: 'input_queue_item_not_found', message: `Input queue item not found: ${req.params.inputId}` }
-        });
+      const ownership = requireTerminalInputOwnershipByQueueItem(
+        req,
+        res,
+        '/orchestration/input-queue/:inputId/deliver',
+        db.getTerminalInputQueueItem(req.params.inputId)
+      );
+      if (!ownership) {
+        return;
       }
+      const item = ownership.item;
       if (item.status !== 'pending') {
         return res.status(409).json({
           error: {
@@ -3546,6 +4264,16 @@ function createOrchestrationRouter(context) {
             message: `Input queue item ${item.id} is ${item.status}; only pending inputs can be delivered.`,
             status: item.status,
             nextAction: item.status === 'held_for_approval' ? 'approve the input before delivering it' : null
+          }
+        });
+      }
+      if (item.approvalRequired && (item.decision !== 'approved' || !item.approvedBy)) {
+        return res.status(409).json({
+          error: {
+            code: 'invalid_input_queue_state',
+            message: `Input queue item ${item.id} requires explicit approval with actor identity before delivery.`,
+            status: item.status,
+            approvalRequired: true
           }
         });
       }
@@ -3590,8 +4318,11 @@ function createOrchestrationRouter(context) {
       });
     } catch (error) {
       if (error.message.includes('not found')) {
-        return res.status(404).json({
-          error: { code: 'terminal_not_found', message: error.message }
+        return denyTerminalInputOwnership(res, {
+          terminalId: null,
+          callerRootSessionId: String(req.body?.rootSessionId || req.body?.root_session_id || '').trim() || null,
+          ownerRootSessionId: null,
+          reason: 'unknown_terminal'
         });
       }
       if (error.code === 'terminal_busy' || error.statusCode === 409) {

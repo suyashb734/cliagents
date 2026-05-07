@@ -42,6 +42,14 @@ const MCP_POLL_INTERVAL_MS = parseInt(process.env.CLIAGENTS_MCP_POLL_MS || '3000
 const MCP_SYNC_WAIT_MS = parseInt(process.env.CLIAGENTS_MCP_SYNC_WAIT_MS || '25000', 10);
 const MCP_ROOM_DISCUSSION_TIMEOUT_MS = parseInt(process.env.CLIAGENTS_MCP_ROOM_DISCUSSION_TIMEOUT_MS || '90000', 10);
 const MCP_STATUS_RETRY_AFTER_MS = parseInt(process.env.CLIAGENTS_MCP_RETRY_AFTER_MS || String(Math.max(MCP_POLL_INTERVAL_MS * 2, 8000)), 10);
+const DEFAULT_ROUTE_RETRY_DELAY_MS = parseInt(process.env.CLIAGENTS_MCP_ROUTE_RETRY_DELAY_MS || '500', 10);
+const MAX_ROUTE_RETRY_DELAY_MS = (() => {
+  const parsed = Number.parseInt(process.env.CLIAGENTS_MCP_ROUTE_RETRY_DELAY_MAX_MS || '5000', 10);
+  if (!Number.isFinite(parsed) || parsed < 0) {
+    return 5000;
+  }
+  return parsed;
+})();
 const SESSION_GRAPH_WRITES_ENABLED = process.env.SESSION_GRAPH_WRITES_ENABLED === '1';
 const REQUIRE_ROOT_ATTACH = process.env.CLIAGENTS_REQUIRE_ROOT_ATTACH === '1';
 
@@ -72,6 +80,102 @@ function sendError(id, code, message) {
   process.stdout.write(JSON.stringify(response) + '\n');
 }
 
+function looksLikeJsonPayload(raw) {
+  if (typeof raw !== 'string') {
+    return false;
+  }
+
+  const trimmed = raw.trim();
+  if (!trimmed) {
+    return false;
+  }
+
+  const first = trimmed[0];
+  const last = trimmed[trimmed.length - 1];
+  return (first === '{' && last === '}') || (first === '[' && last === ']');
+}
+
+function escapeControlCharsInJsonStrings(raw) {
+  let repaired = '';
+  let inString = false;
+  let escaped = false;
+
+  for (const char of raw) {
+    if (!inString) {
+      repaired += char;
+      if (char === '"') {
+        inString = true;
+      }
+      continue;
+    }
+
+    if (escaped) {
+      repaired += char;
+      escaped = false;
+      continue;
+    }
+
+    if (char === '\\') {
+      repaired += char;
+      escaped = true;
+      continue;
+    }
+
+    if (char === '"') {
+      repaired += char;
+      inString = false;
+      continue;
+    }
+
+    const code = char.charCodeAt(0);
+    if (code >= 0x00 && code <= 0x1f) {
+      switch (char) {
+        case '\b':
+          repaired += '\\b';
+          break;
+        case '\f':
+          repaired += '\\f';
+          break;
+        case '\n':
+          repaired += '\\n';
+          break;
+        case '\r':
+          repaired += '\\r';
+          break;
+        case '\t':
+          repaired += '\\t';
+          break;
+        default:
+          repaired += `\\u${code.toString(16).padStart(4, '0')}`;
+          break;
+      }
+    } else {
+      repaired += char;
+    }
+  }
+
+  return repaired;
+}
+
+function parseCliagentsJsonResponse(raw) {
+  if (typeof raw !== 'string' || !looksLikeJsonPayload(raw)) {
+    return { parsed: false, value: raw };
+  }
+
+  try {
+    return { parsed: true, value: JSON.parse(raw) };
+  } catch {}
+
+  const repaired = escapeControlCharsInJsonStrings(raw);
+  if (repaired !== raw) {
+    try {
+      return { parsed: true, value: JSON.parse(repaired) };
+    } catch {}
+  }
+
+  return { parsed: false, value: raw };
+}
+
 // HTTP client for cliagents API
 async function callCliagents(method, path, body = null, requestTimeout = 600000) {
   return new Promise((resolve, reject) => {
@@ -94,11 +198,8 @@ async function callCliagents(method, path, body = null, requestTimeout = 600000)
       let data = '';
       res.on('data', chunk => data += chunk);
       res.on('end', () => {
-        try {
-          resolve({ status: res.statusCode, data: JSON.parse(data) });
-        } catch {
-          resolve({ status: res.statusCode, data });
-        }
+        const parsed = parseCliagentsJsonResponse(data);
+        resolve({ status: res.statusCode, data: parsed.value });
       });
     });
 
@@ -537,6 +638,119 @@ function buildRouteRequest({
     routeRequest.sessionMetadata = controlPlaneContext.sessionMetadata;
   }
   return routeRequest;
+}
+
+function toFiniteNonNegative(value, fallback = null) {
+  const parsed = Number.parseInt(value, 10);
+  if (!Number.isFinite(parsed) || parsed < 0) {
+    return fallback;
+  }
+  return parsed;
+}
+
+function isExplicitTerminalBusySignal(errorCode, normalizedMessage) {
+  if (errorCode === 'terminal_busy') {
+    return true;
+  }
+
+  if (!normalizedMessage) {
+    return false;
+  }
+
+  if (normalizedMessage.includes('terminal_busy')) {
+    return true;
+  }
+
+  const hasTerminalBusy = normalizedMessage.includes('terminal') && normalizedMessage.includes('busy');
+  const hasSessionBusy = normalizedMessage.includes('session') && normalizedMessage.includes('busy');
+  const hasTerminalProcessing = normalizedMessage.includes('terminal') && normalizedMessage.includes('processing');
+  return hasTerminalBusy || hasSessionBusy || hasTerminalProcessing;
+}
+
+function normalizeRouteRetryDelayMs(retryAfterMs, fallbackMs) {
+  const normalizedFallback = toFiniteNonNegative(fallbackMs, 0) ?? 0;
+  const normalizedDelay = toFiniteNonNegative(retryAfterMs, normalizedFallback) ?? normalizedFallback;
+  return Math.min(normalizedDelay, MAX_ROUTE_RETRY_DELAY_MS);
+}
+
+function classifyRouteRetryResponse(response) {
+  if (!response || response.status === 200) {
+    return null;
+  }
+
+  const errorCode = String(response.data?.error?.code || '').trim().toLowerCase();
+  const errorMessage = String(response.data?.error?.message || '').trim().toLowerCase();
+  const retryAfterMs = toFiniteNonNegative(response.data?.error?.retryAfterMs, null);
+  const isTerminalBusy = isExplicitTerminalBusySignal(errorCode, errorMessage);
+
+  if (isTerminalBusy) {
+    return {
+      reason: 'terminal_busy',
+      delayMs: normalizeRouteRetryDelayMs(retryAfterMs, DEFAULT_ROUTE_RETRY_DELAY_MS)
+    };
+  }
+
+  if (
+    errorCode === 'terminal_not_found'
+    || errorMessage.includes('terminal not found')
+    || errorMessage.includes('tmux session not found')
+    || errorMessage.includes('tmux window not found')
+  ) {
+    return {
+      reason: 'terminal_missing',
+      delayMs: normalizeRouteRetryDelayMs(retryAfterMs, 0)
+    };
+  }
+
+  return null;
+}
+
+function buildRouteRetryRequest(routeRequest, retryPlan) {
+  const retryRequest = {
+    ...routeRequest,
+    preferReuse: false,
+    forceFreshSession: true
+  };
+
+  if (routeRequest?.sessionMetadata && typeof routeRequest.sessionMetadata === 'object') {
+    retryRequest.sessionMetadata = {
+      ...routeRequest.sessionMetadata,
+      routeRetry: {
+        reason: retryPlan.reason,
+        strategy: 'force_fresh_session'
+      }
+    };
+  }
+
+  return retryRequest;
+}
+
+async function callRouteWithReuseRecovery(routeRequest, toolName) {
+  const firstResponse = await callCliagents('POST', '/orchestration/route', routeRequest);
+  maybeThrowRootAttachError(firstResponse, toolName);
+
+  if (firstResponse.status === 200) {
+    return { response: firstResponse, retried: false, retryPlan: null };
+  }
+
+  const retryPlan = classifyRouteRetryResponse(firstResponse);
+  if (!retryPlan) {
+    return { response: firstResponse, retried: false, retryPlan: null };
+  }
+
+  if ((retryPlan.delayMs || 0) > 0) {
+    await sleep(retryPlan.delayMs);
+  }
+
+  const retryRequest = buildRouteRetryRequest(routeRequest, retryPlan);
+  const retryResponse = await callCliagents('POST', '/orchestration/route', retryRequest);
+  maybeThrowRootAttachError(retryResponse, toolName);
+
+  return {
+    response: retryResponse,
+    retried: true,
+    retryPlan
+  };
 }
 
 async function fetchTerminalOutput(terminalId) {
@@ -1183,6 +1397,57 @@ This calls cliagents' direct-session discussion route and returns the completed 
         }
       },
       required: ['message', 'participants']
+    }
+  },
+  {
+    name: 'run_bpe_scenario',
+    description: 'Run the deterministic Browser Perception Engine scenario (session -> state -> single action) and return normalized evidence payload.',
+    inputSchema: {
+      type: 'object',
+      properties: {
+        targetUrl: {
+          type: 'string',
+          description: 'Scenario target URL. Defaults to https://example.com.'
+        },
+        resumeSessionId: {
+          type: 'string',
+          description: 'Optional existing BPE session ID to resume.'
+        },
+        interaction: {
+          type: 'object',
+          description: 'Optional interaction override. Defaults to one deterministic click action.'
+        },
+        runtime: {
+          type: 'object',
+          description: 'Optional runtime options forwarded to BPE session create.'
+        },
+        trace: {
+          type: 'object',
+          description: 'Optional trace metadata forwarded to BPE.'
+        },
+        timeoutMs: {
+          type: 'number',
+          description: 'Optional end-to-end timeout in milliseconds.'
+        },
+        actionTimeoutMs: {
+          type: 'number',
+          description: 'Optional action step timeout in milliseconds.'
+        },
+        idempotencyKey: {
+          type: 'string',
+          description: 'Optional idempotency key for the action call.'
+        },
+        expectedStateVersion: {
+          type: 'number',
+          description: 'Optional expected state version for the action step.'
+        },
+        format: {
+          type: 'string',
+          enum: ['summary', 'json'],
+          description: 'Return concise text summary or full JSON payload. Default: summary',
+          default: 'summary'
+        }
+      }
     }
   },
   {
@@ -2450,14 +2715,16 @@ async function handleDelegateTask(args) {
     } : null
   });
 
-  const routeRes = await callCliagents('POST', '/orchestration/route', routeRequest);
-
-  maybeThrowRootAttachError(routeRes, 'delegate_task');
+  const routeOutcome = await callRouteWithReuseRecovery(routeRequest, 'delegate_task');
+  const routeRes = routeOutcome.response;
   if (routeRes.status !== 200) {
     throw new Error(`Routing failed: ${JSON.stringify(routeRes.data)}`);
   }
 
   const { terminalId, adapter: usedAdapter, taskType, profile: routedProfile } = routeRes.data;
+  const retrySummaryLine = routeOutcome.retried
+    ? `**Recovery:** retried route with forceFreshSession after ${routeOutcome.retryPlan?.reason || 'transient_error'}`
+    : null;
 
   if (wait) {
     const syncWaitMs = Math.max(
@@ -2468,12 +2735,13 @@ async function handleDelegateTask(args) {
       )
     );
     const waitResult = await waitForTerminalCompletion(terminalId, syncWaitMs);
+    const waitStatus = waitResult.status || waitResult.lastStatus || 'unknown';
 
     if (waitResult.state === 'completed') {
       return {
         content: [{
           type: 'text',
-          text: `## ${profileDisplay} (${usedAdapter}) Response\n\n**Terminal ID:** ${terminalId}\n**Status:** completed\n\n${waitResult.output || 'No output captured'}`
+          text: `## ${profileDisplay} (${usedAdapter}) Response\n\n**Terminal ID:** ${terminalId}\n**Status:** completed${retrySummaryLine ? `\n${retrySummaryLine}` : ''}\n\n${waitResult.output || 'No output captured'}`
         }]
       };
     }
@@ -2482,7 +2750,7 @@ async function handleDelegateTask(args) {
       return {
         content: [{
           type: 'text',
-          text: `## ${profileDisplay} (${usedAdapter}) Task Failed\n\n**Terminal ID:** ${terminalId}\n**Status:** ${waitResult.lastStatus}\n\n${waitResult.output || 'No output captured'}`
+          text: `## ${profileDisplay} (${usedAdapter}) Task Failed\n\n**Terminal ID:** ${terminalId}\n**Status:** ${waitStatus}${retrySummaryLine ? `\n${retrySummaryLine}` : ''}\n\n${waitResult.output || 'No output captured'}`
         }]
       };
     }
@@ -2491,7 +2759,7 @@ async function handleDelegateTask(args) {
       return {
         content: [{
           type: 'text',
-          text: `## ${profileDisplay} (${usedAdapter}) Waiting\n\n**Terminal ID:** ${terminalId}\n**Status:** ${waitResult.lastStatus}\n\nThe delegated task is blocked on an interactive prompt. Use \`check_task_status({ terminalId: "${terminalId}" })\` for the blocker details or \`check_tasks_status({ terminalIds: ["${terminalId}"] })\` if you are monitoring several tasks.`
+          text: `## ${profileDisplay} (${usedAdapter}) Waiting\n\n**Terminal ID:** ${terminalId}\n**Status:** ${waitStatus}${retrySummaryLine ? `\n${retrySummaryLine}` : ''}\n\nThe delegated task is blocked on an interactive prompt. Use \`check_task_status({ terminalId: "${terminalId}" })\` for the blocker details or \`check_tasks_status({ terminalIds: ["${terminalId}"] })\` if you are monitoring several tasks.`
         }]
       };
     }
@@ -2499,7 +2767,7 @@ async function handleDelegateTask(args) {
     return {
       content: [{
         type: 'text',
-        text: `## ${profileDisplay} (${usedAdapter}) Still Running\n\n**Terminal ID:** ${terminalId}\n**Status:** ${waitResult.lastStatus}\n\nThe task exceeded the MCP synchronous wait window (${Math.round(syncWaitMs / 1000)}s) but is still running. Continue with \`check_task_status({ terminalId: "${terminalId}" })\`, or use \`check_tasks_status\` / \`wait_for_tasks\` if you are coordinating several terminals.`
+        text: `## ${profileDisplay} (${usedAdapter}) Still Running\n\n**Terminal ID:** ${terminalId}\n**Status:** ${waitStatus}${retrySummaryLine ? `\n${retrySummaryLine}` : ''}\n\nThe task exceeded the MCP synchronous wait window (${Math.round(syncWaitMs / 1000)}s) but is still running. Continue with \`check_task_status({ terminalId: "${terminalId}" })\`, or use \`check_tasks_status\` / \`wait_for_tasks\` if you are coordinating several terminals.`
       }]
     };
   }
@@ -2507,7 +2775,7 @@ async function handleDelegateTask(args) {
   return {
     content: [{
       type: 'text',
-      text: `## Task Delegated: ASYNC\n\n**Terminal ID:** ${terminalId}\n**Profile:** ${routedProfile || profileDisplay}\n**Adapter:** ${usedAdapter}\n**Task Type:** ${taskType}\n\nThe task is running asynchronously. Use \`check_task_status({ terminalId: "${terminalId}" })\` for a single task, \`check_tasks_status({ terminalIds: ["${terminalId}"] })\` for grouped monitoring, or \`get_terminal_output({ terminalId: "${terminalId}" })\` to inspect partial output.`
+      text: `## Task Delegated: ASYNC\n\n**Terminal ID:** ${terminalId}\n**Profile:** ${routedProfile || profileDisplay}\n**Adapter:** ${usedAdapter}\n**Task Type:** ${taskType}${retrySummaryLine ? `\n${retrySummaryLine}` : ''}\n\nThe task is running asynchronously. Use \`check_task_status({ terminalId: "${terminalId}" })\` for a single task, \`check_tasks_status({ terminalIds: ["${terminalId}"] })\` for grouped monitoring, or \`get_terminal_output({ terminalId: "${terminalId}" })\` to inspect partial output.`
     }]
   };
 }
@@ -2521,8 +2789,20 @@ async function handleReplyToTerminal(args) {
     throw new Error('message is required');
   }
 
+  const rootContext = getAttachedRootContext();
+  const controlPlanePayload = rootContext?.rootSessionId
+    ? {
+        rootSessionId: rootContext.rootSessionId,
+        parentSessionId: rootContext.rootSessionId,
+        originClient: rootContext.originClient || null,
+        externalSessionRef: rootContext.externalSessionRef || null,
+        sessionMetadata: rootContext.sessionMetadata || null
+      }
+    : {};
+
   const res = await callCliagents('POST', `/orchestration/terminals/${encodeURIComponent(terminalId)}/input`, {
-    message
+    message,
+    ...controlPlanePayload
   });
 
   if (res.status === 403 && res.data?.error?.code === 'root_read_only') {
@@ -2559,6 +2839,17 @@ async function handleEnqueueTerminalInput(args = {}) {
     throw new Error('terminalId is required');
   }
 
+  const rootContext = getAttachedRootContext();
+  const controlPlanePayload = rootContext?.rootSessionId
+    ? {
+        rootSessionId: rootContext.rootSessionId,
+        parentSessionId: rootContext.rootSessionId,
+        originClient: rootContext.originClient || null,
+        externalSessionRef: rootContext.externalSessionRef || null,
+        sessionMetadata: rootContext.sessionMetadata || null
+      }
+    : {};
+
   const res = await callCliagents('POST', `/orchestration/terminals/${encodeURIComponent(terminalId)}/input-queue`, {
     message: args.message || null,
     inputKind: args.inputKind || args.input_kind || 'message',
@@ -2566,7 +2857,8 @@ async function handleEnqueueTerminalInput(args = {}) {
     controlMode: args.controlMode || args.control_mode || null,
     expiresAt: args.expiresAt || args.expires_at || null,
     requestedBy: args.requestedBy || args.requested_by || null,
-    metadata: args.metadata || null
+    metadata: args.metadata || null,
+    ...controlPlanePayload
   });
   if (res.status !== 200) {
     throw new Error(`Failed to enqueue terminal input: ${JSON.stringify(res.data)}`);
@@ -2633,8 +2925,19 @@ async function handleApproveTerminalInput(args = {}) {
   if (!inputId) {
     throw new Error('inputId is required');
   }
+  const rootContext = getAttachedRootContext();
+  const controlPlanePayload = rootContext?.rootSessionId
+    ? {
+        rootSessionId: rootContext.rootSessionId,
+        parentSessionId: rootContext.rootSessionId,
+        originClient: rootContext.originClient || null,
+        externalSessionRef: rootContext.externalSessionRef || null,
+        sessionMetadata: rootContext.sessionMetadata || null
+      }
+    : {};
   const res = await callCliagents('POST', `/orchestration/input-queue/${encodeURIComponent(inputId)}/approve`, {
-    approvedBy: args.approvedBy || args.approved_by || null
+    approvedBy: args.approvedBy || args.approved_by || null,
+    ...controlPlanePayload
   });
   if (res.status !== 200) {
     throw new Error(`Failed to approve terminal input: ${JSON.stringify(res.data)}`);
@@ -2653,9 +2956,20 @@ async function handleDenyTerminalInput(args = {}) {
   if (!inputId) {
     throw new Error('inputId is required');
   }
+  const rootContext = getAttachedRootContext();
+  const controlPlanePayload = rootContext?.rootSessionId
+    ? {
+        rootSessionId: rootContext.rootSessionId,
+        parentSessionId: rootContext.rootSessionId,
+        originClient: rootContext.originClient || null,
+        externalSessionRef: rootContext.externalSessionRef || null,
+        sessionMetadata: rootContext.sessionMetadata || null
+      }
+    : {};
   const res = await callCliagents('POST', `/orchestration/input-queue/${encodeURIComponent(inputId)}/deny`, {
     deniedBy: args.deniedBy || args.denied_by || null,
-    reason: args.reason || null
+    reason: args.reason || null,
+    ...controlPlanePayload
   });
   if (res.status !== 200) {
     throw new Error(`Failed to deny terminal input: ${JSON.stringify(res.data)}`);
@@ -2674,8 +2988,19 @@ async function handleCancelTerminalInput(args = {}) {
   if (!inputId) {
     throw new Error('inputId is required');
   }
+  const rootContext = getAttachedRootContext();
+  const controlPlanePayload = rootContext?.rootSessionId
+    ? {
+        rootSessionId: rootContext.rootSessionId,
+        parentSessionId: rootContext.rootSessionId,
+        originClient: rootContext.originClient || null,
+        externalSessionRef: rootContext.externalSessionRef || null,
+        sessionMetadata: rootContext.sessionMetadata || null
+      }
+    : {};
   const res = await callCliagents('POST', `/orchestration/input-queue/${encodeURIComponent(inputId)}/cancel`, {
-    reason: args.reason || null
+    reason: args.reason || null,
+    ...controlPlanePayload
   });
   if (res.status !== 200) {
     throw new Error(`Failed to cancel terminal input: ${JSON.stringify(res.data)}`);
@@ -2694,7 +3019,17 @@ async function handleDeliverTerminalInput(args = {}) {
   if (!inputId) {
     throw new Error('inputId is required');
   }
-  const res = await callCliagents('POST', `/orchestration/input-queue/${encodeURIComponent(inputId)}/deliver`, {});
+  const rootContext = getAttachedRootContext();
+  const controlPlanePayload = rootContext?.rootSessionId
+    ? {
+        rootSessionId: rootContext.rootSessionId,
+        parentSessionId: rootContext.rootSessionId,
+        originClient: rootContext.originClient || null,
+        externalSessionRef: rootContext.externalSessionRef || null,
+        sessionMetadata: rootContext.sessionMetadata || null
+      }
+    : {};
+  const res = await callCliagents('POST', `/orchestration/input-queue/${encodeURIComponent(inputId)}/deliver`, controlPlanePayload);
   if (res.status !== 200) {
     throw new Error(`Failed to deliver terminal input: ${JSON.stringify(res.data)}`);
   }
@@ -3292,6 +3627,76 @@ async function handleRunDiscussion(args) {
         '',
         data.runId ? `Use \`get_run_detail({ runId: "${data.runId}" })\` for the persisted run record.` : null
       ].filter(Boolean).join('\n')
+    }]
+  };
+}
+
+async function handleRunBpeScenario(args = {}) {
+  const format = args?.format === 'json' ? 'json' : 'summary';
+  const body = {
+    targetUrl: args?.targetUrl || null,
+    resumeSessionId: args?.resumeSessionId || null,
+    interaction: args?.interaction || null,
+    runtime: args?.runtime || null,
+    trace: args?.trace || null,
+    timeoutMs: args?.timeoutMs || null,
+    actionTimeoutMs: args?.actionTimeoutMs || null,
+    idempotencyKey: args?.idempotencyKey || null,
+    expectedStateVersion: args?.expectedStateVersion || null
+  };
+
+  const res = await callCliagents('POST', '/orchestration/browser-perception-engine/scenario', body);
+  const data = res.data || {};
+
+  if (format === 'json') {
+    return {
+      content: [{
+        type: 'text',
+        text: JSON.stringify({
+          status: res.status,
+          ...data
+        }, null, 2)
+      }]
+    };
+  }
+
+  if (res.status !== 200) {
+    const failureClass = data.failureClass || 'transport_error';
+    const terminalFailureReason = data.terminalFailureReason || failureClass;
+    return {
+      content: [{
+        type: 'text',
+        text: [
+          '## BPE Scenario Failed',
+          '',
+          `status_code: ${res.status}`,
+          `failure_class: ${failureClass}`,
+          `terminal_failure_reason: ${terminalFailureReason}`,
+          `session_id: ${data.sessionId || 'n/a'}`,
+          `action_id: ${data.actionId || 'n/a'}`,
+          `message: ${data.message || 'unknown error'}`,
+          data.details ? `details: ${JSON.stringify(data.details)}` : null
+        ].filter(Boolean).join('\n')
+      }]
+    };
+  }
+
+  return {
+    content: [{
+      type: 'text',
+      text: [
+        '## BPE Scenario Completed',
+        '',
+        `provider: ${data.provider || 'browser_perception_engine'}`,
+        `scenario: ${data.scenario?.kind || 'deterministic_single_interaction'}`,
+        `target_url: ${data.scenario?.targetUrl || data.scenario?.target_url || data.state?.url || 'n/a'}`,
+        `session_id: ${data.session?.sessionId || data.session?.session_id || data.evidence?.session_id || 'n/a'}`,
+        `state_version: ${data.state?.stateVersion ?? 'n/a'}`,
+        `action_id: ${data.action?.actionId || data.action?.action_id || data.evidence?.action_id || 'n/a'}`,
+        `action_status: ${data.action?.status || 'n/a'}`,
+        `action_state_version: ${data.action?.stateVersion ?? 'n/a'}`,
+        `terminal_failure_reason: ${data.evidence?.terminal_failure_reason ?? 'null'}`
+      ].join('\n')
     }]
   };
 }
@@ -5248,6 +5653,9 @@ async function handleRequest(request) {
           case 'run_discussion':
             result = await handleRunDiscussion(args);
             break;
+          case 'run_bpe_scenario':
+            result = await handleRunBpeScenario(args);
+            break;
           case 'get_run_detail':
             result = await handleGetRunDetail(args);
             break;
@@ -5471,6 +5879,7 @@ module.exports = {
   handleGetRoomMessages,
   handleDiscussRoom,
   handleGetRunDetail,
+  handleRunBpeScenario,
   handleListRootSessions,
   handleListRuns,
   handleGetMemoryBundle,
