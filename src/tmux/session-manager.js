@@ -1764,6 +1764,33 @@ class PersistentSessionManager extends EventEmitter {
     });
   }
 
+  _recordTerminalLiveness(terminal, nextStatus, extra = {}) {
+    if (!terminal || !nextStatus) {
+      return null;
+    }
+
+    const previousStatus = extra.previousStatus || null;
+    const attentionCode = String(extra.attention?.code || '').trim() || null;
+    const runId = terminal.activeRun?.runId || null;
+    return this._recordRootIoEvent(terminal, {
+      idempotencyKey: `liveness:${terminal.terminalId}:${runId || 'session'}:${previousStatus || 'unknown'}:${nextStatus}:${attentionCode || 'none'}`,
+      eventKind: 'liveness',
+      source: 'broker',
+      contentPreview: attentionCode
+        ? `status ${nextStatus}: ${attentionCode}`
+        : `status ${nextStatus}`,
+      metadata: {
+        source: extra.source || 'session-manager.status',
+        previousStatus,
+        nextStatus,
+        runId,
+        attentionCode,
+        attentionMessage: extra.attention?.message || null
+      },
+      retentionClass: 'metadata-indefinite'
+    });
+  }
+
   _syncInteractiveTranscript(terminal, output, nextStatus) {
     if (!this._supportsInteractiveTranscriptSync(terminal)) {
       return;
@@ -2095,6 +2122,7 @@ class PersistentSessionManager extends EventEmitter {
       return nextStatus;
     }
 
+    const previousStatus = terminal.status;
     terminal.status = nextStatus;
     if (Object.prototype.hasOwnProperty.call(extra, 'attention')) {
       terminal.attention = extra.attention || null;
@@ -2102,6 +2130,10 @@ class PersistentSessionManager extends EventEmitter {
     if (this.db) {
       this.db.updateStatus(terminal.terminalId, nextStatus);
     }
+    this._recordTerminalLiveness(terminal, nextStatus, {
+      ...extra,
+      previousStatus
+    });
     this._interruptFatalTrackedRun(terminal, nextStatus);
     this._recordModelExecutionOutcome(terminal, nextStatus, extra);
     if ([TerminalStatus.COMPLETED, TerminalStatus.ERROR].includes(nextStatus)) {
@@ -4280,11 +4312,16 @@ class PersistentSessionManager extends EventEmitter {
     }
 
     // Update status
+    const previousStatus = terminal.status;
     terminal.status = TerminalStatus.PROCESSING;
     terminal.lastActive = new Date();
 
     if (this.db) {
       this.db.updateStatus(terminalId, TerminalStatus.PROCESSING);
+      this._recordTerminalLiveness(terminal, TerminalStatus.PROCESSING, {
+        previousStatus,
+        source: 'session-manager.sendInput'
+      });
 
       this._recordRootIoEvent(terminal, {
         eventKind: 'input',

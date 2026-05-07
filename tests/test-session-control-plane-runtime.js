@@ -751,6 +751,15 @@ async function run() {
     const liveTerminal = manager.terminals.get(terminal.terminalId);
     const codexWorkerThreadRef = 'thread-codex-123';
     assert.strictEqual(liveTerminal.status, TerminalStatus.PROCESSING);
+    let livenessEvents = db.listRootIoEvents({
+      terminalId: terminal.terminalId,
+      eventKind: 'liveness',
+      limit: 10
+    });
+    assert(
+      livenessEvents.some((event) => event.metadata.nextStatus === TerminalStatus.PROCESSING && event.metadata.source === 'session-manager.sendInput'),
+      'sendInput should persist a processing liveness root IO event'
+    );
     assert(liveTerminal.activeRun, 'tracked one-shot run should be active');
 
     fs.writeFileSync(
@@ -773,6 +782,15 @@ async function run() {
     const status = manager.getStatus(terminal.terminalId);
     assert.strictEqual(status, TerminalStatus.COMPLETED);
     assert.strictEqual(liveTerminal.providerThreadRef, codexWorkerThreadRef);
+    livenessEvents = db.listRootIoEvents({
+      terminalId: terminal.terminalId,
+      eventKind: 'liveness',
+      limit: 10
+    });
+    assert(
+      livenessEvents.some((event) => event.metadata.nextStatus === TerminalStatus.COMPLETED && event.metadata.source === 'session-manager.status'),
+      'status transition should persist a completed liveness root IO event'
+    );
     const screenSnapshots = db.listRootIoEvents({
       terminalId: terminal.terminalId,
       eventKind: 'screen_snapshot',
