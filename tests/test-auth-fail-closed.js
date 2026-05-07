@@ -10,7 +10,7 @@ const path = require('path');
 const WebSocket = require('ws');
 const AgentServer = require('../src/server');
 const { callCliagentsJson } = require('../src/index');
-const { readLocalApiKey } = require('../src/server/auth');
+const { configureAuth, getLocalApiKeyFilePaths, readLocalApiKey } = require('../src/server/auth');
 
 const AUTH_ENV_KEYS = [
   'CLIAGENTS_API_KEY',
@@ -286,6 +286,33 @@ async function testCliAuthFailureExplainsLocalTokenMigration() {
   }
 }
 
+async function testLocalTokenLookupFallsBackToPackageDataDir() {
+  const envSnapshot = snapshotAuthEnv();
+  const originalCwd = process.cwd();
+  const cwdDir = makeTempDir('cliagents-auth-cwd-');
+  const packageDataDir = makeTempDir('cliagents-auth-package-data-');
+
+  try {
+    applyAuthEnv({});
+    process.chdir(cwdDir);
+    configureAuth({ localApiKeyFilePath: null });
+    const tokenPath = path.join(packageDataDir, 'local-api-key');
+    fs.writeFileSync(tokenPath, 'package-token\n', 'utf8');
+
+    const searchedPaths = getLocalApiKeyFilePaths({ packageDataDir });
+    assert.deepStrictEqual(searchedPaths, [
+      path.resolve(process.cwd(), 'data', 'local-api-key'),
+      tokenPath
+    ]);
+    assert.strictEqual(readLocalApiKey({ packageDataDir }), 'package-token');
+  } finally {
+    process.chdir(originalCwd);
+    fs.rmSync(cwdDir, { recursive: true, force: true });
+    fs.rmSync(packageDataDir, { recursive: true, force: true });
+    restoreAuthEnv(envSnapshot);
+  }
+}
+
 async function run() {
   const tests = [
     { name: 'HTTP auth is fail-closed by default', fn: testHttpFailClosedByDefault },
@@ -293,7 +320,8 @@ async function run() {
     { name: 'local broker token authenticates same-machine CLI calls', fn: testLocalBrokerTokenAuthenticatesSameMachineCli },
     { name: 'API key env aliases are parity-compatible', fn: testEnvAliasParity },
     { name: 'localhost unauthenticated override rejects non-loopback bind host', fn: testLocalhostOverrideRejectsNonLoopbackHost },
-    { name: 'CLI auth failure explains local-token migration', fn: testCliAuthFailureExplainsLocalTokenMigration }
+    { name: 'CLI auth failure explains local-token migration', fn: testCliAuthFailureExplainsLocalTokenMigration },
+    { name: 'local token lookup falls back to package data dir', fn: testLocalTokenLookupFallsBackToPackageDataDir }
   ];
 
   console.log('Running auth fail-closed regression tests...');

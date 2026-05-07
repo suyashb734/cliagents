@@ -34,7 +34,7 @@ const SessionWrapper = require('./utils/session-wrapper');
 
 // Server
 const AgentServer = require('./server');
-const { getConfiguredApiKey, getLocalApiKeyFilePath } = require('./server/auth');
+const { getConfiguredApiKey, getLocalApiKeyFilePaths } = require('./server/auth');
 
 // Transcription Service
 const { transcribeAudio } = require('./services/transcriptionService');
@@ -121,10 +121,11 @@ function buildCliagentsAuthFailureMessage(message, url, apiKey) {
   }
 
   if (isLoopbackUrl(url)) {
+    const searchedPaths = getLocalApiKeyFilePaths().join(', ');
     return [
       message,
       `No CLIAGENTS_API_KEY or local broker token was found for ${url.origin}.`,
-      `If this broker was already running before local-token auth was added, restart it so it creates ${getLocalApiKeyFilePath()}.`,
+      `If this broker was already running before local-token auth was added, restart it so it creates a local token. Searched: ${searchedPaths}.`,
       'For explicit unauthenticated local-only development, start the broker with CLIAGENTS_ALLOW_UNAUTHENTICATED_LOCALHOST=1.'
     ].join(' ');
   }

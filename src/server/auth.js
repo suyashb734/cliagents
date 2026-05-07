@@ -77,39 +77,65 @@ function getDefaultDataDir() {
   return normalizeEnvString(process.env[DATA_DIR_ENV]) || path.join(process.cwd(), 'data');
 }
 
-function getLocalApiKeyFilePath(options = {}) {
+function pushUniquePath(paths, filePath) {
+  if (!filePath) {
+    return;
+  }
+  const resolved = path.resolve(filePath);
+  if (!paths.includes(resolved)) {
+    paths.push(resolved);
+  }
+}
+
+function getPackageDataDir(options = {}) {
+  return path.resolve(
+    normalizeEnvString(options.packageDataDir)
+    || path.join(__dirname, '..', '..', 'data')
+  );
+}
+
+function getLocalApiKeyFilePaths(options = {}) {
   const explicitFilePath = normalizeEnvString(options.filePath)
     || normalizeEnvString(process.env[LOCAL_API_KEY_FILE_ENV]);
   if (explicitFilePath) {
-    return path.resolve(explicitFilePath);
+    return [path.resolve(explicitFilePath)];
   }
 
   if (options.dataDir) {
-    return path.resolve(options.dataDir, LOCAL_API_KEY_FILENAME);
+    return [path.resolve(options.dataDir, LOCAL_API_KEY_FILENAME)];
   }
 
   const envDataDir = normalizeEnvString(process.env[DATA_DIR_ENV]);
   if (envDataDir) {
-    return path.resolve(envDataDir, LOCAL_API_KEY_FILENAME);
+    return [path.resolve(envDataDir, LOCAL_API_KEY_FILENAME)];
   }
 
-  return path.resolve(
-    normalizeEnvString(runtimeAuthConfig.localApiKeyFilePath)
-    || path.join(process.cwd(), 'data', LOCAL_API_KEY_FILENAME)
-  );
+  const paths = [];
+  pushUniquePath(paths, normalizeEnvString(runtimeAuthConfig.localApiKeyFilePath));
+  pushUniquePath(paths, path.join(process.cwd(), 'data', LOCAL_API_KEY_FILENAME));
+  pushUniquePath(paths, path.join(getPackageDataDir(options), LOCAL_API_KEY_FILENAME));
+  return paths;
+}
+
+function getLocalApiKeyFilePath(options = {}) {
+  return getLocalApiKeyFilePaths(options)[0];
 }
 
 function readLocalApiKey(options = {}) {
-  const filePath = getLocalApiKeyFilePath(options);
-  try {
-    const value = fs.readFileSync(filePath, 'utf8').trim();
-    return value || null;
-  } catch (error) {
-    if (error && error.code === 'ENOENT') {
-      return null;
+  for (const filePath of getLocalApiKeyFilePaths(options)) {
+    try {
+      const value = fs.readFileSync(filePath, 'utf8').trim();
+      if (value) {
+        return value;
+      }
+    } catch (error) {
+      if (error && error.code === 'ENOENT') {
+        continue;
+      }
+      continue;
     }
-    return null;
   }
+  return null;
 }
 
 function ensureLocalApiKey(options = {}) {
@@ -365,6 +391,7 @@ module.exports = {
   configureAuth,
   ensureLocalApiKey,
   getLocalApiKeyFilePath,
+  getLocalApiKeyFilePaths,
   readLocalApiKey,
   isLoopbackHost,
   isUnauthenticatedLocalhostModeEnabled,
