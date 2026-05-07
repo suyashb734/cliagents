@@ -461,6 +461,11 @@ function extractUsageMetadataFromOutput(adapter, output) {
       ?? modelUsageMetadata.cacheReadInputTokens
       ?? modelUsageMetadata.cache_read_input_tokens
       ?? null;
+    const reportedCachedInputTokens = usage?.cached_input_tokens
+      ?? usage?.cachedInputTokens
+      ?? modelUsageMetadata.cachedInputTokens
+      ?? modelUsageMetadata.cached_input_tokens
+      ?? null;
     const totalTokens = usage?.total_tokens
       ?? usage?.totalTokens
       ?? modelUsageMetadata.totalTokens
@@ -487,7 +492,7 @@ function extractUsageMetadataFromOutput(adapter, output) {
         reasoningTokens,
         cacheCreationInputTokens,
         cacheReadInputTokens,
-        cachedInputTokens: cacheRelatedInputTokens,
+        cachedInputTokens: reportedCachedInputTokens ?? cacheRelatedInputTokens,
         totalTokens: computedTotalTokens,
         costUsd: object.total_cost_usd
           ?? object.totalCostUsd

@@ -761,6 +761,19 @@ test('Tracked-run usage parser reads Claude stream-json result usage', () => {
   assert.strictEqual(metadata.usage.model, 'claude-haiku-4-5');
 });
 
+test('Tracked-run usage parser reads Codex JSON cached input tokens', () => {
+  const metadata = extractUsageMetadataFromOutput(
+    'codex-cli',
+    '{"type":"turn.completed","usage":{"input_tokens":249532,"cached_input_tokens":181760,"output_tokens":3976,"reasoning_output_tokens":3046}}'
+  );
+
+  assert(metadata, 'usage metadata should be extracted from Codex turn JSON');
+  assert.strictEqual(metadata.usage.inputTokens, 249532);
+  assert.strictEqual(metadata.usage.outputTokens, 3976);
+  assert.strictEqual(metadata.usage.cachedInputTokens, 181760);
+  assert.strictEqual(metadata.usage.totalTokens, 253508);
+});
+
 test('Session manager persists tracked one-shot usage for task assignments', () => {
   const usageInputs = [];
   const manager = new PersistentSessionManager({
