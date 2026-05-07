@@ -2197,7 +2197,13 @@ class PersistentSessionManager extends EventEmitter {
       return null;
     }
 
-    const metadata = extractUsageMetadataFromOutput(terminal.adapter, output);
+    let metadata = extractUsageMetadataFromOutput(terminal.adapter, output);
+    if (!metadata && terminal.logPath) {
+      metadata = extractUsageMetadataFromOutput(
+        terminal.adapter,
+        this.readLogTail(terminal.terminalId, 20000)
+      );
+    }
     if (!metadata) {
       return null;
     }

@@ -840,6 +840,36 @@ test('Session manager persists tracked one-shot usage for task assignments', () 
   assert.strictEqual(usageInputs[1].terminalId, 'term-usage-2');
   assert.strictEqual(usageInputs[1].runId, 'def456abc1237890');
   assert.strictEqual(usageInputs[1].taskAssignmentId, 'assignment-usage-2');
+
+  const wrappedHistoryOutput = runOutput.replace('"type":"result"', '"type":"res\nult"');
+  manager.readLogTail = () => runOutput;
+  const logFallbackTerminal = {
+    terminalId: 'term-usage-3',
+    rootSessionId: 'root-usage-1',
+    parentSessionId: 'root-usage-1',
+    adapter: 'claude-code',
+    role: 'worker',
+    status: TerminalStatus.COMPLETED,
+    model: 'claude-haiku-4-5',
+    effectiveModel: 'claude-haiku-4-5',
+    logPath: '/tmp/term-usage-3.log',
+    activeRun: { runId: 'fed456abc1237890', exitCode: 0 },
+    sessionMetadata: {
+      taskId: 'task-usage-1',
+      taskAssignmentId: 'assignment-usage-3',
+      taskRole: 'test'
+    }
+  };
+
+  manager._applyStatusUpdate(logFallbackTerminal, TerminalStatus.COMPLETED, {
+    runOutput: wrappedHistoryOutput,
+    exitCode: 0
+  });
+
+  assert.strictEqual(usageInputs.length, 3, 'usage should fall back to raw terminal logs when tmux history wraps JSON');
+  assert.strictEqual(usageInputs[2].terminalId, 'term-usage-3');
+  assert.strictEqual(usageInputs[2].runId, 'fed456abc1237890');
+  assert.strictEqual(usageInputs[2].taskAssignmentId, 'assignment-usage-3');
 });
 
 console.log('\n--- Launch Attach ---');
