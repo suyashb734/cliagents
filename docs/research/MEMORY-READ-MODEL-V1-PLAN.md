@@ -70,9 +70,28 @@ Deliverables:
 - exact `projects` schema
 - exact `memory_records_v1` shape
 - exact `memory_edges_v1` shape
+- exact `root_io_events` ownership and field contract for native root capture
+- exact summary-lineage edge contract, including edge namespace and staleness
+  rules
 - route payloads for `/orchestration/memory/query` and
   `/orchestration/memory/insights`
 - test fixtures and acceptance criteria
+- redaction contract: every new persistable text or JSON field (`prompt_body`,
+  `content_full`, `content_preview`, `parsed_message`, `metadata`, and `*_json`
+  user-content fields) is written through one redaction seam. The default
+  ruleset reuses `src/security/secret-redaction.js`. Summary writers use the
+  same seam. No new write path ships with redaction disabled.
+- hash policy: `content_sha256` is computed over the redacted payload. Raw-byte
+  audit fidelity, if needed, belongs in a separately purgeable opt-in side store.
+- retention contract: each new table declares a retention class
+  (`raw-bounded`, `summary-indefinite`, or `metadata-indefinite`). Raw-bounded
+  tables ship with the columns needed for future cleanup without another
+  migration. A purge-by-`root_session_id` path is designed and named even if V1
+  only stubs implementation.
+- performance budget: `/orchestration/memory/query` p95 <= 250 ms and
+  `/orchestration/memory/insights` p95 <= 500 ms against the V1 seed fixture
+  (at least 50k `root_io_events`, 5k `runs`, and 500 `orchestrations`) with a
+  representative filter set. Required indexes are named in the migration spec.
 
 Parallelism: no implementation workers yet.
 
@@ -125,6 +144,34 @@ Acceptance:
 - edges expose lineage without inventing weak links
 - query results can drill back to source records
 - derived summaries link back to their source scopes or source records
+
+### Phase 2a: Native Root Events And Summary Lineage
+
+Preferred executor: strong coding model after Phase 0.
+
+Write scope:
+
+- ordered migration for `root_io_events` and summary-lineage storage
+- redaction and retention helpers in the persistence path
+- native-root event tests
+
+Deliverables:
+
+- `root_io_events` for broker-sent input, terminal output chunks, parsed visible
+  messages, tool events, usage, and liveness signals
+- log offsets and redacted payload hashes so raw terminal logs remain the audit
+  fallback without making query tables unbounded raw-byte stores
+- summary lineage edges for root, run, room, task, and project summaries
+- parser confidence rules so low-confidence TUI extraction does not seed
+  authoritative-looking summary edges
+
+Acceptance:
+
+- `run_context_snapshots` and root IO payloads are redacted on creation
+- immutable snapshots are never partially scrubbed later; the only post-hoc
+  privacy operation is full purge by scope
+- parsed-message ingestion is idempotent across parser reruns
+- summary edges preserve source provenance and cannot loop indefinitely
 
 ### Phase 3: HTTP Query And Insights APIs
 
@@ -197,6 +244,13 @@ Supervisor gates:
 - focused DB/memory/query tests
 - `npm test`
 - manual route smoke for query and insights
+- redaction conformance: injected JWT, Google API key, and bearer token patterns
+  in a TUI output stream and `run_context_snapshots.prompt_body` do not appear
+  unredacted in persisted rows, derived summaries, or metadata fields
+- retention dry-run: cleanup identifies expired `raw-bounded` rows under the
+  documented policy without touching summary or lineage rows
+- benchmark gate: the `BENCH=1` fixture test executes within documented SLOs and
+  exercises the same indexes named in the migration plan
 - no new broad-suite regressions except documented provider auth/quota skips
 
 ## Worktree Strategy

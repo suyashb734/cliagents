@@ -9,6 +9,8 @@ docs remain useful context, but this file is the current entrypoint.
    - Run the live child reliability matrix.
    - Rate adapters for ephemeral and collaborator readiness.
    - Gate collaborator mode where provider continuity is not reliable.
+   - Make compatible child reuse the default under an attached root, and expose
+     the reuse decision whenever the broker reuses or skips a settled lane.
 
 2. **Task-linked observability follow-through**
    - Keep task, assignment, run, usage, and memory linkage coherent.
@@ -25,6 +27,9 @@ docs remain useful context, but this file is the current entrypoint.
    - Build derived memory as layered summaries over raw events: brief,
      decisions, blockers, next actions, and eventually a tree or graph of
      conversation/run summaries.
+   - Own `root_io_events` and summary-lineage edges in the Memory Read Model
+     branch so Long-Horizon orchestration does not introduce competing
+     persistence tables.
    - Improve live metadata completeness for model, duration, and cost where
      providers expose it.
 
@@ -54,6 +59,9 @@ docs remain useful context, but this file is the current entrypoint.
    - Use dispatch requests as the durable queue boundary before spawning work,
      but keep native interactive-root capture as the audit boundary for
      human-managed roots.
+   - Start with a Phase 0 contract freeze for dispatch state, context snapshot
+     immutability, task-session binding history, reuse policy, redaction,
+     retention, and benchmark gates before implementation workers edit files.
    - Keep this as an execution-control model, not a generic task-board product.
 
 ## Deferred

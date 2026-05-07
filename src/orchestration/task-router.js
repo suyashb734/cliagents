@@ -785,6 +785,7 @@ class TaskRouter extends EventEmitter {
           terminalId: terminal.terminalId,
           reused: terminal.reused === true,
           reuseReason: terminal.reuseReason || null,
+          reuse: terminal.reuseDecision || null,
           profile: profileName,
           adapter: profile.adapter,
           model: modelSelection.model,
@@ -1016,6 +1017,7 @@ class TaskRouter extends EventEmitter {
       modelRecommendation: stepModelSelection.recommendation,
       reused: terminal.reused === true,
       reuseReason: terminal.reuseReason || null,
+      reuse: terminal.reuseDecision || null,
       output
     };
   }

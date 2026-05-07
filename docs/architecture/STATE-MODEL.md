@@ -66,6 +66,13 @@ linked terminal when a terminal exists.
 
 ## Continuity Rule
 
+Compatible child-lane reuse is the default when a delegated task is attached to
+a root session. Reuse is compatible only when adapter, model, effort, workdir or
+worktree, role, session kind, session label, tool policy, permission mode,
+system prompt, and task or assignment scope match.
+
 Use `reply_to_terminal` for exact continuation of a known child terminal. Use
-`delegate_task` for new bounded work. Use `collaborator: true` with a
-`sessionLabel` only when a named child should preserve provider continuity.
+`delegate_task` for routed bounded work; it should return a reuse decision that
+explains whether a compatible terminal was selected or why a new binding was
+created. Use `collaborator: true` with a `sessionLabel` only when a named child
+should preserve provider continuity.

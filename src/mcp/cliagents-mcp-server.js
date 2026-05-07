@@ -784,6 +784,20 @@ function buildRouteRequest({
   return routeRequest;
 }
 
+function formatRouteReuseLine(routeData = {}) {
+  const reuse = routeData.reuse || routeData.reuseDecision || null;
+  if (!reuse) {
+    return null;
+  }
+
+  const preferred = reuse.preferred === true ? 'yes' : 'no';
+  const selected = (reuse.selected === true || routeData.reused === true) ? 'yes' : 'no';
+  const reason = reuse.reason || routeData.reuseReason || 'n/a';
+  const candidate = reuse.candidateTerminalId ? `, candidate=${reuse.candidateTerminalId}` : '';
+  const newBinding = reuse.requiredNewBinding === true ? ', new_binding=yes' : '';
+  return `**Reuse:** preferred=${preferred}, selected=${selected}, reason=${reason}${candidate}${newBinding}`;
+}
+
 function toFiniteNonNegative(value, fallback = null) {
   const parsed = Number.parseInt(value, 10);
   if (!Number.isFinite(parsed) || parsed < 0) {
@@ -2869,6 +2883,8 @@ async function handleDelegateTask(args) {
   const retrySummaryLine = routeOutcome.retried
     ? `**Recovery:** retried route with forceFreshSession after ${routeOutcome.retryPlan?.reason || 'transient_error'}`
     : null;
+  const reuseSummaryLine = formatRouteReuseLine(routeRes.data);
+  const routeSummaryLines = [retrySummaryLine, reuseSummaryLine].filter(Boolean).join('\n');
 
   if (wait) {
     const syncWaitMs = Math.max(
@@ -2885,7 +2901,7 @@ async function handleDelegateTask(args) {
       return {
         content: [{
           type: 'text',
-          text: `## ${profileDisplay} (${usedAdapter}) Response\n\n**Terminal ID:** ${terminalId}\n**Status:** completed${retrySummaryLine ? `\n${retrySummaryLine}` : ''}\n\n${waitResult.output || 'No output captured'}`
+          text: `## ${profileDisplay} (${usedAdapter}) Response\n\n**Terminal ID:** ${terminalId}\n**Status:** completed${routeSummaryLines ? `\n${routeSummaryLines}` : ''}\n\n${waitResult.output || 'No output captured'}`
         }]
       };
     }
@@ -2894,7 +2910,7 @@ async function handleDelegateTask(args) {
       return {
         content: [{
           type: 'text',
-          text: `## ${profileDisplay} (${usedAdapter}) Task Failed\n\n**Terminal ID:** ${terminalId}\n**Status:** ${waitStatus}${retrySummaryLine ? `\n${retrySummaryLine}` : ''}\n\n${waitResult.output || 'No output captured'}`
+          text: `## ${profileDisplay} (${usedAdapter}) Task Failed\n\n**Terminal ID:** ${terminalId}\n**Status:** ${waitStatus}${routeSummaryLines ? `\n${routeSummaryLines}` : ''}\n\n${waitResult.output || 'No output captured'}`
         }]
       };
     }
@@ -2903,7 +2919,7 @@ async function handleDelegateTask(args) {
       return {
         content: [{
           type: 'text',
-          text: `## ${profileDisplay} (${usedAdapter}) Waiting\n\n**Terminal ID:** ${terminalId}\n**Status:** ${waitStatus}${retrySummaryLine ? `\n${retrySummaryLine}` : ''}\n\nThe delegated task is blocked on an interactive prompt. Use \`check_task_status({ terminalId: "${terminalId}" })\` for the blocker details or \`check_tasks_status({ terminalIds: ["${terminalId}"] })\` if you are monitoring several tasks.`
+          text: `## ${profileDisplay} (${usedAdapter}) Waiting\n\n**Terminal ID:** ${terminalId}\n**Status:** ${waitStatus}${routeSummaryLines ? `\n${routeSummaryLines}` : ''}\n\nThe delegated task is blocked on an interactive prompt. Use \`check_task_status({ terminalId: "${terminalId}" })\` for the blocker details or \`check_tasks_status({ terminalIds: ["${terminalId}"] })\` if you are monitoring several tasks.`
         }]
       };
     }
@@ -2911,7 +2927,7 @@ async function handleDelegateTask(args) {
     return {
       content: [{
         type: 'text',
-        text: `## ${profileDisplay} (${usedAdapter}) Still Running\n\n**Terminal ID:** ${terminalId}\n**Status:** ${waitStatus}${retrySummaryLine ? `\n${retrySummaryLine}` : ''}\n\nThe task exceeded the MCP synchronous wait window (${Math.round(syncWaitMs / 1000)}s) but is still running. Continue with \`check_task_status({ terminalId: "${terminalId}" })\`, or use \`check_tasks_status\` / \`wait_for_tasks\` if you are coordinating several terminals.`
+        text: `## ${profileDisplay} (${usedAdapter}) Still Running\n\n**Terminal ID:** ${terminalId}\n**Status:** ${waitStatus}${routeSummaryLines ? `\n${routeSummaryLines}` : ''}\n\nThe task exceeded the MCP synchronous wait window (${Math.round(syncWaitMs / 1000)}s) but is still running. Continue with \`check_task_status({ terminalId: "${terminalId}" })\`, or use \`check_tasks_status\` / \`wait_for_tasks\` if you are coordinating several terminals.`
       }]
     };
   }
@@ -2919,7 +2935,7 @@ async function handleDelegateTask(args) {
   return {
     content: [{
       type: 'text',
-      text: `## Task Delegated: ASYNC\n\n**Terminal ID:** ${terminalId}\n**Profile:** ${routedProfile || profileDisplay}\n**Adapter:** ${usedAdapter}\n**Task Type:** ${taskType}${retrySummaryLine ? `\n${retrySummaryLine}` : ''}\n\nThe task is running asynchronously. Use \`check_task_status({ terminalId: "${terminalId}" })\` for a single task, \`check_tasks_status({ terminalIds: ["${terminalId}"] })\` for grouped monitoring, or \`get_terminal_output({ terminalId: "${terminalId}" })\` to inspect partial output.`
+      text: `## Task Delegated: ASYNC\n\n**Terminal ID:** ${terminalId}\n**Profile:** ${routedProfile || profileDisplay}\n**Adapter:** ${usedAdapter}\n**Task Type:** ${taskType}${routeSummaryLines ? `\n${routeSummaryLines}` : ''}\n\nThe task is running asynchronously. Use \`check_task_status({ terminalId: "${terminalId}" })\` for a single task, \`check_tasks_status({ terminalIds: ["${terminalId}"] })\` for grouped monitoring, or \`get_terminal_output({ terminalId: "${terminalId}" })\` to inspect partial output.`
     }]
   };
 }

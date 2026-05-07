@@ -65,8 +65,9 @@ The correct center of gravity is:
 - `orchestration` becomes the top-level long-horizon object
 - `phases`, `gates`, and `handoffs` model execution semantics
 - `specialists` define routing and policy
-- native interactive roots get their own event-capture path so human-managed
-  TUI sessions become queryable broker memory, not just replayable terminal logs
+- native interactive roots get their own event-capture path, owned by the Memory
+  Read Model plan, so human-managed TUI sessions become queryable broker memory
+  instead of only replayable terminal logs
 - memory snapshots become layered derived summaries over raw events, suitable
   for external supervisors and future summary-tree/summary-graph navigation
 
@@ -365,7 +366,7 @@ The existing run ledger remains canonical for execution history.
 
 Add orchestration-specific state keyed by `run_id`.
 
-### New Tables
+### Long-Horizon-Owned Tables
 
 #### `orchestrations`
 
@@ -425,6 +426,10 @@ Add orchestration-specific state keyed by `run_id`.
 
 #### `task_session_bindings`
 
+Append-only. A model, effort, worktree, tool policy, provider-thread, or
+compatible-reuse decision change creates a new binding row instead of mutating
+historical attribution.
+
 - `binding_id`
 - `task_id`
 - `assignment_id`
@@ -438,10 +443,18 @@ Add orchestration-specific state keyed by `run_id`.
 - `runtime_host`
 - `runtime_fidelity`
 - `reuse_policy`
+- `reuse_decision_json`
 - `status`
 - `metadata`
 - `created_at`
 - `last_verified_at`
+
+### Prerequisite Memory Read Model Tables
+
+`root_io_events` and `memory_summary_edges` are prerequisites owned by the Memory
+Read Model plan, not Long-Horizon execution-control tables. Long-Horizon may
+reference them for supervisor reconstruction, continuation summaries, and
+orchestration lineage, but it must not introduce competing migrations for them.
 
 #### `root_io_events`
 
@@ -466,9 +479,19 @@ Add orchestration-specific state keyed by `run_id`.
 - `occurred_at`
 - `recorded_at`
 
+Normative contract:
+
+`content_full` and `content_preview` store redacted payloads. Raw terminal bytes
+remain in the existing tmux log path and are governed by their own retention
+policy. Offsets (`log_offset_start`, `log_offset_end`) plus `content_sha256` are
+sufficient to reconstruct provenance while the raw log exists. A workspace may
+opt in to a separate raw side store, but that side store is purgeable
+independently of `root_io_events`.
+
 #### `memory_summary_edges`
 
 - `edge_id`
+- `edge_namespace` (`structural`, `derivation`, `execution`)
 - `parent_scope_type`
 - `parent_scope_id`
 - `child_scope_type`
@@ -553,6 +576,36 @@ should prefer normalized event rows and derived summaries.
 
 ## Phase Order
 
+### Phase 0: Contract Freeze
+
+Owner: supervisor. No implementation workers.
+
+Deliverables:
+
+- exact schema for `orchestrations`, `dispatch_requests`,
+  `run_context_snapshots`, `task_session_bindings`, `orchestration_phases`,
+  `orchestration_gates`, `orchestration_handoffs`, and additive
+  `operator_actions` semantics
+- imported Memory Read Model contracts for `root_io_events` and
+  `memory_summary_edges`
+- dispatch request state machine, coalescing semantics, defer/cancel behavior,
+  idempotency keys, and restart reconciliation rules
+- immutable `run_context_snapshots`: redacted on creation, update-blocked after
+  insert, and purge-only for post-hoc privacy operations
+- append-only `task_session_bindings`, including model/effort/tool/worktree
+  changes and compatible-reuse decisions
+- redaction contract for `prompt_body`, `content_full`, `content_preview`,
+  `parsed_message`, metadata, and every `*_json` field that may carry user
+  content; `content_sha256` is computed over redacted bytes
+- retention contract: every new table declares a retention class and ships the
+  columns needed to enforce it without future migration
+- liveness and timeout values for `dispatch_requests`, phases,
+  `task_session_bindings`, and runtime hosts
+- acceptance fixtures for dispatch coalescing/defer, blocked-state replay,
+  root IO capture, and gate approval/rejection
+
+Workers may not edit implementation files until Phase 0 is signed off.
+
 ### Phase 1: Harden Runs
 
 Goal:
@@ -574,15 +627,16 @@ Primary touchpoints:
 - `src/database/db.js`
 - `src/database/migrations`
 
-### Phase 1a: Native Interactive Root Persistence
+### Prerequisite: Memory Read Model Phase 2a
 
 Goal:
-Make broker-managed native roots inspectable as structured broker memory, not
-only as raw tmux logs.
+Make broker-managed native roots inspectable as structured broker memory before
+Long-Horizon uses those events for supervisor reconstruction.
 
 Required work:
 
-1. add `root_io_events` persistence and projection helpers
+1. add `root_io_events` persistence and projection helpers in the Memory Read
+   Model branch
 2. record broker-sent terminal input, permission replies, approvals, denials,
    interrupts, detach, resize, and kill actions as durable events
 3. persist terminal output chunks with log offsets and timestamps
@@ -769,12 +823,24 @@ This plan is successful when:
    continuation summary, and known usage without reading raw tmux logs directly
 8. root, task, room, run, and project summaries can be linked into a derived
    memory tree or graph without overriding raw event truth
+9. raw `root_io_events.content_full` storage is bounded by its declared
+   retention class; offsets and `content_sha256` remain queryable after raw
+   payload purge
+10. any new persistence path that captures user prompt or terminal output
+    content is covered by redaction-conformance tests, including derived
+    summaries and `memory_summary_edges` traversals
+11. an operator-initiated purge by `root_session_id` reaches every table that
+    stores user content for that root, including derived summaries and reachable
+    memory summary edges
+12. route and dispatch responses expose compatible-reuse decisions so supervisors
+    can tell whether an existing child lane was reused or why a new binding was
+    created
 
 ## Recommended Initial Implementation Order
 
 1. fix run-state and blocked-state durability
-2. add native interactive-root persistence with `root_io_events`, parsed
-   messages, and continuation summaries
+2. finish Memory Read Model Phase 2a for native interactive-root persistence,
+   parsed messages, continuation summaries, and summary lineage
 3. add orchestration tables and service layer
 4. add dispatch request, context snapshot, and task-session binding records
 5. add phase and gate state with minimal HTTP routes

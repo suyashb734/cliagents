@@ -187,6 +187,22 @@ async function run() {
 
     assert.strictEqual(second.terminalId, first.terminalId);
     assert.strictEqual(second.reused, true);
+    assert.deepStrictEqual(
+      {
+        preferred: second.reuse.preferred,
+        selected: second.reuse.selected,
+        reason: second.reuse.reason,
+        candidateTerminalId: second.reuse.candidateTerminalId,
+        requiredNewBinding: second.reuse.requiredNewBinding
+      },
+      {
+        preferred: true,
+        selected: true,
+        reason: 'matching-root-session-shape',
+        candidateTerminalId: first.terminalId,
+        requiredNewBinding: false
+      }
+    );
     assert.strictEqual(fakeTmux.createCalls.length, 1);
 
     const researchRootSessionId = 'eeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee';

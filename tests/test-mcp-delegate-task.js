@@ -416,7 +416,14 @@ async function run() {
         terminalId: 'term-default-async',
         adapter: 'qwen-cli',
         taskType: 'architect',
-        profile: 'architect_qwen-cli'
+        profile: 'architect_qwen-cli',
+        reuse: {
+          preferred: true,
+          selected: false,
+          reason: 'no_compatible_terminal',
+          candidateTerminalId: null,
+          requiredNewBinding: true
+        }
       },
       statuses: ['processing'],
       output: ''
@@ -430,6 +437,7 @@ async function run() {
     const defaultAsyncText = defaultAsync.content[0].text;
     assert(defaultAsyncText.includes('Task Delegated: ASYNC'));
     assert(defaultAsyncText.includes('term-default-async'));
+    assert(defaultAsyncText.includes('preferred=yes, selected=no, reason=no_compatible_terminal'));
 
     const replied = await mod.handleReplyToTerminal({
       terminalId: 'term-default-async',

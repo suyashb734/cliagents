@@ -2623,33 +2623,149 @@ class PersistentSessionManager extends EventEmitter {
     return status === TerminalStatus.IDLE || status === TerminalStatus.COMPLETED;
   }
 
-  _findReusableTerminal(options = {}) {
-    const preferReuse = options.preferReuse ?? !!options.rootSessionId;
-    if (!preferReuse || options.forceFreshSession || !options.rootSessionId) {
-      return null;
+  _describeReuseContextMismatch(candidateContext = {}, requestedContext = {}) {
+    const scalarFields = [
+      ['adapter', 'adapter_mismatch'],
+      ['model', 'model_mismatch'],
+      ['reasoningEffort', 'effort_mismatch'],
+      ['workDir', 'workdir_mismatch'],
+      ['role', 'role_mismatch'],
+      ['agentProfile', 'profile_mismatch'],
+      ['sessionKind', 'session_kind_mismatch'],
+      ['sessionLabel', 'session_label_mismatch'],
+      ['permissionMode', 'permission_mode_mismatch'],
+      ['taskId', 'task_id_mismatch'],
+      ['taskAssignmentId', 'task_assignment_id_mismatch'],
+      ['systemPromptHash', 'system_prompt_mismatch']
+    ];
+
+    for (const [field, reason] of scalarFields) {
+      if ((candidateContext?.[field] || null) !== (requestedContext?.[field] || null)) {
+        return reason;
+      }
     }
 
-    const requestedSignature = this._buildReuseSignature(this._buildReuseContext(options));
+    const candidateTools = JSON.stringify(candidateContext?.allowedTools || []);
+    const requestedTools = JSON.stringify(requestedContext?.allowedTools || []);
+    if (candidateTools !== requestedTools) {
+      return 'tool_policy_mismatch';
+    }
+
+    return null;
+  }
+
+  _buildReuseDecision(options = {}) {
+    const preferReuse = options.preferReuse ?? !!options.rootSessionId;
+    const decision = {
+      preferred: preferReuse === true,
+      selected: false,
+      reason: null,
+      candidateTerminalId: null,
+      requiredNewBinding: false
+    };
+
+    if (!preferReuse) {
+      decision.reason = 'reuse_not_preferred';
+      decision.requiredNewBinding = !!options.rootSessionId;
+      return decision;
+    }
+
+    if (options.forceFreshSession) {
+      decision.reason = 'force_fresh_session';
+      decision.requiredNewBinding = true;
+      return decision;
+    }
+
+    if (!options.rootSessionId) {
+      decision.reason = 'missing_root_session';
+      return decision;
+    }
+
+    const requestedContext = this._buildReuseContext(options);
+    const requestedSignature = this._buildReuseSignature(requestedContext);
+    let shapeMismatchFallback = null;
+    let exactShapeBlockedFallback = null;
+
     for (const terminal of this.terminals.values()) {
       if (!terminal || terminal.rootSessionId !== options.rootSessionId) {
         continue;
       }
-      if (!terminal._reuseSignature || terminal._reuseSignature !== requestedSignature) {
+
+      const mismatchReason = terminal._reuseSignature === requestedSignature
+        ? null
+        : this._describeReuseContextMismatch(terminal._reuseContext || {}, requestedContext);
+      if (mismatchReason) {
+        if (!shapeMismatchFallback) {
+          shapeMismatchFallback = {
+            reason: mismatchReason,
+            candidateTerminalId: terminal.terminalId
+          };
+        }
         continue;
       }
+
+      if (!terminal._reuseSignature) {
+        if (!shapeMismatchFallback) {
+          shapeMismatchFallback = {
+            reason: 'candidate_missing_reuse_context',
+            candidateTerminalId: terminal.terminalId
+          };
+        }
+        continue;
+      }
+
       if (this._isTerminalReserved(terminal)) {
+        if (!exactShapeBlockedFallback) {
+          exactShapeBlockedFallback = {
+            reason: 'candidate_reserved',
+            candidateTerminalId: terminal.terminalId
+          };
+        }
         continue;
       }
 
       const currentStatus = this.getStatus(terminal.terminalId);
       if (!this._isReusableTerminalStatus(currentStatus)) {
+        if (!exactShapeBlockedFallback) {
+          exactShapeBlockedFallback = {
+            reason: `candidate_${currentStatus || 'unknown'}_not_reusable`,
+            candidateTerminalId: terminal.terminalId
+          };
+        }
         continue;
       }
 
-      return terminal;
+      return {
+        ...decision,
+        selected: true,
+        reason: 'matching-root-session-shape',
+        candidateTerminalId: terminal.terminalId,
+        requiredNewBinding: false
+      };
     }
 
-    return null;
+    const fallback = exactShapeBlockedFallback || shapeMismatchFallback || {
+      reason: 'no_compatible_terminal',
+      candidateTerminalId: null
+    };
+    decision.reason = fallback.reason;
+    decision.candidateTerminalId = fallback.candidateTerminalId;
+    decision.requiredNewBinding = true;
+
+    return decision;
+  }
+
+  _findReusableTerminalWithDecision(options = {}) {
+    const reuseDecision = this._buildReuseDecision(options);
+    const terminal = reuseDecision?.selected && reuseDecision.candidateTerminalId
+      ? this.terminals.get(reuseDecision.candidateTerminalId) || null
+      : null;
+
+    return { terminal, reuseDecision };
+  }
+
+  _findReusableTerminal(options = {}) {
+    return this._findReusableTerminalWithDecision(options).terminal;
   }
 
   _getProcessState(terminal) {
@@ -2877,6 +2993,7 @@ class PersistentSessionManager extends EventEmitter {
       attention,
       reused: false,
       reuseReason: null,
+      reuseDecision: null,
       ...extra
     };
   }
@@ -2939,6 +3056,14 @@ class PersistentSessionManager extends EventEmitter {
     }
 
     const reuseReason = options.reuseReason || 'matching-root-session-shape';
+    const reuseDecision = {
+      ...(options.reuseDecision || {}),
+      preferred: true,
+      selected: true,
+      reason: reuseReason,
+      candidateTerminalId: terminal.terminalId,
+      requiredNewBinding: false
+    };
     this._recordSessionResumed(terminal, {
       reuseReason,
       metadata: options.sessionMetadata || terminal.sessionMetadata || null
@@ -2952,7 +3077,8 @@ class PersistentSessionManager extends EventEmitter {
 
     return this._buildTerminalResponse(terminal, {
       reused: true,
-      reuseReason
+      reuseReason,
+      reuseDecision
     });
   }
 
@@ -2970,6 +3096,14 @@ class PersistentSessionManager extends EventEmitter {
     }
 
     const reuseReason = options.reuseReason || 'matching-root-session-shape';
+    const reuseDecision = {
+      ...(options.reuseDecision || {}),
+      preferred: true,
+      selected: true,
+      reason: reuseReason,
+      candidateTerminalId: terminal.terminalId,
+      requiredNewBinding: false
+    };
     this._recordSessionResumed(terminal, {
       reuseReason,
       metadata: options.sessionMetadata || terminal.sessionMetadata || null
@@ -2983,7 +3117,8 @@ class PersistentSessionManager extends EventEmitter {
 
     return this._buildTerminalResponse(terminal, {
       reused: true,
-      reuseReason
+      reuseReason,
+      reuseDecision
     });
   }
 
@@ -3263,7 +3398,7 @@ class PersistentSessionManager extends EventEmitter {
       ? String(recoveryMetadata.providerResumeCommand || '').trim() || null
       : null;
 
-    const reusableTerminal = this._findReusableTerminal({
+    const reuseLookup = this._findReusableTerminalWithDecision({
       adapter,
       agentProfile,
       role,
@@ -3280,10 +3415,13 @@ class PersistentSessionManager extends EventEmitter {
       preferReuse,
       forceFreshSession
     });
+    const reusableTerminal = reuseLookup.terminal;
+    const reuseDecision = reuseLookup.reuseDecision;
     if (reusableTerminal) {
       const preserveProviderStateOnReuse = resolvedSessionKind === 'main' || resolvedSessionKind === 'collaborator';
       return this._reuseTerminal(reusableTerminal, {
         reuseReason: 'matching-root-session-shape',
+        reuseDecision,
         sessionMetadata: Object.keys(resolvedSessionMetadata).length > 0 ? resolvedSessionMetadata : null,
         resetProviderState: !preserveProviderStateOnReuse
       });
@@ -3563,7 +3701,9 @@ class PersistentSessionManager extends EventEmitter {
       });
     }
 
-    return this._buildTerminalResponse(terminal);
+    return this._buildTerminalResponse(terminal, {
+      reuseDecision
+    });
   }
 
   /**

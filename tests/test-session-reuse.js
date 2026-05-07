@@ -159,6 +159,22 @@ async function run() {
 
     assert.notStrictEqual(second.terminalId, first.terminalId);
     assert.strictEqual(second.reused, false);
+    assert.deepStrictEqual(
+      {
+        preferred: second.reuseDecision.preferred,
+        selected: second.reuseDecision.selected,
+        reason: second.reuseDecision.reason,
+        candidateTerminalId: second.reuseDecision.candidateTerminalId,
+        requiredNewBinding: second.reuseDecision.requiredNewBinding
+      },
+      {
+        preferred: true,
+        selected: false,
+        reason: 'task_id_mismatch',
+        candidateTerminalId: first.terminalId,
+        requiredNewBinding: true
+      }
+    );
     assert.strictEqual(fakeTmux.createCalls.length, 2);
     assert.strictEqual(db.listTerminals({ rootSessionId: reusableRoot }).length, 2);
     const secondLiveTerminal = manager.terminals.get(second.terminalId);
@@ -205,6 +221,8 @@ async function run() {
     });
     assert.notStrictEqual(forcedFresh.terminalId, first.terminalId);
     assert.strictEqual(forcedFresh.reused, false);
+    assert.strictEqual(forcedFresh.reuseDecision.reason, 'force_fresh_session');
+    assert.strictEqual(forcedFresh.reuseDecision.requiredNewBinding, true);
 
     const busyRoot = 'bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb';
     const busy = await manager.createTerminal({
@@ -253,6 +271,8 @@ async function run() {
       sessionKind: 'reviewer'
     });
     assert.notStrictEqual(busyFollowUp.terminalId, busy.terminalId);
+    assert.strictEqual(busyFollowUp.reuseDecision.reason, 'candidate_processing_not_reusable');
+    assert.strictEqual(busyFollowUp.reuseDecision.candidateTerminalId, busy.terminalId);
 
     const modelRoot = 'cccccccccccccccccccccccccccccccc';
     const modelOne = await manager.createTerminal({
@@ -269,6 +289,8 @@ async function run() {
       model: 'gpt-5'
     });
     assert.notStrictEqual(modelTwo.terminalId, modelOne.terminalId);
+    assert.strictEqual(modelTwo.reuseDecision.reason, 'model_mismatch');
+    assert.strictEqual(modelTwo.reuseDecision.candidateTerminalId, modelOne.terminalId);
 
     console.log('✅ Session manager isolates reuse by task scope, skips busy terminals, and honors force-fresh/model boundaries');
   } finally {

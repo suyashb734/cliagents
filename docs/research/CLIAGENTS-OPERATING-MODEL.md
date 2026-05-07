@@ -91,6 +91,18 @@ Use child sessions for:
 
 Do not treat child sessions as silent new roots.
 
+Compatible reuse is the default posture for child sessions attached to a root.
+The broker should reuse a settled child when the lane shape matches: adapter,
+model, effort, workdir or worktree, role, session kind, session label, tool
+policy, permission mode, system prompt, and task or assignment scope. If any of
+those change, the broker should create a new binding and report why reuse was
+skipped.
+
+Exact continuation is different from compatible reuse. Use the known terminal id
+when continuing one specific child conversation. Use a collaborator child with a
+stable `sessionLabel` when provider-thread continuity is part of the lane
+contract.
+
 ### Room
 
 A multi-agent conversation surface.

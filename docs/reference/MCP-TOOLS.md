@@ -32,3 +32,10 @@ it is not a generated schema.
 
 Use MCP for tracked orchestration. Use raw provider CLIs only for disposable work
 that does not need broker persistence, usage, memory, or replay.
+
+`delegate_task` should prefer compatible settled child-session reuse when the
+caller is attached to a root session. Its result should expose the broker reuse
+decision: whether reuse was preferred, whether it was selected, the candidate
+terminal when relevant, and why a new binding was required. Use
+`reply_to_terminal` instead when the operator wants exact continuation of one
+known terminal.
