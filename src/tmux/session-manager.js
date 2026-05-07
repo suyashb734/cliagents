@@ -1681,6 +1681,51 @@ class PersistentSessionManager extends EventEmitter {
     return messageId;
   }
 
+  _recordRootIoEvent(terminal, event = {}) {
+    if (!terminal || !this.db?.appendRootIoEvent) {
+      return null;
+    }
+
+    const rootSessionId = terminal.rootSessionId || terminal.terminalId;
+    if (!rootSessionId) {
+      return null;
+    }
+
+    const sessionMetadata = terminal.sessionMetadata && typeof terminal.sessionMetadata === 'object'
+      ? terminal.sessionMetadata
+      : {};
+    try {
+      return this.db.appendRootIoEvent({
+        rootSessionId,
+        terminalId: terminal.terminalId,
+        runId: event.runId || sessionMetadata.runId || null,
+        taskId: event.taskId || sessionMetadata.taskId || null,
+        taskAssignmentId: event.taskAssignmentId || sessionMetadata.taskAssignmentId || null,
+        roomId: event.roomId || sessionMetadata.roomId || null,
+        discussionId: event.discussionId || sessionMetadata.discussionId || null,
+        traceId: event.traceId || null,
+        eventKind: event.eventKind,
+        source: event.source || 'broker',
+        contentPreview: event.contentPreview,
+        contentFull: event.contentFull,
+        parsedRole: event.parsedRole || null,
+        metadata: {
+          adapter: terminal.adapter,
+          role: terminal.role || null,
+          sessionKind: terminal.sessionKind || null,
+          agentProfile: terminal.agentProfile || null,
+          ...(event.metadata || {})
+        },
+        occurredAt: event.occurredAt || Date.now(),
+        recordedAt: event.recordedAt || Date.now(),
+        retentionClass: event.retentionClass || 'raw-bounded'
+      });
+    } catch (error) {
+      console.warn('[SessionManager] Failed to record root IO event:', error.message);
+      return null;
+    }
+  }
+
   _syncInteractiveTranscript(terminal, output, nextStatus) {
     if (!this._supportsInteractiveTranscriptSync(terminal)) {
       return;
@@ -4203,6 +4248,19 @@ class PersistentSessionManager extends EventEmitter {
     if (this.db) {
       this.db.updateStatus(terminalId, TerminalStatus.PROCESSING);
 
+      this._recordRootIoEvent(terminal, {
+        eventKind: 'input',
+        source: 'broker',
+        contentFull: message,
+        parsedRole: 'user',
+        traceId: options.traceId || null,
+        metadata: {
+          source: 'session-manager.sendInput',
+          inputKind: 'message',
+          ...(options.metadata || {})
+        }
+      });
+
       // Store input message in conversation history
       this.db.addMessage(terminalId, 'user', message, {
         traceId: options.traceId || null,
@@ -4230,7 +4288,7 @@ class PersistentSessionManager extends EventEmitter {
    * @param {string} terminalId - Terminal ID
    * @param {string} key - Key to send (Enter, Tab, C-c, etc.)
    */
-  sendSpecialKey(terminalId, key) {
+  sendSpecialKey(terminalId, key, options = {}) {
     const terminal = this.terminals.get(terminalId);
     if (!terminal) {
       throw new Error(`Terminal not found: ${terminalId}`);
@@ -4238,6 +4296,19 @@ class PersistentSessionManager extends EventEmitter {
 
     this.tmux.sendSpecialKey(terminal.sessionName, terminal.windowName, key);
     terminal.lastActive = new Date();
+    this._recordRootIoEvent(terminal, {
+      eventKind: 'input',
+      source: 'broker',
+      contentPreview: `[special-key] ${key}`,
+      parsedRole: 'user',
+      traceId: options.traceId || null,
+      metadata: {
+        source: 'session-manager.sendSpecialKey',
+        inputKind: 'special_key',
+        key,
+        ...(options.metadata || {})
+      }
+    });
   }
 
   /**

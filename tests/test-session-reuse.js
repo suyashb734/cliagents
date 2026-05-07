@@ -132,6 +132,15 @@ async function run() {
       }
     });
     await manager.sendInput(first.terminalId, 'Review the implementation.');
+    const firstInputEvents = db.listRootIoEvents({
+      terminalId: first.terminalId,
+      eventKind: 'input',
+      limit: 10
+    });
+    assert(
+      firstInputEvents.some((event) => event.contentFull === 'Review the implementation.' && event.metadata.source === 'session-manager.sendInput'),
+      'sendInput should persist broker-sent input as a root IO event'
+    );
     const firstLiveTerminal = manager.terminals.get(first.terminalId);
     fs.writeFileSync(
       firstLiveTerminal.logPath,

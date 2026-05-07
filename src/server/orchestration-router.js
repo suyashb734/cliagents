@@ -3824,19 +3824,30 @@ function createOrchestrationRouter(context) {
   }
 
   async function deliverInputQueueItem(item) {
+    const deliveryMetadata = {
+      source: 'terminal-input-queue',
+      inputQueueId: item.id,
+      inputKind: item.inputKind,
+      controlMode: item.controlMode,
+      approvalRequired: item.approvalRequired,
+      requestedBy: item.requestedBy || null,
+      approvedBy: item.approvedBy || null
+    };
     if (item.inputKind === 'approval' || item.inputKind === 'denial') {
       const key = String(item.message || (item.inputKind === 'approval' ? 'y' : 'n')).trim()
         || (item.inputKind === 'approval' ? 'y' : 'n');
       if (typeof sessionManager?.sendSpecialKey === 'function') {
-        sessionManager.sendSpecialKey(item.terminalId, key);
+        sessionManager.sendSpecialKey(item.terminalId, key, { metadata: deliveryMetadata });
         if (item.metadata?.sendEnter !== false) {
-          sessionManager.sendSpecialKey(item.terminalId, 'Enter');
+          sessionManager.sendSpecialKey(item.terminalId, 'Enter', { metadata: deliveryMetadata });
         }
         return;
       }
     }
 
-    await sessionManager.sendInput(item.terminalId, item.message || '');
+    await sessionManager.sendInput(item.terminalId, item.message || '', {
+      metadata: deliveryMetadata
+    });
   }
 
   /**
