@@ -358,22 +358,82 @@ function getMcpRootStateFilePath(
   return path.join(getMcpRootStateDir(), `${safeClient}-${safeScope}-${digest}.json`);
 }
 
-function loadPersistedRootContext() {
-  const filePath = getMcpRootStateFilePath();
-  if (!fs.existsSync(filePath)) {
-    return null;
-  }
+const ROOT_CONTEXT_RESET_MARKER = '__root_context_reset__';
+const ROOT_CONTEXT_CLIENT_ALIASES = [
+  'mcp-client',
+  'mcp',
+  'codex',
+  'claude',
+  'opencode',
+  'qwen',
+  'gemini',
+  'openclaw'
+];
 
+function listRootContextClientCandidates(primaryClientName = inferMcpClientName()) {
+  const inferredFromEnv = inferClientNameFromEnvironment();
+  const candidates = [
+    primaryClientName,
+    process.env.CLIAGENTS_CLIENT_NAME,
+    process.env.MCP_CLIENT_NAME,
+    process.env.CLIENT_NAME,
+    inferredFromEnv,
+    ...ROOT_CONTEXT_CLIENT_ALIASES
+  ];
+  const deduped = [];
+  for (const candidate of candidates) {
+    const normalized = String(candidate || '').trim();
+    if (!normalized || deduped.includes(normalized)) {
+      continue;
+    }
+    deduped.push(normalized);
+  }
+  return deduped;
+}
+
+function listRootContextStateFilePaths({
+  clientName = inferMcpClientName(),
+  workspaceRoot = inferWorkspaceRoot(),
+  sessionScope = inferMcpSessionScope()
+} = {}) {
+  const paths = [];
+  for (const candidateClientName of listRootContextClientCandidates(clientName)) {
+    const filePath = getMcpRootStateFilePath(candidateClientName, workspaceRoot, sessionScope);
+    if (!paths.includes(filePath)) {
+      paths.push(filePath);
+    }
+  }
+  return paths;
+}
+
+function parsePersistedRootContextFile(filePath, {
+  defaultClientName = inferMcpClientName(),
+  workspaceRoot = inferWorkspaceRoot(),
+  sessionScope = inferMcpSessionScope()
+} = {}) {
   try {
     const parsed = JSON.parse(fs.readFileSync(filePath, 'utf8'));
-    if (!parsed || typeof parsed !== 'object' || !parsed.rootSessionId) {
+    if (!parsed || typeof parsed !== 'object') {
       return null;
     }
 
-    const clientName = parsed.clientName || inferMcpClientName();
-    const workspaceRoot = inferWorkspaceRoot();
-    const sessionScope = parsed.sessionScope || inferMcpSessionScope();
-    const externalSessionRef = parsed.externalSessionRef || buildStickyExternalSessionRef(clientName, workspaceRoot, sessionScope);
+    if (parsed[ROOT_CONTEXT_RESET_MARKER] === true) {
+      return {
+        resetMarker: true
+      };
+    }
+
+    if (!parsed.rootSessionId) {
+      return null;
+    }
+
+    const clientName = parsed.clientName || defaultClientName;
+    const resolvedSessionScope = parsed.sessionScope || sessionScope;
+    const externalSessionRef = parsed.externalSessionRef || buildStickyExternalSessionRef(
+      clientName,
+      workspaceRoot,
+      resolvedSessionScope
+    );
     const sessionMetadata = parsed.sessionMetadata && typeof parsed.sessionMetadata === 'object'
       ? { ...parsed.sessionMetadata }
       : {};
@@ -390,13 +450,14 @@ function loadPersistedRootContext() {
       sessionMetadata.workspaceRoot = workspaceRoot;
     }
     if (!sessionMetadata.mcpSessionScope) {
-      sessionMetadata.mcpSessionScope = sessionScope;
+      sessionMetadata.mcpSessionScope = resolvedSessionScope;
     }
 
     return {
       clientName,
       rootSessionId: parsed.rootSessionId,
       externalSessionRef,
+      sessionScope: resolvedSessionScope,
       originClient: parsed.originClient || 'mcp',
       sessionMetadata
     };
@@ -406,43 +467,103 @@ function loadPersistedRootContext() {
   }
 }
 
+function loadPersistedRootContext() {
+  const workspaceRoot = inferWorkspaceRoot();
+  const sessionScope = inferMcpSessionScope();
+  const clientName = inferMcpClientName();
+  const existingFiles = listRootContextStateFilePaths({
+    clientName,
+    workspaceRoot,
+    sessionScope
+  })
+    .filter((filePath) => fs.existsSync(filePath))
+    .map((filePath) => {
+      let mtimeMs = 0;
+      try {
+        mtimeMs = fs.statSync(filePath).mtimeMs || 0;
+      } catch {}
+      return { filePath, mtimeMs };
+    })
+    .sort((a, b) => b.mtimeMs - a.mtimeMs);
+
+  if (existingFiles.length === 0) {
+    return null;
+  }
+
+  for (const candidate of existingFiles) {
+    const parsed = parsePersistedRootContextFile(candidate.filePath, {
+      defaultClientName: clientName,
+      workspaceRoot,
+      sessionScope
+    });
+    if (!parsed) {
+      continue;
+    }
+    return parsed;
+  }
+
+  return null;
+}
+
 function persistRootContext(rootContext) {
   if (!rootContext?.rootSessionId) {
     return;
   }
 
-  const filePath = getMcpRootStateFilePath(
-    rootContext.clientName || inferMcpClientName(),
-    inferWorkspaceRoot()
-  );
+  const resolvedClientName = rootContext.clientName || inferMcpClientName();
+  const workspaceRoot = inferWorkspaceRoot();
+  const sessionScope = rootContext.sessionScope || inferMcpSessionScope();
   const payload = {
-      clientName: rootContext.clientName || inferMcpClientName(),
-      rootSessionId: rootContext.rootSessionId,
-      externalSessionRef: rootContext.externalSessionRef,
-      originClient: rootContext.originClient || 'mcp',
-      sessionScope: rootContext.sessionScope || inferMcpSessionScope(),
-      sessionMetadata: rootContext.sessionMetadata || {}
-    };
+    clientName: resolvedClientName,
+    rootSessionId: rootContext.rootSessionId,
+    externalSessionRef: rootContext.externalSessionRef,
+    originClient: rootContext.originClient || 'mcp',
+    sessionScope,
+    sessionMetadata: rootContext.sessionMetadata || {}
+  };
 
-  try {
-    fs.mkdirSync(path.dirname(filePath), { recursive: true });
-    const tmpPath = `${filePath}.tmp`;
-    fs.writeFileSync(tmpPath, JSON.stringify(payload, null, 2));
-    fs.renameSync(tmpPath, filePath);
-  } catch (error) {
-    console.warn(`[cliagents-mcp] Failed to persist root context to ${filePath}: ${error.message}`);
+  const targets = [
+    getMcpRootStateFilePath(resolvedClientName, workspaceRoot, sessionScope),
+    getMcpRootStateFilePath(inferMcpClientName(), workspaceRoot, sessionScope)
+  ].filter((filePath, index, arr) => filePath && arr.indexOf(filePath) === index);
+
+  for (const filePath of targets) {
+    try {
+      fs.mkdirSync(path.dirname(filePath), { recursive: true });
+      const tmpPath = `${filePath}.tmp`;
+      fs.writeFileSync(tmpPath, JSON.stringify(payload, null, 2));
+      fs.renameSync(tmpPath, filePath);
+    } catch (error) {
+      console.warn(`[cliagents-mcp] Failed to persist root context to ${filePath}: ${error.message}`);
+    }
   }
 }
 
-function clearPersistedRootContext() {
-  const filePath = getMcpRootStateFilePath();
+function clearPersistedRootContext(options = {}) {
+  const workspaceRoot = options.workspaceRoot || inferWorkspaceRoot();
+  const sessionScope = options.sessionScope || inferMcpSessionScope();
+  const preferredClientName = options.clientName || inferMcpClientName();
+  const targetPaths = listRootContextStateFilePaths({
+    clientName: preferredClientName,
+    workspaceRoot,
+    sessionScope
+  });
   cachedMcpRootContext = null;
-  try {
-    if (fs.existsSync(filePath)) {
-      fs.unlinkSync(filePath);
+
+  const payload = {
+    [ROOT_CONTEXT_RESET_MARKER]: true,
+    clearedAt: new Date().toISOString(),
+    sessionScope
+  };
+  for (const filePath of targetPaths) {
+    try {
+      fs.mkdirSync(path.dirname(filePath), { recursive: true });
+      const tmpPath = `${filePath}.tmp`;
+      fs.writeFileSync(tmpPath, JSON.stringify(payload, null, 2));
+      fs.renameSync(tmpPath, filePath);
+    } catch (error) {
+      console.warn(`[cliagents-mcp] Failed to clear persisted root context at ${filePath}: ${error.message}`);
     }
-  } catch (error) {
-    console.warn(`[cliagents-mcp] Failed to clear persisted root context at ${filePath}: ${error.message}`);
   }
 }
 
@@ -475,13 +596,15 @@ function createImplicitRootContext() {
 function getImplicitRootContext(options = {}) {
   const allowAutoCreate = options?.allowAutoCreate === true;
   if (!cachedMcpRootContext) {
-    if (hasExplicitRootOverrides()) {
+    const persisted = loadPersistedRootContext();
+    if (persisted?.resetMarker) {
+      cachedMcpRootContext = null;
+    } else if (persisted) {
+      cachedMcpRootContext = persisted;
+    } else if (hasExplicitRootOverrides()) {
       cachedMcpRootContext = createImplicitRootContext();
-    } else {
-      cachedMcpRootContext = loadPersistedRootContext();
-      if (!cachedMcpRootContext && allowAutoCreate && !REQUIRE_ROOT_ATTACH) {
-        cachedMcpRootContext = createImplicitRootContext();
-      }
+    } else if (allowAutoCreate && !REQUIRE_ROOT_ATTACH) {
+      cachedMcpRootContext = createImplicitRootContext();
     }
   }
   return cachedMcpRootContext;
@@ -551,6 +674,27 @@ function requireAttachedRootContext(toolName) {
   const rootContext = getAttachedRootContext();
   if (!rootContext?.rootSessionId) {
     throw new Error(buildRootAttachRequiredMessage(toolName));
+  }
+  return rootContext;
+}
+
+function buildTerminalInputForbiddenError(prefix) {
+  const payload = {
+    error: {
+      code: 'terminal_input_forbidden',
+      message: 'Terminal input access denied.'
+    }
+  };
+  const error = new Error(`${prefix}: ${JSON.stringify(payload)}`);
+  error.code = 'terminal_input_forbidden';
+  error.data = payload;
+  return error;
+}
+
+function requireAttachedRootContextForTerminalInput(prefix) {
+  const rootContext = getAttachedRootContext();
+  if (!rootContext?.rootSessionId) {
+    throw buildTerminalInputForbiddenError(prefix);
   }
   return rootContext;
 }
@@ -2789,16 +2933,14 @@ async function handleReplyToTerminal(args) {
     throw new Error('message is required');
   }
 
-  const rootContext = getAttachedRootContext();
-  const controlPlanePayload = rootContext?.rootSessionId
-    ? {
-        rootSessionId: rootContext.rootSessionId,
-        parentSessionId: rootContext.rootSessionId,
-        originClient: rootContext.originClient || null,
-        externalSessionRef: rootContext.externalSessionRef || null,
-        sessionMetadata: rootContext.sessionMetadata || null
-      }
-    : {};
+  const rootContext = requireAttachedRootContextForTerminalInput('Failed to send input');
+  const controlPlanePayload = {
+    rootSessionId: rootContext.rootSessionId,
+    parentSessionId: rootContext.rootSessionId,
+    originClient: rootContext.originClient || null,
+    externalSessionRef: rootContext.externalSessionRef || null,
+    sessionMetadata: rootContext.sessionMetadata || null
+  };
 
   const res = await callCliagents('POST', `/orchestration/terminals/${encodeURIComponent(terminalId)}/input`, {
     message,
@@ -3637,6 +3779,7 @@ async function handleRunBpeScenario(args = {}) {
     targetUrl: args?.targetUrl || null,
     resumeSessionId: args?.resumeSessionId || null,
     interaction: args?.interaction || null,
+    interactionPolicy: args?.interactionPolicy || null,
     runtime: args?.runtime || null,
     trace: args?.trace || null,
     timeoutMs: args?.timeoutMs || null,
@@ -4198,8 +4341,12 @@ async function handleAttachRootSession(args) {
 }
 
 async function handleResetRootSession() {
-  const previous = cachedMcpRootContext || loadPersistedRootContext();
-  clearPersistedRootContext();
+  const persisted = loadPersistedRootContext();
+  const previous = cachedMcpRootContext || (persisted?.resetMarker ? null : persisted);
+  clearPersistedRootContext({
+    clientName: previous?.clientName || inferMcpClientName(),
+    sessionScope: previous?.sessionScope || inferMcpSessionScope()
+  });
 
   return {
     content: [{

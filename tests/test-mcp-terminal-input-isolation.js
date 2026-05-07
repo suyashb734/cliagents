@@ -112,6 +112,13 @@ async function run() {
   let ownerSession = null;
   let attackerSession = null;
   let ownerReloaded = null;
+  let explicitRootSession = null;
+  let driftOwnerSession = null;
+  let driftAttackerSession = null;
+  let driftVerifierSession = null;
+  let resetLeakOwnerSession = null;
+  let resetLeakResetSession = null;
+  let resetLeakProbeSession = null;
   let server = null;
 
   try {
@@ -334,6 +341,13 @@ async function run() {
       }),
       'no-root enqueue_terminal_input after reset'
     );
+    await expectForbidden(
+      () => attackerSession.mod.handleReplyToTerminal({
+        terminalId: 'term-kd71-owner',
+        message: 'KD86_MISSING_ROOT_REPLY_MARKER'
+      }),
+      'no-root reply_to_terminal after reset'
+    );
 
     assert.strictEqual(db.getTerminalInputQueueItem(heldInputId).status, 'held_for_approval');
     assert.strictEqual(db.getTerminalInputQueueItem(pendingDeliverInputId).status, 'pending');
@@ -343,6 +357,193 @@ async function run() {
 
     attackerSession.restore();
     attackerSession = null;
+
+    const explicitOwnerEnv = {
+      ...commonEnv,
+      CLIAGENTS_MCP_SESSION_SCOPE: 'kd71-explicit-owner-scope',
+      CODEX_THREAD_ID: 'kd71-explicit-owner-thread',
+      CLIAGENTS_ROOT_SESSION_ID: ownerRootSessionId,
+      CLIAGENTS_CLIENT_SESSION_REF: 'kd71-explicit-owner-ref'
+    };
+
+    explicitRootSession = loadMcpModule(explicitOwnerEnv);
+    const explicitAttackerEnsure = await explicitRootSession.mod.handleEnsureRootSession({
+      externalSessionRef: 'kd71-root-attacker-explicit'
+    });
+    const explicitAttackerRootSessionId = parseOutputField(
+      explicitAttackerEnsure.content?.[0]?.text,
+      'root_session_id'
+    );
+    assert(explicitAttackerRootSessionId, 'explicit override test should create attacker root session');
+    assert.notStrictEqual(
+      explicitAttackerRootSessionId,
+      ownerRootSessionId,
+      'explicit override attacker root must differ from owner root'
+    );
+    explicitRootSession.restore();
+    explicitRootSession = null;
+
+    explicitRootSession = loadMcpModule(explicitOwnerEnv);
+    await expectForbidden(
+      () => explicitRootSession.mod.handleReplyToTerminal({
+        terminalId: 'term-kd71-owner',
+        message: 'whoami'
+      }),
+      'cross-process root context should honor persisted attacker root instead of env fallback'
+    );
+    const explicitReset = await explicitRootSession.mod.handleResetRootSession();
+    assert(
+      explicitReset.content?.[0]?.text?.includes(`previous_root_session_id: ${explicitAttackerRootSessionId}`),
+      'reset_root_session should report the persisted attacker root when explicit env overrides exist'
+    );
+    explicitRootSession.restore();
+    explicitRootSession = null;
+
+    explicitRootSession = loadMcpModule(explicitOwnerEnv);
+    await expectForbidden(
+      () => explicitRootSession.mod.handleEnqueueTerminalInput({
+        terminalId: 'term-kd71-owner',
+        message: 'pwd'
+      }),
+      'reset_root_session should block terminal writes until ensure_root_session reattaches'
+    );
+    explicitRootSession.restore();
+    explicitRootSession = null;
+
+    const clientDriftScope = 'kd71-client-drift-scope';
+    const clientDriftBaseEnv = {
+      ...commonEnv,
+      CLIAGENTS_CLIENT_NAME: '',
+      CLIAGENTS_MCP_SESSION_SCOPE: clientDriftScope,
+      CODEX_THREAD_ID: ''
+    };
+
+    driftOwnerSession = loadMcpModule(clientDriftBaseEnv);
+    const driftOwnerEnsure = await driftOwnerSession.mod.handleEnsureRootSession({
+      externalSessionRef: 'kd71-client-drift-owner'
+    });
+    const driftOwnerRootSessionId = parseOutputField(driftOwnerEnsure.content?.[0]?.text, 'root_session_id');
+    assert(driftOwnerRootSessionId, 'client-drift owner root session should be created');
+    db.registerTerminal(
+      'term-kd71-client-drift-owner',
+      'cliagents-kd71',
+      '1',
+      'codex-cli',
+      null,
+      'worker',
+      rootDir,
+      null,
+      {
+        rootSessionId: driftOwnerRootSessionId,
+        parentSessionId: driftOwnerRootSessionId,
+        sessionKind: 'worker',
+        originClient: 'codex',
+        externalSessionRef: 'kd71-client-drift-owner',
+        sessionMetadata: {
+          clientName: 'codex',
+          externalSessionRef: 'kd71-client-drift-owner'
+        }
+      }
+    );
+    driftOwnerSession.restore();
+    driftOwnerSession = null;
+
+    driftAttackerSession = loadMcpModule(clientDriftBaseEnv);
+    const driftAttackerEnsure = await driftAttackerSession.mod.handleEnsureRootSession({
+      externalSessionRef: 'kd71-client-drift-attacker',
+      clientName: 'codex'
+    });
+    const driftAttackerRootSessionId = parseOutputField(driftAttackerEnsure.content?.[0]?.text, 'root_session_id');
+    assert(driftAttackerRootSessionId, 'client-drift attacker root session should be created');
+    assert.notStrictEqual(
+      driftAttackerRootSessionId,
+      driftOwnerRootSessionId,
+      'client-drift attacker root must differ from owner root'
+    );
+    driftAttackerSession.restore();
+    driftAttackerSession = null;
+
+    driftVerifierSession = loadMcpModule(clientDriftBaseEnv);
+    await expectForbidden(
+      () => driftVerifierSession.mod.handleReplyToTerminal({
+        terminalId: 'term-kd71-client-drift-owner',
+        message: 'CLIENT_NAME_DRIFT_CROSS_ROOT_REPLY'
+      }),
+      'cross-process client-name drift should not revive stale owner root context'
+    );
+    driftVerifierSession.restore();
+    driftVerifierSession = null;
+
+    const resetLeakScope = 'kd71-reset-leak-scope';
+    const resetLeakBaseEnv = {
+      ...commonEnv,
+      CLIAGENTS_CLIENT_NAME: '',
+      CLIAGENTS_MCP_SESSION_SCOPE: resetLeakScope,
+      CODEX_THREAD_ID: ''
+    };
+
+    resetLeakOwnerSession = loadMcpModule(resetLeakBaseEnv);
+    const resetLeakOwnerEnsure = await resetLeakOwnerSession.mod.handleEnsureRootSession({
+      externalSessionRef: 'kd71-reset-leak-owner',
+      clientName: 'codex'
+    });
+    const resetLeakOwnerRootSessionId = parseOutputField(resetLeakOwnerEnsure.content?.[0]?.text, 'root_session_id');
+    assert(resetLeakOwnerRootSessionId, 'reset-leak owner root session should be created');
+    db.registerTerminal(
+      'term-kd71-reset-leak-owner',
+      'cliagents-kd71',
+      '2',
+      'codex-cli',
+      null,
+      'worker',
+      rootDir,
+      null,
+      {
+        rootSessionId: resetLeakOwnerRootSessionId,
+        parentSessionId: resetLeakOwnerRootSessionId,
+        sessionKind: 'worker',
+        originClient: 'codex',
+        externalSessionRef: 'kd71-reset-leak-owner',
+        sessionMetadata: {
+          clientName: 'codex',
+          externalSessionRef: 'kd71-reset-leak-owner'
+        }
+      }
+    );
+    resetLeakOwnerSession.restore();
+    resetLeakOwnerSession = null;
+
+    resetLeakResetSession = loadMcpModule(resetLeakBaseEnv);
+    const resetLeakResult = await resetLeakResetSession.mod.handleResetRootSession();
+    assert(
+      resetLeakResult.content?.[0]?.text?.includes(`previous_root_session_id: ${resetLeakOwnerRootSessionId}`),
+      'reset_root_session should clear the latest attached root context across client-name aliases'
+    );
+    resetLeakResetSession.restore();
+    resetLeakResetSession = null;
+
+    resetLeakProbeSession = loadMcpModule({
+      ...commonEnv,
+      CLIAGENTS_CLIENT_NAME: 'codex',
+      CLIAGENTS_MCP_SESSION_SCOPE: resetLeakScope,
+      CODEX_THREAD_ID: ''
+    });
+    await expectForbidden(
+      () => resetLeakProbeSession.mod.handleEnqueueTerminalInput({
+        terminalId: 'term-kd71-reset-leak-owner',
+        message: 'RESET_LEAK_SHOULD_FAIL_CLOSED',
+        approvalRequired: true
+      }),
+      'reset_root_session should invalidate stale codex-root writes across process boundaries'
+    );
+    resetLeakProbeSession.restore();
+    resetLeakProbeSession = null;
+
+    assert.strictEqual(db.getTerminalInputQueueItem(heldInputId).status, 'held_for_approval');
+    assert.strictEqual(db.getTerminalInputQueueItem(pendingDeliverInputId).status, 'pending');
+    assert.strictEqual(db.getTerminalInputQueueItem(pendingDenyInputId).status, 'pending');
+    assert.strictEqual(db.getTerminalInputQueueItem(pendingCancelInputId).status, 'pending');
+    assert.strictEqual(sentInputs.length, 0, 'cross-process root context checks must not inject terminal input');
 
     ownerReloaded = loadMcpModule(ownerEnv);
     const approveHeld = await ownerReloaded.mod.handleApproveTerminalInput({
@@ -404,6 +605,27 @@ async function run() {
     }
     if (ownerReloaded) {
       ownerReloaded.restore();
+    }
+    if (explicitRootSession) {
+      explicitRootSession.restore();
+    }
+    if (driftOwnerSession) {
+      driftOwnerSession.restore();
+    }
+    if (driftAttackerSession) {
+      driftAttackerSession.restore();
+    }
+    if (driftVerifierSession) {
+      driftVerifierSession.restore();
+    }
+    if (resetLeakOwnerSession) {
+      resetLeakOwnerSession.restore();
+    }
+    if (resetLeakResetSession) {
+      resetLeakResetSession.restore();
+    }
+    if (resetLeakProbeSession) {
+      resetLeakProbeSession.restore();
     }
     if (server) {
       await stopApp(server);
