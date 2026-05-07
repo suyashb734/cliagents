@@ -103,6 +103,7 @@ const DEFERRED_PROVIDER_ATTACH_POLL_INTERVAL_MS = 150;
 const DEFAULT_POST_ATTACH_PROVIDER_START_DELAY_MS = 120;
 const DEFAULT_CODEX_ORCHESTRATION_MODEL = process.env.CLIAGENTS_CODEX_ORCHESTRATION_MODEL || 'gpt-5.4';
 const ENABLE_STATUS_DEBUG_LOGS = process.env.CLIAGENTS_STATUS_DEBUG === '1';
+const REASONING_EFFORT_LEVELS = new Set(['none', 'minimal', 'low', 'medium', 'high', 'xhigh']);
 
 const BROKER_MODEL_ALIASES = Object.freeze({
   'claude-code': Object.freeze({
@@ -217,6 +218,14 @@ function normalizeBrokerModelAlias(adapter, model) {
   }
   const aliases = BROKER_MODEL_ALIASES[adapter] || null;
   return aliases?.[normalizedModel.toLowerCase()] || normalizedModel;
+}
+
+function normalizeReasoningEffort(effort) {
+  const normalized = String(effort || '').trim().toLowerCase();
+  if (!normalized) {
+    return null;
+  }
+  return REASONING_EFFORT_LEVELS.has(normalized) ? normalized : null;
 }
 
 function resolveTerminalModel(adapter, role, sessionKind, model) {
@@ -401,6 +410,32 @@ function inferEffectiveModelFromOutput(adapter, output) {
   return candidates.length > 0 ? candidates[candidates.length - 1] : null;
 }
 
+function inferEffectiveReasoningEffortFromOutput(output) {
+  const source = String(output || '');
+  if (!source.trim()) {
+    return null;
+  }
+
+  for (const object of parseJsonObjectsFromOutput(source)) {
+    const candidates = [
+      object?.reasoning_effort,
+      object?.reasoningEffort,
+      object?.effort,
+      object?.model_reasoning_effort,
+      object?.modelReasoningEffort
+    ];
+    for (const candidate of candidates) {
+      const normalized = normalizeReasoningEffort(candidate);
+      if (normalized) {
+        return normalized;
+      }
+    }
+  }
+
+  const uiMatch = source.match(/\b(?:gpt-[\w.-]+|o\d[\w.-]*)\s+(none|minimal|low|medium|high|xhigh)\b/i);
+  return uiMatch ? normalizeReasoningEffort(uiMatch[1]) : null;
+}
+
 function normalizeUsageTokenSum(values = []) {
   return values.reduce((sum, value) => {
     const parsed = Number(value);
@@ -448,8 +483,12 @@ function extractUsageMetadataFromOutput(adapter, output) {
       ?? null;
     const reasoningTokens = usage?.reasoning_tokens
       ?? usage?.reasoningTokens
+      ?? usage?.reasoning_output_tokens
+      ?? usage?.reasoningOutputTokens
       ?? modelUsageMetadata.reasoningTokens
       ?? modelUsageMetadata.reasoning_tokens
+      ?? modelUsageMetadata.reasoningOutputTokens
+      ?? modelUsageMetadata.reasoning_output_tokens
       ?? null;
     const cacheCreationInputTokens = usage?.cache_creation_input_tokens
       ?? usage?.cacheCreationInputTokens
@@ -472,10 +511,11 @@ function extractUsageMetadataFromOutput(adapter, output) {
       ?? modelUsageMetadata.total_tokens
       ?? null;
     const cacheRelatedInputTokens = normalizeUsageTokenSum([cacheCreationInputTokens, cacheReadInputTokens]);
+    // Reasoning tokens are a breakdown of output tokens for Codex/OpenAI-style
+    // usage. Track them separately, but do not double-count them in totals.
     const computedTotalTokens = totalTokens ?? normalizeUsageTokenSum([
       inputTokens,
       outputTokens,
-      reasoningTokens,
       cacheCreationInputTokens,
       cacheReadInputTokens
     ]);
@@ -745,6 +785,14 @@ function buildCodexOneShotCommand(message, terminal) {
   const resolvedModel = resolveCodexOneShotModel(terminal.model);
   if (resolvedModel) {
     args.push('-m', resolvedModel);
+  }
+  const reasoningEffort = normalizeReasoningEffort(
+    terminal.reasoningEffort
+    || terminal.requestedEffort
+    || terminal.effectiveEffort
+  );
+  if (reasoningEffort) {
+    args.push('-c', `'model_reasoning_effort="${reasoningEffort}"'`);
   }
   args.push('--full-auto', '--json', '--skip-git-repo-check');
   args.push(`'${escapedPrompt}'`);
@@ -1152,6 +1200,10 @@ const CLI_COMMANDS = {
     if (resolvedModel) {
       args.push('--model', resolvedModel);
     }
+    const reasoningEffort = normalizeReasoningEffort(options.reasoningEffort || options.effort);
+    if (reasoningEffort) {
+      args.push('-c', `'model_reasoning_effort="${reasoningEffort}"'`);
+    }
 
     return wrapManagedRootProviderCommand(args.join(' '), {
       ...options,
@@ -1307,6 +1359,18 @@ class PersistentSessionManager extends EventEmitter {
           || requestedModel
           || ''
         ).trim() || null;
+        const requestedEffort = normalizeReasoningEffort(
+          dbTerminal.requestedEffort
+          || dbTerminal.requested_effort
+          || sessionMetadata?.reasoningEffort
+          || sessionMetadata?.requestedEffort
+          || sessionMetadata?.effort
+        );
+        const effectiveEffort = normalizeReasoningEffort(
+          dbTerminal.effectiveEffort
+          || dbTerminal.effective_effort
+          || requestedEffort
+        );
         const runtimeMetadata = resolveRuntimeHostMetadata({
           ...dbTerminal,
           terminalId,
@@ -1338,6 +1402,9 @@ class PersistentSessionManager extends EventEmitter {
             model: effectiveModel,
             requestedModel,
             effectiveModel,
+            reasoningEffort: requestedEffort,
+            requestedEffort,
+            effectiveEffort,
             logPath: path.join(this.logDir, `${terminalId}.log`),
             status: dbTerminal.status || TerminalStatus.IDLE,
             createdAt: new Date(createdAt),
@@ -1366,6 +1433,7 @@ class PersistentSessionManager extends EventEmitter {
             role: recoveredTerminal.role,
             workDir: recoveredTerminal.workDir,
             model: recoveredTerminal.model || null,
+            reasoningEffort: recoveredTerminal.requestedEffort || null,
             allowedTools: recoveredTerminal.allowedTools || null,
             permissionMode: recoveredTerminal.permissionMode || 'auto',
             rootSessionId: recoveredTerminal.rootSessionId,
@@ -1744,6 +1812,8 @@ class PersistentSessionManager extends EventEmitter {
         model: terminal.model || null,
         requestedModel: terminal.requestedModel || null,
         effectiveModel: terminal.effectiveModel || terminal.model || null,
+        requestedEffort: terminal.requestedEffort || null,
+        effectiveEffort: terminal.effectiveEffort || terminal.requestedEffort || null,
         workDir: terminal.workDir || null,
         sessionKind: terminal.sessionKind || 'legacy'
       },
@@ -2194,6 +2264,36 @@ class PersistentSessionManager extends EventEmitter {
     return effectiveModel;
   }
 
+  _syncEffectiveReasoningEffortFromOutput(terminal, output) {
+    if (!terminal || !output) {
+      return terminal?.effectiveEffort || terminal?.requestedEffort || null;
+    }
+
+    const effectiveEffort = inferEffectiveReasoningEffortFromOutput(output);
+    if (!effectiveEffort) {
+      return terminal.effectiveEffort || terminal.requestedEffort || null;
+    }
+
+    const previousEffort = terminal.effectiveEffort || terminal.requestedEffort || null;
+    terminal.effectiveEffort = effectiveEffort;
+    if (!terminal.reasoningEffort) {
+      terminal.reasoningEffort = effectiveEffort;
+    }
+
+    if (previousEffort !== effectiveEffort && this.db?.touchTerminalMessage) {
+      this.db.touchTerminalMessage(terminal.terminalId, {
+        model: terminal.model || null,
+        requestedModel: terminal.requestedModel || null,
+        effectiveModel: terminal.effectiveModel || terminal.model || null,
+        requestedEffort: terminal.requestedEffort || null,
+        effectiveEffort,
+        timestamp: Date.now()
+      });
+    }
+
+    return effectiveEffort;
+  }
+
   _persistTrackedRunUsageFromOutput(terminal, output, options = {}) {
     if (!terminal || !terminal.activeRun || terminal.activeRun.usagePersisted) {
       return null;
@@ -2223,6 +2323,8 @@ class PersistentSessionManager extends EventEmitter {
       terminalId: terminal.terminalId,
       rootSessionId: terminal.rootSessionId || terminal.terminalId,
       runId: terminal.activeRun.runId,
+      requestedEffort: terminal.requestedEffort || null,
+      effectiveEffort: terminal.effectiveEffort || terminal.requestedEffort || null,
       exitCode: options.exitCode ?? terminal.activeRun.exitCode ?? null
     };
     const usageId = this.db.addUsageRecordFromMetadata({
@@ -2321,6 +2423,7 @@ class PersistentSessionManager extends EventEmitter {
     };
     this._syncProviderThreadRefFromOutput(terminal, tail, detector);
     this._syncEffectiveModelFromOutput(terminal, tail, { source: 'tracked-run-output' });
+    this._syncEffectiveReasoningEffortFromOutput(terminal, tail);
     const sawStartMarkerInTail = hasTrackedRunStartMarker(tail, run.runId);
     const exitMatch = matchTrackedRunExitMarker(tail, run.exitMarkerPrefix);
 
@@ -2335,6 +2438,7 @@ class PersistentSessionManager extends EventEmitter {
     const logTail = terminal.logPath ? this.readLogTail(terminal.terminalId, 12000) : '';
     this._syncProviderThreadRefFromOutput(terminal, logTail, detector);
     this._syncEffectiveModelFromOutput(terminal, logTail, { source: 'tracked-run-log' });
+    this._syncEffectiveReasoningEffortFromOutput(terminal, logTail);
     const sawStartMarkerInLog = hasTrackedRunStartMarker(logTail, run.runId);
     const logExitMatch = matchTrackedRunExitMarker(logTail, run.exitMarkerPrefix);
     if (logExitMatch) {
@@ -2424,6 +2528,7 @@ class PersistentSessionManager extends EventEmitter {
       role: options.role || 'worker',
       workDir: path.resolve(options.workDir || this.workDir),
       model: options.model || null,
+      reasoningEffort: normalizeReasoningEffort(options.reasoningEffort || options.effort),
       sessionKind: deriveControlPlaneSessionKind(options),
       permissionMode: options.permissionMode || 'auto',
       allowedTools: normalizedAllowedTools,
@@ -3025,6 +3130,7 @@ class PersistentSessionManager extends EventEmitter {
       workDir = this.workDir,
       systemPrompt = null,
       model = null,
+      reasoningEffort = null,
       allowedTools = null,
       sessionLabel = null,
       // Permission mode support (Gap #4 resolution)
@@ -3085,6 +3191,15 @@ class PersistentSessionManager extends EventEmitter {
         throw new Error('Invalid model name: only alphanumeric, dot, dash, underscore, slash, colon, and at-sign allowed (max 100 chars)');
       }
     }
+    const requestedEffort = normalizeReasoningEffort(
+      reasoningEffort
+      || resolvedSessionMetadata.reasoningEffort
+      || resolvedSessionMetadata.requestedEffort
+      || resolvedSessionMetadata.effort
+    );
+    if ((reasoningEffort || resolvedSessionMetadata.reasoningEffort || resolvedSessionMetadata.requestedEffort || resolvedSessionMetadata.effort) && !requestedEffort) {
+      throw new Error('Invalid reasoning effort: expected one of none, minimal, low, medium, high, xhigh');
+    }
 
     // SECURITY: Validate allowedTools if provided (used as CLI arguments)
     if (allowedTools && Array.isArray(allowedTools)) {
@@ -3139,6 +3254,7 @@ class PersistentSessionManager extends EventEmitter {
       workDir,
       systemPrompt,
       model: effectiveModel,
+      reasoningEffort: requestedEffort,
       allowedTools,
       sessionLabel: resolvedSessionLabel,
       permissionMode,
@@ -3277,6 +3393,7 @@ class PersistentSessionManager extends EventEmitter {
       role,              // CRITICAL: needed for orchestration mode detection
       systemPrompt,
       model: effectiveModel,
+      reasoningEffort: requestedEffort,
       allowedTools,
       providerSessionId: derivedManagedRootProviderSessionId,
       resumeSessionId: providerResumeSessionId,
@@ -3305,6 +3422,9 @@ class PersistentSessionManager extends EventEmitter {
       model: effectiveModel,
       requestedModel,
       effectiveModel,
+      reasoningEffort: requestedEffort,
+      requestedEffort,
+      effectiveEffort: requestedEffort,
       systemPrompt,
       allowedTools: Array.isArray(allowedTools) ? [...allowedTools] : null,
       permissionMode: effectivePermissionMode,
@@ -3347,6 +3467,7 @@ class PersistentSessionManager extends EventEmitter {
       workDir,
       systemPrompt,
       model: effectiveModel,
+      reasoningEffort: requestedEffort,
       allowedTools,
       sessionLabel: resolvedSessionLabel,
       permissionMode: effectivePermissionMode,
@@ -3382,6 +3503,8 @@ class PersistentSessionManager extends EventEmitter {
           model: terminal.model || null,
           requestedModel: terminal.requestedModel || null,
           effectiveModel: terminal.effectiveModel || terminal.model || null,
+          requestedEffort: terminal.requestedEffort || null,
+          effectiveEffort: terminal.effectiveEffort || terminal.requestedEffort || null,
           providerThreadRef: terminal.providerThreadRef,
           adoptedAt: terminal.adoptedAt,
           captureMode: terminal.captureMode,
@@ -4020,6 +4143,7 @@ class PersistentSessionManager extends EventEmitter {
     // Use status detector if available
     const detector = this.statusDetectors.get(reconciledTerminal.adapter);
     this._syncEffectiveModelFromOutput(reconciledTerminal, output, { source: 'terminal-output' });
+    this._syncEffectiveReasoningEffortFromOutput(reconciledTerminal, output);
     this._restoreTrackedRunFromPersistence(reconciledTerminal, output, detector);
     const trackedRunStatus = this._detectTrackedRunStatus(reconciledTerminal, output, detector);
     const attention = this._getTerminalAttention(reconciledTerminal, { output });
@@ -4547,6 +4671,7 @@ module.exports = {
   extractProviderThreadRefFromOutput,
   normalizeProviderThreadRef,
   inferEffectiveModelFromOutput,
+  inferEffectiveReasoningEffortFromOutput,
   extractUsageMetadataFromOutput,
   buildGeminiOneShotRunnerCommand,
   buildClaudeOneShotCommand,

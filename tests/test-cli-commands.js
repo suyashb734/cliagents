@@ -12,6 +12,7 @@ const {
   resolveTerminalStartupDelayMs,
   extractProviderThreadRefFromOutput,
   inferEffectiveModelFromOutput,
+  inferEffectiveReasoningEffortFromOutput,
   extractUsageMetadataFromOutput,
   buildGeminiOneShotRunnerCommand,
   buildClaudeOneShotCommand,
@@ -271,6 +272,17 @@ test('Codex model aliases resolve to exact broker model ids', () => {
   });
 
   assert(cmd.includes('-m gpt-5.4-mini'), `Expected exact mini model id, got: ${cmd}`);
+});
+
+test('Codex one-shot builder can pin reasoning effort', () => {
+  const cmd = buildCodexOneShotCommand('Continue review.', {
+    model: 'gpt-5.5',
+    reasoningEffort: 'xhigh',
+    messageCount: 0
+  });
+
+  assert(cmd.includes('-m gpt-5.5'), `Expected exact model id, got: ${cmd}`);
+  assert(cmd.includes('-c \'model_reasoning_effort="xhigh"\''), `Expected reasoning effort config, got: ${cmd}`);
 });
 
 test('Codex one-shot builder pins a broker-safe default model', () => {
@@ -683,6 +695,17 @@ test('Effective model parser reads provider-reported model ids', () => {
   );
 });
 
+test('Effective reasoning effort parser reads Codex UI effort', () => {
+  assert.strictEqual(
+    inferEffectiveReasoningEffortFromOutput('│ model:     gpt-5.5 xhigh   /model to change  │'),
+    'xhigh'
+  );
+  assert.strictEqual(
+    inferEffectiveReasoningEffortFromOutput('gpt-5.4 high · ~/Documents/AI-projects/cliagents'),
+    'high'
+  );
+});
+
 test('Session manager persists verified effective model changes', () => {
   const events = [];
   const touches = [];
@@ -770,6 +793,7 @@ test('Tracked-run usage parser reads Codex JSON cached input tokens', () => {
   assert(metadata, 'usage metadata should be extracted from Codex turn JSON');
   assert.strictEqual(metadata.usage.inputTokens, 249532);
   assert.strictEqual(metadata.usage.outputTokens, 3976);
+  assert.strictEqual(metadata.usage.reasoningTokens, 3046);
   assert.strictEqual(metadata.usage.cachedInputTokens, 181760);
   assert.strictEqual(metadata.usage.totalTokens, 253508);
 });

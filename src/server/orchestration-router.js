@@ -825,6 +825,30 @@ function createOrchestrationRouter(context) {
     ['review', 'review'],
     ['judge', 'review']
   ]);
+  const REASONING_EFFORT_LEVELS = new Set(['none', 'minimal', 'low', 'medium', 'high', 'xhigh']);
+
+  function normalizeReasoningEffort(value) {
+    const normalized = String(value || '').trim().toLowerCase();
+    return REASONING_EFFORT_LEVELS.has(normalized) ? normalized : null;
+  }
+
+  function parseReasoningEffortFromBody(body = {}) {
+    const hasInput = body.reasoningEffort !== undefined
+      || body.reasoning_effort !== undefined
+      || body.effort !== undefined;
+    if (!hasInput) {
+      return { provided: false, value: undefined };
+    }
+    const raw = body.reasoningEffort ?? body.reasoning_effort ?? body.effort;
+    if (raw === null || raw === '') {
+      return { provided: true, value: null };
+    }
+    const normalized = normalizeReasoningEffort(raw);
+    if (!normalized) {
+      return { provided: true, error: String(raw) };
+    }
+    return { provided: true, value: normalized };
+  }
 
   function normalizeTaskAssignmentStatus(status, fallback = 'queued') {
     const normalized = String(status || '').trim().toLowerCase();
@@ -847,6 +871,8 @@ function createOrchestrationRouter(context) {
         model: liveTerminal.model || assignment.model || null,
         requestedModel: liveTerminal.requestedModel || null,
         effectiveModel: liveTerminal.effectiveModel || liveTerminal.model || null,
+        requestedEffort: liveTerminal.requestedEffort || null,
+        effectiveEffort: liveTerminal.effectiveEffort || liveTerminal.requestedEffort || null,
         role: liveTerminal.role || null
       };
     }
@@ -874,6 +900,11 @@ function createOrchestrationRouter(context) {
       effectiveModel: persistedTerminal.effective_model
         || persistedTerminal.effectiveModel
         || persistedTerminal.model
+        || null,
+      requestedEffort: persistedTerminal.requested_effort || persistedTerminal.requestedEffort || null,
+      effectiveEffort: persistedTerminal.effective_effort
+        || persistedTerminal.effectiveEffort
+        || persistedTerminal.requested_effort
         || null,
       role: persistedTerminal.role || null
     };
@@ -907,6 +938,8 @@ function createOrchestrationRouter(context) {
       model: assignment.model || terminal?.model || null,
       requestedModel: terminal?.requestedModel || assignment.model || null,
       effectiveModel: terminal?.effectiveModel || terminal?.model || assignment.model || null,
+      requestedEffort: terminal?.requestedEffort || assignment.reasoningEffort || null,
+      effectiveEffort: terminal?.effectiveEffort || terminal?.requestedEffort || assignment.reasoningEffort || null,
       terminal: terminal ? {
         terminalId: terminal.terminalId,
         status: terminal.status,
@@ -914,6 +947,8 @@ function createOrchestrationRouter(context) {
         model: terminal.model,
         requestedModel: terminal.requestedModel || null,
         effectiveModel: terminal.effectiveModel || terminal.model || null,
+        requestedEffort: terminal.requestedEffort || null,
+        effectiveEffort: terminal.effectiveEffort || terminal.requestedEffort || null,
         role: terminal.role,
         missing: terminal.missing === true
       } : null,
@@ -1339,6 +1374,16 @@ function createOrchestrationRouter(context) {
           error: { code: 'missing_parameter', message: 'instructions are required', param: 'instructions' }
         });
       }
+      const reasoningEffortInput = parseReasoningEffortFromBody(req.body);
+      if (reasoningEffortInput.error) {
+        return res.status(400).json({
+          error: {
+            code: 'invalid_parameter',
+            message: 'reasoningEffort must be one of none, minimal, low, medium, high, xhigh',
+            param: 'reasoningEffort'
+          }
+        });
+      }
 
       const now = Date.now();
       const assignment = db.createTaskAssignment({
@@ -1348,6 +1393,7 @@ function createOrchestrationRouter(context) {
         instructions,
         adapter: req.body?.adapter || null,
         model: req.body?.model || null,
+        reasoningEffort: reasoningEffortInput.provided ? reasoningEffortInput.value : null,
         worktreePath: req.body?.worktreePath || null,
         worktreeBranch: req.body?.worktreeBranch || null,
         acceptanceCriteria: req.body?.acceptanceCriteria || null,
@@ -1452,6 +1498,19 @@ function createOrchestrationRouter(context) {
       if (req.body?.model !== undefined) {
         patch.model = req.body.model;
       }
+      const reasoningEffortInput = parseReasoningEffortFromBody(req.body);
+      if (reasoningEffortInput.error) {
+        return res.status(400).json({
+          error: {
+            code: 'invalid_parameter',
+            message: 'reasoningEffort must be one of none, minimal, low, medium, high, xhigh',
+            param: 'reasoningEffort'
+          }
+        });
+      }
+      if (reasoningEffortInput.provided) {
+        patch.reasoningEffort = reasoningEffortInput.value;
+      }
       if (req.body?.worktreePath !== undefined) {
         patch.worktreePath = req.body.worktreePath;
       }
@@ -1543,6 +1602,7 @@ function createOrchestrationRouter(context) {
           instructions: replacementSpec.instructions || assignment.instructions,
           adapter: replacementSpec.adapter !== undefined ? replacementSpec.adapter : assignment.adapter,
           model: replacementSpec.model !== undefined ? replacementSpec.model : assignment.model,
+          reasoningEffort: replacementSpec.reasoningEffort !== undefined ? replacementSpec.reasoningEffort : assignment.reasoningEffort,
           worktreePath: replacementSpec.worktreePath !== undefined ? replacementSpec.worktreePath : assignment.worktreePath,
           worktreeBranch: replacementSpec.worktreeBranch !== undefined ? replacementSpec.worktreeBranch : assignment.worktreeBranch,
           acceptanceCriteria: replacementSpec.acceptanceCriteria !== undefined ? replacementSpec.acceptanceCriteria : assignment.acceptanceCriteria,
@@ -1640,6 +1700,16 @@ function createOrchestrationRouter(context) {
       }
       const executionControlPlane = projectExecutionControlPlane(resolvedControlPlane);
       const router = getTaskRouter();
+      const reasoningEffortInput = parseReasoningEffortFromBody(req.body);
+      if (reasoningEffortInput.error) {
+        return res.status(400).json({
+          error: {
+            code: 'invalid_parameter',
+            message: 'reasoningEffort must be one of none, minimal, low, medium, high, xhigh',
+            param: 'reasoningEffort'
+          }
+        });
+      }
       const preparedWorktree = assignment.worktreePath
         ? prepareTaskAssignmentWorktree(task, assignment)
         : null;
@@ -1662,6 +1732,7 @@ function createOrchestrationRouter(context) {
         forceRole: normalizeTaskAssignmentRoutingRole(assignment.role),
         forceAdapter: assignment.adapter || undefined,
         model: assignment.model || undefined,
+        reasoningEffort: reasoningEffortInput.provided ? reasoningEffortInput.value : (assignment.reasoningEffort || undefined),
         systemPrompt: req.body?.systemPrompt || null,
         workDir: workingDirectory || undefined,
         sessionLabel: req.body?.sessionLabel || null,
@@ -1681,6 +1752,7 @@ function createOrchestrationRouter(context) {
         terminalId: result.terminalId,
         adapter: result.adapter || assignment.adapter || null,
         model: result.model || assignment.model || null,
+        reasoningEffort: result.reasoningEffort || assignment.reasoningEffort || null,
         status: 'running',
         worktreePath: preparedWorktree?.worktreePath || assignment.worktreePath || null,
         worktreeBranch: preparedWorktree?.worktreeBranch || assignment.worktreeBranch || null,
@@ -4151,6 +4223,7 @@ function createOrchestrationRouter(context) {
       const launchEnvironment = normalizeLaunchEnvironment(req.body?.launchEnvironment || sessionMetadata.launchEnvironment);
       const deferProviderStartUntilAttached = req.body?.deferProviderStartUntilAttached === true;
       const providerResumePicker = adapter === 'codex-cli' && req.body?.providerResumePicker === true;
+      const reasoningEffort = req.body?.reasoningEffort || req.body?.reasoning_effort || req.body?.effort || null;
       if (!sessionMetadata.launchProfile) {
         sessionMetadata.launchProfile = String(req.body?.profile || 'guarded-root').trim() || 'guarded-root';
       }
@@ -4180,6 +4253,10 @@ function createOrchestrationRouter(context) {
       sessionMetadata.launchSource = 'http-root-launch';
       sessionMetadata.managedLaunch = true;
       sessionMetadata.resumeMode = requestedResumeMode;
+      if (reasoningEffort) {
+        sessionMetadata.reasoningEffort = reasoningEffort;
+        sessionMetadata.requestedEffort = reasoningEffort;
+      }
       if (providerSessionId) {
         sessionMetadata.providerResumeSessionId = providerSessionId;
         sessionMetadata.providerResumeLatest = false;
@@ -4202,6 +4279,7 @@ function createOrchestrationRouter(context) {
         workDir,
         systemPrompt,
         model: req.body?.model || null,
+        reasoningEffort,
         allowedTools: Array.isArray(req.body?.allowedTools) ? req.body.allowedTools : null,
         permissionMode: req.body?.permissionMode || 'default',
         rootSessionId: null,
@@ -4560,6 +4638,7 @@ function createOrchestrationRouter(context) {
         forceRole,
         forceAdapter,
         model,
+        reasoningEffort,
         sessionLabel,
         systemPrompt,
         workingDirectory,
@@ -4616,6 +4695,7 @@ function createOrchestrationRouter(context) {
         forceRole,
         forceAdapter,
         model,
+        reasoningEffort,
         sessionLabel,
         systemPrompt,
         workDir: workingDirectory,

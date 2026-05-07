@@ -269,14 +269,24 @@ async function runRouteAssertions() {
     assert.strictEqual(missingRole.status, 400);
     assert.strictEqual(missingRole.data.error.param, 'role');
 
+    const invalidEffort = await request(serverHandle.baseUrl, 'POST', `/orchestration/tasks/${taskId}/assignments`, {
+      role: 'executor',
+      instructions: 'Implement the feature.',
+      reasoningEffort: 'maximum'
+    });
+    assert.strictEqual(invalidEffort.status, 400);
+    assert.strictEqual(invalidEffort.data.error.param, 'reasoningEffort');
+
     const createAssignmentRes = await request(serverHandle.baseUrl, 'POST', `/orchestration/tasks/${taskId}/assignments`, {
       role: 'executor',
       instructions: 'Implement the feature and add tests.',
+      reasoningEffort: 'high',
       worktreePath,
       worktreeBranch: 'task/tasks-v1'
     });
     assert.strictEqual(createAssignmentRes.status, 200);
     assert.strictEqual(createAssignmentRes.data.assignment.status, 'queued');
+    assert.strictEqual(createAssignmentRes.data.assignment.reasoningEffort, 'high');
     assert.strictEqual(createAssignmentRes.data.assignment.worktreePath, worktreePath);
     const assignmentId = createAssignmentRes.data.assignment.id;
 
@@ -294,16 +304,19 @@ async function runRouteAssertions() {
       rootSessionId: 'root-task-routes',
       parentSessionId: 'root-task-routes',
       originClient: 'test',
-      externalSessionRef: 'test:task-routes'
+      externalSessionRef: 'test:task-routes',
+      reasoningEffort: 'xhigh'
     });
     assert.strictEqual(startAssignmentRes.status, 200);
     assert.strictEqual(startAssignmentRes.data.assignment.status, 'running');
+    assert.strictEqual(startAssignmentRes.data.assignment.reasoningEffort, 'xhigh');
     assert(startAssignmentRes.data.assignment.terminalId, 'started assignment should be linked to a terminal');
     assert.strictEqual(sessionManager.state.createCalls.length, 1);
     assert.strictEqual(sessionManager.state.sendCalls.length, 1);
     assert.strictEqual(sessionManager.state.createCalls[0].workDir, worktreePath);
     assert.strictEqual(sessionManager.state.createCalls[0].sessionMetadata.taskId, taskId);
     assert.strictEqual(sessionManager.state.createCalls[0].sessionMetadata.taskAssignmentId, assignmentId);
+    assert.strictEqual(sessionManager.state.createCalls[0].reasoningEffort, 'xhigh');
     assert.strictEqual(sessionManager.state.sendCalls[0].message, 'Implement the feature, add tests, and report status.');
     assert.strictEqual(sessionManager.state.createCalls[0].rootSessionId, 'root-task-routes');
 

@@ -31,6 +31,13 @@ function normalizeCodexModelAlias(model) {
   return CODEX_MODEL_ALIASES[normalized.toLowerCase()] || normalized;
 }
 
+function normalizeReasoningEffort(effort) {
+  const normalized = String(effort || '').trim().toLowerCase();
+  return ['none', 'minimal', 'low', 'medium', 'high', 'xhigh'].includes(normalized)
+    ? normalized
+    : null;
+}
+
 class CodexCliAdapter extends BaseLLMAdapter {
   constructor(config = {}) {
     super({
@@ -186,6 +193,7 @@ class CodexCliAdapter extends BaseLLMAdapter {
 
     const workDir = options.workDir || this.config.workDir;
     const model = normalizeCodexModelAlias(options.model || this.config.model);
+    const reasoningEffort = normalizeReasoningEffort(options.reasoningEffort || options.effort || this.config.reasoningEffort);
     const providerSessionId = String(options.providerSessionId || '').trim() || null;
 
     // Ensure work directory exists
@@ -201,6 +209,7 @@ class CodexCliAdapter extends BaseLLMAdapter {
       systemPrompt: options.systemPrompt,
       workDir,
       model,
+      reasoningEffort,
       allowedTools: options.allowedTools,
       jsonMode: options.jsonMode || false
     };
@@ -458,6 +467,9 @@ class CodexCliAdapter extends BaseLLMAdapter {
     // Add model flag if specified
     if (session.model && session.model !== 'default') {
       args.push('-m', session.model);
+    }
+    if (session.reasoningEffort) {
+      args.push('-c', `model_reasoning_effort="${session.reasoningEffort}"`);
     }
 
     // JSON mode: read-only sandbox (no tool use, pure LLM response)

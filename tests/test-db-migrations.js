@@ -588,6 +588,10 @@ function runTerminalModelStateMigrationRegressionTest() {
       const terminalColumns = migratedDb.db.prepare('PRAGMA table_info(terminals)').all().map((column) => column.name);
       assert(terminalColumns.includes('requested_model'), 'terminals should include requested_model');
       assert(terminalColumns.includes('effective_model'), 'terminals should include effective_model');
+      assert(terminalColumns.includes('requested_effort'), 'terminals should include requested_effort');
+      assert(terminalColumns.includes('effective_effort'), 'terminals should include effective_effort');
+      const assignmentColumns = migratedDb.db.prepare('PRAGMA table_info(task_assignments)').all().map((column) => column.name);
+      assert(assignmentColumns.includes('reasoning_effort'), 'task_assignments should include reasoning_effort');
 
       const legacyTerminal = migratedDb.getTerminal('term-legacy-model-state');
       assert.strictEqual(legacyTerminal.model, 'gpt-5.4');
@@ -607,7 +611,9 @@ function runTerminalModelStateMigrationRegressionTest() {
           rootSessionId: 'root-new-model-state',
           model: 'claude-opus-4-6',
           requestedModel: 'claude-opus-4-7',
-          effectiveModel: 'claude-opus-4-6'
+          effectiveModel: 'claude-opus-4-6',
+          requestedEffort: 'high',
+          effectiveEffort: 'high'
         }
       );
 
@@ -615,11 +621,15 @@ function runTerminalModelStateMigrationRegressionTest() {
       assert.strictEqual(newTerminal.model, 'claude-opus-4-6');
       assert.strictEqual(newTerminal.requested_model, 'claude-opus-4-7');
       assert.strictEqual(newTerminal.effective_model, 'claude-opus-4-6');
+      assert.strictEqual(newTerminal.requested_effort, 'high');
+      assert.strictEqual(newTerminal.effective_effort, 'high');
 
       migratedDb.touchTerminalMessage('term-new-model-state', {
         model: 'claude-opus-4-7',
         requestedModel: 'claude-opus-4-7',
         effectiveModel: 'claude-opus-4-7',
+        requestedEffort: 'xhigh',
+        effectiveEffort: 'xhigh',
         timestamp: Date.now()
       });
 
@@ -627,6 +637,8 @@ function runTerminalModelStateMigrationRegressionTest() {
       assert.strictEqual(newTerminal.model, 'claude-opus-4-7');
       assert.strictEqual(newTerminal.requested_model, 'claude-opus-4-7');
       assert.strictEqual(newTerminal.effective_model, 'claude-opus-4-7');
+      assert.strictEqual(newTerminal.requested_effort, 'xhigh');
+      assert.strictEqual(newTerminal.effective_effort, 'xhigh');
     } finally {
       migratedDb.close();
     }

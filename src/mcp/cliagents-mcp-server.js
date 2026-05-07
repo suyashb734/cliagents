@@ -493,6 +493,7 @@ function buildRouteRequest({
   systemPrompt,
   workingDirectory,
   model,
+  reasoningEffort,
   sessionLabel,
   preferReuse,
   forceFreshSession,
@@ -513,6 +514,9 @@ function buildRouteRequest({
   }
   if (model) {
     routeRequest.model = model;
+  }
+  if (reasoningEffort) {
+    routeRequest.reasoningEffort = reasoningEffort;
   }
   if (sessionLabel) {
     routeRequest.sessionLabel = sessionLabel;
@@ -894,6 +898,11 @@ Timeout presets: "simple" (3 min), "standard" (10 min, default), "complex" (30 m
         model: {
           type: 'string',
           description: 'Optional model override for the selected adapter. Example: o4-mini, gemini-2.5-pro, qwen-max.'
+        },
+        reasoningEffort: {
+          type: 'string',
+          enum: ['none', 'minimal', 'low', 'medium', 'high', 'xhigh'],
+          description: 'Optional reasoning effort override for adapters that support it, such as Codex.'
         },
         sessionLabel: {
           type: 'string',
@@ -1489,6 +1498,11 @@ This calls cliagents' direct-session discussion route and returns the completed 
           type: 'string',
           description: 'Optional model override for the launched root.'
         },
+        reasoningEffort: {
+          type: 'string',
+          enum: ['none', 'minimal', 'low', 'medium', 'high', 'xhigh'],
+          description: 'Optional reasoning effort override for adapters that support it, such as Codex.'
+        },
         profile: {
           type: 'string',
           description: 'Optional managed-root launch profile. Defaults to guarded-root.'
@@ -1936,6 +1950,11 @@ This calls cliagents' direct-session discussion route and returns the completed 
           type: 'string',
           description: 'Optional preferred model.'
         },
+        reasoningEffort: {
+          type: 'string',
+          enum: ['none', 'minimal', 'low', 'medium', 'high', 'xhigh'],
+          description: 'Optional preferred reasoning effort for adapters that support it.'
+        },
         worktreePath: {
           type: 'string',
           description: 'Optional worktree path to use as the working directory override when started.'
@@ -2003,6 +2022,11 @@ This calls cliagents' direct-session discussion route and returns the completed 
         systemPrompt: {
           type: 'string',
           description: 'Optional system prompt override at start time.'
+        },
+        reasoningEffort: {
+          type: 'string',
+          enum: ['none', 'minimal', 'low', 'medium', 'high', 'xhigh'],
+          description: 'Optional reasoning effort override at start time.'
         }
       },
       required: ['taskId', 'assignmentId']
@@ -2354,6 +2378,7 @@ async function handleDelegateTask(args) {
     adapter,
     systemPrompt,
     model,
+    reasoningEffort,
     sessionLabel,
     collaborator = false,
     preferReuse,
@@ -2406,6 +2431,7 @@ async function handleDelegateTask(args) {
     systemPrompt,
     workingDirectory,
     model,
+    reasoningEffort,
     sessionLabel,
     preferReuse,
     forceFreshSession,
@@ -3790,6 +3816,7 @@ async function handleLaunchRootSession(args) {
     workDir: args?.workDir || args?.workingDirectory || process.cwd(),
     model: args?.model || null,
     modelExplicit: Object.prototype.hasOwnProperty.call(args || {}, 'model'),
+    reasoningEffort: args?.reasoningEffort || args?.reasoning_effort || null,
     profile: args?.profile || 'guarded-root',
     profileExplicit: Object.prototype.hasOwnProperty.call(args || {}, 'profile'),
     permissionMode: args?.permissionMode || null,
@@ -3839,6 +3866,7 @@ async function handleLaunchRootSession(args) {
       adapter: launchOptions.adapter,
       workDir: launchOptions.workDir,
       model: launchOptions.model || null,
+      reasoningEffort: launchOptions.reasoningEffort || null,
       permissionMode: launchOptions.permissionMode || null,
       profile: launchOptions.profile,
       systemPrompt: launchOptions.systemPrompt || null,
@@ -3865,6 +3893,7 @@ async function handleLaunchRootSession(args) {
           `root_session_id: ${data.rootSessionId || 'n/a'}`,
           `terminal_id: ${data.terminalId || 'n/a'}`,
           `session_name: ${data.sessionName || 'n/a'}`,
+          launchOptions.reasoningEffort ? `reasoning_effort: ${launchOptions.reasoningEffort}` : null,
           launchOptions.resumeMode === 'exact' ? `provider_session_id: ${launchOptions.providerSessionId}` : null,
           launchOptions.providerResumePicker ? 'provider_resume: picker' : null,
           launchOptions.sourceRootSessionId ? `source_root_session_id: ${launchOptions.sourceRootSessionId}` : null,
@@ -4221,6 +4250,7 @@ async function handleCreateTaskAssignment(args) {
     instructions: args?.instructions,
     adapter: args?.adapter || null,
     model: args?.model || null,
+    reasoningEffort: args?.reasoningEffort || args?.reasoning_effort || null,
     worktreePath: args?.worktreePath || null,
     worktreeBranch: args?.worktreeBranch || null,
     acceptanceCriteria: args?.acceptanceCriteria || null,
@@ -4243,7 +4273,8 @@ async function handleCreateTaskAssignment(args) {
         `role: ${assignment.role || args?.role || 'n/a'}`,
         `status: ${assignment.status || 'queued'}`,
         assignment.adapter ? `adapter: ${assignment.adapter}` : null,
-        assignment.model ? `model: ${assignment.model}` : null
+        assignment.model ? `model: ${assignment.model}` : null,
+        assignment.reasoningEffort ? `reasoning_effort: ${assignment.reasoningEffort}` : null
       ].filter(Boolean).join('\n')
     }]
   };
@@ -4277,6 +4308,7 @@ async function handleListTaskAssignments(args) {
           `status=${assignment.status || 'queued'}`,
           assignment.terminalId ? `terminal=${assignment.terminalId}` : null,
           assignment.adapter ? `adapter=${assignment.adapter}` : null,
+          assignment.reasoningEffort ? `effort=${assignment.reasoningEffort}` : null,
           assignment.usageSummary ? `total_tokens=${assignment.usageSummary.totalTokens || 0}` : null
         ].filter(Boolean).join(' • ')).join('\n')
       ].filter(Boolean).join('\n')
@@ -4307,7 +4339,8 @@ async function handleStartTaskAssignment(args) {
       preferReuse: typeof args?.preferReuse === 'boolean' ? args.preferReuse : undefined,
       forceFreshSession: typeof args?.forceFreshSession === 'boolean' ? args.forceFreshSession : undefined,
       sessionLabel: args?.sessionLabel || null,
-      systemPrompt: args?.systemPrompt || null
+      systemPrompt: args?.systemPrompt || null,
+      reasoningEffort: args?.reasoningEffort || args?.reasoning_effort || null
     }
   );
 
@@ -4331,6 +4364,7 @@ async function handleStartTaskAssignment(args) {
         `status: ${assignment.status || 'running'}`,
         `adapter: ${assignment.adapter || data.route?.adapter || 'n/a'}`,
         `model: ${assignment.model || data.route?.model || 'n/a'}`,
+        assignment.reasoningEffort || data.route?.reasoningEffort ? `reasoning_effort: ${assignment.reasoningEffort || data.route?.reasoningEffort}` : null,
         assignment.worktreePath ? `worktree_path: ${assignment.worktreePath}` : null,
         assignment.worktreeBranch ? `worktree_branch: ${assignment.worktreeBranch}` : null
       ].filter(Boolean).join('\n')

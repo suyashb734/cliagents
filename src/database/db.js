@@ -88,6 +88,13 @@ function normalizeUsageConfidence(value) {
   return 'unknown';
 }
 
+function normalizeReasoningEffort(value) {
+  const normalized = String(value || '').trim().toLowerCase();
+  return ['none', 'minimal', 'low', 'medium', 'high', 'xhigh'].includes(normalized)
+    ? normalized
+    : null;
+}
+
 function normalizeUsageRole(value) {
   const normalized = String(value || '').trim().toLowerCase();
   return normalized || 'unknown';
@@ -204,7 +211,7 @@ function buildUsageRecordFromMetadata(context = {}, metadata = {}) {
 
   const inputTokens = getFirstUsageValue(usageMetadata, ['inputTokens', 'input_tokens', 'promptTokens', 'prompt_tokens']);
   const outputTokens = getFirstUsageValue(usageMetadata, ['outputTokens', 'output_tokens', 'completionTokens', 'completion_tokens', 'candidateTokens', 'candidate_tokens']);
-  const reasoningTokens = getFirstUsageValue(usageMetadata, ['reasoningTokens', 'reasoning_tokens']);
+  const reasoningTokens = getFirstUsageValue(usageMetadata, ['reasoningTokens', 'reasoning_tokens', 'reasoningOutputTokens', 'reasoning_output_tokens']);
   const cachedInputTokens = getFirstUsageValue(usageMetadata, ['cachedInputTokens', 'cached_input_tokens']);
   const cacheReadInputTokens = getFirstUsageValue(usageMetadata, ['cacheReadInputTokens', 'cache_read_input_tokens']);
   const cacheCreationInputTokens = getFirstUsageValue(usageMetadata, [
@@ -245,12 +252,14 @@ function buildUsageRecordFromMetadata(context = {}, metadata = {}) {
   const normalizedInputTokens = normalizeInteger(inputTokens, 0);
   const normalizedOutputTokens = normalizeInteger(outputTokens, 0);
   const normalizedReasoningTokens = normalizeInteger(reasoningTokens, 0);
+  const normalizedCacheReadInputTokens = normalizeInteger(cacheReadInputTokens, 0);
+  const normalizedCacheCreationInputTokens = normalizeInteger(cacheCreationInputTokens, 0);
   const normalizedCachedInputTokens = cachedInputTokens !== null && cachedInputTokens !== undefined
     ? normalizeInteger(cachedInputTokens, 0)
-    : normalizeInteger(cacheReadInputTokens, 0) + normalizeInteger(cacheCreationInputTokens, 0);
+    : normalizedCacheReadInputTokens + normalizedCacheCreationInputTokens;
   const normalizedTotalTokens = normalizeUsageTotalTokens(
     totalTokens,
-    normalizedInputTokens + normalizedOutputTokens + normalizedReasoningTokens
+    normalizedInputTokens + normalizedOutputTokens + normalizedCacheReadInputTokens + normalizedCacheCreationInputTokens
   );
 
   const terminalId = String(context.terminalId || '').trim();
@@ -1720,6 +1729,18 @@ class OrchestrationDB {
       ?? model
       ?? ''
     ).trim() || null;
+    const requestedEffort = normalizeReasoningEffort(
+      terminalOptions.requestedEffort
+      ?? terminalOptions.requested_effort
+      ?? terminalOptions.reasoningEffort
+      ?? terminalOptions.reasoning_effort
+      ?? terminalOptions.effort
+    );
+    const effectiveEffort = normalizeReasoningEffort(
+      terminalOptions.effectiveEffort
+      ?? terminalOptions.effective_effort
+      ?? requestedEffort
+    );
     const lastMessageAt = Number.isFinite(terminalOptions.lastMessageAt) ? terminalOptions.lastMessageAt : null;
     const sessionControlMode = normalizeSessionControlMode(
       terminalOptions.sessionControlMode || terminalOptions.session_control_mode,
@@ -1820,6 +1841,14 @@ class OrchestrationDB {
     if (this._hasColumn('terminals', 'effective_model')) {
       columns.push('effective_model');
       values.push(effectiveModel);
+    }
+    if (this._hasColumn('terminals', 'requested_effort')) {
+      columns.push('requested_effort');
+      values.push(requestedEffort);
+    }
+    if (this._hasColumn('terminals', 'effective_effort')) {
+      columns.push('effective_effort');
+      values.push(effectiveEffort);
     }
 
     this.db.run(`
@@ -1983,6 +2012,13 @@ class OrchestrationDB {
       || terminalOptions.requested_model !== undefined
       || terminalOptions.effectiveModel !== undefined
       || terminalOptions.effective_model !== undefined
+      || terminalOptions.requestedEffort !== undefined
+      || terminalOptions.requested_effort !== undefined
+      || terminalOptions.effectiveEffort !== undefined
+      || terminalOptions.effective_effort !== undefined
+      || terminalOptions.reasoningEffort !== undefined
+      || terminalOptions.reasoning_effort !== undefined
+      || terminalOptions.effort !== undefined
     );
     if (hasModelStateInput) {
       const requestedModel = String(
@@ -1997,6 +2033,18 @@ class OrchestrationDB {
         ?? terminalOptions.model
         ?? ''
       ).trim() || null;
+      const requestedEffort = normalizeReasoningEffort(
+        terminalOptions.requestedEffort
+        ?? terminalOptions.requested_effort
+        ?? terminalOptions.reasoningEffort
+        ?? terminalOptions.reasoning_effort
+        ?? terminalOptions.effort
+      );
+      const effectiveEffort = normalizeReasoningEffort(
+        terminalOptions.effectiveEffort
+        ?? terminalOptions.effective_effort
+        ?? requestedEffort
+      );
       const modelStateUpdates = [];
       const modelStateValues = [];
       if (this._hasColumn('terminals', 'requested_model')) {
@@ -2006,6 +2054,14 @@ class OrchestrationDB {
       if (this._hasColumn('terminals', 'effective_model')) {
         modelStateUpdates.push('effective_model = COALESCE(?, effective_model)');
         modelStateValues.push(effectiveModel);
+      }
+      if (this._hasColumn('terminals', 'requested_effort')) {
+        modelStateUpdates.push('requested_effort = COALESCE(?, requested_effort)');
+        modelStateValues.push(requestedEffort);
+      }
+      if (this._hasColumn('terminals', 'effective_effort')) {
+        modelStateUpdates.push('effective_effort = COALESCE(?, effective_effort)');
+        modelStateValues.push(effectiveEffort);
       }
       if (modelStateUpdates.length > 0) {
         this.db.run(`
@@ -2409,6 +2465,18 @@ class OrchestrationDB {
       ?? options.requested_model
       ?? ''
     ).trim() || null;
+    const requestedEffort = normalizeReasoningEffort(
+      options.requestedEffort
+      ?? options.requested_effort
+      ?? options.reasoningEffort
+      ?? options.reasoning_effort
+      ?? options.effort
+    );
+    const effectiveEffort = normalizeReasoningEffort(
+      options.effectiveEffort
+      ?? options.effective_effort
+      ?? requestedEffort
+    );
     const updates = ['model = COALESCE(?, model)'];
     const params = [model];
     if (this._hasColumn('terminals', 'effective_model')) {
@@ -2418,6 +2486,14 @@ class OrchestrationDB {
     if (this._hasColumn('terminals', 'requested_model')) {
       updates.push('requested_model = COALESCE(?, requested_model)');
       params.push(requestedModel);
+    }
+    if (this._hasColumn('terminals', 'requested_effort')) {
+      updates.push('requested_effort = COALESCE(?, requested_effort)');
+      params.push(requestedEffort);
+    }
+    if (this._hasColumn('terminals', 'effective_effort')) {
+      updates.push('effective_effort = COALESCE(?, effective_effort)');
+      params.push(effectiveEffort);
     }
     params.push(timestamp, timestamp, terminalId);
     const result = this.db.run(`
@@ -4119,6 +4195,7 @@ class OrchestrationDB {
       instructions: row.instructions,
       adapter: row.adapter || null,
       model: row.model || null,
+      reasoningEffort: row.reasoning_effort || null,
       status: row.status || 'queued',
       worktreePath: row.worktree_path || null,
       worktreeBranch: row.worktree_branch || null,
@@ -4264,6 +4341,7 @@ class OrchestrationDB {
     const instructions = String(input.instructions || '').trim();
     const adapter = String(input.adapter || '').trim() || null;
     const model = String(input.model || '').trim() || null;
+    const reasoningEffort = normalizeReasoningEffort(input.reasoningEffort ?? input.reasoning_effort ?? input.effort);
     const status = String(input.status || 'queued').trim().toLowerCase() || 'queued';
     const worktreePath = String(input.worktreePath || '').trim() || null;
     const worktreeBranch = String(input.worktreeBranch || '').trim() || null;
@@ -4285,13 +4363,12 @@ class OrchestrationDB {
       throw new Error('instructions is required');
     }
 
-    this.db.prepare(`
-      INSERT INTO task_assignments (
-        id, task_id, terminal_id, role, instructions, adapter, model, status,
-        worktree_path, worktree_branch, acceptance_criteria, metadata, started_at,
-        completed_at, created_at, updated_at
-      ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-    `).run(
+    const columns = [
+      'id', 'task_id', 'terminal_id', 'role', 'instructions', 'adapter', 'model', 'status',
+      'worktree_path', 'worktree_branch', 'acceptance_criteria', 'metadata', 'started_at',
+      'completed_at', 'created_at', 'updated_at'
+    ];
+    const values = [
       id,
       taskId,
       terminalId,
@@ -4308,7 +4385,16 @@ class OrchestrationDB {
       completedAt,
       now,
       now
-    );
+    ];
+    if (this._hasColumn('task_assignments', 'reasoning_effort')) {
+      columns.splice(7, 0, 'reasoning_effort');
+      values.splice(7, 0, reasoningEffort);
+    }
+
+    this.db.prepare(`
+      INSERT INTO task_assignments (${columns.join(', ')})
+      VALUES (${columns.map(() => '?').join(', ')})
+    `).run(...values);
 
     return this.getTaskAssignment(id);
   }
@@ -4357,6 +4443,12 @@ class OrchestrationDB {
     if (patch.model !== undefined) {
       updates.push('model = ?');
       params.push(String(patch.model || '').trim() || null);
+    }
+    if (patch.reasoningEffort !== undefined || patch.reasoning_effort !== undefined || patch.effort !== undefined) {
+      if (this._hasColumn('task_assignments', 'reasoning_effort')) {
+        updates.push('reasoning_effort = ?');
+        params.push(normalizeReasoningEffort(patch.reasoningEffort ?? patch.reasoning_effort ?? patch.effort));
+      }
     }
     if (patch.status !== undefined) {
       updates.push('status = ?');
