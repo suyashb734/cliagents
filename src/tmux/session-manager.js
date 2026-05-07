@@ -16,6 +16,7 @@ const GeminiCliAdapter = require('../adapters/gemini-cli');
 const { isCollaboratorReadyAdapter } = require('../orchestration/child-session-support');
 const { getModelRoutingService } = require('../services/model-routing');
 const { resolveClaudeCliPath } = require('../utils/claude-cli-path');
+const { isAdapterAuthenticated } = require('../utils/adapter-auth');
 const { extractOutput, stripAnsiCodes } = require('../utils/output-extractor');
 const {
   RUNTIME_HOSTS,
@@ -821,6 +822,11 @@ function buildQwenOneShotCommand(message, terminal) {
   }
 
   return args.join(' ');
+}
+
+function buildQwenAuthPreflightFailureCommand(reason) {
+  const message = `Qwen provider authentication failed: ${reason || 'Qwen Code is not configured for non-interactive use.'}`;
+  return `printf '%s\\n' '${escapeForSingleQuotes(message)}'; false`;
 }
 
 function buildOpencodeOneShotCommand(message, terminal) {
@@ -2717,7 +2723,7 @@ class PersistentSessionManager extends EventEmitter {
       return null;
     }
 
-    if (/401 invalid access token|token expired|invalid access token|authentication failed/i.test(output)) {
+    if (/401 invalid access token|token expired|invalid access token|authentication failed|qwen provider authentication failed/i.test(output)) {
       return {
         code: 'auth_expired',
         message: 'Qwen access token is invalid or expired.'
@@ -4022,7 +4028,10 @@ class PersistentSessionManager extends EventEmitter {
         true
       );
     } else if (isQwenOrchestration) {
-      const qwenCommand = buildQwenOneShotCommand(message, terminal);
+      const qwenAuth = isAdapterAuthenticated('qwen-cli');
+      const qwenCommand = qwenAuth.authenticated
+        ? buildQwenOneShotCommand(message, terminal)
+        : buildQwenAuthPreflightFailureCommand(qwenAuth.reason);
       terminal.messageCount = Number.isInteger(terminal.messageCount) ? terminal.messageCount + 1 : 1;
 
       this.tmux.sendKeys(

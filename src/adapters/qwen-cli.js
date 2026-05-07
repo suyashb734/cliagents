@@ -12,6 +12,7 @@ const fs = require('fs');
 const BaseLLMAdapter = require('../core/base-llm-adapter');
 const { createAdapterContract, defineAdapterCapabilities, EXECUTION_MODES } = require('./contract');
 const { logConversation, logSessionStart } = require('../utils/conversation-logger');
+const { isAdapterAuthenticated } = require('../utils/adapter-auth');
 
 const SAFE_ALLOWED_TOOL_PATTERN = /^[a-zA-Z0-9_-]+$/;
 const QWEN_PATH_NOT_FOUND = Symbol('qwen_path_not_found');
@@ -92,6 +93,9 @@ class QwenCliAdapter extends BaseLLMAdapter {
     this.activeProcesses = new Map();
     this._qwenPathCache = undefined;
     this._qwenPathResolvePromise = null;
+    this.authInspector = typeof config.authInspector === 'function'
+      ? config.authInspector
+      : isAdapterAuthenticated;
     this.capabilities = defineAdapterCapabilities({
       usesOfficialCli: true,
       executionMode: EXECUTION_MODES.DIRECT_SESSION,
@@ -187,6 +191,32 @@ class QwenCliAdapter extends BaseLLMAdapter {
 
   _spawnProcess(command, args, options = {}) {
     return spawn(command, args, options);
+  }
+
+  _shouldSkipAuthPreflight() {
+    return this.config.skipAuthPreflight === true || process.env.CLIAGENTS_QWEN_SKIP_AUTH_PREFLIGHT === '1';
+  }
+
+  _getAuthPreflightResult() {
+    if (this._shouldSkipAuthPreflight()) {
+      return { authenticated: true, reason: 'Qwen auth preflight disabled' };
+    }
+
+    try {
+      const result = this.authInspector(this.name);
+      if (result && result.authenticated === true) {
+        return result;
+      }
+      return {
+        authenticated: false,
+        reason: result?.reason || 'Qwen Code is not configured for non-interactive use.'
+      };
+    } catch (error) {
+      return {
+        authenticated: false,
+        reason: error?.message || 'Qwen auth preflight failed.'
+      };
+    }
   }
 
   async _getQwenPath() {
@@ -285,6 +315,17 @@ class QwenCliAdapter extends BaseLLMAdapter {
 
     if (!qwenPath) {
       yield { type: 'error', content: 'Qwen CLI not found in PATH' };
+      return;
+    }
+
+    const authPreflight = this._getAuthPreflightResult();
+    if (!authPreflight.authenticated) {
+      yield {
+        type: 'error',
+        content: `Qwen provider authentication failed: ${authPreflight.reason}`,
+        timedOut: false,
+        failureClass: 'auth'
+      };
       return;
     }
 

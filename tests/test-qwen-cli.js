@@ -126,7 +126,7 @@ async function withTimeout(promise, timeoutMs, label) {
   });
 
   await runTest('_runQwenCommandStreaming escalates to SIGKILL when timeout ignores SIGTERM', async () => {
-    const adapter = new QwenCliAdapter({ timeout: 20, terminationGraceMs: 10 });
+    const adapter = new QwenCliAdapter({ timeout: 20, terminationGraceMs: 10, skipAuthPreflight: true });
     const killSignals = [];
 
     adapter._getQwenPath = async () => '/usr/local/bin/qwen';
@@ -167,7 +167,7 @@ async function withTimeout(promise, timeoutMs, label) {
   });
 
   await runTest('_runQwenCommandStreaming settles when the child never emits close/error', async () => {
-    const adapter = new QwenCliAdapter({ timeout: 20, terminationGraceMs: 10, timeoutSettleMs: 20 });
+    const adapter = new QwenCliAdapter({ timeout: 20, terminationGraceMs: 10, timeoutSettleMs: 20, skipAuthPreflight: true });
     const killSignals = [];
 
     adapter._getQwenPath = async () => '/usr/local/bin/qwen';
@@ -204,7 +204,7 @@ async function withTimeout(promise, timeoutMs, label) {
   });
 
   await runTest('_runQwenCommandStreaming settles when stdout iterator never resolves after timeout', async () => {
-    const adapter = new QwenCliAdapter({ timeout: 20, terminationGraceMs: 10, timeoutSettleMs: 20 });
+    const adapter = new QwenCliAdapter({ timeout: 20, terminationGraceMs: 10, timeoutSettleMs: 20, skipAuthPreflight: true });
     const killSignals = [];
 
     adapter._getQwenPath = async () => '/usr/local/bin/qwen';
@@ -247,6 +247,34 @@ async function withTimeout(promise, timeoutMs, label) {
     assert.strictEqual(errorChunk.timedOut, true, 'Timeout error should be marked timedOut=true');
     assert(killSignals.includes('SIGTERM'), `Expected SIGTERM during timeout handling, got ${killSignals.join(', ')}`);
     assert(killSignals.includes('SIGKILL'), `Expected SIGKILL during timeout handling, got ${killSignals.join(', ')}`);
+  });
+
+  await runTest('_runQwenCommandStreaming fails auth preflight before spawning qwen', async () => {
+    const adapter = new QwenCliAdapter({
+      timeout: 1000,
+      authInspector: () => ({
+        authenticated: false,
+        reason: 'test qwen auth missing'
+      })
+    });
+    let spawnCount = 0;
+    adapter._getQwenPath = async () => '/usr/local/bin/qwen';
+    adapter._spawnProcess = () => {
+      spawnCount += 1;
+      throw new Error('qwen should not be spawned when auth preflight fails');
+    };
+
+    const chunks = await collect(adapter._runQwenCommandStreaming(['-p', 'auth-test'], {
+      timeout: 1000,
+      sessionId: 'qwen-auth-preflight',
+      workDir: process.cwd()
+    }));
+
+    const errorChunk = chunks.find((chunk) => chunk.type === 'error');
+    assert(errorChunk, 'Expected auth preflight error chunk');
+    assert.strictEqual(errorChunk.failureClass, 'auth');
+    assert(errorChunk.content.includes('test qwen auth missing'));
+    assert.strictEqual(spawnCount, 0, 'Qwen process must not be spawned when auth preflight fails');
   });
 
   await runTest('send rejects invalid allowedTools entries', async () => {
