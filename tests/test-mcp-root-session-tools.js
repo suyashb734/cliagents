@@ -112,7 +112,11 @@ async function startFakeCliagentsServer() {
     lastRouteBody: null,
     lastOutputUrl: null,
     inputResponses: [],
-    inputBodies: []
+    inputBodies: [],
+    inputQueueBodies: [],
+    inputQueueResponses: [],
+    inputQueueListResponse: null,
+    inputQueueActionBodies: []
   };
 
   const server = http.createServer(async (req, res) => {
@@ -397,6 +401,67 @@ async function startFakeCliagentsServer() {
         return writeJson(response.status, response.body);
       }
       return writeJson(200, response.body || response);
+    }
+
+    const inputQueueEnqueueMatch = req.url.match(/^\/orchestration\/terminals\/([^/]+)\/input-queue$/);
+    if (req.method === 'POST' && inputQueueEnqueueMatch) {
+      const body = await readBody();
+      state.inputQueueBodies.push({ terminalId: inputQueueEnqueueMatch[1], body });
+      const response = state.inputQueueResponses.length > 0
+        ? state.inputQueueResponses.shift()
+        : {
+            input: {
+              id: 'input-queued-1',
+              terminalId: inputQueueEnqueueMatch[1],
+              inputKind: body.inputKind || 'message',
+              status: body.approvalRequired ? 'held_for_approval' : 'pending',
+              controlMode: body.controlMode || 'operator'
+            }
+          };
+      if (response.status && response.status !== 200) {
+        return writeJson(response.status, response.body);
+      }
+      return writeJson(200, response.body || response);
+    }
+
+    if (req.method === 'GET' && req.url.startsWith('/orchestration/input-queue')) {
+      return writeJson(200, state.inputQueueListResponse || {
+        inputs: [
+          {
+            id: 'input-queued-1',
+            terminalId: 'child-terminal-1',
+            inputKind: 'message',
+            status: 'pending',
+            controlMode: 'operator'
+          }
+        ]
+      });
+    }
+
+    const inputQueueActionMatch = req.url.match(/^\/orchestration\/input-queue\/([^/]+)\/(approve|deny|cancel|deliver)$/);
+    if (req.method === 'POST' && inputQueueActionMatch) {
+      const body = await readBody();
+      state.inputQueueActionBodies.push({
+        inputId: inputQueueActionMatch[1],
+        action: inputQueueActionMatch[2],
+        body
+      });
+      const statusByAction = {
+        approve: 'pending',
+        deny: 'cancelled',
+        cancel: 'cancelled',
+        deliver: 'delivered'
+      };
+      return writeJson(200, {
+        success: inputQueueActionMatch[2] === 'deliver' ? true : undefined,
+        input: {
+          id: inputQueueActionMatch[1],
+          terminalId: 'child-terminal-1',
+          inputKind: 'message',
+          status: statusByAction[inputQueueActionMatch[2]],
+          controlMode: 'operator'
+        }
+      });
     }
 
     return writeJson(404, { error: { message: `Unhandled route ${req.method} ${req.url}` } });
@@ -1266,6 +1331,37 @@ async function run() {
     });
     assert(replyResult.content[0].text.includes('Terminal Updated'));
     assert(replyResult.content[0].text.includes('child-terminal-1'));
+
+    const queuedResult = await mod.handleEnqueueTerminalInput({
+      terminalId: 'child-terminal-1',
+      message: 'Queue this first.',
+      approvalRequired: true,
+      requestedBy: 'mcp-test'
+    });
+    assert(queuedResult.content[0].text.includes('Terminal Input Queued'));
+    assert(queuedResult.content[0].text.includes('status: held_for_approval'));
+    assert.strictEqual(fakeServer.state.inputQueueBodies.at(-1).terminalId, 'child-terminal-1');
+    assert.strictEqual(fakeServer.state.inputQueueBodies.at(-1).body.approvalRequired, true);
+
+    const queueList = await mod.handleListTerminalInputQueue({
+      terminalId: 'child-terminal-1',
+      status: 'pending'
+    });
+    assert(queueList.content[0].text.includes('Terminal Input Queue'));
+    assert(queueList.content[0].text.includes('input-queued-1'));
+
+    const approveInput = await mod.handleApproveTerminalInput({
+      inputId: 'input-queued-1',
+      approvedBy: 'mcp-test'
+    });
+    assert(approveInput.content[0].text.includes('Terminal Input Approved'));
+    assert.strictEqual(fakeServer.state.inputQueueActionBodies.at(-1).action, 'approve');
+
+    const deliverInput = await mod.handleDeliverTerminalInput({
+      inputId: 'input-queued-1'
+    });
+    assert(deliverInput.content[0].text.includes('Terminal Input Delivered'));
+    assert.strictEqual(fakeServer.state.inputQueueActionBodies.at(-1).action, 'deliver');
 
     const implicitUpgrade = loadMcpModule({
       ...envOverrides,

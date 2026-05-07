@@ -950,6 +950,94 @@ Timeout presets: "simple" (3 min), "standard" (10 min, default), "complex" (30 m
     }
   },
   {
+    name: 'enqueue_terminal_input',
+    description: 'Queue remote terminal input, approval, or denial for durable review and explicit delivery.',
+    inputSchema: {
+      type: 'object',
+      properties: {
+        terminalId: { type: 'string', description: 'Terminal ID to queue input for.' },
+        message: { type: 'string', description: 'Input text. Defaults to y/n for approval/denial kinds.' },
+        inputKind: {
+          type: 'string',
+          enum: ['message', 'approval', 'denial'],
+          description: 'Input kind. Use approval/denial for permission prompts.'
+        },
+        approvalRequired: { type: 'boolean', description: 'Hold the queued input until explicitly approved.' },
+        controlMode: {
+          type: 'string',
+          enum: ['observer', 'operator', 'exclusive'],
+          description: 'Control mode recorded for this input.'
+        },
+        expiresAt: { type: 'integer', description: 'Optional expiration timestamp in milliseconds.' },
+        requestedBy: { type: 'string', description: 'Optional operator/client identifier.' },
+        metadata: { type: 'object', description: 'Optional queue metadata such as diff references.' }
+      },
+      required: ['terminalId']
+    }
+  },
+  {
+    name: 'list_terminal_input_queue',
+    description: 'List durable queued terminal inputs and approval/denial records.',
+    inputSchema: {
+      type: 'object',
+      properties: {
+        terminalId: { type: 'string', description: 'Optional terminal filter.' },
+        rootSessionId: { type: 'string', description: 'Optional root-session filter.' },
+        taskId: { type: 'string', description: 'Optional task filter.' },
+        status: { type: 'string', description: 'Optional comma-separated status filter.' },
+        limit: { type: 'integer', description: 'Maximum records to return. Default 100.' }
+      }
+    }
+  },
+  {
+    name: 'approve_terminal_input',
+    description: 'Approve a held terminal input queue item so it can be delivered.',
+    inputSchema: {
+      type: 'object',
+      properties: {
+        inputId: { type: 'string', description: 'Input queue item ID.' },
+        approvedBy: { type: 'string', description: 'Optional approver identifier.' }
+      },
+      required: ['inputId']
+    }
+  },
+  {
+    name: 'deny_terminal_input',
+    description: 'Deny a pending or held terminal input queue item without delivering it.',
+    inputSchema: {
+      type: 'object',
+      properties: {
+        inputId: { type: 'string', description: 'Input queue item ID.' },
+        deniedBy: { type: 'string', description: 'Optional operator identifier.' },
+        reason: { type: 'string', description: 'Optional denial reason.' }
+      },
+      required: ['inputId']
+    }
+  },
+  {
+    name: 'cancel_terminal_input',
+    description: 'Cancel a pending or held terminal input queue item without delivering it.',
+    inputSchema: {
+      type: 'object',
+      properties: {
+        inputId: { type: 'string', description: 'Input queue item ID.' },
+        reason: { type: 'string', description: 'Optional cancellation reason.' }
+      },
+      required: ['inputId']
+    }
+  },
+  {
+    name: 'deliver_terminal_input',
+    description: 'Deliver a pending terminal input queue item through runtime-capability-gated broker input.',
+    inputSchema: {
+      type: 'object',
+      properties: {
+        inputId: { type: 'string', description: 'Input queue item ID.' }
+      },
+      required: ['inputId']
+    }
+  },
+  {
     name: 'run_workflow',
     description: `Execute a predefined multi-agent workflow. Launches multiple subagents (Gemini + Codex + Qwen) in parallel or sequence.
 
@@ -2425,6 +2513,176 @@ async function handleReplyToTerminal(args) {
     content: [{
       type: 'text',
       text: `## Terminal Updated\n\n**Terminal ID:** ${terminalId}\n**Status:** input sent\n\nThe follow-up message was delivered to the existing terminal. Continue with \`check_task_status({ terminalId: "${terminalId}" })\` or \`get_terminal_output({ terminalId: "${terminalId}" })\` to monitor the same session.`
+    }]
+  };
+}
+
+function formatInputQueueItem(item = {}) {
+  return [
+    `${item.id || 'n/a'} (${item.inputKind || 'message'})`,
+    `terminal=${item.terminalId || 'n/a'}`,
+    `status=${item.status || 'pending'}`,
+    item.controlMode ? `control=${item.controlMode}` : null,
+    item.expiresAt ? `expires=${new Date(item.expiresAt).toISOString()}` : null
+  ].filter(Boolean).join(' • ');
+}
+
+async function handleEnqueueTerminalInput(args = {}) {
+  const terminalId = args.terminalId || args.terminal_id;
+  if (!terminalId) {
+    throw new Error('terminalId is required');
+  }
+
+  const res = await callCliagents('POST', `/orchestration/terminals/${encodeURIComponent(terminalId)}/input-queue`, {
+    message: args.message || null,
+    inputKind: args.inputKind || args.input_kind || 'message',
+    approvalRequired: args.approvalRequired === true || args.approval_required === true,
+    controlMode: args.controlMode || args.control_mode || null,
+    expiresAt: args.expiresAt || args.expires_at || null,
+    requestedBy: args.requestedBy || args.requested_by || null,
+    metadata: args.metadata || null
+  });
+  if (res.status !== 200) {
+    throw new Error(`Failed to enqueue terminal input: ${JSON.stringify(res.data)}`);
+  }
+
+  const item = res.data?.input || {};
+  return {
+    content: [{
+      type: 'text',
+      text: [
+        '## Terminal Input Queued',
+        '',
+        `input_id: ${item.id || 'n/a'}`,
+        `terminal_id: ${item.terminalId || terminalId}`,
+        `kind: ${item.inputKind || args.inputKind || 'message'}`,
+        `status: ${item.status || 'pending'}`,
+        `control_mode: ${item.controlMode || 'operator'}`
+      ].join('\n')
+    }]
+  };
+}
+
+async function handleListTerminalInputQueue(args = {}) {
+  const params = new URLSearchParams();
+  if (args.terminalId || args.terminal_id) {
+    params.set('terminalId', args.terminalId || args.terminal_id);
+  }
+  if (args.rootSessionId || args.root_session_id) {
+    params.set('rootSessionId', args.rootSessionId || args.root_session_id);
+  }
+  if (args.taskId || args.task_id) {
+    params.set('taskId', args.taskId || args.task_id);
+  }
+  if (args.status) {
+    params.set('status', Array.isArray(args.status) ? args.status.join(',') : String(args.status));
+  }
+  if (Number.isFinite(args.limit)) {
+    params.set('limit', String(args.limit));
+  }
+
+  const qs = params.toString();
+  const res = await callCliagents('GET', `/orchestration/input-queue${qs ? `?${qs}` : ''}`);
+  if (res.status !== 200) {
+    throw new Error(`Failed to list terminal input queue: ${JSON.stringify(res.data)}`);
+  }
+
+  const inputs = Array.isArray(res.data?.inputs) ? res.data.inputs : [];
+  return {
+    content: [{
+      type: 'text',
+      text: [
+        '## Terminal Input Queue',
+        '',
+        `returned: ${inputs.length}`,
+        '',
+        inputs.map(formatInputQueueItem).join('\n')
+      ].filter(Boolean).join('\n')
+    }]
+  };
+}
+
+async function handleApproveTerminalInput(args = {}) {
+  const inputId = args.inputId || args.input_id;
+  if (!inputId) {
+    throw new Error('inputId is required');
+  }
+  const res = await callCliagents('POST', `/orchestration/input-queue/${encodeURIComponent(inputId)}/approve`, {
+    approvedBy: args.approvedBy || args.approved_by || null
+  });
+  if (res.status !== 200) {
+    throw new Error(`Failed to approve terminal input: ${JSON.stringify(res.data)}`);
+  }
+  const item = res.data?.input || {};
+  return {
+    content: [{
+      type: 'text',
+      text: `## Terminal Input Approved\n\ninput_id: ${item.id || inputId}\nstatus: ${item.status || 'pending'}`
+    }]
+  };
+}
+
+async function handleDenyTerminalInput(args = {}) {
+  const inputId = args.inputId || args.input_id;
+  if (!inputId) {
+    throw new Error('inputId is required');
+  }
+  const res = await callCliagents('POST', `/orchestration/input-queue/${encodeURIComponent(inputId)}/deny`, {
+    deniedBy: args.deniedBy || args.denied_by || null,
+    reason: args.reason || null
+  });
+  if (res.status !== 200) {
+    throw new Error(`Failed to deny terminal input: ${JSON.stringify(res.data)}`);
+  }
+  const item = res.data?.input || {};
+  return {
+    content: [{
+      type: 'text',
+      text: `## Terminal Input Denied\n\ninput_id: ${item.id || inputId}\nstatus: ${item.status || 'cancelled'}`
+    }]
+  };
+}
+
+async function handleCancelTerminalInput(args = {}) {
+  const inputId = args.inputId || args.input_id;
+  if (!inputId) {
+    throw new Error('inputId is required');
+  }
+  const res = await callCliagents('POST', `/orchestration/input-queue/${encodeURIComponent(inputId)}/cancel`, {
+    reason: args.reason || null
+  });
+  if (res.status !== 200) {
+    throw new Error(`Failed to cancel terminal input: ${JSON.stringify(res.data)}`);
+  }
+  const item = res.data?.input || {};
+  return {
+    content: [{
+      type: 'text',
+      text: `## Terminal Input Cancelled\n\ninput_id: ${item.id || inputId}\nstatus: ${item.status || 'cancelled'}`
+    }]
+  };
+}
+
+async function handleDeliverTerminalInput(args = {}) {
+  const inputId = args.inputId || args.input_id;
+  if (!inputId) {
+    throw new Error('inputId is required');
+  }
+  const res = await callCliagents('POST', `/orchestration/input-queue/${encodeURIComponent(inputId)}/deliver`, {});
+  if (res.status !== 200) {
+    throw new Error(`Failed to deliver terminal input: ${JSON.stringify(res.data)}`);
+  }
+  const item = res.data?.input || {};
+  return {
+    content: [{
+      type: 'text',
+      text: [
+        '## Terminal Input Delivered',
+        '',
+        `input_id: ${item.id || inputId}`,
+        `terminal_id: ${item.terminalId || 'n/a'}`,
+        `status: ${item.status || 'delivered'}`
+      ].join('\n')
     }]
   };
 }
@@ -4932,6 +5190,24 @@ async function handleRequest(request) {
           case 'reply_to_terminal':
             result = await handleReplyToTerminal(args);
             break;
+          case 'enqueue_terminal_input':
+            result = await handleEnqueueTerminalInput(args);
+            break;
+          case 'list_terminal_input_queue':
+            result = await handleListTerminalInputQueue(args);
+            break;
+          case 'approve_terminal_input':
+            result = await handleApproveTerminalInput(args);
+            break;
+          case 'deny_terminal_input':
+            result = await handleDenyTerminalInput(args);
+            break;
+          case 'cancel_terminal_input':
+            result = await handleCancelTerminalInput(args);
+            break;
+          case 'deliver_terminal_input':
+            result = await handleDeliverTerminalInput(args);
+            break;
           case 'run_workflow':
             result = await handleRunWorkflow(args);
             break;
@@ -5131,6 +5407,12 @@ module.exports = {
   handleCheckTasksStatus,
   handleDelegateTask,
   handleReplyToTerminal,
+  handleEnqueueTerminalInput,
+  handleListTerminalInputQueue,
+  handleApproveTerminalInput,
+  handleDenyTerminalInput,
+  handleCancelTerminalInput,
+  handleDeliverTerminalInput,
   handleGetTerminalOutput,
   handleGetRootSessionStatus,
   handleGetRemoteSnapshot,

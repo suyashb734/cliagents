@@ -19,6 +19,8 @@ internals.
   sending raw terminal control.
 - Terminal input remains gated by runtime capability. A runtime must advertise
   `send_input` before `/orchestration/terminals/:id/input` accepts input.
+- Queued terminal input is the preferred remote write path when approval,
+  denial, cancellation, expiration, or mobile review is needed.
 
 ## Snapshot Route
 
@@ -58,9 +60,20 @@ Use specific MCP tools for follow-up detail:
 - `get_usage_summary`
 - `get_memory_bundle`
 
+Use terminal input queue tools for remote write control:
+
+- `enqueue_terminal_input`
+- `list_terminal_input_queue`
+- `approve_terminal_input`
+- `deny_terminal_input`
+- `cancel_terminal_input`
+- `deliver_terminal_input`
+
+The queue states are documented in [Terminal Input Queue](./INPUT-QUEUE.md).
+
 ## Non-Goals
 
 - No tunnel or relay is created in V1.
 - No direct PTY or terminal renderer is introduced.
-- No remote approval state machine is added here.
+- No multi-operator lease protocol is added here.
 - No raw shell control is exposed without runtime capability checks.

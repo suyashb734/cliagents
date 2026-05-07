@@ -86,6 +86,20 @@
       "last_reviewed": "2026-05-06"
     },
     {
+      "path": "docs/reference/INPUT-QUEUE.md",
+      "status": "reference",
+      "type": "reference",
+      "scope": ["remote-control", "terminal-input", "approvals", "session-control"],
+      "related_code": [
+        "src/server/orchestration-router.js",
+        "src/mcp/cliagents-mcp-server.js",
+        "src/database/db.js",
+        "src/database/migrations/0016_terminal_input_queue.sql"
+      ],
+      "supersedes": [],
+      "last_reviewed": "2026-05-07"
+    },
+    {
       "path": "docs/reference/MCP-TOOLS.md",
       "status": "reference",
       "type": "reference",

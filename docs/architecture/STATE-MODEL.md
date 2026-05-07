@@ -25,6 +25,24 @@ tasks, and assignments.
 Busy terminals reject new input with `terminal_busy` instead of silently mixing
 turns.
 
+## Session Control Mode
+
+- `observer`: remote clients may inspect but not deliver input.
+- `operator`: normal remote-control mode.
+- `exclusive`: marks exclusive operator intent; V1 records it, with lease
+  enforcement deferred.
+
+Queued input also records a control mode so mobile/web clients can audit why an
+input was deliverable or blocked.
+
+## Terminal Input Queue Status
+
+- `pending`: queued and ready for delivery.
+- `held_for_approval`: waiting for explicit operator approval.
+- `delivered`: sent through the runtime host.
+- `expired`: no longer deliverable.
+- `cancelled`: denied or cancelled before delivery.
+
 ## Task Status
 
 Task status is derived from assignment state:

@@ -4,7 +4,7 @@
 
 Status: `active-plan`
 
-Last reviewed: `2026-05-06`
+Last reviewed: `2026-05-07`
 
 Review source: Claude Code architecture review through `cliagents` terminal
 `ddc645aa08f0c7a3b9c8fcfbab3be4c4`.
@@ -241,6 +241,22 @@ hardening slice:
 - keep terminal input capability-gated and do not add raw shell control
 - do not add tunnels, remote approval queues, direct PTY ownership, or a web UI
   in this milestone
+
+## Milestone 5 Execution Brief
+
+Implement Approval, Diff, And Input Queue V1 as the first remote write-control
+slice:
+
+- add a durable terminal input queue with `pending`, `held_for_approval`,
+  `delivered`, `expired`, and `cancelled`
+- add session control modes: `observer`, `operator`, and `exclusive`
+- route queued delivery through the same runtime capability and attached-root
+  checks as direct terminal input
+- support approval and denial input kinds for permission prompts
+- expose HTTP and MCP surfaces for enqueue, list, approve, deny, cancel, and
+  deliver
+- keep diff support metadata-only in this slice; do not build a renderer, lease
+  protocol, remote web UI, tunnel, or direct PTY ownership here
 
 ## Rejected Alternative
 

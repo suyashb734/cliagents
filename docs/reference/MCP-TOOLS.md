@@ -19,6 +19,8 @@ The MCP server is the primary agent-facing control surface for `cliagents`.
 - **Memory**: retrieve memory bundles and message windows.
 - **Remote snapshot**: inspect one runtime-neutral broker snapshot for
   remote/web/mobile control surfaces.
+- **Terminal input queue**: queue, approve, deny, cancel, and deliver
+  remote-safe terminal input.
 
 ## Source Of Truth
 

@@ -36,6 +36,8 @@ const { isAdapterAuthenticated } = require('../utils/adapter-auth');
 const {
   RUNTIME_HOSTS,
   RUNTIME_FIDELITY,
+  SESSION_CONTROL_MODES,
+  normalizeSessionControlMode,
   normalizeRuntimeCapabilities,
   resolveRuntimeHostMetadata
 } = require('../runtime/host-model');
@@ -209,6 +211,13 @@ function createOrchestrationRouter(context) {
       role: liveTerminal?.role || terminalRow?.role || null,
       agentProfile: terminalRow?.agent_profile || terminalRow?.agentProfile || null,
       status: liveTerminal?.taskState || liveTerminal?.status || terminalRow?.status || null,
+      sessionControlMode: normalizeSessionControlMode(
+        liveTerminal?.sessionControlMode
+          || liveTerminal?.session_control_mode
+          || terminalRow?.session_control_mode
+          || terminalRow?.sessionControlMode,
+        SESSION_CONTROL_MODES.OPERATOR
+      ),
       lastActive: liveTerminal?.lastActive || terminalRow?.last_active || terminalRow?.lastActive || null,
       providerThreadRefPresent: Boolean(providerThreadRef),
       runtimeHost: runtimeMetadata.runtimeHost,
@@ -241,6 +250,18 @@ function createOrchestrationRouter(context) {
     }
 
     return resolveRuntimeHostMetadata(terminalRow);
+  }
+
+  function getTerminalSessionControlMode(terminalId) {
+    const liveTerminal = getLiveTerminal(terminalId);
+    const terminalRow = liveTerminal || (typeof db?.getTerminal === 'function' ? db.getTerminal(terminalId) : null);
+    return normalizeSessionControlMode(
+      liveTerminal?.sessionControlMode
+        || liveTerminal?.session_control_mode
+        || terminalRow?.session_control_mode
+        || terminalRow?.sessionControlMode,
+      SESSION_CONTROL_MODES.OPERATOR
+    );
   }
 
   function getLiveOutput(terminalId, options = {}) {
@@ -299,6 +320,100 @@ function createOrchestrationRouter(context) {
       eventLimit: 120,
       terminalLimit: 200
     });
+  }
+
+  function validateTerminalRemoteControlAccess(terminalId, options = {}) {
+    const inputKind = String(options.inputKind || 'message').trim().toLowerCase();
+    const rootSnapshot = resolveTerminalRootAccess(terminalId);
+    const runtimeMetadata = getTerminalRuntimeMetadata(terminalId);
+    const requiredCapability = inputKind === 'approval' || inputKind === 'denial'
+      ? 'approve_permission'
+      : 'send_input';
+
+    if (runtimeMetadata) {
+      const capabilities = runtimeMetadata.runtimeCapabilities || [];
+      const supported = capabilities.includes(requiredCapability)
+        || (requiredCapability === 'approve_permission' && capabilities.includes('send_input'));
+      if (!supported) {
+        return {
+          ok: false,
+          status: 403,
+          body: {
+            error: {
+              code: 'runtime_capability_unsupported',
+              message: `Runtime host ${runtimeMetadata.runtimeHost} does not support ${requiredCapability} for terminal ${terminalId}.`,
+              terminalId,
+              runtimeHost: runtimeMetadata.runtimeHost,
+              requiredCapability,
+              runtimeCapabilities: capabilities
+            }
+          }
+        };
+      }
+    }
+
+    const sessionControlMode = getTerminalSessionControlMode(terminalId);
+    if (sessionControlMode === SESSION_CONTROL_MODES.OBSERVER) {
+      return {
+        ok: false,
+        status: 403,
+        body: {
+          error: {
+            code: 'session_control_observer',
+            message: `Terminal ${terminalId} is in observer mode and cannot accept remote input.`,
+            terminalId,
+            sessionControlMode
+          }
+        }
+      };
+    }
+
+    if (rootSnapshot?.rootMode === 'attached') {
+      const terminalSession = (rootSnapshot.sessions || []).find(s => s.sessionId === terminalId);
+      const liveTerminal = getLiveTerminal(terminalId);
+      const isRoot = terminalId === rootSnapshot.rootSessionId;
+      const liveRootSessionId = liveTerminal?.rootSessionId || liveTerminal?.root_session_id || null;
+      const liveParentSessionId = liveTerminal?.parentSessionId || liveTerminal?.parent_session_id || null;
+      const dbParentSessionId = terminalSession?.parentSessionId || terminalSession?.parent_session_id || null;
+      const dbOriginClient = String(terminalSession?.originClient || terminalSession?.origin_client || '').trim().toLowerCase();
+      const liveOriginClient = String(liveTerminal?.originClient || liveTerminal?.origin_client || '').trim().toLowerCase();
+      const dbSessionKind = String(terminalSession?.sessionKind || terminalSession?.session_kind || '').trim().toLowerCase();
+      const liveSessionKind = String(liveTerminal?.sessionKind || liveTerminal?.session_kind || '').trim().toLowerCase();
+      const originClientsMatch = Boolean(dbOriginClient) && Boolean(liveOriginClient) && dbOriginClient === liveOriginClient;
+      const hasBrokerChildRole = Boolean(terminalSession?.agentProfile || terminalSession?.agent_profile || liveTerminal?.agentProfile)
+        || ATTACHED_ROOT_BROKER_CHILD_SESSION_KINDS.has(dbSessionKind || liveSessionKind);
+      const isBrokerOwnedChild = Boolean(terminalSession && liveTerminal)
+        && liveRootSessionId === rootSnapshot.rootSessionId
+        && liveParentSessionId === rootSnapshot.rootSessionId
+        && dbParentSessionId === rootSnapshot.rootSessionId
+        && originClientsMatch
+        && dbOriginClient !== 'legacy'
+        && hasBrokerChildRole
+        && (!dbSessionKind || !liveSessionKind || dbSessionKind === liveSessionKind);
+
+      if (isRoot || !isBrokerOwnedChild) {
+        return {
+          ok: false,
+          status: 403,
+          body: {
+            error: {
+              code: 'root_read_only',
+              message: `Root session ${rootSnapshot.rootSessionId} is attached and read-only. Remote execution requires a managed or adopted root.`,
+              rootSessionId: rootSnapshot.rootSessionId,
+              rootMode: rootSnapshot.rootMode,
+              terminalId
+            }
+          }
+        };
+      }
+    }
+
+    return {
+      ok: true,
+      rootSnapshot,
+      runtimeMetadata,
+      sessionControlMode
+    };
   }
 
   function readHeaderValue(req, name) {
@@ -991,12 +1106,17 @@ function createOrchestrationRouter(context) {
           'room_discussion',
           'root_launch',
           'root_adopt',
-          'root_attach'
+          'root_attach',
+          'terminal_input_queue',
+          'terminal_input_approval'
         ],
         terminalInput: {
           route: '/orchestration/terminals/:id/input',
           mode: 'runtime_capability_gated',
-          requiresRuntimeCapability: 'send_input'
+          queueRoute: '/orchestration/terminals/:id/input-queue',
+          requiresRuntimeCapability: 'send_input',
+          approvalCapability: 'approve_permission',
+          controlModes: Object.values(SESSION_CONTROL_MODES)
         }
       },
       routes: {
@@ -1009,6 +1129,7 @@ function createOrchestrationRouter(context) {
         runs: '/orchestration/runs',
         usage: '/orchestration/usage/*',
         memory: '/orchestration/memory/*',
+        inputQueue: '/orchestration/input-queue',
         sessionEvents: '/orchestration/session-events?normalized=1',
         adapters: '/orchestration/adapters'
       },
@@ -2964,6 +3085,52 @@ function createOrchestrationRouter(context) {
     }
   });
 
+  function normalizeInputQueueKind(value) {
+    const normalized = String(value || 'message').trim().toLowerCase();
+    return ['message', 'approval', 'denial'].includes(normalized) ? normalized : 'message';
+  }
+
+  function parseInputQueueTimestamp(value) {
+    if (value === null || value === undefined || value === '') {
+      return null;
+    }
+    if (typeof value === 'number' && Number.isFinite(value)) {
+      return Math.round(value);
+    }
+    const parsedNumber = Number(value);
+    if (Number.isFinite(parsedNumber)) {
+      return Math.round(parsedNumber);
+    }
+    const parsedDate = Date.parse(String(value));
+    return Number.isFinite(parsedDate) ? parsedDate : null;
+  }
+
+  function buildInputQueuePayload(item) {
+    if (!item) {
+      return null;
+    }
+    return {
+      input: item,
+      terminal: typeof db?.getTerminal === 'function' ? db.getTerminal(item.terminalId) : null
+    };
+  }
+
+  async function deliverInputQueueItem(item) {
+    if (item.inputKind === 'approval' || item.inputKind === 'denial') {
+      const key = String(item.message || (item.inputKind === 'approval' ? 'y' : 'n')).trim()
+        || (item.inputKind === 'approval' ? 'y' : 'n');
+      if (typeof sessionManager?.sendSpecialKey === 'function') {
+        sessionManager.sendSpecialKey(item.terminalId, key);
+        if (item.metadata?.sendEnter !== false) {
+          sessionManager.sendSpecialKey(item.terminalId, 'Enter');
+        }
+        return;
+      }
+    }
+
+    await sessionManager.sendInput(item.terminalId, item.message || '');
+  }
+
   /**
    * POST /orchestration/terminals/:id/input
    * Send input to terminal
@@ -2978,54 +3145,9 @@ function createOrchestrationRouter(context) {
         });
       }
 
-      const rootSnapshot = resolveTerminalRootAccess(req.params.id);
-      const runtimeMetadata = getTerminalRuntimeMetadata(req.params.id);
-      if (runtimeMetadata && !runtimeMetadata.runtimeCapabilities.includes('send_input')) {
-        return res.status(403).json({
-          error: {
-            code: 'runtime_capability_unsupported',
-            message: `Runtime host ${runtimeMetadata.runtimeHost} does not support remote input for terminal ${req.params.id}.`,
-            terminalId: req.params.id,
-            runtimeHost: runtimeMetadata.runtimeHost,
-            runtimeCapabilities: runtimeMetadata.runtimeCapabilities
-          }
-        });
-      }
-
-      if (rootSnapshot?.rootMode === 'attached') {
-        const terminalSession = (rootSnapshot.sessions || []).find(s => s.sessionId === req.params.id);
-        const liveTerminal = getLiveTerminal(req.params.id);
-        const isRoot = req.params.id === rootSnapshot.rootSessionId;
-        const liveRootSessionId = liveTerminal?.rootSessionId || liveTerminal?.root_session_id || null;
-        const liveParentSessionId = liveTerminal?.parentSessionId || liveTerminal?.parent_session_id || null;
-        const dbParentSessionId = terminalSession?.parentSessionId || terminalSession?.parent_session_id || null;
-        const dbOriginClient = String(terminalSession?.originClient || terminalSession?.origin_client || '').trim().toLowerCase();
-        const liveOriginClient = String(liveTerminal?.originClient || liveTerminal?.origin_client || '').trim().toLowerCase();
-        const dbSessionKind = String(terminalSession?.sessionKind || terminalSession?.session_kind || '').trim().toLowerCase();
-        const liveSessionKind = String(liveTerminal?.sessionKind || liveTerminal?.session_kind || '').trim().toLowerCase();
-        const originClientsMatch = Boolean(dbOriginClient) && Boolean(liveOriginClient) && dbOriginClient === liveOriginClient;
-        const hasBrokerChildRole = Boolean(terminalSession?.agentProfile || terminalSession?.agent_profile || liveTerminal?.agentProfile)
-          || ATTACHED_ROOT_BROKER_CHILD_SESSION_KINDS.has(dbSessionKind || liveSessionKind);
-        const isBrokerOwnedChild = Boolean(terminalSession && liveTerminal)
-          && liveRootSessionId === rootSnapshot.rootSessionId
-          && liveParentSessionId === rootSnapshot.rootSessionId
-          && dbParentSessionId === rootSnapshot.rootSessionId
-          && originClientsMatch
-          && dbOriginClient !== 'legacy'
-          && hasBrokerChildRole
-          && (!dbSessionKind || !liveSessionKind || dbSessionKind === liveSessionKind);
-
-        if (isRoot || !isBrokerOwnedChild) {
-          return res.status(403).json({
-            error: {
-              code: 'root_read_only',
-              message: `Root session ${rootSnapshot.rootSessionId} is attached and read-only. Remote execution requires a managed or adopted root.`,
-              rootSessionId: rootSnapshot.rootSessionId,
-              rootMode: rootSnapshot.rootMode,
-              terminalId: req.params.id
-            }
-          });
-        }
+      const access = validateTerminalRemoteControlAccess(req.params.id, { inputKind: 'message' });
+      if (!access.ok) {
+        return res.status(access.status).json(access.body);
       }
 
       await sessionManager.sendInput(req.params.id, message);
@@ -3056,6 +3178,340 @@ function createOrchestrationRouter(context) {
         });
       }
 
+      res.status(500).json({
+        error: { code: 'internal_error', message: error.message }
+      });
+    }
+  });
+
+  /**
+   * POST /orchestration/terminals/:id/input-queue
+   * Enqueue remote input or approval/denial for explicit delivery.
+   */
+  router.post('/terminals/:id/input-queue', async (req, res) => {
+    try {
+      if (!db?.enqueueTerminalInput) {
+        return res.status(503).json({
+          error: { code: 'unavailable', message: 'terminal input queue is not configured' }
+        });
+      }
+
+      const inputKind = normalizeInputQueueKind(req.body?.inputKind || req.body?.input_kind);
+      const message = req.body?.message
+        || (inputKind === 'approval' ? 'y' : null)
+        || (inputKind === 'denial' ? 'n' : null);
+      if (!message && inputKind === 'message') {
+        return res.status(400).json({
+          error: { code: 'missing_parameter', message: 'message is required', param: 'message' }
+        });
+      }
+
+      const terminalRow = typeof db?.getTerminal === 'function' ? db.getTerminal(req.params.id) : null;
+      if (!terminalRow) {
+        return res.status(404).json({
+          error: { code: 'terminal_not_found', message: `Terminal not found: ${req.params.id}` }
+        });
+      }
+
+      const approvalRequired = parseQueryBoolean(req.body?.approvalRequired ?? req.body?.approval_required, false);
+      const item = db.enqueueTerminalInput({
+        id: req.body?.inputId || req.body?.id || null,
+        terminalId: req.params.id,
+        rootSessionId: req.body?.rootSessionId || req.body?.root_session_id || terminalRow.root_session_id || null,
+        runId: req.body?.runId || req.body?.run_id || null,
+        taskId: req.body?.taskId || req.body?.task_id || null,
+        taskAssignmentId: req.body?.taskAssignmentId || req.body?.task_assignment_id || null,
+        inputKind,
+        message,
+        status: approvalRequired ? 'held_for_approval' : 'pending',
+        controlMode: req.body?.controlMode || req.body?.control_mode || getTerminalSessionControlMode(req.params.id),
+        requestedBy: req.body?.requestedBy || req.body?.requested_by || null,
+        approvalRequired,
+        holdReason: req.body?.holdReason || req.body?.hold_reason || null,
+        expiresAt: parseInputQueueTimestamp(req.body?.expiresAt ?? req.body?.expires_at),
+        metadata: req.body?.metadata || null
+      });
+
+      res.json(buildInputQueuePayload(item));
+    } catch (error) {
+      res.status(500).json({
+        error: { code: 'internal_error', message: error.message }
+      });
+    }
+  });
+
+  router.get('/terminals/:id/input-queue', (req, res) => {
+    try {
+      if (!db?.listTerminalInputQueue) {
+        return res.status(503).json({
+          error: { code: 'unavailable', message: 'terminal input queue is not configured' }
+        });
+      }
+
+      db.expireTerminalInputQueueItems?.();
+      const inputs = db.listTerminalInputQueue({
+        terminalId: req.params.id,
+        status: req.query.status,
+        limit: parseQueryInteger(req.query.limit, 100),
+        offset: parseQueryInteger(req.query.offset, 0)
+      });
+      res.json({ terminalId: req.params.id, inputs });
+    } catch (error) {
+      res.status(500).json({
+        error: { code: 'internal_error', message: error.message }
+      });
+    }
+  });
+
+  router.get('/input-queue', (req, res) => {
+    try {
+      if (!db?.listTerminalInputQueue) {
+        return res.status(503).json({
+          error: { code: 'unavailable', message: 'terminal input queue is not configured' }
+        });
+      }
+
+      db.expireTerminalInputQueueItems?.();
+      const status = req.query.status
+        ? String(req.query.status).split(',').map((entry) => entry.trim()).filter(Boolean)
+        : null;
+      const inputs = db.listTerminalInputQueue({
+        terminalId: req.query.terminalId || req.query.terminal_id || null,
+        rootSessionId: req.query.rootSessionId || req.query.root_session_id || null,
+        taskId: req.query.taskId || req.query.task_id || null,
+        status,
+        limit: parseQueryInteger(req.query.limit, 100),
+        offset: parseQueryInteger(req.query.offset, 0)
+      });
+      res.json({ inputs });
+    } catch (error) {
+      res.status(500).json({
+        error: { code: 'internal_error', message: error.message }
+      });
+    }
+  });
+
+  router.get('/input-queue/:inputId', (req, res) => {
+    try {
+      if (!db?.getTerminalInputQueueItem) {
+        return res.status(503).json({
+          error: { code: 'unavailable', message: 'terminal input queue is not configured' }
+        });
+      }
+
+      db.expireTerminalInputQueueItems?.();
+      const item = db.getTerminalInputQueueItem(req.params.inputId);
+      if (!item) {
+        return res.status(404).json({
+          error: { code: 'input_queue_item_not_found', message: `Input queue item not found: ${req.params.inputId}` }
+        });
+      }
+      res.json(buildInputQueuePayload(item));
+    } catch (error) {
+      res.status(500).json({
+        error: { code: 'internal_error', message: error.message }
+      });
+    }
+  });
+
+  router.post('/input-queue/:inputId/approve', (req, res) => {
+    try {
+      if (!db?.updateTerminalInputQueueItem) {
+        return res.status(503).json({
+          error: { code: 'unavailable', message: 'terminal input queue is not configured' }
+        });
+      }
+
+      const item = db.getTerminalInputQueueItem(req.params.inputId);
+      if (!item) {
+        return res.status(404).json({
+          error: { code: 'input_queue_item_not_found', message: `Input queue item not found: ${req.params.inputId}` }
+        });
+      }
+      if (item.status !== 'held_for_approval') {
+        return res.status(409).json({
+          error: {
+            code: 'invalid_input_queue_state',
+            message: `Input queue item ${item.id} is ${item.status}, not held_for_approval.`,
+            status: item.status
+          }
+        });
+      }
+
+      const updated = db.updateTerminalInputQueueItem(req.params.inputId, {
+        status: 'pending',
+        approvedBy: req.body?.approvedBy || req.body?.approved_by || req.body?.operator || null,
+        approvedAt: Date.now(),
+        decision: 'approved',
+        holdReason: null
+      });
+      res.json(buildInputQueuePayload(updated));
+    } catch (error) {
+      res.status(500).json({
+        error: { code: 'internal_error', message: error.message }
+      });
+    }
+  });
+
+  router.post('/input-queue/:inputId/deny', (req, res) => {
+    try {
+      if (!db?.updateTerminalInputQueueItem) {
+        return res.status(503).json({
+          error: { code: 'unavailable', message: 'terminal input queue is not configured' }
+        });
+      }
+
+      const item = db.getTerminalInputQueueItem(req.params.inputId);
+      if (!item) {
+        return res.status(404).json({
+          error: { code: 'input_queue_item_not_found', message: `Input queue item not found: ${req.params.inputId}` }
+        });
+      }
+      if (!['pending', 'held_for_approval'].includes(item.status)) {
+        return res.status(409).json({
+          error: {
+            code: 'invalid_input_queue_state',
+            message: `Input queue item ${item.id} is ${item.status} and cannot be denied.`,
+            status: item.status
+          }
+        });
+      }
+
+      const updated = db.updateTerminalInputQueueItem(req.params.inputId, {
+        status: 'cancelled',
+        approvedBy: req.body?.deniedBy || req.body?.denied_by || req.body?.operator || null,
+        approvedAt: Date.now(),
+        decision: 'denied',
+        cancelledAt: Date.now(),
+        holdReason: req.body?.reason || 'denied'
+      });
+      res.json(buildInputQueuePayload(updated));
+    } catch (error) {
+      res.status(500).json({
+        error: { code: 'internal_error', message: error.message }
+      });
+    }
+  });
+
+  router.post('/input-queue/:inputId/cancel', (req, res) => {
+    try {
+      if (!db?.updateTerminalInputQueueItem) {
+        return res.status(503).json({
+          error: { code: 'unavailable', message: 'terminal input queue is not configured' }
+        });
+      }
+
+      const item = db.getTerminalInputQueueItem(req.params.inputId);
+      if (!item) {
+        return res.status(404).json({
+          error: { code: 'input_queue_item_not_found', message: `Input queue item not found: ${req.params.inputId}` }
+        });
+      }
+      if (!['pending', 'held_for_approval'].includes(item.status)) {
+        return res.status(409).json({
+          error: {
+            code: 'invalid_input_queue_state',
+            message: `Input queue item ${item.id} is ${item.status} and cannot be cancelled.`,
+            status: item.status
+          }
+        });
+      }
+
+      const updated = db.updateTerminalInputQueueItem(req.params.inputId, {
+        status: 'cancelled',
+        cancelledAt: Date.now(),
+        holdReason: req.body?.reason || 'cancelled'
+      });
+      res.json(buildInputQueuePayload(updated));
+    } catch (error) {
+      res.status(500).json({
+        error: { code: 'internal_error', message: error.message }
+      });
+    }
+  });
+
+  router.post('/input-queue/:inputId/deliver', async (req, res) => {
+    try {
+      if (!db?.updateTerminalInputQueueItem || !db?.getTerminalInputQueueItem) {
+        return res.status(503).json({
+          error: { code: 'unavailable', message: 'terminal input queue is not configured' }
+        });
+      }
+
+      db.expireTerminalInputQueueItems?.();
+      const item = db.getTerminalInputQueueItem(req.params.inputId);
+      if (!item) {
+        return res.status(404).json({
+          error: { code: 'input_queue_item_not_found', message: `Input queue item not found: ${req.params.inputId}` }
+        });
+      }
+      if (item.status !== 'pending') {
+        return res.status(409).json({
+          error: {
+            code: 'invalid_input_queue_state',
+            message: `Input queue item ${item.id} is ${item.status}; only pending inputs can be delivered.`,
+            status: item.status,
+            nextAction: item.status === 'held_for_approval' ? 'approve the input before delivering it' : null
+          }
+        });
+      }
+      if (item.expiresAt && item.expiresAt <= Date.now()) {
+        const expired = db.updateTerminalInputQueueItem(item.id, {
+          status: 'expired'
+        });
+        return res.status(409).json({
+          error: {
+            code: 'input_queue_item_expired',
+            message: `Input queue item ${item.id} has expired.`,
+            input: expired
+          }
+        });
+      }
+      if (item.controlMode === SESSION_CONTROL_MODES.OBSERVER) {
+        return res.status(403).json({
+          error: {
+            code: 'session_control_observer',
+            message: `Input queue item ${item.id} was created in observer mode and cannot be delivered.`,
+            inputId: item.id,
+            terminalId: item.terminalId,
+            controlMode: item.controlMode
+          }
+        });
+      }
+
+      const access = validateTerminalRemoteControlAccess(item.terminalId, { inputKind: item.inputKind });
+      if (!access.ok) {
+        return res.status(access.status).json(access.body);
+      }
+
+      await deliverInputQueueItem(item);
+      const delivered = db.updateTerminalInputQueueItem(item.id, {
+        status: 'delivered',
+        deliveredAt: Date.now()
+      });
+      res.json({
+        success: true,
+        ...buildInputQueuePayload(delivered),
+        status: typeof sessionManager?.getStatus === 'function' ? sessionManager.getStatus(item.terminalId) : null
+      });
+    } catch (error) {
+      if (error.message.includes('not found')) {
+        return res.status(404).json({
+          error: { code: 'terminal_not_found', message: error.message }
+        });
+      }
+      if (error.code === 'terminal_busy' || error.statusCode === 409) {
+        return res.status(409).json({
+          error: {
+            code: 'terminal_busy',
+            message: error.message,
+            terminalId: error.terminalId || null,
+            status: error.terminalStatus || null,
+            retryAfterMs: error.retryAfterMs || 1000,
+            nextAction: 'wait for the terminal to finish, then deliver the queued input again'
+          }
+        });
+      }
       res.status(500).json({
         error: { code: 'internal_error', message: error.message }
       });

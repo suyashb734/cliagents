@@ -11,6 +11,8 @@ const path = require('path');
 const fs = require('fs');
 const crypto = require('crypto');
 const {
+  SESSION_CONTROL_MODES,
+  normalizeSessionControlMode,
   resolveRuntimeHostMetadata,
   serializeRuntimeCapabilities
 } = require('../runtime/host-model');
@@ -328,6 +330,8 @@ function buildUsageWhereClause(options = {}) {
 const MEMORY_SNAPSHOT_SCOPES = new Set(['run', 'root']);
 const MEMORY_SNAPSHOT_GENERATION_TRIGGERS = new Set(['run_completed', 'root_refresh', 'repair', 'manual']);
 const MEMORY_SNAPSHOT_GENERATION_STRATEGIES = new Set(['rule_based']);
+const TERMINAL_INPUT_QUEUE_STATUSES = new Set(['pending', 'held_for_approval', 'delivered', 'expired', 'cancelled']);
+const TERMINAL_INPUT_KINDS = new Set(['message', 'approval', 'denial']);
 const ROOM_TURN_ACTIVE_STATUSES = new Set(['pending', 'running']);
 const ROOM_TURN_TERMINAL_STATUSES = new Set(['completed', 'partial', 'failed']);
 const DEFAULT_ROOM_TURN_STALE_MS = 30 * 60 * 1000;
@@ -358,6 +362,7 @@ const MEMORY_PROJECTION_SOURCE_LOOKUPS = {
   run_outputs: { primaryKey: 'id' },
   run_tool_events: { primaryKey: 'id' },
   usage_records: { primaryKey: 'id' },
+  terminal_input_queue: { primaryKey: 'id' },
   discussions: { primaryKey: 'id' },
   discussion_messages: { primaryKey: 'id' },
   artifacts: { primaryKey: 'id' },
@@ -367,6 +372,17 @@ const MEMORY_PROJECTION_SOURCE_LOOKUPS = {
   operator_actions: { primaryKey: 'action_id' },
   run_blocked_states: { primaryKey: 'id' }
 };
+
+function normalizeTerminalInputQueueStatus(value, fallback = 'pending') {
+  const normalized = String(value || '').trim().toLowerCase();
+  return TERMINAL_INPUT_QUEUE_STATUSES.has(normalized) ? normalized : fallback;
+}
+
+function normalizeTerminalInputKind(value, fallback = 'message') {
+  const normalized = String(value || '').trim().toLowerCase();
+  return TERMINAL_INPUT_KINDS.has(normalized) ? normalized : fallback;
+}
+
 function clampLimit(value, fallback = 100, max = 500) {
   const parsed = Number.parseInt(value, 10);
   if (!Number.isFinite(parsed) || parsed <= 0) {
@@ -1686,6 +1702,10 @@ class OrchestrationDB {
     const captureMode = terminalOptions.captureMode || 'raw-tty';
     const model = terminalOptions.model || null;
     const lastMessageAt = Number.isFinite(terminalOptions.lastMessageAt) ? terminalOptions.lastMessageAt : null;
+    const sessionControlMode = normalizeSessionControlMode(
+      terminalOptions.sessionControlMode || terminalOptions.session_control_mode,
+      SESSION_CONTROL_MODES.OPERATOR
+    );
     const runtimeMetadata = resolveRuntimeHostMetadata({
       terminalId,
       sessionName,
@@ -1769,6 +1789,10 @@ class OrchestrationDB {
     if (this._hasColumn('terminals', 'runtime_fidelity')) {
       columns.push('runtime_fidelity');
       values.push(runtimeMetadata.runtimeFidelity);
+    }
+    if (this._hasColumn('terminals', 'session_control_mode')) {
+      columns.push('session_control_mode');
+      values.push(sessionControlMode);
     }
 
     this.db.run(`
@@ -1909,6 +1933,21 @@ class OrchestrationDB {
         SET ${runtimeUpdates.join(', ')}, last_active = CURRENT_TIMESTAMP
         WHERE terminal_id = ?
       `, ...runtimeValues, terminalId);
+    }
+    if (
+      this._hasColumn('terminals', 'session_control_mode')
+      && (terminalOptions.sessionControlMode !== undefined || terminalOptions.session_control_mode !== undefined)
+    ) {
+      this.db.run(`
+        UPDATE terminals
+        SET session_control_mode = ?, last_active = CURRENT_TIMESTAMP
+        WHERE terminal_id = ?
+      `,
+      normalizeSessionControlMode(
+        terminalOptions.sessionControlMode ?? terminalOptions.session_control_mode,
+        SESSION_CONTROL_MODES.OPERATOR
+      ),
+      terminalId);
     }
   }
 
@@ -2312,6 +2351,266 @@ class OrchestrationDB {
    */
   deleteTerminal(terminalId) {
     this.db.run('DELETE FROM terminals WHERE terminal_id = ?', terminalId);
+  }
+
+  _parseTerminalInputQueueRow(row) {
+    if (!row) {
+      return null;
+    }
+
+    return {
+      id: row.id,
+      terminalId: row.terminal_id,
+      rootSessionId: row.root_session_id || null,
+      runId: row.run_id || null,
+      taskId: row.task_id || null,
+      taskAssignmentId: row.task_assignment_id || null,
+      inputKind: row.input_kind,
+      message: row.message || null,
+      status: row.status,
+      controlMode: row.control_mode || SESSION_CONTROL_MODES.OPERATOR,
+      requestedBy: row.requested_by || null,
+      approvalRequired: Number(row.approval_required) === 1,
+      approvedBy: row.approved_by || null,
+      approvedAt: row.approved_at || null,
+      decision: row.decision || null,
+      holdReason: row.hold_reason || null,
+      expiresAt: row.expires_at || null,
+      deliveredAt: row.delivered_at || null,
+      cancelledAt: row.cancelled_at || null,
+      metadata: parseJsonField(row.metadata),
+      createdAt: row.created_at,
+      updatedAt: row.updated_at
+    };
+  }
+
+  enqueueTerminalInput(input = {}) {
+    const terminalId = String(input.terminalId || input.terminal_id || '').trim();
+    if (!terminalId) {
+      throw new Error('terminalId is required');
+    }
+    if (!this.getTerminal(terminalId)) {
+      throw new Error(`Terminal not found: ${terminalId}`);
+    }
+
+    const terminalRow = this.getTerminal(terminalId);
+    const terminalMetadata = parseJsonField(terminalRow?.session_metadata) || {};
+    const inputKind = normalizeTerminalInputKind(input.inputKind || input.input_kind);
+    const message = input.message == null ? null : String(input.message);
+    if (!message && inputKind === 'message') {
+      throw new Error('message is required');
+    }
+
+    const approvalRequired = input.approvalRequired === true || Number(input.approval_required) === 1;
+    const status = normalizeTerminalInputQueueStatus(
+      input.status || (approvalRequired ? 'held_for_approval' : 'pending')
+    );
+    const controlMode = normalizeSessionControlMode(
+      input.controlMode || input.control_mode,
+      SESSION_CONTROL_MODES.OPERATOR
+    );
+    const now = Number.isFinite(input.createdAt || input.created_at)
+      ? (input.createdAt || input.created_at)
+      : Date.now();
+    const metadata = input.metadata == null
+      ? null
+      : (typeof input.metadata === 'string' ? input.metadata : JSON.stringify(input.metadata));
+    const id = String(input.id || `input_${generateId()}`).trim();
+
+    this.db.prepare(`
+      INSERT INTO terminal_input_queue (
+        id,
+        terminal_id,
+        root_session_id,
+        run_id,
+        task_id,
+        task_assignment_id,
+        input_kind,
+        message,
+        status,
+        control_mode,
+        requested_by,
+        approval_required,
+        approved_by,
+        approved_at,
+        decision,
+        hold_reason,
+        expires_at,
+        delivered_at,
+        cancelled_at,
+        metadata,
+        created_at,
+        updated_at
+      ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+    `).run(
+      id,
+      terminalId,
+      input.rootSessionId || input.root_session_id || terminalRow?.root_session_id || terminalRow?.rootSessionId || null,
+      input.runId || input.run_id || null,
+      input.taskId || input.task_id || terminalMetadata.taskId || null,
+      input.taskAssignmentId || input.task_assignment_id || terminalMetadata.taskAssignmentId || null,
+      inputKind,
+      message,
+      status,
+      controlMode,
+      input.requestedBy || input.requested_by || null,
+      approvalRequired ? 1 : 0,
+      input.approvedBy || input.approved_by || null,
+      Number.isFinite(input.approvedAt || input.approved_at) ? (input.approvedAt || input.approved_at) : null,
+      input.decision || null,
+      input.holdReason || input.hold_reason || (approvalRequired ? 'approval_required' : null),
+      Number.isFinite(input.expiresAt || input.expires_at) ? (input.expiresAt || input.expires_at) : null,
+      Number.isFinite(input.deliveredAt || input.delivered_at) ? (input.deliveredAt || input.delivered_at) : null,
+      Number.isFinite(input.cancelledAt || input.cancelled_at) ? (input.cancelledAt || input.cancelled_at) : null,
+      metadata,
+      now,
+      Number.isFinite(input.updatedAt || input.updated_at) ? (input.updatedAt || input.updated_at) : now
+    );
+
+    return this.getTerminalInputQueueItem(id);
+  }
+
+  getTerminalInputQueueItem(id) {
+    const normalizedId = String(id || '').trim();
+    if (!normalizedId) {
+      return null;
+    }
+    const row = this.db.prepare('SELECT * FROM terminal_input_queue WHERE id = ?').get(normalizedId);
+    return this._parseTerminalInputQueueRow(row);
+  }
+
+  listTerminalInputQueue(options = {}) {
+    const queueOptions = options && typeof options === 'object' ? options : {};
+    const clauses = [];
+    const params = [];
+
+    if (queueOptions.terminalId || queueOptions.terminal_id) {
+      clauses.push('terminal_id = ?');
+      params.push(String(queueOptions.terminalId || queueOptions.terminal_id).trim());
+    }
+    if (queueOptions.rootSessionId || queueOptions.root_session_id) {
+      clauses.push('root_session_id = ?');
+      params.push(String(queueOptions.rootSessionId || queueOptions.root_session_id).trim());
+    }
+    if (queueOptions.taskId || queueOptions.task_id) {
+      clauses.push('task_id = ?');
+      params.push(String(queueOptions.taskId || queueOptions.task_id).trim());
+    }
+    if (queueOptions.status) {
+      const statuses = Array.isArray(queueOptions.status) ? queueOptions.status : [queueOptions.status];
+      const normalizedStatuses = statuses
+        .map((status) => normalizeTerminalInputQueueStatus(status, null))
+        .filter(Boolean);
+      if (normalizedStatuses.length > 0) {
+        clauses.push(`status IN (${normalizedStatuses.map(() => '?').join(', ')})`);
+        params.push(...normalizedStatuses);
+      }
+    }
+
+    const limit = clampLimit(queueOptions.limit, 100, 500);
+    const offset = clampLimit(queueOptions.offset, 0, 100000);
+    const whereSql = clauses.length ? `WHERE ${clauses.join(' AND ')}` : '';
+    const rows = this.db.prepare(`
+      SELECT *
+      FROM terminal_input_queue
+      ${whereSql}
+      ORDER BY created_at DESC, id DESC
+      LIMIT ? OFFSET ?
+    `).all(...params, limit, offset);
+
+    return rows.map((row) => this._parseTerminalInputQueueRow(row));
+  }
+
+  updateTerminalInputQueueItem(id, patch = {}) {
+    const normalizedId = String(id || '').trim();
+    if (!normalizedId) {
+      throw new Error('inputQueueId is required');
+    }
+    const existing = this.getTerminalInputQueueItem(normalizedId);
+    if (!existing) {
+      throw new Error(`Input queue item not found: ${normalizedId}`);
+    }
+
+    const updates = [];
+    const params = [];
+    const addUpdate = (column, value) => {
+      updates.push(`${column} = ?`);
+      params.push(value);
+    };
+
+    if (patch.status !== undefined) {
+      addUpdate('status', normalizeTerminalInputQueueStatus(patch.status));
+    }
+    if (patch.message !== undefined) {
+      addUpdate('message', patch.message == null ? null : String(patch.message));
+    }
+    if (patch.controlMode !== undefined || patch.control_mode !== undefined) {
+      addUpdate('control_mode', normalizeSessionControlMode(patch.controlMode ?? patch.control_mode));
+    }
+    if (patch.requestedBy !== undefined || patch.requested_by !== undefined) {
+      addUpdate('requested_by', patch.requestedBy ?? patch.requested_by ?? null);
+    }
+    if (patch.approvalRequired !== undefined || patch.approval_required !== undefined) {
+      addUpdate('approval_required', (patch.approvalRequired ?? patch.approval_required) ? 1 : 0);
+    }
+    if (patch.approvedBy !== undefined || patch.approved_by !== undefined) {
+      addUpdate('approved_by', patch.approvedBy ?? patch.approved_by ?? null);
+    }
+    if (patch.approvedAt !== undefined || patch.approved_at !== undefined) {
+      addUpdate('approved_at', patch.approvedAt ?? patch.approved_at ?? null);
+    }
+    if (patch.decision !== undefined) {
+      const decision = patch.decision == null ? null : String(patch.decision).trim().toLowerCase();
+      if (decision && !['approved', 'denied'].includes(decision)) {
+        throw new Error(`Invalid decision: ${patch.decision}`);
+      }
+      addUpdate('decision', decision || null);
+    }
+    if (patch.holdReason !== undefined || patch.hold_reason !== undefined) {
+      addUpdate('hold_reason', patch.holdReason ?? patch.hold_reason ?? null);
+    }
+    if (patch.expiresAt !== undefined || patch.expires_at !== undefined) {
+      addUpdate('expires_at', patch.expiresAt ?? patch.expires_at ?? null);
+    }
+    if (patch.deliveredAt !== undefined || patch.delivered_at !== undefined) {
+      addUpdate('delivered_at', patch.deliveredAt ?? patch.delivered_at ?? null);
+    }
+    if (patch.cancelledAt !== undefined || patch.cancelled_at !== undefined) {
+      addUpdate('cancelled_at', patch.cancelledAt ?? patch.cancelled_at ?? null);
+    }
+    if (patch.metadata !== undefined) {
+      addUpdate('metadata', patch.metadata == null
+        ? null
+        : (typeof patch.metadata === 'string' ? patch.metadata : JSON.stringify(patch.metadata)));
+    }
+
+    if (updates.length === 0) {
+      return existing;
+    }
+
+    addUpdate('updated_at', Number.isFinite(patch.updatedAt || patch.updated_at)
+      ? (patch.updatedAt || patch.updated_at)
+      : Date.now());
+
+    this.db.prepare(`
+      UPDATE terminal_input_queue
+      SET ${updates.join(', ')}
+      WHERE id = ?
+    `).run(...params, normalizedId);
+
+    return this.getTerminalInputQueueItem(normalizedId);
+  }
+
+  expireTerminalInputQueueItems(now = Date.now()) {
+    const result = this.db.prepare(`
+      UPDATE terminal_input_queue
+      SET status = 'expired', updated_at = ?
+      WHERE status IN ('pending', 'held_for_approval')
+        AND expires_at IS NOT NULL
+        AND expires_at <= ?
+    `).run(now, now);
+
+    return result.changes || 0;
   }
 
   /**
