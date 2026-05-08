@@ -138,7 +138,14 @@ async function startFakeCliagentsServer() {
             role: 'executor',
             status: 'running',
             terminalId: 'term-1',
-            adapter: 'codex-cli'
+            adapter: 'codex-cli',
+            dispatch: {
+              id: 'dispatch-1',
+              status: 'spawned'
+            },
+            taskSessionBindings: [
+              { id: 'binding-1', rootSessionId: 'root-attached' }
+            ]
           }
         ]
       });
@@ -163,7 +170,20 @@ async function startFakeCliagentsServer() {
           status: 'running',
           terminalId: 'term-1',
           adapter: 'codex-cli',
-          model: 'gpt-5.4'
+          model: 'gpt-5.4',
+          dispatch: {
+            id: 'dispatch-1',
+            status: 'spawned'
+          },
+          taskSessionBindings: [
+            { id: 'binding-1', rootSessionId: 'root-attached' }
+          ]
+        },
+        dispatch: {
+          dispatchRequestId: 'dispatch-1',
+          contextSnapshotId: 'context-1',
+          taskSessionBindingId: 'binding-1',
+          status: 'spawned'
         },
         route: {
           terminalId: 'term-1',
@@ -241,6 +261,8 @@ async function run() {
     const listAssignmentsResult = await mod.handleListTaskAssignments({ taskId: 'task-1' });
     assert(listAssignmentsResult.content[0].text.includes('Task Assignments'));
     assert(listAssignmentsResult.content[0].text.includes('assignment-1'));
+    assert(listAssignmentsResult.content[0].text.includes('dispatch=dispatch-1:spawned'));
+    assert(listAssignmentsResult.content[0].text.includes('bindings=1'));
 
     const startAssignmentResult = await mod.handleStartTaskAssignment({
       taskId: 'task-1',
@@ -248,6 +270,9 @@ async function run() {
       sessionLabel: 'task-executor'
     });
     assert(startAssignmentResult.content[0].text.includes('Task Assignment Started'));
+    assert(startAssignmentResult.content[0].text.includes('dispatch_request_id: dispatch-1'));
+    assert(startAssignmentResult.content[0].text.includes('context_snapshot_id: context-1'));
+    assert(startAssignmentResult.content[0].text.includes('task_session_binding_id: binding-1'));
     assert.strictEqual(fakeServer.state.lastStartAssignmentBody.rootSessionId, 'root-attached');
     assert.strictEqual(fakeServer.state.lastStartAssignmentBody.parentSessionId, 'root-attached');
     assert.strictEqual(fakeServer.state.lastStartAssignmentBody.sessionKind, 'subagent');

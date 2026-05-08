@@ -116,7 +116,9 @@ Task assignment start now creates this boundary on the existing broker route:
 the dispatch request is claimed before worktree preparation/spawn, the context
 snapshot captures the redacted assignment prompt and linked task metadata, and
 the task-session binding records the root-scoped terminal/runtime/provider reuse
-decision after spawn.
+decision after spawn. Assignment read surfaces expose compact dispatch and
+session-binding summaries; context snapshots remain durable audit records and
+are not expanded into every task list response.
 
 ## Continuity Rule
 

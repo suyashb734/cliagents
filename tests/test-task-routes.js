@@ -325,6 +325,9 @@ async function runRouteAssertions() {
     assert.strictEqual(startAssignmentRes.data.assignment.status, 'running');
     assert.strictEqual(startAssignmentRes.data.assignment.reasoningEffort, 'xhigh');
     assert(startAssignmentRes.data.assignment.terminalId, 'started assignment should be linked to a terminal');
+    assert.strictEqual(startAssignmentRes.data.assignment.dispatch.status, 'spawned');
+    assert.strictEqual(startAssignmentRes.data.assignment.dispatchRequests.length, 1);
+    assert.strictEqual(startAssignmentRes.data.assignment.taskSessionBindings.length, 1);
     assert.strictEqual(sessionManager.state.createCalls.length, 1);
     assert.strictEqual(sessionManager.state.sendCalls.length, 1);
     assert.strictEqual(sessionManager.state.createCalls[0].workDir, worktreePath);
@@ -408,6 +411,8 @@ async function runRouteAssertions() {
     assert.strictEqual(listAssignmentsRes.data.assignments[0].status, 'running');
     assert.strictEqual(listAssignmentsRes.data.assignments[0].terminalStatus, 'processing');
     assert.strictEqual(listAssignmentsRes.data.assignments[0].usageSummary.totalTokens, 15);
+    assert.strictEqual(listAssignmentsRes.data.assignments[0].dispatch.status, 'spawned');
+    assert.strictEqual(listAssignmentsRes.data.assignments[0].taskSessionBindings[0].rootSessionId, 'root-task-routes');
 
     const liveTerminal = sessionManager.state.terminals.get(startAssignmentRes.data.assignment.terminalId);
     sessionManager.state.terminals.delete(startAssignmentRes.data.assignment.terminalId);

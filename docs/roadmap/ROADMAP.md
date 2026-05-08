@@ -75,7 +75,8 @@ docs remain useful context, but this file is the current entrypoint.
      `run_context_snapshots`, and `task_session_bindings` with immutable
      context snapshots and append-only root-scoped session bindings. Task
      assignment start now populates dispatch, context, and binding rows around
-     the existing task/router spawn path.
+     the existing task/router spawn path, and assignment read surfaces expose
+     compact dispatch/session-binding summaries.
    - Keep this as an execution-control model, not a generic task-board product.
 
 ## Deferred

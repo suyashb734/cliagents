@@ -4882,6 +4882,10 @@ async function handleListTaskAssignments(args) {
           assignment.terminalId ? `terminal=${assignment.terminalId}` : null,
           assignment.adapter ? `adapter=${assignment.adapter}` : null,
           assignment.reasoningEffort ? `effort=${assignment.reasoningEffort}` : null,
+          assignment.dispatch?.id ? `dispatch=${assignment.dispatch.id}:${assignment.dispatch.status || 'unknown'}` : null,
+          Array.isArray(assignment.taskSessionBindings) && assignment.taskSessionBindings.length > 0
+            ? `bindings=${assignment.taskSessionBindings.length}`
+            : null,
           assignment.isolation?.mode ? `isolation=${assignment.isolation.mode}` : null,
           assignment.isolation?.branch ? `branch=${assignment.isolation.branch}` : null,
           assignment.usageSummary ? `total_tokens=${assignment.usageSummary.totalTokens || 0}` : null
@@ -4942,6 +4946,13 @@ async function handleStartTaskAssignment(args) {
         assignment.reasoningEffort || data.route?.reasoningEffort ? `reasoning_effort: ${assignment.reasoningEffort || data.route?.reasoningEffort}` : null,
         assignment.worktreePath ? `worktree_path: ${assignment.worktreePath}` : null,
         assignment.worktreeBranch ? `worktree_branch: ${assignment.worktreeBranch}` : null,
+        assignment.dispatch?.id || data.dispatch?.dispatchRequestId ? `dispatch_request_id: ${assignment.dispatch?.id || data.dispatch?.dispatchRequestId}` : null,
+        assignment.dispatch?.status || data.dispatch?.status ? `dispatch_status: ${assignment.dispatch?.status || data.dispatch?.status}` : null,
+        data.dispatch?.contextSnapshotId ? `context_snapshot_id: ${data.dispatch.contextSnapshotId}` : null,
+        data.dispatch?.taskSessionBindingId ? `task_session_binding_id: ${data.dispatch.taskSessionBindingId}` : null,
+        Array.isArray(assignment.taskSessionBindings) && assignment.taskSessionBindings.length > 0
+          ? `task_session_bindings: ${assignment.taskSessionBindings.length}`
+          : null,
         assignment.isolation?.mode ? `isolation_mode: ${assignment.isolation.mode}` : null,
         assignment.isolation?.created !== undefined ? `isolation_created: ${assignment.isolation.created === true}` : null,
         assignment.isolation?.dirty !== undefined && assignment.isolation?.dirty !== null ? `isolation_dirty: ${assignment.isolation.dirty === true}` : null,

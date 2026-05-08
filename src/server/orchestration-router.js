@@ -1156,6 +1156,41 @@ function createOrchestrationRouter(context) {
       && !Array.isArray(assignment.metadata.isolation)
       ? assignment.metadata.isolation
       : null;
+    const dispatchRequests = assignment?.id && typeof db?.listDispatchRequests === 'function'
+      ? db.listDispatchRequests({ taskAssignmentId: assignment.id, limit: 5 }).map((dispatch) => ({
+        id: dispatch.id,
+        status: dispatch.status,
+        requestKind: dispatch.requestKind,
+        rootSessionId: dispatch.rootSessionId,
+        contextSnapshotId: dispatch.contextSnapshotId,
+        boundSessionId: dispatch.boundSessionId,
+        runId: dispatch.runId,
+        terminalId: dispatch.terminalId,
+        coalescedCount: dispatch.coalescedCount,
+        createdAt: dispatch.createdAt,
+        updatedAt: dispatch.updatedAt,
+        dispatchedAt: dispatch.dispatchedAt,
+        cancelledAt: dispatch.cancelledAt
+      }))
+      : [];
+    const taskSessionBindings = assignment?.id && typeof db?.listTaskSessionBindings === 'function'
+      ? db.listTaskSessionBindings({ taskAssignmentId: assignment.id, limit: 5 }).map((binding) => ({
+        id: binding.id,
+        rootSessionId: binding.rootSessionId,
+        adapter: binding.adapter,
+        model: binding.model,
+        reasoningEffort: binding.reasoningEffort,
+        terminalId: binding.terminalId,
+        providerSessionId: binding.providerSessionId,
+        runtimeHost: binding.runtimeHost,
+        runtimeFidelity: binding.runtimeFidelity,
+        reusePolicy: binding.reusePolicy,
+        reuseDecision: binding.reuseDecision,
+        status: binding.status,
+        createdAt: binding.createdAt,
+        lastVerifiedAt: binding.lastVerifiedAt
+      }))
+      : [];
 
     return {
       ...assignment,
@@ -1163,6 +1198,9 @@ function createOrchestrationRouter(context) {
       storedStatus,
       terminalStatus,
       isolation,
+      dispatch: dispatchRequests[0] || null,
+      dispatchRequests,
+      taskSessionBindings,
       usageSummary,
       usageAttribution,
       adapter: assignment.adapter || terminal?.adapter || null,
