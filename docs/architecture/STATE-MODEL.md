@@ -95,6 +95,14 @@ worktrees must be under an allowed worktree root, outside the primary repo, and
 already checked out on the requested branch. Missing worktree paths require a
 branch and are created with `git worktree add`.
 
+## Room Moderator Readout
+
+Room discussions keep raw discussion runs and optional curated transcript
+artifacts as audit records, but each completed room discussion also writes a
+broker-native moderator readout into the room turn metadata. The readout records
+participant success counts, round success counts, judge status, linked run and
+discussion ids, and a compact summary for room list/get/MCP clients.
+
 ## Continuity Rule
 
 Compatible child-lane reuse is the default when a delegated task is attached to

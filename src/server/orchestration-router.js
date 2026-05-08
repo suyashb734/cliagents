@@ -1018,7 +1018,8 @@ function createOrchestrationRouter(context) {
     return {
       room: snapshot.room,
       participants: snapshot.participants,
-      latestTurn: snapshot.latestTurn
+      latestTurn: snapshot.latestTurn,
+      moderator: snapshot.moderator || null
     };
   }
 

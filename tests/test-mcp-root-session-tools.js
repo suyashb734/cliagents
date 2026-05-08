@@ -836,6 +836,10 @@ async function run() {
             id: 'turn-1',
             status: 'completed'
           },
+          moderator: {
+            status: 'completed',
+            summary: 'Room discussion completed with 2/2 participant(s).'
+          },
           participantCount: 2,
           messageCount: 5
         }
@@ -846,6 +850,7 @@ async function run() {
     assert(listRoomsText.includes('## Rooms'));
     assert(listRoomsText.includes('room-1'));
     assert(listRoomsText.includes('participants=2'));
+    assert(listRoomsText.includes('moderator=completed'));
 
     fakeServer.state.roomById.set('room-1', {
       room: {
@@ -860,6 +865,10 @@ async function run() {
       latestTurn: {
         id: 'turn-1',
         status: 'completed'
+      },
+      moderator: {
+        status: 'completed',
+        summary: 'Room discussion completed with 2/2 participant(s).'
       }
     });
     const getRoomResult = await mod.handleGetRoom({ roomId: 'room-1' });
@@ -867,6 +876,7 @@ async function run() {
     assert(getRoomText.includes('## Room'));
     assert(getRoomText.includes('room_id: room-1'));
     assert(getRoomText.includes('latest_turn_status: completed'));
+    assert(getRoomText.includes('moderator_status: completed'));
 
     fakeServer.state.roomMessageResponses = [
       {
@@ -920,9 +930,23 @@ async function run() {
     fakeServer.state.roomDiscussResponses = [
       {
         roomId: 'room-1',
-        turn: { id: 'turn-discuss-1', status: 'completed' },
+        turn: {
+          id: 'turn-discuss-1',
+          status: 'completed',
+          metadata: {
+            writebackMode: 'curated_transcript',
+            moderator: {
+              status: 'completed',
+              summary: 'Room discussion completed with 2/2 participant(s).'
+            }
+          }
+        },
         runId: 'run-room-1',
-        discussionId: 'discussion-room-1'
+        discussionId: 'discussion-room-1',
+        moderator: {
+          status: 'completed',
+          summary: 'Room discussion completed with 2/2 participant(s).'
+        }
       }
     ];
     const discussRoomResult = await mod.handleDiscussRoom({
@@ -934,6 +958,7 @@ async function run() {
     assert(discussRoomText.includes('Room Discussion Completed'));
     assert(discussRoomText.includes('discussion_id: discussion-room-1'));
     assert(discussRoomText.includes('writeback_mode: curated_transcript'));
+    assert(discussRoomText.includes('moderator_status: completed'));
     assert.strictEqual(fakeServer.state.roomDiscussBodies.at(-1).roomId, 'room-1');
     assert.strictEqual(fakeServer.state.roomDiscussBodies.at(-1).body.message, 'Debate the persistence plan.');
     assert.strictEqual(fakeServer.state.roomDiscussBodies.at(-1).body.writebackMode, 'curated_transcript');

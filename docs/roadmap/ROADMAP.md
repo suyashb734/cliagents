@@ -57,6 +57,8 @@ docs remain useful context, but this file is the current entrypoint.
 5. **Room-native orchestration**
    - Move room UX toward a broker-native moderator model.
    - Keep runs and discussions as audit records underneath the room transcript.
+   - Current V1 slice stores a structured moderator readout on each discussion
+     turn and exposes it through room read surfaces and MCP room tools.
 
 6. **Long-horizon orchestration mechanics**
    - Execute [Long-Horizon Orchestration V1](../research/LONG-HORIZON-ORCHESTRATION-V1-PLAN.md)

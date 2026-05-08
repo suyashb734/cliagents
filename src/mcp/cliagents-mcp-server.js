@@ -5008,8 +5008,9 @@ async function handleListRooms(args) {
             `${room.id || 'n/a'}${room.title ? ` (${room.title})` : ''}`,
             `participants=${entry.participantCount || 0}`,
             `messages=${entry.messageCount || 0}`,
-            `latest_turn=${entry.latestTurn?.status || 'n/a'}`
-          ].join(' • ');
+            `latest_turn=${entry.latestTurn?.status || 'n/a'}`,
+            entry.moderator?.status ? `moderator=${entry.moderator.status}` : null
+          ].filter(Boolean).join(' • ');
         }).join('\n')
       ].filter(Boolean).join('\n')
     }]
@@ -5059,7 +5060,9 @@ async function handleGetRoom(args) {
         data.room?.title ? `title: ${data.room.title}` : null,
         `participants: ${Array.isArray(data.participants) ? data.participants.length : 0}`,
         data.latestTurn?.id ? `latest_turn_id: ${data.latestTurn.id}` : null,
-        data.latestTurn?.status ? `latest_turn_status: ${data.latestTurn.status}` : null
+        data.latestTurn?.status ? `latest_turn_status: ${data.latestTurn.status}` : null,
+        data.moderator?.status ? `moderator_status: ${data.moderator.status}` : null,
+        data.moderator?.summary ? `moderator_summary: ${truncateText(data.moderator.summary, 240)}` : null
       ].filter(Boolean).join('\n')
     }]
   };
@@ -5124,8 +5127,10 @@ async function handleDiscussRoom(args) {
         `status: ${data.turn?.status || 'unknown'}`,
         `run_id: ${data.runId || 'n/a'}`,
         `discussion_id: ${data.discussionId || 'n/a'}`,
-        `writeback_mode: ${data.turn?.metadata?.writebackMode || args?.writebackMode || 'summary'}`
-      ].join('\n')
+        `writeback_mode: ${data.turn?.metadata?.writebackMode || args?.writebackMode || 'summary'}`,
+        data.moderator?.status ? `moderator_status: ${data.moderator.status}` : null,
+        data.moderator?.summary ? `moderator_summary: ${truncateText(data.moderator.summary, 240)}` : null
+      ].filter(Boolean).join('\n')
     }]
   };
 }

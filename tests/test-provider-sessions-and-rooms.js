@@ -590,7 +590,11 @@ async function runRouteAssertions(homeDir, fixture) {
     assert(discussRes.data.discussionId, 'expected room discussion to return a discussion id');
     assert(['completed', 'partial'].includes(discussRes.data.turn.status));
     assert.strictEqual(discussRes.data.turn.metadata.writebackMode, 'summary');
+    assert.strictEqual(discussRes.data.moderator.kind, 'room_moderator_readout');
+    assert.strictEqual(discussRes.data.turn.metadata.moderator.kind, 'room_moderator_readout');
+    assert(discussRes.data.moderator.summary.includes('Room discussion completed'));
     assert(discussRes.data.messages.some((message) => message.role === 'system' && message.content.includes('Room discussion completed')));
+    assert(discussRes.data.messages.some((message) => message.metadata?.roomModerator === true), 'summary writeback should mark the broker-native moderator row');
 
     const roomAfterDiscussionRes = await request(
       serverHandle.baseUrl,
@@ -599,6 +603,7 @@ async function runRouteAssertions(homeDir, fixture) {
     );
     assert.strictEqual(roomAfterDiscussionRes.status, 200);
     assert(['completed', 'partial'].includes(roomAfterDiscussionRes.data.latestTurn.status));
+    assert.strictEqual(roomAfterDiscussionRes.data.moderator.kind, 'room_moderator_readout');
 
     const finalMessagesRes = await request(
       serverHandle.baseUrl,
