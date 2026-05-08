@@ -3814,6 +3814,47 @@ class OrchestrationDB {
     `, ...params, limit).map((row) => this._parseDispatchRequestRow(row));
   }
 
+  listDispatchRequestsForTask(taskId, options = {}) {
+    if (!this._hasTable('dispatch_requests')) {
+      return [];
+    }
+
+    const normalizedTaskId = String(taskId || '').trim();
+    if (!normalizedTaskId) {
+      return [];
+    }
+
+    const scopeClauses = ['task_id = ?'];
+    const params = [normalizedTaskId];
+    if (this._hasTable('task_assignments')) {
+      scopeClauses.push('task_assignment_id IN (SELECT id FROM task_assignments WHERE task_id = ?)');
+      params.push(normalizedTaskId);
+    }
+
+    const clauses = [`(${scopeClauses.join(' OR ')})`];
+    const pushTextMatch = (column, value) => {
+      const normalized = String(value || '').trim();
+      if (!normalized) {
+        return;
+      }
+      clauses.push(`${column} = ?`);
+      params.push(normalized);
+    };
+
+    pushTextMatch('status', options.status);
+    pushTextMatch('root_session_id', options.rootSessionId || options.root_session_id);
+    pushTextMatch('request_kind', options.requestKind || options.request_kind);
+
+    const limit = clampLimit(options.limit, 100, 500);
+    return this.db.all(`
+      SELECT *
+      FROM dispatch_requests
+      WHERE ${clauses.join(' AND ')}
+      ORDER BY COALESCE(dispatched_at, updated_at, created_at) DESC, dispatch_request_id ASC
+      LIMIT ?
+    `, ...params, limit).map((row) => this._parseDispatchRequestRow(row));
+  }
+
   updateDispatchRequest(dispatchRequestId, patch = {}) {
     if (!this._hasTable('dispatch_requests')) {
       return null;
@@ -4006,6 +4047,42 @@ class OrchestrationDB {
     return this._parseRunContextSnapshotRow(row);
   }
 
+  listRunContextSnapshotsForTask(taskId, options = {}) {
+    if (!this._hasTable('run_context_snapshots') || !this._hasTable('dispatch_requests')) {
+      return [];
+    }
+
+    const normalizedTaskId = String(taskId || '').trim();
+    if (!normalizedTaskId) {
+      return [];
+    }
+
+    const scopeClauses = ['dr.task_id = ?'];
+    const params = [normalizedTaskId];
+    if (this._hasTable('task_assignments')) {
+      scopeClauses.push('dr.task_assignment_id IN (SELECT id FROM task_assignments WHERE task_id = ?)');
+      params.push(normalizedTaskId);
+    }
+
+    const clauses = [`(${scopeClauses.join(' OR ')})`];
+    const contextMode = String(options.contextMode || options.context_mode || '').trim();
+    if (contextMode) {
+      clauses.push('rcs.context_mode = ?');
+      params.push(contextMode);
+    }
+
+    const limit = clampLimit(options.limit, 100, 500);
+    return this.db.all(`
+      SELECT rcs.*
+      FROM run_context_snapshots rcs
+      INNER JOIN dispatch_requests dr
+        ON dr.dispatch_request_id = rcs.dispatch_request_id
+      WHERE ${clauses.join(' AND ')}
+      ORDER BY rcs.created_at DESC, rcs.context_snapshot_id ASC
+      LIMIT ?
+    `, ...params, limit).map((row) => this._parseRunContextSnapshotRow(row));
+  }
+
   _parseTaskSessionBindingRow(row) {
     if (!row) {
       return null;
@@ -4154,6 +4231,49 @@ class OrchestrationDB {
       FROM task_session_bindings
       ${whereSql}
       ORDER BY created_at DESC, binding_id ASC
+      LIMIT ?
+    `, ...params, limit).map((row) => this._parseTaskSessionBindingRow(row));
+  }
+
+  listTaskSessionBindingsForTask(taskId, options = {}) {
+    if (!this._hasTable('task_session_bindings')) {
+      return [];
+    }
+
+    const normalizedTaskId = String(taskId || '').trim();
+    if (!normalizedTaskId) {
+      return [];
+    }
+
+    const scopeClauses = ['task_id = ?'];
+    const params = [normalizedTaskId];
+    if (this._hasTable('task_assignments')) {
+      scopeClauses.push('task_assignment_id IN (SELECT id FROM task_assignments WHERE task_id = ?)');
+      params.push(normalizedTaskId);
+    }
+
+    const clauses = [`(${scopeClauses.join(' OR ')})`];
+    const pushTextMatch = (column, value) => {
+      const normalized = String(value || '').trim();
+      if (!normalized) {
+        return;
+      }
+      clauses.push(`${column} = ?`);
+      params.push(normalized);
+    };
+
+    if (this._hasColumn('task_session_bindings', 'root_session_id')) {
+      pushTextMatch('root_session_id', options.rootSessionId || options.root_session_id);
+    }
+    pushTextMatch('adapter', options.adapter);
+    pushTextMatch('status', options.status);
+
+    const limit = clampLimit(options.limit, 100, 500);
+    return this.db.all(`
+      SELECT *
+      FROM task_session_bindings
+      WHERE ${clauses.join(' AND ')}
+      ORDER BY COALESCE(last_verified_at, created_at) DESC, binding_id ASC
       LIMIT ?
     `, ...params, limit).map((row) => this._parseTaskSessionBindingRow(row));
   }
@@ -7611,6 +7731,58 @@ class OrchestrationDB {
     }));
     const contextIds = this.getContext(scopeId).slice(0, 5).map((entry) => entry.id);
     const snapshotByRunId = new Map(runSnapshots.map((entry) => [entry.runId, entry]));
+    const compactDispatchRequest = (dispatch) => ({
+      id: dispatch.id,
+      requestKind: dispatch.requestKind,
+      status: dispatch.status,
+      taskAssignmentId: dispatch.taskAssignmentId,
+      rootSessionId: dispatch.rootSessionId,
+      terminalId: dispatch.terminalId,
+      runId: dispatch.runId,
+      contextSnapshotId: dispatch.contextSnapshotId,
+      boundSessionId: dispatch.boundSessionId,
+      coalescedCount: dispatch.coalescedCount,
+      createdAt: dispatch.createdAt,
+      updatedAt: dispatch.updatedAt,
+      dispatchedAt: dispatch.dispatchedAt,
+      cancelledAt: dispatch.cancelledAt
+    });
+    const compactContextSnapshot = (snapshot) => ({
+      id: snapshot.id,
+      dispatchRequestId: snapshot.dispatchRequestId,
+      contextMode: snapshot.contextMode,
+      promptSummary: snapshot.promptSummary,
+      adapter: snapshot.adapter,
+      model: snapshot.model,
+      reasoningEffort: snapshot.reasoningEffort,
+      retentionClass: snapshot.retentionClass,
+      createdAt: snapshot.createdAt
+    });
+    const compactTaskSessionBinding = (binding) => ({
+      id: binding.id,
+      rootSessionId: binding.rootSessionId,
+      taskAssignmentId: binding.taskAssignmentId,
+      adapter: binding.adapter,
+      model: binding.model,
+      reasoningEffort: binding.reasoningEffort,
+      terminalId: binding.terminalId,
+      providerSessionId: binding.providerSessionId,
+      runtimeHost: binding.runtimeHost,
+      runtimeFidelity: binding.runtimeFidelity,
+      reusePolicy: binding.reusePolicy,
+      status: binding.status,
+      createdAt: binding.createdAt,
+      lastVerifiedAt: binding.lastVerifiedAt
+    });
+    const dispatchRequests = (typeof this.listDispatchRequestsForTask === 'function'
+      ? this.listDispatchRequestsForTask(scopeId, { limit: 20 })
+      : this.listDispatchRequests({ taskId: scopeId, limit: 20 })).map(compactDispatchRequest);
+    const contextSnapshots = (typeof this.listRunContextSnapshotsForTask === 'function'
+      ? this.listRunContextSnapshotsForTask(scopeId, { limit: 20 })
+      : []).map(compactContextSnapshot);
+    const taskSessionBindings = (typeof this.listTaskSessionBindingsForTask === 'function'
+      ? this.listTaskSessionBindingsForTask(scopeId, { limit: 20 })
+      : this.listTaskSessionBindings({ taskId: scopeId, limit: 20 })).map(compactTaskSessionBinding);
     const assignments = this.listTaskAssignments(scopeId, { limit: 20 }).map((assignment) => ({
       id: assignment.id,
       role: assignment.role,
@@ -7623,7 +7795,13 @@ class OrchestrationDB {
       worktreeBranch: assignment.worktreeBranch,
       startedAt: assignment.startedAt,
       completedAt: assignment.completedAt,
-      updatedAt: assignment.updatedAt
+      updatedAt: assignment.updatedAt,
+      dispatchRequestIds: dispatchRequests
+        .filter((dispatch) => dispatch.taskAssignmentId === assignment.id)
+        .map((dispatch) => dispatch.id),
+      taskSessionBindingIds: taskSessionBindings
+        .filter((binding) => binding.taskAssignmentId === assignment.id)
+        .map((binding) => binding.id)
     }));
     const rooms = this.listRooms({ taskId: scopeId, limit: 10 }).map((room) => ({
       id: room.id,
@@ -7653,6 +7831,9 @@ class OrchestrationDB {
       findings,
       assignments,
       rooms,
+      dispatchRequests,
+      contextSnapshots,
+      taskSessionBindings,
       usage,
       usageAttribution,
       recentSessionEvents,
@@ -7674,6 +7855,9 @@ class OrchestrationDB {
             runIds: latestRuns.map((run) => run.id),
             assignmentIds: assignments.map((assignment) => assignment.id),
             roomIds: rooms.map((room) => room.id),
+            dispatchRequestIds: dispatchRequests.map((dispatch) => dispatch.id),
+            contextSnapshotIds: contextSnapshots.map((snapshot) => snapshot.id),
+            taskSessionBindingIds: taskSessionBindings.map((binding) => binding.id),
             artifactKeys: artifacts,
             findingIds: findings.map((finding) => finding.id),
             contextIds,

@@ -120,7 +120,10 @@ decision after spawn. Assignment read surfaces expose compact dispatch and
 session-binding summaries; context snapshots remain durable audit records and
 are not expanded into every task list response. The memory read model projects
 dispatch requests, context snapshots, and task-session bindings as queryable
-records with task/root/assignment/terminal lineage.
+records with task/root/assignment/terminal lineage. Task memory bundles include
+compact dispatch, context-snapshot, and task-session-binding summaries so
+operators and external supervisors can inspect assignment continuity without
+reconstructing it from raw tables.
 
 ## Continuity Rule
 

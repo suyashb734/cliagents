@@ -5492,6 +5492,47 @@ async function handleGetMemoryBundle(args) {
     text += `- totalTokens=${bundle.usage.totalTokens} inputTokens=${bundle.usage.inputTokens} outputTokens=${bundle.usage.outputTokens} reasoningTokens=${bundle.usage.reasoningTokens}\n\n`;
   }
 
+  if (bundle.assignments?.length > 0) {
+    text += `### Assignments\n`;
+    for (const assignment of bundle.assignments.slice(0, 10)) {
+      const runtime = [assignment.adapter, assignment.model, assignment.reasoningEffort].filter(Boolean).join('/');
+      text += `- **${assignment.id}** (${assignment.role}): ${assignment.status}${runtime ? ` - ${runtime}` : ''}\n`;
+    }
+    text += '\n';
+  }
+
+  if (bundle.dispatchRequests?.length > 0) {
+    text += `### Dispatch Requests\n`;
+    for (const dispatch of bundle.dispatchRequests.slice(0, 10)) {
+      text += `- **${dispatch.id}** (${dispatch.requestKind}): ${dispatch.status}`;
+      text += dispatch.taskAssignmentId ? ` assignment=${dispatch.taskAssignmentId}` : '';
+      text += dispatch.terminalId ? ` terminal=${dispatch.terminalId}` : '';
+      text += '\n';
+    }
+    text += '\n';
+  }
+
+  if (bundle.contextSnapshots?.length > 0) {
+    text += `### Context Snapshots\n`;
+    for (const snapshot of bundle.contextSnapshots.slice(0, 10)) {
+      const runtime = [snapshot.adapter, snapshot.model, snapshot.reasoningEffort].filter(Boolean).join('/');
+      text += `- **${snapshot.id}** (${snapshot.contextMode}): ${snapshot.promptSummary || 'no summary'}${runtime ? ` - ${runtime}` : ''}\n`;
+    }
+    text += '\n';
+  }
+
+  if (bundle.taskSessionBindings?.length > 0) {
+    text += `### Task Session Bindings\n`;
+    for (const binding of bundle.taskSessionBindings.slice(0, 10)) {
+      const runtime = [binding.adapter, binding.model, binding.reasoningEffort].filter(Boolean).join('/');
+      text += `- **${binding.id}**: ${binding.status}${runtime ? ` - ${runtime}` : ''}`;
+      text += binding.terminalId ? ` terminal=${binding.terminalId}` : '';
+      text += binding.reusePolicy ? ` reuse=${binding.reusePolicy}` : '';
+      text += '\n';
+    }
+    text += '\n';
+  }
+
   if (bundle.recentTasks?.length > 0) {
     text += `### Recent Tasks\n`;
     for (const task of bundle.recentTasks.slice(0, 10)) {

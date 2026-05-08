@@ -77,7 +77,8 @@ docs remain useful context, but this file is the current entrypoint.
      assignment start now populates dispatch, context, and binding rows around
      the existing task/router spawn path, and assignment read surfaces expose
      compact dispatch/session-binding summaries. The memory read model also
-     projects these records for supervisor query and lineage inspection.
+     projects these records for supervisor query and lineage inspection, and
+     task memory bundles expose compact dispatch/context/binding summaries.
    - Keep this as an execution-control model, not a generic task-board product.
 
 ## Deferred

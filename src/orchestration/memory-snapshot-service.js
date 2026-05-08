@@ -254,6 +254,51 @@ class MemorySnapshotService {
         metadata: { taskId, terminalId: usage.terminal_id || usage.terminalId || null }
       });
     }
+    if (typeof this.db.listDispatchRequestsForTask === 'function') {
+      for (const dispatch of this.db.listDispatchRequestsForTask(taskId, { limit: 50 })) {
+        sources.push({
+          scopeType: 'dispatch_request',
+          scopeId: dispatch.id,
+          metadata: {
+            taskId,
+            assignmentId: dispatch.taskAssignmentId || null,
+            terminalId: dispatch.terminalId || null,
+            requestKind: dispatch.requestKind,
+            status: dispatch.status
+          }
+        });
+      }
+    }
+    if (typeof this.db.listRunContextSnapshotsForTask === 'function') {
+      for (const snapshot of this.db.listRunContextSnapshotsForTask(taskId, { limit: 50 })) {
+        sources.push({
+          scopeType: 'run_context_snapshot',
+          scopeId: snapshot.id,
+          metadata: {
+            taskId,
+            dispatchRequestId: snapshot.dispatchRequestId,
+            contextMode: snapshot.contextMode,
+            retentionClass: snapshot.retentionClass
+          }
+        });
+      }
+    }
+    if (typeof this.db.listTaskSessionBindingsForTask === 'function') {
+      for (const binding of this.db.listTaskSessionBindingsForTask(taskId, { limit: 50 })) {
+        sources.push({
+          scopeType: 'task_session_binding',
+          scopeId: binding.id,
+          metadata: {
+            taskId,
+            assignmentId: binding.taskAssignmentId || null,
+            terminalId: binding.terminalId || null,
+            adapter: binding.adapter,
+            model: binding.model,
+            status: binding.status
+          }
+        });
+      }
+    }
 
     return sources;
   }
@@ -468,6 +513,15 @@ class MemorySnapshotService {
       const usage = this.db.summarizeUsage({ taskId });
       const assignments = this.db.listTaskAssignments(taskId, { limit: 100 });
       const rooms = this.db.listRooms({ taskId, limit: 50 });
+      const dispatchRequests = typeof this.db.listDispatchRequestsForTask === 'function'
+        ? this.db.listDispatchRequestsForTask(taskId, { limit: 100 })
+        : [];
+      const contextSnapshots = typeof this.db.listRunContextSnapshotsForTask === 'function'
+        ? this.db.listRunContextSnapshotsForTask(taskId, { limit: 100 })
+        : [];
+      const taskSessionBindings = typeof this.db.listTaskSessionBindingsForTask === 'function'
+        ? this.db.listTaskSessionBindingsForTask(taskId, { limit: 100 })
+        : [];
       const latestRuns = this.db.getLatestRunsForTask(taskId, 20);
       const runSnapshots = this.db.listRunSnapshotsByTask(taskId, 10);
       const latestContext = this.db.getLatestContext(taskId);
@@ -490,6 +544,8 @@ class MemorySnapshotService {
           runBrief || latestContext?.summary || null,
           assignments.length ? `Assignments: ${assignments.length}` : null,
           rooms.length ? `Rooms: ${rooms.length}` : null,
+          dispatchRequests.length ? `Dispatch requests: ${dispatchRequests.length}` : null,
+          taskSessionBindings.length ? `Session bindings: ${taskSessionBindings.length}` : null,
           usage.totalTokens ? `Usage: ${usage.totalTokens} tokens` : null
         ].filter(Boolean).join('\n'),
         TASK_BRIEF_MAX_LENGTH
@@ -515,6 +571,9 @@ class MemorySnapshotService {
           assignmentCount: assignments.length,
           roomCount: rooms.length,
           runCount: latestRuns.length,
+          dispatchRequestCount: dispatchRequests.length,
+          contextSnapshotCount: contextSnapshots.length,
+          taskSessionBindingCount: taskSessionBindings.length,
           usageRecordCount: usage.recordCount,
           totalTokens: usage.totalTokens,
           sourceCount: sources.length

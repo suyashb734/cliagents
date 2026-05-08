@@ -134,6 +134,56 @@ async function seedPersistenceFixture(db) {
       fixture: true
     }
   });
+  const dispatch = db.createDispatchRequest({
+    id: 'dispatch-456-review',
+    taskId,
+    taskAssignmentId: 'assignment-456-review',
+    rootSessionId,
+    requestKind: 'assignment_start',
+    status: 'spawned',
+    terminalId: 'term-1',
+    metadata: {
+      fixture: true
+    }
+  });
+  db.createRunContextSnapshot({
+    id: 'context-456-review',
+    dispatchRequestId: dispatch.id,
+    workspacePath: process.cwd(),
+    contextMode: 'task_assignment',
+    promptSummary: 'Review persistence bundle coverage.',
+    promptBody: 'Review persistence bundle coverage.',
+    linkedContext: {
+      taskId,
+      taskAssignmentId: 'assignment-456-review'
+    },
+    adapter: 'codex-cli',
+    model: 'gpt-5.4',
+    reasoningEffort: 'high',
+    metadata: {
+      fixture: true
+    }
+  });
+  db.createTaskSessionBinding({
+    id: 'binding-456-review',
+    rootSessionId,
+    taskId,
+    taskAssignmentId: 'assignment-456-review',
+    adapter: 'codex-cli',
+    model: 'gpt-5.4',
+    reasoningEffort: 'high',
+    terminalId: 'term-1',
+    providerSessionId: 'provider-456-review',
+    runtimeHost: 'tmux',
+    runtimeFidelity: 'managed',
+    reusePolicy: 'prefer_compatible_reuse',
+    reuseDecision: {
+      reused: false
+    },
+    metadata: {
+      fixture: true
+    }
+  });
   db.createRoom({
     id: 'room-456',
     rootSessionId,
@@ -414,6 +464,39 @@ async function runRouteTests() {
       }).length >= 1,
       'task snapshots should summarize linked runs'
     );
+    assert(
+      db.queryMemoryEdges({
+        sourceTable: 'memory_snapshots',
+        sourceId: taskSnapshot.id,
+        edgeTypes: ['summarizes'],
+        targetScopeType: 'dispatch_request',
+        targetId: 'dispatch-456-review',
+        limit: 10
+      }).length >= 1,
+      'task snapshots should summarize linked dispatch requests'
+    );
+    assert(
+      db.queryMemoryEdges({
+        sourceTable: 'memory_snapshots',
+        sourceId: taskSnapshot.id,
+        edgeTypes: ['summarizes'],
+        targetScopeType: 'run_context_snapshot',
+        targetId: 'context-456-review',
+        limit: 10
+      }).length >= 1,
+      'task snapshots should summarize linked context snapshots'
+    );
+    assert(
+      db.queryMemoryEdges({
+        sourceTable: 'memory_snapshots',
+        sourceId: taskSnapshot.id,
+        edgeTypes: ['summarizes'],
+        targetScopeType: 'task_session_binding',
+        targetId: 'binding-456-review',
+        limit: 10
+      }).length >= 1,
+      'task snapshots should summarize linked task session bindings'
+    );
 
     const projectSnapshot = db.getMemorySnapshot('project', projectId);
     assert(projectSnapshot, 'task snapshot producer should refresh the linked project snapshot');
@@ -483,6 +566,17 @@ async function runRouteTests() {
     assert.strictEqual(taskBundleRes.data.findings.length, 1);
     assert(taskBundleRes.data.assignments.some((assignment) => assignment.id === 'assignment-456-review'), 'task bundle should include assignments');
     assert(taskBundleRes.data.rooms.some((room) => room.id === 'room-456'), 'task bundle should include linked rooms');
+    assert(taskBundleRes.data.dispatchRequests.some((dispatch) => dispatch.id === 'dispatch-456-review'), 'task bundle should include dispatch requests');
+    assert(taskBundleRes.data.contextSnapshots.some((snapshot) => snapshot.id === 'context-456-review'), 'task bundle should include context snapshots');
+    assert(taskBundleRes.data.taskSessionBindings.some((binding) => binding.id === 'binding-456-review'), 'task bundle should include task session bindings');
+    assert(
+      taskBundleRes.data.assignments.some((assignment) =>
+        assignment.id === 'assignment-456-review' &&
+        assignment.dispatchRequestIds.includes('dispatch-456-review') &&
+        assignment.taskSessionBindingIds.includes('binding-456-review')
+      ),
+      'task bundle assignments should include dispatch and binding linkage'
+    );
     assert.strictEqual(taskBundleRes.data.usage.totalTokens, 42, 'task bundle should include task usage totals');
     assert.strictEqual(taskBundleRes.data.usageAttribution.executionTokens, 42, 'task bundle should include role-aware usage attribution');
     assert(
@@ -492,6 +586,9 @@ async function runRouteTests() {
     assert.strictEqual(taskBundleRes.data.rawPointers.artifactKeys.length, 1);
     assert(taskBundleRes.data.rawPointers.assignmentIds.includes('assignment-456-review'));
     assert(taskBundleRes.data.rawPointers.roomIds.includes('room-456'));
+    assert(taskBundleRes.data.rawPointers.dispatchRequestIds.includes('dispatch-456-review'));
+    assert(taskBundleRes.data.rawPointers.contextSnapshotIds.includes('context-456-review'));
+    assert(taskBundleRes.data.rawPointers.taskSessionBindingIds.includes('binding-456-review'));
     assert.strictEqual(taskBundleRes.data.rawPointers.usageRecordCount, 1);
     assert(taskBundleRes.data.recentRuns.some((run) => run.runId === fixture.runId));
 
@@ -754,6 +851,10 @@ async function runMcpTests() {
     });
     const bundleText = bundleResult.content[0].text;
     assert(bundleText.includes(`Memory Bundle: task ${fixture.taskId}`));
+    assert(bundleText.includes('Assignments'));
+    assert(bundleText.includes('Dispatch Requests'));
+    assert(bundleText.includes('Context Snapshots'));
+    assert(bundleText.includes('Task Session Bindings'));
     assert(bundleText.includes('Recent Runs'));
     assert(bundleText.includes('Raw Pointers'));
 
