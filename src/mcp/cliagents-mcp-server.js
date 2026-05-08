@@ -2212,17 +2212,17 @@ This calls cliagents' direct-session discussion route and returns the completed 
   },
   {
     name: 'get_memory_bundle',
-    description: 'Get a consolidated memory bundle (brief, key decisions, findings) for a run, root, room, or task.',
+    description: 'Get a consolidated memory bundle (brief, key decisions, findings) for a run, root, room, task, or project.',
     inputSchema: {
       type: 'object',
       properties: {
         scopeId: {
           type: 'string',
-          description: 'The ID of the run, root session, room, or task.'
+          description: 'The ID of the run, root session, room, task, or project.'
         },
         scopeType: {
           type: 'string',
-          enum: ['run', 'root', 'room', 'task'],
+          enum: ['run', 'root', 'room', 'task', 'project'],
           description: 'The type of scope for the memory bundle. Default: task',
           default: 'task'
         },
@@ -5463,6 +5463,19 @@ async function handleGetMemoryBundle(args) {
 
   if (bundle.findings?.length > 0) {
     text += `### Top Findings\n${bundle.findings.map(f => `- [${f.severity}/${f.type}] ${f.content}`).join('\n')}\n\n`;
+  }
+
+  if (bundle.usage && bundle.usage.recordCount > 0) {
+    text += `### Usage\n`;
+    text += `- totalTokens=${bundle.usage.totalTokens} inputTokens=${bundle.usage.inputTokens} outputTokens=${bundle.usage.outputTokens} reasoningTokens=${bundle.usage.reasoningTokens}\n\n`;
+  }
+
+  if (bundle.recentTasks?.length > 0) {
+    text += `### Recent Tasks\n`;
+    for (const task of bundle.recentTasks.slice(0, 10)) {
+      text += `- **${task.id}** (${task.kind || 'general'}): ${task.title || 'untitled'}\n`;
+    }
+    text += '\n';
   }
 
   if (bundle.recentRuns?.length > 0) {

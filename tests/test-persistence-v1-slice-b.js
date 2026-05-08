@@ -220,6 +220,17 @@ async function seedPersistenceFixture(db) {
   snapshotService.writeRunSnapshot(runId, { rootSessionId, taskId });
   await snapshotService.refreshRootSnapshot(rootSessionId);
 
+  db.createTask({
+    id: repairTaskId,
+    title: 'Repair snapshot task',
+    workspaceRoot: process.cwd(),
+    rootSessionId: repairRootSessionId,
+    metadata: {
+      fixture: true,
+      repair: true
+    }
+  });
+
   const repairRunId = runLedger.createRun({
     id: 'run-repair',
     kind: 'consensus',
@@ -376,6 +387,60 @@ async function runRouteTests() {
       'summary lineage should be idempotent across repeated root refreshes'
     );
 
+    const task = db.getTask(fixture.taskId);
+    const projectId = task.projectId;
+    const taskSnapshot = db.getMemorySnapshot('task', fixture.taskId);
+    assert(taskSnapshot, 'run snapshot producer should refresh the linked task snapshot');
+    assert.strictEqual(taskSnapshot.projectId, projectId, 'task snapshot should keep project linkage');
+    assert(
+      db.queryMemoryEdges({
+        sourceTable: 'memory_snapshots',
+        sourceId: taskSnapshot.id,
+        edgeTypes: ['summarizes'],
+        targetScopeType: 'task',
+        targetId: fixture.taskId,
+        limit: 10
+      }).length >= 1,
+      'task snapshots should write provenance edges to their source task'
+    );
+    assert(
+      db.queryMemoryEdges({
+        sourceTable: 'memory_snapshots',
+        sourceId: taskSnapshot.id,
+        edgeTypes: ['summarizes'],
+        targetScopeType: 'run',
+        targetId: fixture.runId,
+        limit: 10
+      }).length >= 1,
+      'task snapshots should summarize linked runs'
+    );
+
+    const projectSnapshot = db.getMemorySnapshot('project', projectId);
+    assert(projectSnapshot, 'task snapshot producer should refresh the linked project snapshot');
+    assert.strictEqual(projectSnapshot.projectId, projectId, 'project snapshot should self-identify project linkage');
+    assert(
+      db.queryMemoryEdges({
+        sourceTable: 'memory_snapshots',
+        sourceId: projectSnapshot.id,
+        edgeTypes: ['summarizes'],
+        targetScopeType: 'project',
+        targetId: projectId,
+        limit: 10
+      }).length >= 1,
+      'project snapshots should write provenance edges to their source project'
+    );
+    assert(
+      db.queryMemoryEdges({
+        sourceTable: 'memory_snapshots',
+        sourceId: projectSnapshot.id,
+        edgeTypes: ['summarizes'],
+        targetScopeType: 'task',
+        targetId: fixture.taskId,
+        limit: 10
+      }).length >= 1,
+      'project snapshots should summarize linked tasks'
+    );
+
     const runBundleRes = await request(
       testServer.baseUrl,
       'GET',
@@ -429,6 +494,20 @@ async function runRouteTests() {
     assert(taskBundleRes.data.rawPointers.roomIds.includes('room-456'));
     assert.strictEqual(taskBundleRes.data.rawPointers.usageRecordCount, 1);
     assert(taskBundleRes.data.recentRuns.some((run) => run.runId === fixture.runId));
+
+    const projectBundleRes = await request(
+      testServer.baseUrl,
+      'GET',
+      `/orchestration/memory/bundle/${projectId}?scope_type=project`
+    );
+    assert.strictEqual(projectBundleRes.status, 200);
+    assert.strictEqual(projectBundleRes.data.scopeType, 'project');
+    assert.strictEqual(projectBundleRes.data.scopeId, projectId);
+    assert(projectBundleRes.data.brief, 'project bundle should include a brief');
+    assert(projectBundleRes.data.recentTasks.some((entry) => entry.id === fixture.taskId), 'project bundle should include recent tasks');
+    assert(projectBundleRes.data.recentRuns.some((run) => run.runId === fixture.runId), 'project bundle should include recent runs');
+    assert.strictEqual(projectBundleRes.data.usage.totalTokens, 42, 'project bundle should include project usage totals');
+    assert(projectBundleRes.data.rawPointers.taskIds.includes(fixture.taskId), 'project raw pointers should include task ids');
 
     const invalidBundleRes = await request(
       testServer.baseUrl,
@@ -556,6 +635,8 @@ async function runRouteTests() {
     assert(repairRes.data.terminalsRefreshed >= 1, 'repair should recompute terminal message recency');
     assert(repairRes.data.repairedRuns >= 1, 'repair should backfill at least one run snapshot');
     assert(repairRes.data.repairedRoots >= 1, 'repair should refresh at least one root snapshot');
+    assert(repairRes.data.repairedTasks >= 1, `repair should refresh task snapshots: ${JSON.stringify(repairRes.data)}`);
+    assert(repairRes.data.repairedProjects >= 1, `repair should refresh project snapshots: ${JSON.stringify(repairRes.data)}`);
     assert(repairRes.data.skippedRunsWithoutRootSessionId >= 1, 'repair should report orphan completed runs');
     assert(db.getMemorySnapshot('run', fixture.repairRunId), 'repair should create missing run snapshot');
     assert(db.getMemorySnapshot('root', fixture.repairRootSessionId), 'repair should create missing root snapshot');
@@ -659,7 +740,7 @@ async function runMcpTests() {
     const memoryTool = mod.TOOLS.find((tool) => tool.name === 'get_memory_bundle');
     assert(memoryTool, 'get_memory_bundle should be exposed');
     assert.strictEqual(memoryTool.inputSchema.required[0], 'scopeId');
-    assert.deepStrictEqual(memoryTool.inputSchema.properties.scopeType.enum, ['run', 'root', 'room', 'task']);
+    assert.deepStrictEqual(memoryTool.inputSchema.properties.scopeType.enum, ['run', 'root', 'room', 'task', 'project']);
 
     const messageTool = mod.TOOLS.find((tool) => tool.name === 'get_message_window');
     assert(messageTool, 'get_message_window should be exposed');
@@ -675,6 +756,18 @@ async function runMcpTests() {
     assert(bundleText.includes(`Memory Bundle: task ${fixture.taskId}`));
     assert(bundleText.includes('Recent Runs'));
     assert(bundleText.includes('Raw Pointers'));
+
+    const projectId = testServer.server.orchestration.db.getTask(fixture.taskId).projectId;
+    const projectBundleResult = await mod.handleGetMemoryBundle({
+      scopeId: projectId,
+      scopeType: 'project',
+      recentRunsLimit: 3,
+      includeRawPointers: true
+    });
+    const projectBundleText = projectBundleResult.content[0].text;
+    assert(projectBundleText.includes(`Memory Bundle: project ${projectId}`));
+    assert(projectBundleText.includes('Recent Tasks'));
+    assert(projectBundleText.includes('Usage'));
 
     const messageResult = await mod.handleGetMessageWindow({
       terminalId: 'term-1',

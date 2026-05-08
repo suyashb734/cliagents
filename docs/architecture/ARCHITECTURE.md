@@ -22,9 +22,10 @@ route work, preserve execution state, and make multi-agent work inspectable.
   assignment scopes when known.
 - **Root IO event**: redacted, ordered input/output or parsed-message event for
   reconstructing native interactive roots without relying only on raw tmux logs.
-- **Memory snapshot**: derived continuity bundle over root, run, room, or task
-  history. Task bundles include runs, assignments, linked rooms, usage, and
-  recent root session events.
+- **Memory snapshot**: derived continuity bundle over root, run, room, task, or
+  project history. Task bundles include runs, assignments, linked rooms, usage,
+  and recent root session events; project bundles roll up recent tasks, runs,
+  rooms, and project usage.
 - **Memory summary edge**: provenance edge from a derived summary to the records
   or scopes it summarizes, supersedes, or derives from.
 

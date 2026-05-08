@@ -16,7 +16,8 @@ The MCP server is the primary agent-facing control surface for `cliagents`.
 - **Adapter readiness**: list or inspect effective child and collaborator
   readiness before delegating.
 - **Usage**: summarize usage by root, terminal, run, task, or assignment.
-- **Memory**: retrieve memory bundles and message windows.
+- **Memory**: retrieve memory bundles for run, root, room, task, or project
+  scopes, plus durable message windows.
 - **Remote snapshot**: inspect one runtime-neutral broker snapshot for
   remote/web/mobile control surfaces.
 - **Terminal input queue**: queue, approve, deny, cancel, and deliver

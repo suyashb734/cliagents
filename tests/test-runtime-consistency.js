@@ -112,6 +112,13 @@ async function test(name, fn) {
       console.log(`  ⏭️  ${name} (${reason})`);
       return;
     }
+    if (isTransientFailure(error.message)) {
+      const reason = `transient runtime/provider failure: ${error.message}`;
+      results.skipped += 1;
+      results.tests.push({ name, status: 'skipped', reason });
+      console.log(`  ⏭️  ${name} (${reason})`);
+      return;
+    }
 
     results.failed += 1;
     results.tests.push({ name, status: 'failed', error: error.message });

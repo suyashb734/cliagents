@@ -387,6 +387,11 @@ function runProjectAnchorRepairAndDiagnosticsTest() {
       brief: 'Recoverable run snapshot',
       generationTrigger: 'repair'
     });
+    db.db.prepare(`
+      UPDATE memory_snapshots
+      SET project_id = NULL
+      WHERE scope = 'run' AND scope_id = 'run-root-recoverable'
+    `).run();
 
     db.db.prepare(`
       INSERT INTO messages (terminal_id, trace_id, root_session_id, role, content, metadata, created_at)

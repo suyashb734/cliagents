@@ -340,6 +340,10 @@ function buildUsageWhereClause(options = {}) {
     clauses.push('usage_records.task_assignment_id = ?');
     params.push(options.taskAssignmentId);
   }
+  if (options.projectId || options.project_id) {
+    clauses.push('usage_records.project_id = ?');
+    params.push(options.projectId || options.project_id);
+  }
   if (options.participantId) {
     clauses.push('usage_records.participant_id = ?');
     params.push(options.participantId);
@@ -1111,6 +1115,15 @@ class OrchestrationDB {
     return String(row?.project_id || '').trim() || null;
   }
 
+  _getRoomProjectId(roomId) {
+    const normalizedRoomId = String(roomId || '').trim();
+    if (!normalizedRoomId || !this._hasColumn('rooms', 'project_id')) {
+      return null;
+    }
+    const row = this.db.prepare('SELECT project_id FROM rooms WHERE id = ?').get(normalizedRoomId);
+    return String(row?.project_id || '').trim() || null;
+  }
+
   _resolveProjectIdForTask(taskId) {
     const existingProjectId = this._getTaskProjectId(taskId);
     if (existingProjectId) {
@@ -1152,6 +1165,26 @@ class OrchestrationDB {
       this._getTaskProjectId(record.taskId || record.task_id),
       this._getRunProjectId(record.runId || record.run_id),
       this._getTerminalProjectId(record.terminalId || record.terminal_id)
+    ]);
+  }
+
+  _resolveProjectIdForMemorySnapshot(snapshot = {}, scope = null, scopeId = null) {
+    const explicitProjectId = String(snapshot.projectId || snapshot.project_id || '').trim();
+    if (explicitProjectId) {
+      return explicitProjectId;
+    }
+
+    const normalizedScope = String(scope || snapshot.scope || '').trim().toLowerCase();
+    const normalizedScopeId = String(scopeId || snapshot.scopeId || snapshot.scope_id || '').trim();
+    if (normalizedScope === 'project' && normalizedScopeId) {
+      return normalizedScopeId;
+    }
+
+    return this._resolveSingleProjectId([
+      this._resolveProjectIdForTask(snapshot.taskId || snapshot.task_id || (normalizedScope === 'task' ? normalizedScopeId : null)),
+      this._getRunProjectId(snapshot.runId || snapshot.run_id || (normalizedScope === 'run' ? normalizedScopeId : null)),
+      this._getRoomProjectId(normalizedScope === 'room' ? normalizedScopeId : null),
+      this._getTerminalProjectId(snapshot.terminalId || snapshot.terminal_id)
     ]);
   }
 
@@ -4955,6 +4988,10 @@ class OrchestrationDB {
       clauses.push('workspace_root = ?');
       params.push(String(options.workspaceRoot));
     }
+    if ((options.projectId || options.project_id) && this._hasColumn('tasks', 'project_id')) {
+      clauses.push('project_id = ?');
+      params.push(String(options.projectId || options.project_id).trim());
+    }
     const whereSql = clauses.length ? `WHERE ${clauses.join(' AND ')}` : '';
     const limit = clampLimit(options.limit, 50, 500);
     return this.db.prepare(`
@@ -5378,6 +5415,10 @@ class OrchestrationDB {
     if (options.taskId || options.task_id) {
       clauses.push('task_id = ?');
       params.push(String(options.taskId || options.task_id).trim());
+    }
+    if ((options.projectId || options.project_id) && this._hasColumn('rooms', 'project_id')) {
+      clauses.push('project_id = ?');
+      params.push(String(options.projectId || options.project_id).trim());
     }
     const whereSql = clauses.length ? `WHERE ${clauses.join(' AND ')}` : '';
     const limit = clampLimit(options.limit, 20, 100);
@@ -6167,38 +6208,63 @@ class OrchestrationDB {
     const createdAt = existing?.createdAt || (Number.isFinite(snapshot.createdAt) ? snapshot.createdAt : now);
     const brief = truncateText(snapshot.brief, 1500) || '(no brief available)';
 
+    const columns = [
+      'id',
+      'scope',
+      'scope_id',
+      'run_id',
+      'root_session_id',
+      'task_id',
+      'brief',
+      'key_decisions',
+      'pending_items',
+      'generation_trigger',
+      'generation_strategy',
+      'metadata',
+      'created_at',
+      'updated_at'
+    ];
+    const values = [
+      id,
+      scope,
+      scopeId,
+      snapshot.runId || null,
+      snapshot.rootSessionId || null,
+      snapshot.taskId || null,
+      brief,
+      JSON.stringify(dedupeStrings(snapshot.keyDecisions || [], 20)),
+      JSON.stringify(dedupeStrings(snapshot.pendingItems || [], 20)),
+      generationTrigger,
+      generationStrategy,
+      snapshot.metadata == null ? null : JSON.stringify(snapshot.metadata),
+      createdAt,
+      now
+    ];
+    const updateColumns = [
+      'run_id',
+      'root_session_id',
+      'task_id',
+      'brief',
+      'key_decisions',
+      'pending_items',
+      'generation_trigger',
+      'generation_strategy',
+      'metadata',
+      'updated_at'
+    ];
+
+    if (this._hasColumn('memory_snapshots', 'project_id')) {
+      columns.push('project_id');
+      values.push(this._resolveProjectIdForMemorySnapshot(snapshot, scope, scopeId));
+      updateColumns.push('project_id');
+    }
+
     this.db.run(`
-      INSERT INTO memory_snapshots (
-        id, scope, scope_id, run_id, root_session_id, task_id,
-        brief, key_decisions, pending_items, generation_trigger,
-        generation_strategy, metadata, created_at, updated_at
-      ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+      INSERT INTO memory_snapshots (${columns.join(', ')})
+      VALUES (${columns.map(() => '?').join(', ')})
       ON CONFLICT(scope, scope_id) DO UPDATE SET
-        run_id = excluded.run_id,
-        root_session_id = excluded.root_session_id,
-        task_id = excluded.task_id,
-        brief = excluded.brief,
-        key_decisions = excluded.key_decisions,
-        pending_items = excluded.pending_items,
-        generation_trigger = excluded.generation_trigger,
-        generation_strategy = excluded.generation_strategy,
-        metadata = excluded.metadata,
-        updated_at = excluded.updated_at
-    `,
-    id,
-    scope,
-    scopeId,
-    snapshot.runId || null,
-    snapshot.rootSessionId || null,
-    snapshot.taskId || null,
-    brief,
-    JSON.stringify(dedupeStrings(snapshot.keyDecisions || [], 20)),
-    JSON.stringify(dedupeStrings(snapshot.pendingItems || [], 20)),
-    generationTrigger,
-    generationStrategy,
-    snapshot.metadata == null ? null : JSON.stringify(snapshot.metadata),
-    createdAt,
-    now);
+        ${updateColumns.map((column) => `${column} = excluded.${column}`).join(',\n        ')}
+    `, ...values);
 
     return id;
   }
@@ -6327,6 +6393,72 @@ class OrchestrationDB {
     return rows.map((row) => this._mapRunRow(row));
   }
 
+  getLatestRunsForProject(projectId, limit = 10) {
+    if (!this._hasColumn('runs', 'project_id')) {
+      return [];
+    }
+    const rows = this.db.prepare(`
+      SELECT * FROM runs
+      WHERE project_id = ?
+      ORDER BY COALESCE(completed_at, started_at) DESC, id DESC
+      LIMIT ?
+    `).all(projectId, clampLimit(limit, 10, 50));
+    return rows.map((row) => this._mapRunRow(row));
+  }
+
+  getLatestActivityAtForTask(taskId) {
+    const row = this.db.prepare(`
+      SELECT MAX(activity_at) AS latest_activity_at
+      FROM (
+        SELECT updated_at AS activity_at FROM tasks WHERE id = ?
+        UNION ALL SELECT updated_at FROM task_assignments WHERE task_id = ?
+        UNION ALL SELECT COALESCE(completed_at, started_at) FROM runs WHERE task_id = ?
+        UNION ALL SELECT updated_at FROM rooms WHERE task_id = ?
+        UNION ALL SELECT created_at FROM findings WHERE task_id = ?
+        UNION ALL SELECT created_at FROM artifacts WHERE task_id = ?
+        UNION ALL SELECT created_at FROM context WHERE task_id = ?
+        UNION ALL SELECT created_at FROM usage_records WHERE task_id = ?
+        UNION ALL
+          SELECT updated_at
+          FROM memory_snapshots
+          WHERE task_id = ?
+            AND NOT (scope = 'task' AND scope_id = ?)
+      )
+    `).get(taskId, taskId, taskId, taskId, taskId, taskId, taskId, taskId, taskId, taskId);
+    return row?.latest_activity_at || null;
+  }
+
+  getLatestActivityAtForProject(projectId) {
+    if (!this._hasTable('projects')) {
+      return null;
+    }
+
+    const selects = ['SELECT updated_at AS activity_at FROM projects WHERE id = ?'];
+    const params = [projectId];
+    const appendProjectSelect = (tableName, columnName = 'updated_at', extraWhere = '') => {
+      if (!this._hasColumn(tableName, 'project_id')) {
+        return;
+      }
+      selects.push(`SELECT ${columnName} FROM ${tableName} WHERE project_id = ? ${extraWhere}`.trim());
+      params.push(projectId);
+    };
+
+    appendProjectSelect('tasks', 'updated_at');
+    appendProjectSelect('runs', 'COALESCE(completed_at, started_at)');
+    appendProjectSelect('rooms', 'updated_at');
+    appendProjectSelect('terminals', 'COALESCE(last_message_at, created_at)');
+    appendProjectSelect('usage_records', 'created_at');
+    appendProjectSelect('memory_snapshots', 'updated_at', "AND NOT (scope = 'project' AND scope_id = project_id)");
+
+    const row = this.db.prepare(`
+      SELECT MAX(activity_at) AS latest_activity_at
+      FROM (
+        ${selects.join('\n        UNION ALL\n        ')}
+      )
+    `).get(...params);
+    return row?.latest_activity_at || null;
+  }
+
   getRunById(runId) {
     const run = this.db.get('SELECT * FROM runs WHERE id = ?', runId);
     return run ? this._mapRunRow(run) : null;
@@ -6429,6 +6561,43 @@ class OrchestrationDB {
       runKind: row.run_kind || null,
       runStatus: row.run_status || null,
       completedAt: row.completed_at || null
+    }));
+  }
+
+  listRunSnapshotsByProject(projectId, limit = 10) {
+    if (!this._hasColumn('memory_snapshots', 'project_id')) {
+      return [];
+    }
+    return this.db.prepare(`
+      SELECT ms.*, r.kind AS run_kind, r.status AS run_status, r.completed_at
+      FROM memory_snapshots ms
+      LEFT JOIN runs r ON r.id = ms.run_id
+      WHERE ms.scope = 'run' AND ms.project_id = ?
+      ORDER BY COALESCE(r.completed_at, r.started_at, ms.updated_at) DESC, ms.updated_at DESC
+      LIMIT ?
+    `).all(projectId, clampLimit(limit, 10, 50)).map((row) => ({
+      ...this._parseMemorySnapshotRow(row),
+      runKind: row.run_kind || null,
+      runStatus: row.run_status || null,
+      completedAt: row.completed_at || null
+    }));
+  }
+
+  listTaskSnapshotsByProject(projectId, limit = 10) {
+    if (!this._hasColumn('memory_snapshots', 'project_id')) {
+      return [];
+    }
+    return this.db.prepare(`
+      SELECT ms.*, t.title AS task_title, t.kind AS task_kind
+      FROM memory_snapshots ms
+      LEFT JOIN tasks t ON t.id = ms.task_id
+      WHERE ms.scope = 'task' AND ms.project_id = ?
+      ORDER BY ms.updated_at DESC, ms.created_at DESC
+      LIMIT ?
+    `).all(projectId, clampLimit(limit, 10, 50)).map((row) => ({
+      ...this._parseMemorySnapshotRow(row),
+      taskTitle: row.task_title || null,
+      taskKind: row.task_kind || null
     }));
   }
 
@@ -6935,6 +7104,89 @@ class OrchestrationDB {
     };
   }
 
+  _buildProjectMemoryBundle(scopeId, options = {}) {
+    const project = this.getProject(scopeId);
+    const snapshot = this.getMemorySnapshot('project', scopeId);
+    if (!project && !snapshot) {
+      return null;
+    }
+
+    const recentRunsLimit = clampLimit(options.recentRunsLimit, 3, 10);
+    const taskSnapshots = this.listTaskSnapshotsByProject(scopeId, 10);
+    const runSnapshots = this.listRunSnapshotsByProject(scopeId, 10);
+    const recentTasks = this.listTasks({ projectId: scopeId, limit: 20 }).map((task) => ({
+      id: task.id,
+      title: task.title,
+      kind: task.kind,
+      updatedAt: task.updatedAt
+    }));
+    const rooms = this.listRooms({ projectId: scopeId, limit: 10 }).map((room) => ({
+      id: room.id,
+      taskId: room.taskId,
+      rootSessionId: room.rootSessionId,
+      title: room.title,
+      status: room.status,
+      updatedAt: room.updatedAt
+    }));
+    const usage = this.summarizeUsage({ projectId: scopeId });
+    const fallbackBrief = recentTasks.length
+      ? truncateText([
+        project?.workspaceRoot ? `Project: ${project.workspaceRoot}` : `Project: ${scopeId}`,
+        `Recent tasks: ${recentTasks.slice(0, 5).map((task) => task.title || task.id).join(', ')}`
+      ].join('\n'), 1500)
+      : (project?.workspaceRoot ? `Project: ${project.workspaceRoot}` : null);
+    const latestActivityAt = this.getLatestActivityAtForProject(scopeId);
+    const isStale = snapshot
+      ? Boolean(latestActivityAt && latestActivityAt > snapshot.updatedAt)
+      : Boolean(latestActivityAt);
+
+    return {
+      scopeType: 'project',
+      scopeId,
+      brief: snapshot?.brief || fallbackBrief,
+      keyDecisions: snapshot?.keyDecisions || dedupeStrings(
+        [
+          ...taskSnapshots.flatMap((entry) => entry.keyDecisions),
+          ...runSnapshots.flatMap((entry) => entry.keyDecisions)
+        ],
+        20
+      ),
+      pendingItems: snapshot?.pendingItems || dedupeStrings(
+        [
+          ...taskSnapshots.flatMap((entry) => entry.pendingItems),
+          ...runSnapshots.flatMap((entry) => entry.pendingItems)
+        ],
+        20
+      ),
+      findings: [],
+      recentTasks,
+      rooms,
+      usage,
+      recentRuns: runSnapshots.slice(0, recentRunsLimit).map((entry) => ({
+        runId: entry.runId,
+        brief: entry.brief,
+        keyDecisions: entry.keyDecisions,
+        pendingItems: entry.pendingItems,
+        status: entry.runStatus,
+        kind: entry.runKind,
+        completedAt: entry.completedAt,
+        updatedAt: entry.updatedAt
+      })),
+      rawPointers: options.includeRawPointers === false
+        ? null
+        : {
+            projectId: scopeId,
+            workspaceRoot: project?.workspaceRoot || null,
+            taskIds: recentTasks.map((task) => task.id),
+            taskSnapshotIds: taskSnapshots.map((entry) => entry.id),
+            runIds: runSnapshots.map((entry) => entry.runId).filter(Boolean),
+            roomIds: rooms.map((room) => room.id),
+            usageRecordCount: usage.recordCount
+          },
+      isStale
+    };
+  }
+
   getMemoryBundle(scopeId, scopeType = 'task', options = {}) {
     const normalizedScopeType = String(scopeType || 'task').trim().toLowerCase();
     const bundleOptions = {
@@ -6953,6 +7205,9 @@ class OrchestrationDB {
     }
     if (normalizedScopeType === 'task') {
       return this._buildTaskMemoryBundle(scopeId, bundleOptions);
+    }
+    if (normalizedScopeType === 'project') {
+      return this._buildProjectMemoryBundle(scopeId, bundleOptions);
     }
 
     throw new Error(`Unsupported memory bundle scope type: ${scopeType}`);
