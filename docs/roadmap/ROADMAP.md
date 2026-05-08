@@ -83,7 +83,8 @@ docs remain useful context, but this file is the current entrypoint.
      The current control-plane slice adds server-side duplicate-start coalescing,
      deferred assignment starts, stale/ready dispatch discovery, and compact
      liveness/next-action readouts; it deliberately stops short of a background
-     scheduler.
+     scheduler. The task supervisor harness consumes dispatch liveness so
+     autonomous loops do not bypass deferred starts or active dispatch claims.
    - Keep this as an execution-control model, not a generic task-board product.
 
 ## Deferred

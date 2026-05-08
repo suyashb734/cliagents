@@ -135,6 +135,11 @@ lineage. Task memory bundles include compact dispatch, context-snapshot, and
 task-session-binding summaries so operators and external supervisors can inspect
 assignment continuity without reconstructing it from raw tables.
 
+Supervisor loops must treat dispatch liveness as part of assignment eligibility:
+future deferred dispatches, active queued/claimed dispatches, and stale or
+missing-terminal dispatches block duplicate starts. A deferred dispatch whose
+liveness is `ready` may be started through the normal assignment-start route.
+
 ## Continuity Rule
 
 Compatible child-lane reuse is the default when a delegated task is attached to
