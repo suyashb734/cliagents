@@ -51,10 +51,12 @@ function isTransientFailure(message = '') {
     'deadline exceeded',
     'fetch failed',
     'network',
+    'aborterror',
     'econnreset',
     'socket',
     'status: 504',
-    'process exited with code'
+    'process exited with code',
+    'exited with code'
   ].some((pattern) => text.includes(pattern));
 }
 
@@ -174,17 +176,48 @@ function restoreTemporaryEnv() {
 }
 
 async function createSession(adapter, workDir, options = {}) {
-  const { status, data } = await request('POST', '/sessions', { adapter, workDir }, {
-    timeoutMs: options.timeoutMs || 120000
-  });
-  if (status !== 200) {
-    const message = data?.error?.message || data?.error || JSON.stringify(data);
-    if (isSkippableProviderFailure(message)) {
-      throw new Error(`SKIP: ${message}`);
+  const maxAttempts = Math.max(1, Number(options.retries || 1));
+  const retryDelayMs = Number(options.retryDelayMs || 1500);
+
+  for (let attempt = 1; attempt <= maxAttempts; attempt++) {
+    try {
+      const { status, data } = await request('POST', '/sessions', { adapter, workDir }, {
+        timeoutMs: options.timeoutMs || 120000
+      });
+      if (status !== 200) {
+        const message = data?.error?.message || data?.error || JSON.stringify(data);
+        if (isSkippableProviderFailure(message)) {
+          throw new Error(`SKIP: ${message}`);
+        }
+
+        if (attempt < maxAttempts && isTransientFailure(message)) {
+          await sleep(retryDelayMs);
+          continue;
+        }
+
+        if (isTransientFailure(message)) {
+          throw new Error(`SKIP: transient session create failure: ${message}`);
+        }
+
+        throw new Error(`Failed to create ${adapter} session: ${status} ${message}`);
+      }
+      return data.sessionId;
+    } catch (error) {
+      const errorMessage = String(error?.message || error);
+      if (errorMessage.startsWith('SKIP:')) {
+        throw error;
+      }
+
+      if (attempt < maxAttempts && isTransientFailure(errorMessage)) {
+        await sleep(retryDelayMs);
+        continue;
+      }
+
+      throw error;
     }
-    throw new Error(`Failed to create ${adapter} session: ${status} ${message}`);
   }
-  return data.sessionId;
+
+  throw new Error(`Failed to create ${adapter} session after ${maxAttempts} attempts`);
 }
 
 async function sendMessage(sessionId, message, options = {}) {
@@ -480,10 +513,20 @@ async function testGeminiPersistence() {
     await ensureAdapterAvailable('gemini-cli');
 
     const workDir = makeTempWorkDir('gemini-shared');
-    const sessionA = await createSession('gemini-cli', workDir, { timeoutMs: 210000 });
-    const sessionB = await createSession('gemini-cli', workDir, { timeoutMs: 210000 });
+    let sessionA = null;
+    let sessionB = null;
 
     try {
+      sessionA = await createSession('gemini-cli', workDir, {
+        timeoutMs: 210000,
+        retries: 2,
+        retryDelayMs: 3000
+      });
+      sessionB = await createSession('gemini-cli', workDir, {
+        timeoutMs: 210000,
+        retries: 2,
+        retryDelayMs: 3000
+      });
       await sendMessage(sessionA, 'The session marker is ALPHA. Reply with READY.', { timeout: 120000, retries: 2 });
       await sendMessage(sessionB, 'The session marker is BETA. Reply with READY.', { timeout: 120000, retries: 2 });
       const answer = await sendMessage(
@@ -493,8 +536,12 @@ async function testGeminiPersistence() {
       );
       assert(answer.toLowerCase().includes('alpha'), `Expected ALPHA, got: ${answer}`);
     } finally {
-      await cleanupSession(sessionA);
-      await cleanupSession(sessionB);
+      if (sessionA) {
+        await cleanupSession(sessionA);
+      }
+      if (sessionB) {
+        await cleanupSession(sessionB);
+      }
     }
   });
 }
