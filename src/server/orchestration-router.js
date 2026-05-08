@@ -63,6 +63,10 @@ function createOrchestrationRouter(context) {
   const runLedgerWritesEnabled = process.env.RUN_LEDGER_ENABLED === '1';
   const runLedgerReadsEnabled = process.env.RUN_LEDGER_READS_ENABLED === '1';
   const requireRootAttach = process.env.CLIAGENTS_REQUIRE_ROOT_ATTACH === '1';
+  const dispatchStaleMs = Math.max(
+    1000,
+    Number.parseInt(process.env.CLIAGENTS_DISPATCH_STALE_MS || '', 10) || 10 * 60 * 1000
+  );
   const runLedger = runLedgerWritesEnabled || runLedgerReadsEnabled ? new RunLedgerService(db) : null;
   const providerSessionRegistry = getProviderSessionRegistry();
   const bpeClient = createBrowserPerceptionEngineClient({
@@ -110,6 +114,40 @@ function createOrchestrationRouter(context) {
       return false;
     }
     return fallback;
+  }
+
+  function parseOptionalTimestamp(value, paramName) {
+    if (value === undefined || value === null || value === '') {
+      return { provided: false, value: null };
+    }
+
+    if (typeof value === 'number' && Number.isFinite(value)) {
+      return { provided: true, value };
+    }
+
+    const text = String(value).trim();
+    if (!text) {
+      return { provided: false, value: null };
+    }
+
+    const numeric = Number(text);
+    if (Number.isFinite(numeric)) {
+      return { provided: true, value: numeric };
+    }
+
+    const parsedDate = Date.parse(text);
+    if (Number.isFinite(parsedDate)) {
+      return { provided: true, value: parsedDate };
+    }
+
+    return {
+      provided: true,
+      error: {
+        code: 'invalid_parameter',
+        message: `${paramName} must be a Unix timestamp in milliseconds or an ISO timestamp`,
+        param: paramName
+      }
+    };
   }
 
   function parseSessionMetadataValue(value) {
@@ -1157,21 +1195,7 @@ function createOrchestrationRouter(context) {
       ? assignment.metadata.isolation
       : null;
     const dispatchRequests = assignment?.id && typeof db?.listDispatchRequests === 'function'
-      ? db.listDispatchRequests({ taskAssignmentId: assignment.id, limit: 5 }).map((dispatch) => ({
-        id: dispatch.id,
-        status: dispatch.status,
-        requestKind: dispatch.requestKind,
-        rootSessionId: dispatch.rootSessionId,
-        contextSnapshotId: dispatch.contextSnapshotId,
-        boundSessionId: dispatch.boundSessionId,
-        runId: dispatch.runId,
-        terminalId: dispatch.terminalId,
-        coalescedCount: dispatch.coalescedCount,
-        createdAt: dispatch.createdAt,
-        updatedAt: dispatch.updatedAt,
-        dispatchedAt: dispatch.dispatchedAt,
-        cancelledAt: dispatch.cancelledAt
-      }))
+      ? db.listDispatchRequests({ taskAssignmentId: assignment.id, limit: 5 }).map(buildCompactDispatchPayload)
       : [];
     const taskSessionBindings = assignment?.id && typeof db?.listTaskSessionBindings === 'function'
       ? db.listTaskSessionBindings({ taskAssignmentId: assignment.id, limit: 5 }).map((binding) => ({
@@ -1384,20 +1408,159 @@ function createOrchestrationRouter(context) {
     };
   }
 
-  function createAssignmentStartDispatch({ req, task, assignment, executionControlPlane, reasoningEffort }) {
-    if (!db?.createDispatchRequest) {
+  function resolveDispatchTerminalSnapshot(dispatch) {
+    const terminalId = dispatch?.terminalId || null;
+    if (!terminalId) {
+      return null;
+    }
+    const liveTerminal = getLiveTerminal(terminalId);
+    const persistedTerminal = !liveTerminal && typeof db?.getTerminal === 'function'
+      ? db.getTerminal(terminalId)
+      : null;
+    const terminal = liveTerminal || persistedTerminal || null;
+    if (!terminal) {
+      return {
+        terminalId,
+        status: 'terminal_missing',
+        missing: true
+      };
+    }
+    return {
+      terminalId,
+      status: terminal.status || terminal.taskState || terminal.task_state || null,
+      missing: false
+    };
+  }
+
+  function deriveDispatchLiveness(dispatch) {
+    if (!dispatch) {
       return null;
     }
 
-    return db.createDispatchRequest({
+    const now = Date.now();
+    const updatedAt = dispatch.updatedAt || dispatch.createdAt || now;
+    const ageMs = Math.max(0, now - updatedAt);
+    const terminal = resolveDispatchTerminalSnapshot(dispatch);
+    const status = String(dispatch.status || 'queued').trim().toLowerCase();
+
+    if (status === 'deferred') {
+      const deferUntil = dispatch.deferUntil || null;
+      if (deferUntil && deferUntil > now) {
+        return {
+          state: 'deferred',
+          stale: false,
+          nextAction: 'wait_until_defer_time',
+          ageMs,
+          deferUntil,
+          terminalStatus: terminal?.status || null
+        };
+      }
+      return {
+        state: 'ready',
+        stale: false,
+        nextAction: 'claim_deferred_dispatch',
+        ageMs,
+        deferUntil,
+        terminalStatus: terminal?.status || null
+      };
+    }
+
+    if ((status === 'queued' || status === 'claimed') && !dispatch.terminalId && ageMs >= dispatchStaleMs) {
+      return {
+        state: 'stale',
+        stale: true,
+        nextAction: status === 'claimed' ? 'recover_or_fail_claimed_dispatch' : 'claim_or_cancel_queued_dispatch',
+        ageMs,
+        deferUntil: dispatch.deferUntil || null,
+        terminalStatus: null
+      };
+    }
+
+    if (status === 'queued') {
+      return {
+        state: 'queued',
+        stale: false,
+        nextAction: 'claim_dispatch',
+        ageMs,
+        deferUntil: dispatch.deferUntil || null,
+        terminalStatus: null
+      };
+    }
+
+    if (status === 'claimed') {
+      return {
+        state: 'claimed',
+        stale: false,
+        nextAction: 'wait_for_spawn',
+        ageMs,
+        deferUntil: dispatch.deferUntil || null,
+        terminalStatus: null
+      };
+    }
+
+    if (status === 'spawned') {
+      return {
+        state: terminal?.missing ? 'terminal_missing' : 'spawned',
+        stale: terminal?.missing === true,
+        nextAction: terminal?.missing ? 'reconcile_missing_terminal' : 'monitor_terminal',
+        ageMs,
+        deferUntil: dispatch.deferUntil || null,
+        terminalStatus: terminal?.status || null
+      };
+    }
+
+    return {
+      state: status,
+      stale: false,
+      nextAction: 'none',
+      ageMs,
+      deferUntil: dispatch.deferUntil || null,
+      terminalStatus: terminal?.status || null
+    };
+  }
+
+  function buildCompactDispatchPayload(dispatch) {
+    if (!dispatch) {
+      return null;
+    }
+
+    return {
+      id: dispatch.id,
+      status: dispatch.status,
+      requestKind: dispatch.requestKind,
+      rootSessionId: dispatch.rootSessionId,
+      coalesceKey: dispatch.coalesceKey,
+      contextSnapshotId: dispatch.contextSnapshotId,
+      boundSessionId: dispatch.boundSessionId,
+      runId: dispatch.runId,
+      terminalId: dispatch.terminalId,
+      coalescedCount: dispatch.coalescedCount,
+      deferUntil: dispatch.deferUntil,
+      createdAt: dispatch.createdAt,
+      updatedAt: dispatch.updatedAt,
+      dispatchedAt: dispatch.dispatchedAt,
+      cancelledAt: dispatch.cancelledAt,
+      liveness: deriveDispatchLiveness(dispatch)
+    };
+  }
+
+  function createAssignmentStartDispatch({ req, task, assignment, executionControlPlane, reasoningEffort, deferUntil = null }) {
+    if (!db?.createDispatchRequest && !db?.createOrCoalesceDispatchRequest) {
+      return { dispatch: null, action: 'unavailable', coalesced: false };
+    }
+
+    const now = Date.now();
+    const status = Number.isFinite(deferUntil) && deferUntil > now ? 'deferred' : 'claimed';
+    const payload = {
       idempotencyKey: buildAssignmentStartIdempotencyKey(req, task, assignment),
       taskId: task.id,
       taskAssignmentId: assignment.id,
       rootSessionId: executionControlPlane.rootSessionId || task.rootSessionId || null,
       requestedBy: req.body?.requestedBy || executionControlPlane.originClient || 'api',
       requestKind: 'assignment_start',
-      status: 'claimed',
+      status,
       coalesceKey: `task:${task.id}:assignment:${assignment.id}:start`,
+      deferUntil: Number.isFinite(deferUntil) ? deferUntil : null,
       metadata: {
         endpoint: 'POST /orchestration/tasks/:taskId/assignments/:assignmentId/start',
         taskTitle: task.title,
@@ -1411,7 +1574,20 @@ function createOrchestrationRouter(context) {
         sessionLabel: req.body?.sessionLabel || null,
         workspaceRoot: task.workspaceRoot || null
       }
-    });
+    };
+
+    if (typeof db.createOrCoalesceDispatchRequest === 'function') {
+      return db.createOrCoalesceDispatchRequest(payload, {
+        coalesceActive: true,
+        now
+      });
+    }
+
+    return {
+      dispatch: db.createDispatchRequest(payload),
+      action: status === 'deferred' ? 'deferred' : 'created',
+      coalesced: false
+    };
   }
 
   function createAssignmentStartContextSnapshot({ task, assignment, dispatchRequest, workingDirectory, reasoningEffort }) {
@@ -2434,13 +2610,57 @@ function createOrchestrationRouter(context) {
       const requestedReasoningEffort = reasoningEffortInput.provided
         ? reasoningEffortInput.value
         : (assignment.reasoningEffort || null);
-      dispatchRequest = createAssignmentStartDispatch({
+      const deferUntilInput = parseOptionalTimestamp(req.body?.deferUntil ?? req.body?.defer_until, 'deferUntil');
+      if (deferUntilInput.error) {
+        return res.status(400).json({ error: deferUntilInput.error });
+      }
+      const dispatchClaim = createAssignmentStartDispatch({
         req,
         task,
         assignment,
         executionControlPlane,
-        reasoningEffort: requestedReasoningEffort
+        reasoningEffort: requestedReasoningEffort,
+        deferUntil: deferUntilInput.value
       });
+      dispatchRequest = dispatchClaim?.dispatch || null;
+      if (dispatchRequest && (dispatchClaim?.coalesced || dispatchRequest.status === 'deferred')) {
+        const now = Date.now();
+        const updatedAssignment = db.updateTaskAssignment(assignment.id, {
+          metadata: {
+            ...(assignment.metadata || {}),
+            dispatch: {
+              dispatchRequestId: dispatchRequest.id,
+              coalesced: dispatchClaim?.coalesced === true,
+              action: dispatchClaim?.action || null,
+              deferUntil: dispatchRequest.deferUntil || null
+            }
+          },
+          updatedAt: now
+        });
+        db.updateTask(task.id, {
+          rootSessionId: executionControlPlane.rootSessionId || task.rootSessionId || null,
+          updatedAt: now
+        });
+
+        return res.status(202).json({
+          task: buildTaskPayload(task.id),
+          assignment: buildTaskAssignmentPayload(updatedAssignment),
+          route: null,
+          dispatch: {
+            dispatchRequestId: dispatchRequest.id,
+            contextSnapshotId: dispatchRequest.contextSnapshotId || null,
+            taskSessionBindingId: dispatchRequest.boundSessionId || null,
+            status: dispatchRequest.status,
+            action: dispatchClaim?.action || null,
+            coalesced: dispatchClaim?.coalesced === true,
+            coalescedCount: dispatchRequest.coalescedCount || 0,
+            deferUntil: dispatchRequest.deferUntil || null,
+            liveness: deriveDispatchLiveness(dispatchRequest)
+          },
+          rootSessionId: resolvedControlPlane.rootSessionId || null,
+          parentSessionId: resolvedControlPlane.parentSessionId || null
+        });
+      }
       const preparedWorktree = assignment.worktreePath
         ? prepareTaskAssignmentWorktree(task, assignment)
         : null;
@@ -2575,7 +2795,12 @@ function createOrchestrationRouter(context) {
           dispatchRequestId: dispatchRequest?.id || null,
           contextSnapshotId: contextSnapshot?.id || null,
           taskSessionBindingId: taskSessionBinding?.id || null,
-          status: dispatchRequest?.status || null
+          status: dispatchRequest?.status || null,
+          action: dispatchClaim?.action || null,
+          coalesced: dispatchClaim?.coalesced === true,
+          coalescedCount: dispatchRequest?.coalescedCount || 0,
+          deferUntil: dispatchRequest?.deferUntil || null,
+          liveness: deriveDispatchLiveness(dispatchRequest)
         },
         rootSessionId: resolvedControlPlane.rootSessionId || null,
         parentSessionId: resolvedControlPlane.parentSessionId || null

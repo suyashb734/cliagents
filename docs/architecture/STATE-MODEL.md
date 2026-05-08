@@ -117,18 +117,23 @@ immutable redacted context packets captured at dispatch time. `task_session_bind
 are append-only records of the selected adapter, model, effort, runtime, provider
 thread, and reuse decision for a task or assignment lane.
 
-Task assignment start now creates this boundary on the existing broker route:
-the dispatch request is claimed before worktree preparation/spawn, the context
-snapshot captures the redacted assignment prompt and linked task metadata, and
-the task-session binding records the root-scoped terminal/runtime/provider reuse
-decision after spawn. Assignment read surfaces expose compact dispatch and
-session-binding summaries; context snapshots remain durable audit records and
-are not expanded into every task list response. The memory read model projects
-dispatch requests, context snapshots, and task-session bindings as queryable
-records with task/root/assignment/terminal lineage. Task memory bundles include
-compact dispatch, context-snapshot, and task-session-binding summaries so
-operators and external supervisors can inspect assignment continuity without
-reconstructing it from raw tables.
+Task assignment start now creates this boundary on the existing broker route.
+Normal starts claim a dispatch request before worktree preparation/spawn, capture
+the redacted assignment prompt and linked task metadata in a context snapshot,
+and write a root-scoped task-session binding after the terminal/runtime/provider
+decision is known. Duplicate active starts for the same assignment coalesce into
+the existing dispatch instead of spawning a second terminal. Future starts can be
+deferred; a deferred start leaves the assignment queued and returns `202` with no
+route or terminal until a scheduler/operator claims it later. Assignment read
+surfaces expose compact dispatch and session-binding summaries, including
+dispatch liveness (`queued`, `claimed`, `deferred`, `ready`, `spawned`,
+`stale`, or `terminal_missing`) and the broker's next action. Context snapshots
+remain durable audit records and are not expanded into every task list response.
+The memory read model projects dispatch requests, context snapshots, and
+task-session bindings as queryable records with task/root/assignment/terminal
+lineage. Task memory bundles include compact dispatch, context-snapshot, and
+task-session-binding summaries so operators and external supervisors can inspect
+assignment continuity without reconstructing it from raw tables.
 
 ## Continuity Rule
 

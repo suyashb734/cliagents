@@ -369,6 +369,7 @@ const ROOT_IO_RETENTION_CLASSES = new Set(['raw-bounded', 'summary-indefinite', 
 const MEMORY_SUMMARY_EDGE_NAMESPACES = new Set(['structural', 'derivation', 'execution']);
 const MEMORY_SUMMARY_EDGE_KINDS = new Set(['contains', 'continues', 'summarizes', 'supersedes', 'derived_from', 'blocks', 'unblocks']);
 const DISPATCH_REQUEST_STATUSES = new Set(['queued', 'claimed', 'spawned', 'deferred', 'cancelled', 'failed']);
+const DISPATCH_REQUEST_COALESCABLE_STATUSES = new Set(['queued', 'claimed', 'deferred']);
 const TASK_SESSION_BINDING_STATUSES = new Set(['active', 'superseded', 'failed', 'cancelled']);
 const CONTEXT_RETENTION_CLASSES = new Set(['raw-bounded', 'summary-indefinite', 'metadata-indefinite']);
 const MEMORY_RECORD_TYPE_ALIASES = new Map([
@@ -3777,6 +3778,107 @@ class OrchestrationDB {
     return this._parseDispatchRequestRow(create.immediate());
   }
 
+  getActiveDispatchRequestByCoalesceKey(coalesceKey, options = {}) {
+    if (!this._hasTable('dispatch_requests')) {
+      return null;
+    }
+
+    const normalizedCoalesceKey = String(coalesceKey || '').trim();
+    if (!normalizedCoalesceKey) {
+      return null;
+    }
+
+    const now = Number.isFinite(options.now)
+      ? options.now
+      : (Number.isFinite(options.now_ms) ? options.now_ms : Date.now());
+    const statusValues = Array.from(DISPATCH_REQUEST_COALESCABLE_STATUSES);
+    const placeholders = statusValues.map(() => '?').join(', ');
+    const row = this.db.get(`
+      SELECT *
+      FROM dispatch_requests
+      WHERE coalesce_key = ?
+        AND status IN (${placeholders})
+        AND (
+          status <> 'deferred'
+          OR defer_until IS NULL
+          OR defer_until > ?
+        )
+      ORDER BY created_at ASC, dispatch_request_id ASC
+      LIMIT 1
+    `, normalizedCoalesceKey, ...statusValues, now);
+    return this._parseDispatchRequestRow(row);
+  }
+
+  createOrCoalesceDispatchRequest(input = {}, options = {}) {
+    if (!this._hasTable('dispatch_requests')) {
+      return { dispatch: null, action: 'unavailable', coalesced: false };
+    }
+
+    const dispatchInput = input && typeof input === 'object' ? input : {};
+    const idempotencyKey = String(dispatchInput.idempotencyKey || dispatchInput.idempotency_key || '').trim();
+    const coalesceKey = String(dispatchInput.coalesceKey || dispatchInput.coalesce_key || '').trim();
+    const shouldCoalesce = options.coalesceActive !== false && options.coalesce !== false;
+    const now = Number.isFinite(options.now)
+      ? options.now
+      : (Number.isFinite(options.now_ms) ? options.now_ms : Date.now());
+
+    if (idempotencyKey) {
+      const existing = this.db.get('SELECT * FROM dispatch_requests WHERE idempotency_key = ?', idempotencyKey);
+      if (existing) {
+        return {
+          dispatch: this._parseDispatchRequestRow(existing),
+          action: 'idempotent_replay',
+          coalesced: false
+        };
+      }
+    }
+
+    if (shouldCoalesce && coalesceKey) {
+      const existing = this.getActiveDispatchRequestByCoalesceKey(coalesceKey, { now });
+      if (existing?.id) {
+        const metadata = existing.metadata && typeof existing.metadata === 'object' && !Array.isArray(existing.metadata)
+          ? existing.metadata
+          : {};
+        const existingCoalescing = metadata.coalescing && typeof metadata.coalescing === 'object' && !Array.isArray(metadata.coalescing)
+          ? metadata.coalescing
+          : {};
+        const nextCoalescedCount = normalizeInteger(existing.coalescedCount, 0) + 1;
+        this.db.run(`
+          UPDATE dispatch_requests
+          SET coalesced_count = ?,
+              updated_at = ?,
+              metadata = ?
+          WHERE dispatch_request_id = ?
+        `,
+        nextCoalescedCount,
+        now,
+        JSON.stringify(redactSecretObject({
+          ...metadata,
+          coalescing: {
+            ...existingCoalescing,
+            lastCoalescedAt: now,
+            coalescedCount: nextCoalescedCount,
+            requestedBy: String(dispatchInput.requestedBy || dispatchInput.requested_by || '').trim() || null
+          }
+        })),
+        existing.id);
+
+        return {
+          dispatch: this.getDispatchRequest(existing.id),
+          action: 'coalesced',
+          coalesced: true
+        };
+      }
+    }
+
+    const dispatch = this.createDispatchRequest(dispatchInput);
+    return {
+      dispatch,
+      action: dispatch?.status === 'deferred' ? 'deferred' : 'created',
+      coalesced: false
+    };
+  }
+
   getDispatchRequest(dispatchRequestId) {
     if (!this._hasTable('dispatch_requests')) {
       return null;
@@ -3857,6 +3959,45 @@ class OrchestrationDB {
       FROM dispatch_requests
       WHERE ${clauses.join(' AND ')}
       ORDER BY COALESCE(dispatched_at, updated_at, created_at) DESC, dispatch_request_id ASC
+      LIMIT ?
+    `, ...params, limit).map((row) => this._parseDispatchRequestRow(row));
+  }
+
+  listStaleDispatchRequests(options = {}) {
+    if (!this._hasTable('dispatch_requests')) {
+      return [];
+    }
+
+    const now = Number.isFinite(options.now)
+      ? options.now
+      : (Number.isFinite(options.now_ms) ? options.now_ms : Date.now());
+    const staleMs = Number.isFinite(options.staleMs)
+      ? options.staleMs
+      : (Number.isFinite(options.stale_ms) ? options.stale_ms : 10 * 60 * 1000);
+    const cutoff = Math.max(0, now - Math.max(0, staleMs));
+    const clauses = [`
+      (
+        (status IN ('queued', 'claimed') AND terminal_id IS NULL AND updated_at <= ?)
+        OR (status = 'deferred' AND defer_until IS NOT NULL AND defer_until <= ?)
+      )
+    `];
+    const params = [cutoff, now];
+    const rootSessionId = String(options.rootSessionId || options.root_session_id || '').trim();
+    if (rootSessionId) {
+      clauses.push('root_session_id = ?');
+      params.push(rootSessionId);
+    }
+    const taskId = String(options.taskId || options.task_id || '').trim();
+    if (taskId) {
+      clauses.push('task_id = ?');
+      params.push(taskId);
+    }
+    const limit = clampLimit(options.limit, 100, 500);
+    return this.db.all(`
+      SELECT *
+      FROM dispatch_requests
+      WHERE ${clauses.join(' AND ')}
+      ORDER BY updated_at ASC, created_at ASC, dispatch_request_id ASC
       LIMIT ?
     `, ...params, limit).map((row) => this._parseDispatchRequestRow(row));
   }

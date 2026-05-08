@@ -60,6 +60,74 @@ function run() {
     });
     assert.strictEqual(duplicate.id, 'dispatch-1', 'idempotency should return the original request');
 
+    const activeDispatch = db.createOrCoalesceDispatchRequest({
+      id: 'dispatch-active-1',
+      rootSessionId: 'root-1',
+      taskId: 'task-2',
+      taskAssignmentId: 'assignment-2',
+      requestKind: 'assignment_start',
+      status: 'claimed',
+      coalesceKey: 'task-2:assignment-2:start',
+      requestedBy: 'supervisor',
+      createdAt: 1050,
+      updatedAt: 1050
+    }, { now: 1050 });
+    assert.strictEqual(activeDispatch.action, 'created');
+    assert.strictEqual(activeDispatch.dispatch.status, 'claimed');
+
+    const coalescedDispatch = db.createOrCoalesceDispatchRequest({
+      id: 'dispatch-active-duplicate',
+      rootSessionId: 'root-1',
+      taskId: 'task-2',
+      taskAssignmentId: 'assignment-2',
+      requestKind: 'assignment_start',
+      status: 'claimed',
+      coalesceKey: 'task-2:assignment-2:start',
+      requestedBy: 'second-supervisor'
+    }, { now: 1100 });
+    assert.strictEqual(coalescedDispatch.action, 'coalesced');
+    assert.strictEqual(coalescedDispatch.coalesced, true);
+    assert.strictEqual(coalescedDispatch.dispatch.id, 'dispatch-active-1');
+    assert.strictEqual(coalescedDispatch.dispatch.coalescedCount, 1);
+    assert.strictEqual(coalescedDispatch.dispatch.metadata.coalescing.requestedBy, 'second-supervisor');
+
+    const staleDispatch = db.createOrCoalesceDispatchRequest({
+      id: 'dispatch-stale-1',
+      rootSessionId: 'root-1',
+      taskId: 'task-3',
+      taskAssignmentId: 'assignment-3',
+      requestKind: 'assignment_start',
+      status: 'claimed',
+      coalesceKey: 'task-3:assignment-3:start',
+      createdAt: 100,
+      updatedAt: 100
+    }, { now: 100 });
+    assert.strictEqual(staleDispatch.action, 'created');
+    assert(
+      db.listStaleDispatchRequests({ now: 2000, staleMs: 1000 }).some((entry) => entry.id === 'dispatch-stale-1'),
+      'stale claimed dispatches should be discoverable'
+    );
+
+    const deferredDispatch = db.createOrCoalesceDispatchRequest({
+      id: 'dispatch-deferred-1',
+      rootSessionId: 'root-1',
+      taskId: 'task-4',
+      taskAssignmentId: 'assignment-4',
+      requestKind: 'assignment_start',
+      status: 'deferred',
+      coalesceKey: 'task-4:assignment-4:start',
+      deferUntil: 5000,
+      createdAt: 1200,
+      updatedAt: 1200
+    }, { now: 1200 });
+    assert.strictEqual(deferredDispatch.action, 'deferred');
+    assert.strictEqual(deferredDispatch.dispatch.deferUntil, 5000);
+    assert.strictEqual(db.listStaleDispatchRequests({ now: 4000, staleMs: 1000 }).some((entry) => entry.id === 'dispatch-deferred-1'), false);
+    assert(
+      db.listStaleDispatchRequests({ now: 6000, staleMs: 1000 }).some((entry) => entry.id === 'dispatch-deferred-1'),
+      'ready deferred dispatches should be discoverable'
+    );
+
     const snapshot = db.createRunContextSnapshot({
       id: 'context-1',
       dispatchRequestId: 'dispatch-1',

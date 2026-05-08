@@ -80,6 +80,10 @@ docs remain useful context, but this file is the current entrypoint.
      compact dispatch/session-binding summaries. The memory read model also
      projects these records for supervisor query and lineage inspection, and
      task memory bundles expose compact dispatch/context/binding summaries.
+     The current control-plane slice adds server-side duplicate-start coalescing,
+     deferred assignment starts, stale/ready dispatch discovery, and compact
+     liveness/next-action readouts; it deliberately stops short of a background
+     scheduler.
    - Keep this as an execution-control model, not a generic task-board product.
 
 ## Deferred

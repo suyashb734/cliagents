@@ -369,6 +369,69 @@ async function runRouteAssertions() {
     assert.strictEqual(sessionBindings[0].runtimeFidelity, 'managed');
     assert.strictEqual(sessionBindings[0].reuseDecision.reused, false);
 
+    const dispatchPolicyTaskRes = await request(serverHandle.baseUrl, 'POST', '/orchestration/tasks', {
+      title: 'Dispatch policy task',
+      workspaceRoot: rootDir
+    });
+    assert.strictEqual(dispatchPolicyTaskRes.status, 200);
+    const dispatchPolicyTaskId = dispatchPolicyTaskRes.data.task.id;
+
+    const deferredAssignmentRes = await request(serverHandle.baseUrl, 'POST', `/orchestration/tasks/${dispatchPolicyTaskId}/assignments`, {
+      role: 'executor',
+      instructions: 'Run this later.'
+    });
+    assert.strictEqual(deferredAssignmentRes.status, 200);
+    const deferUntil = Date.now() + 60_000;
+    const createCallsBeforeDeferred = sessionManager.state.createCalls.length;
+    const deferredStartRes = await request(serverHandle.baseUrl, 'POST', `/orchestration/tasks/${dispatchPolicyTaskId}/assignments/${deferredAssignmentRes.data.assignment.id}/start`, {
+      rootSessionId: 'root-task-routes',
+      parentSessionId: 'root-task-routes',
+      originClient: 'test',
+      externalSessionRef: 'test:task-routes',
+      deferUntil
+    });
+    assert.strictEqual(deferredStartRes.status, 202);
+    assert.strictEqual(deferredStartRes.data.assignment.status, 'queued');
+    assert.strictEqual(deferredStartRes.data.dispatch.status, 'deferred');
+    assert.strictEqual(deferredStartRes.data.dispatch.deferUntil, deferUntil);
+    assert.strictEqual(deferredStartRes.data.dispatch.liveness.state, 'deferred');
+    assert.strictEqual(deferredStartRes.data.dispatch.liveness.nextAction, 'wait_until_defer_time');
+    assert.strictEqual(sessionManager.state.createCalls.length, createCallsBeforeDeferred, 'deferred dispatch should not spawn a terminal');
+
+    const coalescedAssignmentRes = await request(serverHandle.baseUrl, 'POST', `/orchestration/tasks/${dispatchPolicyTaskId}/assignments`, {
+      role: 'executor',
+      instructions: 'Coalesce duplicate starts.'
+    });
+    assert.strictEqual(coalescedAssignmentRes.status, 200);
+    const coalescedAssignmentId = coalescedAssignmentRes.data.assignment.id;
+    db.createDispatchRequest({
+      id: 'dispatch-preclaimed-route',
+      taskId: dispatchPolicyTaskId,
+      taskAssignmentId: coalescedAssignmentId,
+      rootSessionId: 'root-task-routes',
+      requestKind: 'assignment_start',
+      status: 'claimed',
+      coalesceKey: `task:${dispatchPolicyTaskId}:assignment:${coalescedAssignmentId}:start`,
+      requestedBy: 'first-supervisor',
+      createdAt: Date.now() - 1000,
+      updatedAt: Date.now() - 1000
+    });
+    const createCallsBeforeCoalesced = sessionManager.state.createCalls.length;
+    const coalescedStartRes = await request(serverHandle.baseUrl, 'POST', `/orchestration/tasks/${dispatchPolicyTaskId}/assignments/${coalescedAssignmentId}/start`, {
+      rootSessionId: 'root-task-routes',
+      parentSessionId: 'root-task-routes',
+      originClient: 'test',
+      externalSessionRef: 'test:task-routes'
+    });
+    assert.strictEqual(coalescedStartRes.status, 202);
+    assert.strictEqual(coalescedStartRes.data.assignment.status, 'queued');
+    assert.strictEqual(coalescedStartRes.data.dispatch.status, 'claimed');
+    assert.strictEqual(coalescedStartRes.data.dispatch.action, 'coalesced');
+    assert.strictEqual(coalescedStartRes.data.dispatch.coalesced, true);
+    assert.strictEqual(coalescedStartRes.data.dispatch.coalescedCount, 1);
+    assert.strictEqual(coalescedStartRes.data.dispatch.liveness.state, 'claimed');
+    assert.strictEqual(sessionManager.state.createCalls.length, createCallsBeforeCoalesced, 'coalesced dispatch should not spawn a duplicate terminal');
+
     db.addUsageRecord({
       rootSessionId: 'root-task-routes',
       terminalId: startAssignmentRes.data.assignment.terminalId,
