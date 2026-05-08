@@ -112,6 +112,12 @@ immutable redacted context packets captured at dispatch time. `task_session_bind
 are append-only records of the selected adapter, model, effort, runtime, provider
 thread, and reuse decision for a task or assignment lane.
 
+Task assignment start now creates this boundary on the existing broker route:
+the dispatch request is claimed before worktree preparation/spawn, the context
+snapshot captures the redacted assignment prompt and linked task metadata, and
+the task-session binding records the root-scoped terminal/runtime/provider reuse
+decision after spawn.
+
 ## Continuity Rule
 
 Compatible child-lane reuse is the default when a delegated task is attached to

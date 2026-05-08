@@ -1307,6 +1307,132 @@ function createOrchestrationRouter(context) {
       || null;
   }
 
+  function truncateForMetadata(value, limit = 500) {
+    const text = String(value || '');
+    return text.length > limit ? `${text.slice(0, limit - 1)}...` : text;
+  }
+
+  function buildAssignmentStartIdempotencyKey(req, task, assignment) {
+    const requestId = extractRequestId(req, req.body || {});
+    return requestId
+      ? `task-assignment-start:${task.id}:${assignment.id}:${requestId}`
+      : null;
+  }
+
+  function resolveStartedTerminalDetails(terminalId) {
+    const liveTerminal = getLiveTerminal(terminalId);
+    const persistedTerminal = !liveTerminal && typeof db?.getTerminal === 'function'
+      ? db.getTerminal(terminalId)
+      : null;
+    const terminal = liveTerminal || persistedTerminal || null;
+    const runtimeMetadata = terminal ? resolveRuntimeHostMetadata(terminal) : null;
+    const providerThreadRef = liveTerminal?.providerThreadRef
+      || liveTerminal?.provider_thread_ref
+      || persistedTerminal?.provider_thread_ref
+      || persistedTerminal?.providerThreadRef
+      || null;
+    const runId = liveTerminal?.activeRun?.runId
+      || liveTerminal?.active_run_id
+      || persistedTerminal?.active_run_id
+      || null;
+
+    return {
+      liveTerminal,
+      persistedTerminal,
+      runId,
+      providerThreadRef,
+      runtimeHost: runtimeMetadata?.runtimeHost || null,
+      runtimeFidelity: runtimeMetadata?.runtimeFidelity || null
+    };
+  }
+
+  function createAssignmentStartDispatch({ req, task, assignment, executionControlPlane, reasoningEffort }) {
+    if (!db?.createDispatchRequest) {
+      return null;
+    }
+
+    return db.createDispatchRequest({
+      idempotencyKey: buildAssignmentStartIdempotencyKey(req, task, assignment),
+      taskId: task.id,
+      taskAssignmentId: assignment.id,
+      rootSessionId: executionControlPlane.rootSessionId || task.rootSessionId || null,
+      requestedBy: req.body?.requestedBy || executionControlPlane.originClient || 'api',
+      requestKind: 'assignment_start',
+      status: 'claimed',
+      coalesceKey: `task:${task.id}:assignment:${assignment.id}:start`,
+      metadata: {
+        endpoint: 'POST /orchestration/tasks/:taskId/assignments/:assignmentId/start',
+        taskTitle: task.title,
+        taskRole: assignment.role,
+        requestedAdapter: assignment.adapter || null,
+        requestedModel: assignment.model || null,
+        requestedReasoningEffort: reasoningEffort || assignment.reasoningEffort || null,
+        preferReuse: req.body?.preferReuse,
+        forceFreshSession: req.body?.forceFreshSession === true,
+        systemPromptProvided: Boolean(req.body?.systemPrompt),
+        sessionLabel: req.body?.sessionLabel || null,
+        workspaceRoot: task.workspaceRoot || null
+      }
+    });
+  }
+
+  function createAssignmentStartContextSnapshot({ task, assignment, dispatchRequest, workingDirectory, reasoningEffort }) {
+    if (!dispatchRequest?.id || !db?.createRunContextSnapshot) {
+      return null;
+    }
+
+    return db.createRunContextSnapshot({
+      dispatchRequestId: dispatchRequest.id,
+      workspacePath: workingDirectory || task.workspaceRoot || null,
+      contextMode: 'task_assignment',
+      promptSummary: `${assignment.role}: ${truncateForMetadata(assignment.instructions, 300)}`,
+      promptBody: assignment.instructions,
+      linkedContext: {
+        task: {
+          id: task.id,
+          title: task.title,
+          kind: task.kind || 'general',
+          brief: task.brief || null,
+          workspaceRoot: task.workspaceRoot || null,
+          rootSessionId: task.rootSessionId || null
+        },
+        assignment: {
+          id: assignment.id,
+          role: assignment.role,
+          adapter: assignment.adapter || null,
+          model: assignment.model || null,
+          reasoningEffort: reasoningEffort || assignment.reasoningEffort || null,
+          worktreePath: assignment.worktreePath || null,
+          worktreeBranch: assignment.worktreeBranch || null,
+          acceptanceCriteria: assignment.acceptanceCriteria || null
+        }
+      },
+      toolPolicy: {
+        route: 'task_assignment_start',
+        worktreeIsolationRequested: Boolean(assignment.worktreePath)
+      },
+      adapter: assignment.adapter || null,
+      model: assignment.model || null,
+      reasoningEffort: reasoningEffort || assignment.reasoningEffort || null
+    });
+  }
+
+  function updateAssignmentStartDispatch(dispatchRequest, patch = {}) {
+    if (!dispatchRequest?.id || !db?.updateDispatchRequest) {
+      return null;
+    }
+
+    const nextMetadata = {
+      ...(dispatchRequest.metadata || {}),
+      ...(patch.metadata || {})
+    };
+    return db.updateDispatchRequest(dispatchRequest.id, {
+      ...patch,
+      metadata: nextMetadata,
+      updatedAt: patch.updatedAt || Date.now()
+    });
+  }
+
   function buildRemoteApiSnapshot(req) {
     const rootLimit = parseQueryInteger(req.query.rootLimit ?? req.query.root_limit, 20);
     const taskLimit = parseQueryInteger(req.query.taskLimit ?? req.query.task_limit, 20);
@@ -2204,6 +2330,9 @@ function createOrchestrationRouter(context) {
    * Launch a queued assignment via the broker task router.
    */
   router.post('/tasks/:taskId/assignments/:assignmentId/start', async (req, res) => {
+    let dispatchRequest = null;
+    let contextSnapshot = null;
+    let taskSessionBinding = null;
     try {
       if (!db?.getTask || !db?.getTaskAssignment) {
         return res.status(503).json({
@@ -2264,6 +2393,16 @@ function createOrchestrationRouter(context) {
           }
         });
       }
+      const requestedReasoningEffort = reasoningEffortInput.provided
+        ? reasoningEffortInput.value
+        : (assignment.reasoningEffort || null);
+      dispatchRequest = createAssignmentStartDispatch({
+        req,
+        task,
+        assignment,
+        executionControlPlane,
+        reasoningEffort: requestedReasoningEffort
+      });
       const preparedWorktree = assignment.worktreePath
         ? prepareTaskAssignmentWorktree(task, assignment)
         : null;
@@ -2282,11 +2421,19 @@ function createOrchestrationRouter(context) {
         sessionMetadata.workspaceRoot = task.workspaceRoot;
       }
 
+      contextSnapshot = createAssignmentStartContextSnapshot({
+        task,
+        assignment,
+        dispatchRequest,
+        workingDirectory,
+        reasoningEffort: requestedReasoningEffort
+      });
+
       const result = await router.routeTask(assignment.instructions, {
         forceRole: normalizeTaskAssignmentRoutingRole(assignment.role),
         forceAdapter: assignment.adapter || undefined,
         model: assignment.model || undefined,
-        reasoningEffort: reasoningEffortInput.provided ? reasoningEffortInput.value : (assignment.reasoningEffort || undefined),
+        reasoningEffort: requestedReasoningEffort || undefined,
         systemPrompt: req.body?.systemPrompt || null,
         workDir: workingDirectory || undefined,
         sessionLabel: req.body?.sessionLabel || null,
@@ -2302,6 +2449,56 @@ function createOrchestrationRouter(context) {
       });
 
       const now = Date.now();
+      const terminalDetails = resolveStartedTerminalDetails(result.terminalId);
+      if (db?.createTaskSessionBinding) {
+        taskSessionBinding = db.createTaskSessionBinding({
+          rootSessionId: executionControlPlane.rootSessionId || task.rootSessionId || null,
+          taskId: task.id,
+          taskAssignmentId: assignment.id,
+          adapter: result.adapter || assignment.adapter || 'unknown',
+          model: result.model || assignment.model || null,
+          reasoningEffort: result.reasoningEffort || requestedReasoningEffort || null,
+          terminalId: result.terminalId,
+          providerSessionId: terminalDetails.providerThreadRef || null,
+          runtimeHost: terminalDetails.runtimeHost || null,
+          runtimeFidelity: terminalDetails.runtimeFidelity || null,
+          reusePolicy: req.body?.forceFreshSession === true
+            ? 'force_fresh_session'
+            : (req.body?.preferReuse === false ? 'no_reuse' : 'prefer_compatible_reuse'),
+          reuseDecision: result.reuse || {
+            reused: result.reused === true,
+            reason: result.reuseReason || null
+          },
+          metadata: {
+            dispatchRequestId: dispatchRequest?.id || null,
+            contextSnapshotId: contextSnapshot?.id || null,
+            routeProfile: result.profile || null,
+            routeTaskType: result.taskType || null,
+            routeAttempts: result.routeAttempts || 1,
+            routeRetried: result.routeRetried === true,
+            routeRetryReason: result.routeRetryReason || null
+          },
+          createdAt: now,
+          lastVerifiedAt: now
+        });
+      }
+      dispatchRequest = updateAssignmentStartDispatch(dispatchRequest, {
+        status: 'spawned',
+        terminalId: result.terminalId,
+        runId: terminalDetails.runId || null,
+        boundSessionId: taskSessionBinding?.id || null,
+        dispatchedAt: now,
+        updatedAt: now,
+        metadata: {
+          spawned: true,
+          adapter: result.adapter || assignment.adapter || null,
+          model: result.model || assignment.model || null,
+          reasoningEffort: result.reasoningEffort || requestedReasoningEffort || null,
+          reused: result.reused === true,
+          reuseReason: result.reuseReason || null,
+          routeAttempts: result.routeAttempts || 1
+        }
+      }) || dispatchRequest;
       const updatedAssignment = db.updateTaskAssignment(assignment.id, {
         terminalId: result.terminalId,
         adapter: result.adapter || assignment.adapter || null,
@@ -2313,7 +2510,13 @@ function createOrchestrationRouter(context) {
         startedAt: now,
         updatedAt: now,
         metadata: {
-          ...(preparedWorktree?.metadata || assignment.metadata || {}),
+          ...(assignment.metadata || {}),
+          ...(preparedWorktree?.metadata || {}),
+          dispatch: {
+            dispatchRequestId: dispatchRequest?.id || null,
+            contextSnapshotId: contextSnapshot?.id || null,
+            taskSessionBindingId: taskSessionBinding?.id || null
+          },
           routing: {
             profile: result.profile || null,
             taskType: result.taskType || null,
@@ -2330,10 +2533,30 @@ function createOrchestrationRouter(context) {
         task: buildTaskPayload(task.id),
         assignment: buildTaskAssignmentPayload(updatedAssignment),
         route: result,
+        dispatch: {
+          dispatchRequestId: dispatchRequest?.id || null,
+          contextSnapshotId: contextSnapshot?.id || null,
+          taskSessionBindingId: taskSessionBinding?.id || null,
+          status: dispatchRequest?.status || null
+        },
         rootSessionId: resolvedControlPlane.rootSessionId || null,
         parentSessionId: resolvedControlPlane.parentSessionId || null
       });
     } catch (error) {
+      if (dispatchRequest?.id && db?.updateDispatchRequest) {
+        try {
+          updateAssignmentStartDispatch(dispatchRequest, {
+            status: 'failed',
+            metadata: {
+              failed: true,
+              error: {
+                message: error.message,
+                code: error.code || null
+              }
+            }
+          });
+        } catch {}
+      }
       res.status(500).json({
         error: { code: 'task_assignment_start_failed', message: error.message }
       });

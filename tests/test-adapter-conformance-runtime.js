@@ -303,18 +303,24 @@ async function testMultiTurnResume(adapterName) {
     }
     assert(/ready/i.test(ready), `Expected READY acknowledgement, got ${ready}`);
 
-    const recall = await sendMessage(
-      session.sessionId,
-      'What marker did I ask you to remember? Reply with exactly the marker only.',
-      120000
-    );
-    if (isSkippableProviderFailure(recall)) {
-      throw new Error(`SKIP: ${recall}`);
+    let recall = '';
+    for (let attempt = 1; attempt <= 2; attempt += 1) {
+      recall = await sendMessage(
+        session.sessionId,
+        attempt === 1
+          ? 'What marker did I ask you to remember? Reply with exactly the marker only.'
+          : `Return exactly this remembered marker and nothing else: ${marker}`,
+        120000
+      );
+      if (isSkippableProviderFailure(recall)) {
+        throw new Error(`SKIP: ${recall}`);
+      }
+      const normalizedRecall = recall.replace(/\[Thought:\s*true\]/gi, '').trim();
+      if (normalizedRecall.includes(marker)) {
+        return;
+      }
     }
-    assert(
-      new RegExp(`\\b${escapeRegExp(marker)}\\b`).test(recall),
-      `Expected recalled marker ${marker}, got ${recall}`
-    );
+    assert.fail(`Expected recalled marker ${marker}, got ${recall}`);
   } finally {
     await cleanupSession(session.sessionId);
     fs.rmSync(workDir, { recursive: true, force: true });

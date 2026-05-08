@@ -107,6 +107,7 @@ function run() {
 
     const binding = db.createTaskSessionBinding({
       id: 'binding-1',
+      rootSessionId: 'root-1',
       taskId: 'task-1',
       taskAssignmentId: 'assignment-1',
       adapter: 'codex-cli',
@@ -124,7 +125,9 @@ function run() {
       createdAt: 1400
     });
     assert.strictEqual(binding.bindingId, 'binding-1');
+    assert.strictEqual(binding.rootSessionId, 'root-1');
     assert.strictEqual(binding.reuseDecision.reused, false);
+    assert.strictEqual(db.listTaskSessionBindings({ rootSessionId: 'root-1' }).length, 1);
     assert.strictEqual(db.listTaskSessionBindings({ taskId: 'task-1' }).length, 1);
 
     assert.throws(

@@ -42,12 +42,20 @@ function createFakeSessionManager() {
         terminalId,
         adapter: options.adapter || 'codex-cli',
         model: options.model || null,
+        requestedModel: options.model || null,
+        effectiveModel: options.model || null,
+        requestedEffort: options.reasoningEffort || null,
+        effectiveEffort: options.reasoningEffort || null,
         role: options.agentProfile || null,
         status: 'processing',
         taskState: 'processing',
         rootSessionId: options.rootSessionId || null,
         parentSessionId: options.parentSessionId || null,
-        sessionKind: options.sessionKind || null
+        sessionKind: options.sessionKind || null,
+        providerThreadRef: `provider-${terminalId}`,
+        runtimeHost: 'tmux',
+        runtimeFidelity: 'managed',
+        activeRun: null
       };
       state.createCalls.push({
         ...options,
@@ -62,6 +70,12 @@ function createFakeSessionManager() {
     },
     async sendInput(terminalId, message) {
       state.sendCalls.push({ terminalId, message });
+      const terminal = state.terminals.get(terminalId);
+      if (terminal) {
+        terminal.activeRun = { runId: `run-${terminalId}` };
+        terminal.status = 'processing';
+        terminal.taskState = 'processing';
+      }
       return { terminalId, message };
     },
     getTerminal(terminalId) {
@@ -319,6 +333,38 @@ async function runRouteAssertions() {
     assert.strictEqual(sessionManager.state.createCalls[0].reasoningEffort, 'xhigh');
     assert.strictEqual(sessionManager.state.sendCalls[0].message, 'Implement the feature, add tests, and report status.');
     assert.strictEqual(sessionManager.state.createCalls[0].rootSessionId, 'root-task-routes');
+    assert(startAssignmentRes.data.dispatch.dispatchRequestId, 'start response should expose dispatch request linkage');
+    assert(startAssignmentRes.data.dispatch.contextSnapshotId, 'start response should expose context snapshot linkage');
+    assert(startAssignmentRes.data.dispatch.taskSessionBindingId, 'start response should expose task session binding linkage');
+
+    const dispatches = db.listDispatchRequests({ taskAssignmentId: assignmentId });
+    assert.strictEqual(dispatches.length, 1);
+    assert.strictEqual(dispatches[0].status, 'spawned');
+    assert.strictEqual(dispatches[0].taskId, taskId);
+    assert.strictEqual(dispatches[0].rootSessionId, 'root-task-routes');
+    assert.strictEqual(dispatches[0].terminalId, startAssignmentRes.data.assignment.terminalId);
+    assert.strictEqual(dispatches[0].runId, `run-${startAssignmentRes.data.assignment.terminalId}`);
+    assert.strictEqual(dispatches[0].contextSnapshotId, startAssignmentRes.data.dispatch.contextSnapshotId);
+    assert.strictEqual(dispatches[0].boundSessionId, startAssignmentRes.data.dispatch.taskSessionBindingId);
+
+    const contextSnapshot = db.getRunContextSnapshot(startAssignmentRes.data.dispatch.contextSnapshotId);
+    assert.strictEqual(contextSnapshot.dispatchRequestId, startAssignmentRes.data.dispatch.dispatchRequestId);
+    assert.strictEqual(contextSnapshot.workspacePath, worktreePath);
+    assert.strictEqual(contextSnapshot.contextMode, 'task_assignment');
+    assert(contextSnapshot.promptBody.includes('Implement the feature'), 'context snapshot should persist the assignment prompt');
+    assert.strictEqual(contextSnapshot.linkedContext.task.id, taskId);
+    assert.strictEqual(contextSnapshot.linkedContext.assignment.id, assignmentId);
+    assert.strictEqual(contextSnapshot.linkedContext.assignment.reasoningEffort, 'xhigh');
+
+    const sessionBindings = db.listTaskSessionBindings({ taskAssignmentId: assignmentId });
+    assert.strictEqual(sessionBindings.length, 1);
+    assert.strictEqual(sessionBindings[0].rootSessionId, 'root-task-routes');
+    assert.strictEqual(sessionBindings[0].taskId, taskId);
+    assert.strictEqual(sessionBindings[0].terminalId, startAssignmentRes.data.assignment.terminalId);
+    assert.strictEqual(sessionBindings[0].providerSessionId, `provider-${startAssignmentRes.data.assignment.terminalId}`);
+    assert.strictEqual(sessionBindings[0].runtimeHost, 'tmux');
+    assert.strictEqual(sessionBindings[0].runtimeFidelity, 'managed');
+    assert.strictEqual(sessionBindings[0].reuseDecision.reused, false);
 
     db.addUsageRecord({
       rootSessionId: 'root-task-routes',

@@ -4010,6 +4010,7 @@ class OrchestrationDB {
     return {
       id: row.binding_id,
       bindingId: row.binding_id,
+      rootSessionId: row.root_session_id || null,
       taskId: row.task_id || null,
       taskAssignmentId: row.task_assignment_id || null,
       orchestrationId: row.orchestration_id || null,
@@ -4056,46 +4057,55 @@ class OrchestrationDB {
       ? input.createdAt
       : (Number.isFinite(input.created_at) ? input.created_at : Date.now());
 
+    const columns = [
+      'binding_id',
+      'task_id',
+      'task_assignment_id',
+      'orchestration_id',
+      'phase_id',
+      'adapter',
+      'model',
+      'reasoning_effort',
+      'terminal_id',
+      'provider_session_id',
+      'runtime_host',
+      'runtime_fidelity',
+      'reuse_policy',
+      'reuse_decision_json',
+      'status',
+      'metadata',
+      'created_at',
+      'last_verified_at'
+    ];
+    const values = [
+      bindingId,
+      String(input.taskId || input.task_id || '').trim() || null,
+      String(input.taskAssignmentId || input.task_assignment_id || input.assignmentId || input.assignment_id || '').trim() || null,
+      String(input.orchestrationId || input.orchestration_id || '').trim() || null,
+      String(input.phaseId || input.phase_id || '').trim() || null,
+      adapter,
+      String(input.model || '').trim() || null,
+      normalizeReasoningEffort(input.reasoningEffort ?? input.reasoning_effort),
+      String(input.terminalId || input.terminal_id || '').trim() || null,
+      String(input.providerSessionId || input.provider_session_id || '').trim() || null,
+      String(input.runtimeHost || input.runtime_host || '').trim() || null,
+      String(input.runtimeFidelity || input.runtime_fidelity || '').trim() || null,
+      String(input.reusePolicy || input.reuse_policy || '').trim() || null,
+      reuseDecisionJson,
+      status,
+      JSON.stringify(metadata),
+      createdAt,
+      normalizeOptionalInteger(input.lastVerifiedAt ?? input.last_verified_at) || createdAt
+    ];
+    if (this._hasColumn('task_session_bindings', 'root_session_id')) {
+      columns.splice(1, 0, 'root_session_id');
+      values.splice(1, 0, String(input.rootSessionId || input.root_session_id || '').trim() || null);
+    }
+
     this.db.run(`
-      INSERT INTO task_session_bindings (
-        binding_id,
-        task_id,
-        task_assignment_id,
-        orchestration_id,
-        phase_id,
-        adapter,
-        model,
-        reasoning_effort,
-        terminal_id,
-        provider_session_id,
-        runtime_host,
-        runtime_fidelity,
-        reuse_policy,
-        reuse_decision_json,
-        status,
-        metadata,
-        created_at,
-        last_verified_at
-      ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-    `,
-    bindingId,
-    String(input.taskId || input.task_id || '').trim() || null,
-    String(input.taskAssignmentId || input.task_assignment_id || input.assignmentId || input.assignment_id || '').trim() || null,
-    String(input.orchestrationId || input.orchestration_id || '').trim() || null,
-    String(input.phaseId || input.phase_id || '').trim() || null,
-    adapter,
-    String(input.model || '').trim() || null,
-    normalizeReasoningEffort(input.reasoningEffort ?? input.reasoning_effort),
-    String(input.terminalId || input.terminal_id || '').trim() || null,
-    String(input.providerSessionId || input.provider_session_id || '').trim() || null,
-    String(input.runtimeHost || input.runtime_host || '').trim() || null,
-    String(input.runtimeFidelity || input.runtime_fidelity || '').trim() || null,
-    String(input.reusePolicy || input.reuse_policy || '').trim() || null,
-    reuseDecisionJson,
-    status,
-    JSON.stringify(metadata),
-    createdAt,
-    normalizeOptionalInteger(input.lastVerifiedAt ?? input.last_verified_at) || createdAt);
+      INSERT INTO task_session_bindings (${columns.join(', ')})
+      VALUES (${columns.map(() => '?').join(', ')})
+    `, ...values);
 
     return this.getTaskSessionBinding(bindingId);
   }
@@ -4125,6 +4135,9 @@ class OrchestrationDB {
     };
 
     pushTextMatch('task_id', options.taskId || options.task_id);
+    if (this._hasColumn('task_session_bindings', 'root_session_id')) {
+      pushTextMatch('root_session_id', options.rootSessionId || options.root_session_id);
+    }
     pushTextMatch('task_assignment_id', options.taskAssignmentId || options.task_assignment_id || options.assignmentId || options.assignment_id);
     pushTextMatch('terminal_id', options.terminalId || options.terminal_id);
     pushTextMatch('adapter', options.adapter);

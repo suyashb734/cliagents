@@ -73,8 +73,9 @@ docs remain useful context, but this file is the current entrypoint.
      retention, and benchmark gates before implementation workers edit files.
    - Current foundation migration adds `dispatch_requests`,
      `run_context_snapshots`, and `task_session_bindings` with immutable
-     context snapshots and append-only session bindings. Runtime spawning still
-     remains on the existing task/router path until dispatch APIs are added.
+     context snapshots and append-only root-scoped session bindings. Task
+     assignment start now populates dispatch, context, and binding rows around
+     the existing task/router spawn path.
    - Keep this as an execution-control model, not a generic task-board product.
 
 ## Deferred

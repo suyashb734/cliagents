@@ -437,6 +437,7 @@ compatible-reuse decision change creates a new binding row instead of mutating
 historical attribution.
 
 - `binding_id`
+- `root_session_id`
 - `task_id`
 - `task_assignment_id`
 - `orchestration_id`
