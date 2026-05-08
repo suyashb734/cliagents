@@ -154,6 +154,9 @@ async function run() {
     const manager = new PersistentSessionManager({
       db,
       tmuxClient: fakeTmux,
+      dataDir: rootDir,
+      localApiKeyFilePath: path.join(rootDir, 'local-api-key'),
+      brokerBaseUrl: 'http://127.0.0.1:4999',
       logDir,
       workDir: rootDir,
       sessionGraphWritesEnabled: true,
@@ -191,6 +194,10 @@ async function run() {
     assert.strictEqual(persistedTerminal.session_kind, 'reviewer');
     assert.strictEqual(persistedTerminal.origin_client, 'mcp');
     assert.strictEqual(persistedTerminal.external_session_ref, 'opencode:thread-42');
+    const workerCreateCall = fakeTmux.createCalls.find((call) => call.terminalId === terminal.terminalId);
+    assert.strictEqual(workerCreateCall.options.env.CLIAGENTS_URL, 'http://127.0.0.1:4999');
+    assert.strictEqual(workerCreateCall.options.env.CLIAGENTS_DATA_DIR, rootDir);
+    assert.strictEqual(workerCreateCall.options.env.CLIAGENTS_LOCAL_API_KEY_FILE, path.join(rootDir, 'local-api-key'));
 
     const recoveredRoot = await manager.createTerminal({
       adapter: 'codex-cli',
@@ -308,6 +315,16 @@ async function run() {
       geometryCreateCall.options.env.CLIAGENTS_MANAGED_ROOT,
       '1',
       'expected managed root launch to mark the provider environment as broker-managed'
+    );
+    assert.strictEqual(
+      geometryCreateCall.options.env.CLIAGENTS_URL,
+      'http://127.0.0.1:4999',
+      'expected managed roots to inherit the broker URL for nested cliagents calls'
+    );
+    assert.strictEqual(
+      geometryCreateCall.options.env.CLIAGENTS_LOCAL_API_KEY_FILE,
+      path.join(rootDir, 'local-api-key'),
+      'expected managed roots to inherit the local-token file path without copying the token'
     );
     assert(
       fakeTmux.resizeCalls.some((call) => (

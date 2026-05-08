@@ -1007,6 +1007,25 @@ function normalizeLaunchEnvironment(env) {
   return normalized;
 }
 
+function buildBrokerClientEnvironment(options = {}) {
+  const baseUrl = String(options.baseUrl || '').trim();
+  const dataDir = String(options.dataDir || '').trim();
+  const localApiKeyFilePath = String(options.localApiKeyFilePath || '').trim();
+  const env = {};
+
+  if (baseUrl) {
+    env.CLIAGENTS_URL = baseUrl;
+  }
+  if (dataDir) {
+    env.CLIAGENTS_DATA_DIR = dataDir;
+  }
+  if (localApiKeyFilePath) {
+    env.CLIAGENTS_LOCAL_API_KEY_FILE = localApiKeyFilePath;
+  }
+
+  return env;
+}
+
 function buildManagedRootControlPlaneEnv(options = {}) {
   const {
     role = null,
@@ -1284,6 +1303,13 @@ class PersistentSessionManager extends EventEmitter {
     super();
 
     this.db = options.db || null;
+    this.brokerBaseUrl = String(options.brokerBaseUrl || process.env.CLIAGENTS_URL || '').trim() || null;
+    this.brokerDataDir = String(options.dataDir || process.env.CLIAGENTS_DATA_DIR || '').trim() || null;
+    this.localApiKeyFilePath = String(
+      options.localApiKeyFilePath
+      || process.env.CLIAGENTS_LOCAL_API_KEY_FILE
+      || (this.brokerDataDir ? path.join(this.brokerDataDir, 'local-api-key') : '')
+    ).trim() || null;
     this.tmux = options.tmuxClient || new TmuxClient({
       logDir: options.logDir || path.join(process.cwd(), 'logs'),
       socketPath: options.tmuxSocketPath || null
@@ -3718,15 +3744,22 @@ class PersistentSessionManager extends EventEmitter {
       workspaceRoot: workDir,
       sessionMetadata: Object.keys(resolvedSessionMetadata).length > 0 ? resolvedSessionMetadata : null
     });
+    const brokerClientEnv = buildBrokerClientEnvironment({
+      baseUrl: this.brokerBaseUrl,
+      dataDir: this.brokerDataDir,
+      localApiKeyFilePath: this.localApiKeyFilePath
+    });
     const sessionEnv = preserveRichTerminalUi
       ? {
           NO_COLOR: null,
           CI: null,
           ...normalizeLaunchEnvironment(launchEnvironment || resolvedSessionMetadata?.launchEnvironment),
+          ...brokerClientEnv,
           ...managedRootControlPlaneEnv
         }
       : {
           NO_COLOR: '1',
+          ...brokerClientEnv,
           ...managedRootControlPlaneEnv
         };
     const launchGeometry = preserveRichTerminalUi

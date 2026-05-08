@@ -147,6 +147,10 @@ a root session. Reuse is compatible only when adapter, model, effort, workdir or
 worktree, role, session kind, session label, tool policy, permission mode,
 system prompt, and task or assignment scope match.
 
+Broker-owned tmux sessions export `CLIAGENTS_URL`, `CLIAGENTS_DATA_DIR`, and
+`CLIAGENTS_LOCAL_API_KEY_FILE` so roots and child agents can call the same broker
+without copying the local token into their environment.
+
 Use `reply_to_terminal` for exact continuation of a known child terminal. Use
 `delegate_task` for routed bounded work; it should return a reuse decision that
 explains whether a compatible terminal was selected or why a new binding was

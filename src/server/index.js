@@ -283,6 +283,9 @@ class AgentServer {
       // Initialize persistent session manager
       const persistentSessionManager = new PersistentSessionManager({
         db,
+        dataDir: this.dataDir,
+        localApiKeyFilePath: this.localApiKey.filePath,
+        brokerBaseUrl: `http://${this.host === '0.0.0.0' ? '127.0.0.1' : this.host}:${this.port}`,
         logDir: options.orchestration?.logDir || path.join(process.cwd(), 'logs'),
         workDir: options.orchestration?.workDir || process.cwd(),
         tmuxSocketPath: options.orchestration?.tmuxSocketPath || null
