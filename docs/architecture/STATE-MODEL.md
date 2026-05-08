@@ -103,6 +103,15 @@ broker-native moderator readout into the room turn metadata. The readout records
 participant success counts, round success counts, judge status, linked run and
 discussion ids, and a compact summary for room list/get/MCP clients.
 
+## Dispatch Boundary
+
+Long-horizon orchestration records work intent before a child run or terminal is
+spawned. `dispatch_requests` are mutable queue records for queued, claimed,
+spawned, deferred, cancelled, or failed work. `run_context_snapshots` are
+immutable redacted context packets captured at dispatch time. `task_session_bindings`
+are append-only records of the selected adapter, model, effort, runtime, provider
+thread, and reuse decision for a task or assignment lane.
+
 ## Continuity Rule
 
 Compatible child-lane reuse is the default when a delegated task is attached to

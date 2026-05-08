@@ -21,6 +21,7 @@ const TEST_FILES = [
   'test-handoff-init-prompts.js',
   'test-db-migrations.js',
   'test-root-io-events.js',
+  'test-long-horizon-dispatch-foundation.js',
   'test-memory-read-model-projections.js',
   'test-memory-query-insights.js',
   'test-usage-ledger.js',

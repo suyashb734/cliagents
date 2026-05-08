@@ -389,19 +389,23 @@ Add orchestration-specific state keyed by `run_id`.
 #### `dispatch_requests`
 
 - `dispatch_request_id`
+- `idempotency_key`
 - `orchestration_id`
 - `phase_id`
 - `task_id`
-- `assignment_id`
+- `task_assignment_id`
 - `room_id`
 - `root_session_id`
 - `requested_by`
 - `request_kind`
 - `status`
 - `coalesce_key`
+- `coalesced_count`
 - `defer_until`
 - `context_snapshot_id`
 - `bound_session_id`
+- `run_id`
+- `terminal_id`
 - `metadata`
 - `created_at`
 - `updated_at`
@@ -421,6 +425,8 @@ Add orchestration-specific state keyed by `run_id`.
 - `adapter`
 - `model`
 - `reasoning_effort`
+- `content_sha256`
+- `retention_class`
 - `metadata`
 - `created_at`
 
@@ -432,7 +438,7 @@ historical attribution.
 
 - `binding_id`
 - `task_id`
-- `assignment_id`
+- `task_assignment_id`
 - `orchestration_id`
 - `phase_id`
 - `adapter`

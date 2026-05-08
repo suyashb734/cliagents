@@ -368,6 +368,9 @@ const ROOT_IO_EVENT_SOURCES = new Set(['broker', 'terminal_log', 'provider_metad
 const ROOT_IO_RETENTION_CLASSES = new Set(['raw-bounded', 'summary-indefinite', 'metadata-indefinite']);
 const MEMORY_SUMMARY_EDGE_NAMESPACES = new Set(['structural', 'derivation', 'execution']);
 const MEMORY_SUMMARY_EDGE_KINDS = new Set(['contains', 'continues', 'summarizes', 'supersedes', 'derived_from', 'blocks', 'unblocks']);
+const DISPATCH_REQUEST_STATUSES = new Set(['queued', 'claimed', 'spawned', 'deferred', 'cancelled', 'failed']);
+const TASK_SESSION_BINDING_STATUSES = new Set(['active', 'superseded', 'failed', 'cancelled']);
+const CONTEXT_RETENTION_CLASSES = new Set(['raw-bounded', 'summary-indefinite', 'metadata-indefinite']);
 const MEMORY_RECORD_TYPE_ALIASES = new Map([
   ['usage', 'usage_record'],
   ['root_io', 'root_io_event'],
@@ -409,6 +412,9 @@ const MEMORY_PROJECTION_SOURCE_LOOKUPS = {
   memory_snapshots: { primaryKey: 'id' },
   root_io_events: { primaryKey: 'root_io_event_id' },
   memory_summary_edges: { primaryKey: 'edge_id' },
+  dispatch_requests: { primaryKey: 'dispatch_request_id' },
+  run_context_snapshots: { primaryKey: 'context_snapshot_id' },
+  task_session_bindings: { primaryKey: 'binding_id' },
   operator_actions: { primaryKey: 'action_id' },
   run_blocked_states: { primaryKey: 'id' }
 };
@@ -598,6 +604,65 @@ function computeRootIoContentHash({ eventKind, source, contentPreview, contentFu
     contentPreview: contentPreview || null,
     contentFull: contentFull || null,
     metadata: metadata || {}
+  }), 'utf8').digest('hex');
+}
+
+function buildRedactedContextSnapshotPayload(input = {}) {
+  const redactionReasons = new Set();
+  const redactText = (value) => {
+    if (value === undefined || value === null) {
+      return null;
+    }
+    const redaction = redactSecretsInText(String(value));
+    if (redaction.redacted) {
+      redaction.reasons.forEach((reason) => redactionReasons.add(reason));
+    }
+    return redaction.content;
+  };
+
+  const metadata = input.metadata && typeof input.metadata === 'object' && !Array.isArray(input.metadata)
+    ? redactSecretObject({ ...input.metadata })
+    : {};
+  const promptBody = redactText(input.promptBody ?? input.prompt_body ?? input.prompt ?? null);
+  const promptSummary = redactText(
+    input.promptSummary ?? input.prompt_summary ?? truncateText(promptBody, 500)
+  );
+  const linkedContext = input.linkedContext ?? input.linked_context ?? input.linkedContextJson ?? input.linked_context_json ?? null;
+  const toolPolicy = input.toolPolicy ?? input.tool_policy ?? input.toolPolicyJson ?? input.tool_policy_json ?? null;
+  const linkedContextJson = linkedContext && typeof linkedContext === 'object'
+    ? redactSecretObject(linkedContext)
+    : linkedContext;
+  const toolPolicyJson = toolPolicy && typeof toolPolicy === 'object'
+    ? redactSecretObject(toolPolicy)
+    : toolPolicy;
+
+  if (redactionReasons.size > 0) {
+    const securityMetadata = metadata.security && typeof metadata.security === 'object'
+      ? { ...metadata.security }
+      : {};
+    securityMetadata.redactedSecretLikeContent = true;
+    securityMetadata.redactionReasonCodes = Array.from(redactionReasons);
+    metadata.security = securityMetadata;
+  }
+
+  return {
+    promptBody,
+    promptSummary,
+    linkedContextJson,
+    toolPolicyJson,
+    metadata
+  };
+}
+
+function computeContextSnapshotHash({ promptSummary, promptBody, linkedContextJson, toolPolicyJson, adapter, model, reasoningEffort }) {
+  return crypto.createHash('sha256').update(JSON.stringify({
+    promptSummary: promptSummary || null,
+    promptBody: promptBody || null,
+    linkedContextJson: linkedContextJson || null,
+    toolPolicyJson: toolPolicyJson || null,
+    adapter: adapter || null,
+    model: model || null,
+    reasoningEffort: reasoningEffort || null
   }), 'utf8').digest('hex');
 }
 
@@ -3576,6 +3641,505 @@ class OrchestrationDB {
       ORDER BY created_at DESC, edge_id ASC
       LIMIT ?
     `, ...params, limit).map((row) => this._parseMemorySummaryEdgeRow(row));
+  }
+
+  // =============================
+  // Long-Horizon Dispatch State
+  // =============================
+
+  _parseDispatchRequestRow(row) {
+    if (!row) {
+      return null;
+    }
+
+    return {
+      id: row.dispatch_request_id,
+      dispatchRequestId: row.dispatch_request_id,
+      idempotencyKey: row.idempotency_key || null,
+      orchestrationId: row.orchestration_id || null,
+      phaseId: row.phase_id || null,
+      taskId: row.task_id || null,
+      taskAssignmentId: row.task_assignment_id || null,
+      roomId: row.room_id || null,
+      rootSessionId: row.root_session_id || null,
+      requestedBy: row.requested_by || null,
+      requestKind: row.request_kind || 'general',
+      status: row.status || 'queued',
+      coalesceKey: row.coalesce_key || null,
+      coalescedCount: row.coalesced_count || 0,
+      deferUntil: row.defer_until || null,
+      contextSnapshotId: row.context_snapshot_id || null,
+      boundSessionId: row.bound_session_id || null,
+      runId: row.run_id || null,
+      terminalId: row.terminal_id || null,
+      metadata: parseJsonField(row.metadata) || {},
+      createdAt: row.created_at,
+      updatedAt: row.updated_at,
+      dispatchedAt: row.dispatched_at || null,
+      cancelledAt: row.cancelled_at || null
+    };
+  }
+
+  createDispatchRequest(input = {}) {
+    if (!this._hasTable('dispatch_requests')) {
+      return null;
+    }
+
+    const dispatchRequestId = String(input.dispatchRequestId || input.dispatch_request_id || input.id || `dispatch_${generateId()}`).trim();
+    const idempotencyKey = String(input.idempotencyKey || input.idempotency_key || '').trim() || null;
+    const status = normalizeEnumValue(input.status, DISPATCH_REQUEST_STATUSES, 'queued');
+    const requestKind = String(input.requestKind || input.request_kind || 'general').trim().toLowerCase() || 'general';
+    const metadata = input.metadata && typeof input.metadata === 'object' && !Array.isArray(input.metadata)
+      ? redactSecretObject({ ...input.metadata })
+      : {};
+    const now = Number.isFinite(input.createdAt)
+      ? input.createdAt
+      : (Number.isFinite(input.created_at) ? input.created_at : Date.now());
+    const updatedAt = Number.isFinite(input.updatedAt)
+      ? input.updatedAt
+      : (Number.isFinite(input.updated_at) ? input.updated_at : now);
+
+    if (!dispatchRequestId) {
+      throw new Error('dispatchRequestId is required');
+    }
+
+    const create = this.db.transaction(() => {
+      if (idempotencyKey) {
+        const existing = this.db.get('SELECT * FROM dispatch_requests WHERE idempotency_key = ?', idempotencyKey);
+        if (existing) {
+          return existing;
+        }
+      }
+
+      this.db.run(`
+        INSERT INTO dispatch_requests (
+          dispatch_request_id,
+          idempotency_key,
+          orchestration_id,
+          phase_id,
+          task_id,
+          task_assignment_id,
+          room_id,
+          root_session_id,
+          requested_by,
+          request_kind,
+          status,
+          coalesce_key,
+          coalesced_count,
+          defer_until,
+          context_snapshot_id,
+          bound_session_id,
+          run_id,
+          terminal_id,
+          metadata,
+          created_at,
+          updated_at,
+          dispatched_at,
+          cancelled_at
+        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+      `,
+      dispatchRequestId,
+      idempotencyKey,
+      String(input.orchestrationId || input.orchestration_id || '').trim() || null,
+      String(input.phaseId || input.phase_id || '').trim() || null,
+      String(input.taskId || input.task_id || '').trim() || null,
+      String(input.taskAssignmentId || input.task_assignment_id || input.assignmentId || input.assignment_id || '').trim() || null,
+      String(input.roomId || input.room_id || '').trim() || null,
+      String(input.rootSessionId || input.root_session_id || '').trim() || null,
+      String(input.requestedBy || input.requested_by || '').trim() || null,
+      requestKind,
+      status,
+      String(input.coalesceKey || input.coalesce_key || '').trim() || null,
+      normalizeInteger(input.coalescedCount ?? input.coalesced_count, 0),
+      normalizeOptionalInteger(input.deferUntil ?? input.defer_until),
+      String(input.contextSnapshotId || input.context_snapshot_id || '').trim() || null,
+      String(input.boundSessionId || input.bound_session_id || '').trim() || null,
+      String(input.runId || input.run_id || '').trim() || null,
+      String(input.terminalId || input.terminal_id || '').trim() || null,
+      JSON.stringify(metadata),
+      now,
+      updatedAt,
+      normalizeOptionalInteger(input.dispatchedAt ?? input.dispatched_at),
+      normalizeOptionalInteger(input.cancelledAt ?? input.cancelled_at));
+
+      return this.db.get('SELECT * FROM dispatch_requests WHERE dispatch_request_id = ?', dispatchRequestId);
+    });
+
+    return this._parseDispatchRequestRow(create.immediate());
+  }
+
+  getDispatchRequest(dispatchRequestId) {
+    if (!this._hasTable('dispatch_requests')) {
+      return null;
+    }
+    const row = this.db.get('SELECT * FROM dispatch_requests WHERE dispatch_request_id = ?', dispatchRequestId);
+    return this._parseDispatchRequestRow(row);
+  }
+
+  listDispatchRequests(options = {}) {
+    if (!this._hasTable('dispatch_requests')) {
+      return [];
+    }
+
+    const clauses = [];
+    const params = [];
+    const pushTextMatch = (column, value) => {
+      const normalized = String(value || '').trim();
+      if (!normalized) {
+        return;
+      }
+      clauses.push(`${column} = ?`);
+      params.push(normalized);
+    };
+
+    pushTextMatch('status', options.status);
+    pushTextMatch('root_session_id', options.rootSessionId || options.root_session_id);
+    pushTextMatch('task_id', options.taskId || options.task_id);
+    pushTextMatch('task_assignment_id', options.taskAssignmentId || options.task_assignment_id || options.assignmentId || options.assignment_id);
+    pushTextMatch('room_id', options.roomId || options.room_id);
+    pushTextMatch('coalesce_key', options.coalesceKey || options.coalesce_key);
+    pushTextMatch('request_kind', options.requestKind || options.request_kind);
+
+    const whereSql = clauses.length ? `WHERE ${clauses.join(' AND ')}` : '';
+    const limit = clampLimit(options.limit, 100, 500);
+    return this.db.all(`
+      SELECT *
+      FROM dispatch_requests
+      ${whereSql}
+      ORDER BY created_at DESC, dispatch_request_id ASC
+      LIMIT ?
+    `, ...params, limit).map((row) => this._parseDispatchRequestRow(row));
+  }
+
+  updateDispatchRequest(dispatchRequestId, patch = {}) {
+    if (!this._hasTable('dispatch_requests')) {
+      return null;
+    }
+
+    const updates = [];
+    const params = [];
+    if (patch.status !== undefined) {
+      const status = normalizeEnumValue(patch.status, DISPATCH_REQUEST_STATUSES);
+      if (!status) {
+        throw new Error(`status must be one of ${Array.from(DISPATCH_REQUEST_STATUSES).join(', ')}`);
+      }
+      updates.push('status = ?');
+      params.push(status);
+    }
+    if (patch.contextSnapshotId !== undefined || patch.context_snapshot_id !== undefined) {
+      updates.push('context_snapshot_id = ?');
+      params.push(String(patch.contextSnapshotId || patch.context_snapshot_id || '').trim() || null);
+    }
+    if (patch.boundSessionId !== undefined || patch.bound_session_id !== undefined) {
+      updates.push('bound_session_id = ?');
+      params.push(String(patch.boundSessionId || patch.bound_session_id || '').trim() || null);
+    }
+    if (patch.runId !== undefined || patch.run_id !== undefined) {
+      updates.push('run_id = ?');
+      params.push(String(patch.runId || patch.run_id || '').trim() || null);
+    }
+    if (patch.terminalId !== undefined || patch.terminal_id !== undefined) {
+      updates.push('terminal_id = ?');
+      params.push(String(patch.terminalId || patch.terminal_id || '').trim() || null);
+    }
+    if (patch.coalescedCount !== undefined || patch.coalesced_count !== undefined) {
+      updates.push('coalesced_count = ?');
+      params.push(normalizeInteger(patch.coalescedCount ?? patch.coalesced_count, 0));
+    }
+    if (patch.deferUntil !== undefined || patch.defer_until !== undefined) {
+      updates.push('defer_until = ?');
+      params.push(normalizeOptionalInteger(patch.deferUntil ?? patch.defer_until));
+    }
+    if (patch.metadata !== undefined) {
+      const metadata = patch.metadata && typeof patch.metadata === 'object' && !Array.isArray(patch.metadata)
+        ? redactSecretObject({ ...patch.metadata })
+        : {};
+      updates.push('metadata = ?');
+      params.push(JSON.stringify(metadata));
+    }
+    if (patch.dispatchedAt !== undefined || patch.dispatched_at !== undefined) {
+      updates.push('dispatched_at = ?');
+      params.push(normalizeOptionalInteger(patch.dispatchedAt ?? patch.dispatched_at));
+    }
+    if (patch.cancelledAt !== undefined || patch.cancelled_at !== undefined) {
+      updates.push('cancelled_at = ?');
+      params.push(normalizeOptionalInteger(patch.cancelledAt ?? patch.cancelled_at));
+    }
+
+    if (updates.length === 0) {
+      return this.getDispatchRequest(dispatchRequestId);
+    }
+
+    const updatedAt = Number.isFinite(patch.updatedAt)
+      ? patch.updatedAt
+      : (Number.isFinite(patch.updated_at) ? patch.updated_at : Date.now());
+    updates.push('updated_at = ?');
+    params.push(updatedAt);
+    params.push(dispatchRequestId);
+
+    this.db.run(`
+      UPDATE dispatch_requests
+      SET ${updates.join(', ')}
+      WHERE dispatch_request_id = ?
+    `, ...params);
+    return this.getDispatchRequest(dispatchRequestId);
+  }
+
+  _parseRunContextSnapshotRow(row) {
+    if (!row) {
+      return null;
+    }
+    return {
+      id: row.context_snapshot_id,
+      contextSnapshotId: row.context_snapshot_id,
+      dispatchRequestId: row.dispatch_request_id,
+      workspacePath: row.workspace_path || null,
+      contextMode: row.context_mode || 'prompt',
+      promptSummary: row.prompt_summary || null,
+      promptBody: row.prompt_body || null,
+      linkedContext: parseJsonField(row.linked_context_json) || null,
+      toolPolicy: parseJsonField(row.tool_policy_json) || null,
+      adapter: row.adapter || null,
+      model: row.model || null,
+      reasoningEffort: row.reasoning_effort || null,
+      contentSha256: row.content_sha256 || null,
+      retentionClass: row.retention_class || 'raw-bounded',
+      metadata: parseJsonField(row.metadata) || {},
+      createdAt: row.created_at
+    };
+  }
+
+  createRunContextSnapshot(input = {}) {
+    if (!this._hasTable('run_context_snapshots')) {
+      return null;
+    }
+
+    const contextSnapshotId = String(input.contextSnapshotId || input.context_snapshot_id || input.id || `context_${generateId()}`).trim();
+    const dispatchRequestId = String(input.dispatchRequestId || input.dispatch_request_id || '').trim();
+    if (!contextSnapshotId) {
+      throw new Error('contextSnapshotId is required');
+    }
+    if (!dispatchRequestId) {
+      throw new Error('dispatchRequestId is required');
+    }
+
+    const adapter = String(input.adapter || '').trim() || null;
+    const model = String(input.model || '').trim() || null;
+    const reasoningEffort = normalizeReasoningEffort(input.reasoningEffort ?? input.reasoning_effort);
+    const retentionClass = normalizeEnumValue(
+      input.retentionClass || input.retention_class,
+      CONTEXT_RETENTION_CLASSES,
+      'raw-bounded'
+    );
+    const payload = buildRedactedContextSnapshotPayload(input);
+    const contentSha256 = String(input.contentSha256 || input.content_sha256 || '').trim()
+      || computeContextSnapshotHash({
+        ...payload,
+        adapter,
+        model,
+        reasoningEffort
+      });
+    const linkedContextJson = payload.linkedContextJson === null || payload.linkedContextJson === undefined
+      ? null
+      : (typeof payload.linkedContextJson === 'string' ? payload.linkedContextJson : JSON.stringify(payload.linkedContextJson));
+    const toolPolicyJson = payload.toolPolicyJson === null || payload.toolPolicyJson === undefined
+      ? null
+      : (typeof payload.toolPolicyJson === 'string' ? payload.toolPolicyJson : JSON.stringify(payload.toolPolicyJson));
+    const createdAt = Number.isFinite(input.createdAt)
+      ? input.createdAt
+      : (Number.isFinite(input.created_at) ? input.created_at : Date.now());
+
+    this.db.run(`
+      INSERT INTO run_context_snapshots (
+        context_snapshot_id,
+        dispatch_request_id,
+        workspace_path,
+        context_mode,
+        prompt_summary,
+        prompt_body,
+        linked_context_json,
+        tool_policy_json,
+        adapter,
+        model,
+        reasoning_effort,
+        content_sha256,
+        retention_class,
+        metadata,
+        created_at
+      ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+    `,
+    contextSnapshotId,
+    dispatchRequestId,
+    String(input.workspacePath || input.workspace_path || '').trim() || null,
+    String(input.contextMode || input.context_mode || 'prompt').trim().toLowerCase() || 'prompt',
+    payload.promptSummary,
+    payload.promptBody,
+    linkedContextJson,
+    toolPolicyJson,
+    adapter,
+    model,
+    reasoningEffort,
+    contentSha256,
+    retentionClass,
+    JSON.stringify(payload.metadata),
+    createdAt);
+
+    const snapshot = this.getRunContextSnapshot(contextSnapshotId);
+    const dispatch = this.getDispatchRequest(dispatchRequestId);
+    if (dispatch && !dispatch.contextSnapshotId) {
+      this.updateDispatchRequest(dispatchRequestId, {
+        contextSnapshotId,
+        updatedAt: createdAt
+      });
+    }
+    return snapshot;
+  }
+
+  getRunContextSnapshot(contextSnapshotId) {
+    if (!this._hasTable('run_context_snapshots')) {
+      return null;
+    }
+    const row = this.db.get('SELECT * FROM run_context_snapshots WHERE context_snapshot_id = ?', contextSnapshotId);
+    return this._parseRunContextSnapshotRow(row);
+  }
+
+  _parseTaskSessionBindingRow(row) {
+    if (!row) {
+      return null;
+    }
+    return {
+      id: row.binding_id,
+      bindingId: row.binding_id,
+      taskId: row.task_id || null,
+      taskAssignmentId: row.task_assignment_id || null,
+      orchestrationId: row.orchestration_id || null,
+      phaseId: row.phase_id || null,
+      adapter: row.adapter,
+      model: row.model || null,
+      reasoningEffort: row.reasoning_effort || null,
+      terminalId: row.terminal_id || null,
+      providerSessionId: row.provider_session_id || null,
+      runtimeHost: row.runtime_host || null,
+      runtimeFidelity: row.runtime_fidelity || null,
+      reusePolicy: row.reuse_policy || null,
+      reuseDecision: parseJsonField(row.reuse_decision_json) || null,
+      status: row.status || 'active',
+      metadata: parseJsonField(row.metadata) || {},
+      createdAt: row.created_at,
+      lastVerifiedAt: row.last_verified_at || null
+    };
+  }
+
+  createTaskSessionBinding(input = {}) {
+    if (!this._hasTable('task_session_bindings')) {
+      return null;
+    }
+
+    const bindingId = String(input.bindingId || input.binding_id || input.id || `binding_${generateId()}`).trim();
+    const adapter = String(input.adapter || '').trim();
+    if (!bindingId) {
+      throw new Error('bindingId is required');
+    }
+    if (!adapter) {
+      throw new Error('adapter is required');
+    }
+
+    const status = normalizeEnumValue(input.status, TASK_SESSION_BINDING_STATUSES, 'active');
+    const reuseDecision = input.reuseDecision ?? input.reuse_decision ?? input.reuseDecisionJson ?? input.reuse_decision_json ?? null;
+    const reuseDecisionJson = reuseDecision === null || reuseDecision === undefined
+      ? null
+      : (typeof reuseDecision === 'string' ? reuseDecision : JSON.stringify(redactSecretObject(reuseDecision)));
+    const metadata = input.metadata && typeof input.metadata === 'object' && !Array.isArray(input.metadata)
+      ? redactSecretObject({ ...input.metadata })
+      : {};
+    const createdAt = Number.isFinite(input.createdAt)
+      ? input.createdAt
+      : (Number.isFinite(input.created_at) ? input.created_at : Date.now());
+
+    this.db.run(`
+      INSERT INTO task_session_bindings (
+        binding_id,
+        task_id,
+        task_assignment_id,
+        orchestration_id,
+        phase_id,
+        adapter,
+        model,
+        reasoning_effort,
+        terminal_id,
+        provider_session_id,
+        runtime_host,
+        runtime_fidelity,
+        reuse_policy,
+        reuse_decision_json,
+        status,
+        metadata,
+        created_at,
+        last_verified_at
+      ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+    `,
+    bindingId,
+    String(input.taskId || input.task_id || '').trim() || null,
+    String(input.taskAssignmentId || input.task_assignment_id || input.assignmentId || input.assignment_id || '').trim() || null,
+    String(input.orchestrationId || input.orchestration_id || '').trim() || null,
+    String(input.phaseId || input.phase_id || '').trim() || null,
+    adapter,
+    String(input.model || '').trim() || null,
+    normalizeReasoningEffort(input.reasoningEffort ?? input.reasoning_effort),
+    String(input.terminalId || input.terminal_id || '').trim() || null,
+    String(input.providerSessionId || input.provider_session_id || '').trim() || null,
+    String(input.runtimeHost || input.runtime_host || '').trim() || null,
+    String(input.runtimeFidelity || input.runtime_fidelity || '').trim() || null,
+    String(input.reusePolicy || input.reuse_policy || '').trim() || null,
+    reuseDecisionJson,
+    status,
+    JSON.stringify(metadata),
+    createdAt,
+    normalizeOptionalInteger(input.lastVerifiedAt ?? input.last_verified_at) || createdAt);
+
+    return this.getTaskSessionBinding(bindingId);
+  }
+
+  getTaskSessionBinding(bindingId) {
+    if (!this._hasTable('task_session_bindings')) {
+      return null;
+    }
+    const row = this.db.get('SELECT * FROM task_session_bindings WHERE binding_id = ?', bindingId);
+    return this._parseTaskSessionBindingRow(row);
+  }
+
+  listTaskSessionBindings(options = {}) {
+    if (!this._hasTable('task_session_bindings')) {
+      return [];
+    }
+
+    const clauses = [];
+    const params = [];
+    const pushTextMatch = (column, value) => {
+      const normalized = String(value || '').trim();
+      if (!normalized) {
+        return;
+      }
+      clauses.push(`${column} = ?`);
+      params.push(normalized);
+    };
+
+    pushTextMatch('task_id', options.taskId || options.task_id);
+    pushTextMatch('task_assignment_id', options.taskAssignmentId || options.task_assignment_id || options.assignmentId || options.assignment_id);
+    pushTextMatch('terminal_id', options.terminalId || options.terminal_id);
+    pushTextMatch('adapter', options.adapter);
+    pushTextMatch('provider_session_id', options.providerSessionId || options.provider_session_id);
+    pushTextMatch('status', options.status);
+
+    const whereSql = clauses.length ? `WHERE ${clauses.join(' AND ')}` : '';
+    const limit = clampLimit(options.limit, 100, 500);
+    return this.db.all(`
+      SELECT *
+      FROM task_session_bindings
+      ${whereSql}
+      ORDER BY created_at DESC, binding_id ASC
+      LIMIT ?
+    `, ...params, limit).map((row) => this._parseTaskSessionBindingRow(row));
   }
 
   /**

@@ -71,6 +71,10 @@ docs remain useful context, but this file is the current entrypoint.
    - Start with a Phase 0 contract freeze for dispatch state, context snapshot
      immutability, task-session binding history, reuse policy, redaction,
      retention, and benchmark gates before implementation workers edit files.
+   - Current foundation migration adds `dispatch_requests`,
+     `run_context_snapshots`, and `task_session_bindings` with immutable
+     context snapshots and append-only session bindings. Runtime spawning still
+     remains on the existing task/router path until dispatch APIs are added.
    - Keep this as an execution-control model, not a generic task-board product.
 
 ## Deferred
