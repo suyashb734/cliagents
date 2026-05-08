@@ -360,6 +360,23 @@ async function seedPersistenceFixture(db) {
       externalSessionRef: 'codex:attached-only'
     }
   });
+  db.appendRootIoEvent({
+    id: 'rio-attached-only-output',
+    rootSessionId: attachedOnlyRootSessionId,
+    eventKind: 'output',
+    source: 'terminal_log',
+    contentPreview: 'Native root answered 5 after a direct prompt.',
+    contentFull: 'User asked: What is 2 + 3?\nAssistant answered: 5',
+    parsedRole: 'assistant',
+    confidence: 0.75,
+    retentionClass: 'raw-bounded',
+    metadata: {
+      fixture: true,
+      capture: 'native-root'
+    },
+    occurredAt: Date.now() - 900,
+    recordedAt: Date.now() - 850
+  });
 
   return {
     rootSessionId,
@@ -553,6 +570,26 @@ async function runRouteTests() {
     );
     assert.strictEqual(missingRootBundleRes.status, 404);
     assert.strictEqual(missingRootBundleRes.data.error.code, 'not_found');
+
+    const nativeRootBundleRes = await request(
+      testServer.baseUrl,
+      'GET',
+      `/orchestration/memory/bundle/${fixture.attachedOnlyRootSessionId}?scope_type=root`
+    );
+    assert.strictEqual(nativeRootBundleRes.status, 200);
+    assert.strictEqual(nativeRootBundleRes.data.scopeType, 'root');
+    assert.strictEqual(nativeRootBundleRes.data.scopeId, fixture.attachedOnlyRootSessionId);
+    assert(nativeRootBundleRes.data.brief.includes('Native root answered 5'), 'native root bundle should summarize root IO');
+    assert.strictEqual(nativeRootBundleRes.data.recentRuns.length, 0, 'native root bundle should not require runs');
+    assert(
+      nativeRootBundleRes.data.recentRootIoEvents.some((event) => event.id === 'rio-attached-only-output'),
+      'native root bundle should include recent root IO events'
+    );
+    assert(
+      nativeRootBundleRes.data.recentSessionEvents.some((event) => event.eventType === 'session_started'),
+      'native root bundle should include root session events'
+    );
+    assert(nativeRootBundleRes.data.rawPointers.rootIoEventIds.includes('rio-attached-only-output'));
 
     const taskBundleRes = await request(
       testServer.baseUrl,
@@ -869,6 +906,17 @@ async function runMcpTests() {
     assert(projectBundleText.includes(`Memory Bundle: project ${projectId}`));
     assert(projectBundleText.includes('Recent Tasks'));
     assert(projectBundleText.includes('Usage'));
+
+    const nativeRootBundleResult = await mod.handleGetMemoryBundle({
+      scopeId: fixture.attachedOnlyRootSessionId,
+      scopeType: 'root',
+      recentRunsLimit: 3,
+      includeRawPointers: true
+    });
+    const nativeRootBundleText = nativeRootBundleResult.content[0].text;
+    assert(nativeRootBundleText.includes(`Memory Bundle: root ${fixture.attachedOnlyRootSessionId}`));
+    assert(nativeRootBundleText.includes('Recent Root IO'));
+    assert(nativeRootBundleText.includes('Recent Session Events'));
 
     const messageResult = await mod.handleGetMessageWindow({
       terminalId: 'term-1',

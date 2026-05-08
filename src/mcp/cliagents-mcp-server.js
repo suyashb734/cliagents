@@ -5549,6 +5549,31 @@ async function handleGetMemoryBundle(args) {
     text += '\n';
   }
 
+  if (bundle.recentRootIoEvents?.length > 0) {
+    text += `### Recent Root IO\n`;
+    for (const event of bundle.recentRootIoEvents.slice(0, 10)) {
+      const role = event.parsedRole ? `/${event.parsedRole}` : '';
+      text += `- **${event.id}** (${event.eventKind}${role}): ${event.preview || 'no preview'}\n`;
+    }
+    text += '\n';
+  }
+
+  if (bundle.recentMessages?.length > 0) {
+    text += `### Recent Messages\n`;
+    for (const message of bundle.recentMessages.slice(-10)) {
+      text += `- **${message.id}** (${message.role}): ${message.preview || 'no preview'}\n`;
+    }
+    text += '\n';
+  }
+
+  if (bundle.recentSessionEvents?.length > 0) {
+    text += `### Recent Session Events\n`;
+    for (const event of bundle.recentSessionEvents.slice(-10)) {
+      text += `- **${event.id}** (${event.eventType})${event.payloadSummary ? `: ${event.payloadSummary}` : ''}\n`;
+    }
+    text += '\n';
+  }
+
   if (bundle.isStale) {
     text += `*Note: This bundle is marked as STALE and may need a refresh.*\n\n`;
   }

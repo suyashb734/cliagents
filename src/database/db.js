@@ -3458,11 +3458,17 @@ class OrchestrationDB {
 
     const whereSql = clauses.length ? `WHERE ${clauses.join(' AND ')}` : '';
     const limit = clampLimit(eventOptions.limit, 100, 500);
+    const orderDirection = String(eventOptions.order || eventOptions.orderBy || '').trim().toLowerCase() === 'desc'
+      ? 'DESC'
+      : 'ASC';
+    const rootIoEventOrder = orderDirection === 'DESC'
+      ? 'occurred_at DESC, sequence_no DESC, recorded_at DESC, root_io_event_id ASC'
+      : 'occurred_at ASC, sequence_no ASC, recorded_at ASC, root_io_event_id ASC';
     return this.db.all(`
       SELECT *
       FROM root_io_events
       ${whereSql}
-      ORDER BY occurred_at ASC, sequence_no ASC, recorded_at ASC, root_io_event_id ASC
+      ORDER BY ${rootIoEventOrder}
       LIMIT ?
     `, ...params, limit).map((row) => this._parseRootIoEventRow(row));
   }
@@ -7616,29 +7622,120 @@ class OrchestrationDB {
       updatedAt: entry.updatedAt
     }));
     const latestCompletedAt = this.getLatestCompletedAtForRoot(scopeId);
-    if (!snapshot && recentRuns.length === 0 && !latestCompletedAt) {
+    const recentRootIoEvents = this.listRootIoEvents({ rootSessionId: scopeId, limit: 20, order: 'desc' }).map((event) => ({
+      id: event.rootIoEventId,
+      eventKind: event.eventKind,
+      source: event.source,
+      terminalId: event.terminalId,
+      runId: event.runId,
+      taskId: event.taskId,
+      taskAssignmentId: event.taskAssignmentId,
+      parsedRole: event.parsedRole,
+      preview: truncateText(event.contentPreview || event.contentFull, 240),
+      occurredAt: event.occurredAt,
+      recordedAt: event.recordedAt
+    }));
+    let recentMessages = [];
+    try {
+      recentMessages = this.queryMessages({ rootSessionId: scopeId, limit: 20 }).map((message) => ({
+        id: message.id,
+        terminalId: message.terminal_id,
+        role: message.role,
+        preview: truncateText(message.content, 240),
+        createdAt: message.created_at
+      }));
+    } catch {}
+    const recentSessionEvents = this.listSessionEvents({ rootSessionId: scopeId, limit: 20 }).map((event) => ({
+      id: event.id,
+      sessionId: event.session_id,
+      runId: event.run_id || null,
+      eventType: event.event_type,
+      payloadSummary: event.payload_summary || null,
+      occurredAt: event.occurred_at,
+      recordedAt: event.recorded_at
+    }));
+    const usage = this.summarizeUsage({ rootSessionId: scopeId });
+    const latestRootIoAt = recentRootIoEvents.reduce((latest, event) => Math.max(latest, event.occurredAt || 0), 0);
+    const latestMessageAt = recentMessages.reduce((latest, message) => Math.max(latest, message.createdAt || 0), 0);
+    const latestSessionEventAt = recentSessionEvents.reduce((latest, event) => Math.max(latest, event.occurredAt || event.recordedAt || 0), 0);
+    const latestRootActivityAt = Math.max(latestCompletedAt || 0, latestRootIoAt, latestMessageAt, latestSessionEventAt);
+    if (!snapshot && recentRuns.length === 0 && !latestCompletedAt && recentRootIoEvents.length === 0 && recentMessages.length === 0 && recentSessionEvents.length === 0 && !usage.recordCount) {
       return null;
     }
-    const isStale = Boolean(snapshot && latestCompletedAt && latestCompletedAt > snapshot.updatedAt);
+    const isStale = Boolean(snapshot && latestRootActivityAt && latestRootActivityAt > snapshot.updatedAt);
 
+    const rootIoBrief = recentRootIoEvents.length
+      ? recentRootIoEvents
+        .filter((entry) => entry.preview)
+        .slice(0, 5)
+        .map((entry, index) => `${index + 1}. ${entry.eventKind}${entry.parsedRole ? `/${entry.parsedRole}` : ''}: ${entry.preview}`)
+        .join('\n')
+      : null;
+    const messageBrief = !rootIoBrief && recentMessages.length
+      ? recentMessages
+        .filter((entry) => entry.preview)
+        .slice(-5)
+        .map((entry, index) => `${index + 1}. ${entry.role}: ${entry.preview}`)
+        .join('\n')
+      : null;
+    const sessionEventBrief = !rootIoBrief && !messageBrief && recentSessionEvents.length
+      ? recentSessionEvents
+        .slice(-5)
+        .map((entry, index) => `${index + 1}. ${entry.eventType}${entry.payloadSummary ? `: ${entry.payloadSummary}` : ''}`)
+        .join('\n')
+      : null;
     const fallbackBrief = recentRuns.length
       ? truncateText(recentRuns.map((entry, index) => `${index + 1}. ${entry.brief || `${entry.kind || 'run'} ${entry.runId}`}`).join('\n'), 1500)
-      : null;
+      : truncateText(rootIoBrief || messageBrief || sessionEventBrief, 1500);
+    const derivedKeyDecisions = recentRuns.length
+      ? dedupeStrings(recentRuns.flatMap((entry) => entry.keyDecisions), 20)
+      : dedupeStrings(
+        [
+          ...recentRootIoEvents
+            .filter((event) => event.eventKind === 'output' || event.parsedRole === 'assistant')
+            .map((event) => event.preview),
+          ...recentMessages
+            .filter((message) => message.role === 'assistant')
+            .map((message) => message.preview)
+        ],
+        20
+      );
+    const derivedPendingItems = recentRuns.length
+      ? dedupeStrings(recentRuns.flatMap((entry) => entry.pendingItems), 20)
+      : dedupeStrings(
+        [
+          ...recentRootIoEvents
+            .filter((event) => event.eventKind === 'input' || event.parsedRole === 'user')
+            .map((event) => event.preview),
+          ...recentMessages
+            .filter((message) => message.role === 'user')
+            .map((message) => message.preview)
+        ],
+        20
+      );
 
     return {
       scopeType: 'root',
       scopeId,
       brief: snapshot?.brief || fallbackBrief,
-      keyDecisions: snapshot?.keyDecisions || dedupeStrings(recentRuns.flatMap((entry) => entry.keyDecisions), 20),
-      pendingItems: snapshot?.pendingItems || dedupeStrings(recentRuns.flatMap((entry) => entry.pendingItems), 20),
+      keyDecisions: snapshot?.keyDecisions || derivedKeyDecisions,
+      pendingItems: snapshot?.pendingItems || derivedPendingItems,
       findings: [],
+      usage,
+      recentRootIoEvents,
+      recentMessages,
+      recentSessionEvents,
       recentRuns,
       rawPointers: options.includeRawPointers === false
         ? null
         : {
-            runIds: recentRuns.map((entry) => entry.runId)
+            runIds: recentRuns.map((entry) => entry.runId),
+            rootIoEventIds: recentRootIoEvents.map((event) => event.id),
+            messageIds: recentMessages.map((message) => message.id),
+            sessionEventIds: recentSessionEvents.map((event) => event.id),
+            usageRecordCount: usage.recordCount
           },
-      isStale: !snapshot ? recentRuns.length > 0 : isStale
+      isStale: !snapshot ? latestRootActivityAt > 0 : isStale
     };
   }
 

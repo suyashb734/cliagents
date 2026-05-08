@@ -33,7 +33,8 @@ docs remain useful context, but this file is the current entrypoint.
      input producers, deduplicated screen snapshots, usage events, tool events,
      liveness events, generated run/root snapshot lineage edges, bounded
      terminal-log output chunks with byte offsets, task memory bundle enrichment,
-     room-scoped snapshots, task/project summary producers, and tests landed.
+     root IO fallback bundles, room-scoped snapshots, task/project summary
+     producers, and tests landed.
    - Improve live metadata completeness for model, duration, and cost where
      providers expose it.
 

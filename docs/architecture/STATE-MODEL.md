@@ -65,6 +65,11 @@ and root memory snapshots write `derivation/summarizes` edges to the run records
 they summarize; repair backfills those edges idempotently for existing
 snapshots.
 
+Root memory bundles do not require a completed run. When a native or
+human-managed root only has root IO, parsed messages, session events, or usage,
+the bundle falls back to those durable records so supervisors can inspect recent
+activity without reading raw tmux logs directly.
+
 ## Task Status
 
 Task status is derived from assignment state:
