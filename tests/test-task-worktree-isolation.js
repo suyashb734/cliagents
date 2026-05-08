@@ -132,6 +132,7 @@ async function run() {
   const repoNestedWorktreeDir = path.join(repoDir, 'nested-task-exec');
   const invalidBranchWorktreeDir = path.join(rootDir, 'repo-worktrees', 'invalid-branch');
   const unregisteredWorktreeDir = path.join(rootDir, 'repo-worktrees', 'unregistered');
+  const existingBranchWorktreeDir = path.join(rootDir, 'repo-worktrees', 'existing-branch');
   const branchName = 'task/task-exec';
   initRepo(repoDir);
 
@@ -225,6 +226,30 @@ async function run() {
     assert.match(invalidBranchStartRes.data.error.message, /Invalid worktreeBranch/);
     assert.strictEqual(sessionManager.state.createCalls.length, 0);
 
+    runGit(repoDir, ['worktree', 'add', '-b', 'task/existing-branch', existingBranchWorktreeDir, 'HEAD']);
+    const branchMismatchAssignmentRes = await request(serverHandle.baseUrl, 'POST', `/orchestration/tasks/${taskId}/assignments`, {
+      role: 'executor',
+      instructions: 'Attempt to reuse a worktree on the wrong branch.',
+      worktreePath: existingBranchWorktreeDir,
+      worktreeBranch: 'task/different-branch'
+    });
+    assert.strictEqual(branchMismatchAssignmentRes.status, 200);
+    const branchMismatchStartRes = await request(
+      serverHandle.baseUrl,
+      'POST',
+      `/orchestration/tasks/${taskId}/assignments/${branchMismatchAssignmentRes.data.assignment.id}/start`,
+      {
+        rootSessionId: 'root-task-isolation',
+        parentSessionId: 'root-task-isolation',
+        originClient: 'test',
+        externalSessionRef: 'test:task-isolation'
+      }
+    );
+    assert.strictEqual(branchMismatchStartRes.status, 500);
+    assert.strictEqual(branchMismatchStartRes.data.error.code, 'task_assignment_start_failed');
+    assert.match(branchMismatchStartRes.data.error.message, /expected "task\/different-branch"/);
+    assert.strictEqual(sessionManager.state.createCalls.length, 0);
+
     fs.mkdirSync(unregisteredWorktreeDir, { recursive: true });
     const unregisteredAssignmentRes = await request(serverHandle.baseUrl, 'POST', `/orchestration/tasks/${taskId}/assignments`, {
       role: 'executor',
@@ -269,6 +294,12 @@ async function run() {
     assert.strictEqual(startAssignmentRes.data.assignment.worktreeBranch, branchName);
     assert.strictEqual(startAssignmentRes.data.assignment.metadata.isolation.mode, 'git_worktree');
     assert.strictEqual(startAssignmentRes.data.assignment.metadata.isolation.created, true);
+    assert.strictEqual(startAssignmentRes.data.assignment.metadata.isolation.existing, false);
+    assert.strictEqual(startAssignmentRes.data.assignment.metadata.isolation.dirty, false);
+    assert.strictEqual(startAssignmentRes.data.assignment.metadata.isolation.requestedBranch, branchName);
+    assert(startAssignmentRes.data.assignment.metadata.isolation.head, 'isolation metadata should record the prepared HEAD');
+    assert.strictEqual(startAssignmentRes.data.assignment.isolation.mode, 'git_worktree');
+    assert.strictEqual(startAssignmentRes.data.assignment.isolation.branch, branchName);
     assert.strictEqual(sessionManager.state.createCalls[0].workDir, worktreeDir);
 
     assert(fs.existsSync(worktreeDir), 'worktree directory should be created on start');

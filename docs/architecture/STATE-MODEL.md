@@ -86,6 +86,15 @@ linked terminal when a terminal exists.
 - `completed`: linked terminal completed or is idle after tracked work.
 - `failed`: linked terminal or launch path failed.
 
+## Assignment Isolation
+
+Assignments may carry `worktreePath` and `worktreeBranch` metadata. When
+started, the broker prepares that path before routing execution and records an
+`isolation` summary on the assignment payload. Existing registered git
+worktrees must be under an allowed worktree root, outside the primary repo, and
+already checked out on the requested branch. Missing worktree paths require a
+branch and are created with `git worktree add`.
+
 ## Continuity Rule
 
 Compatible child-lane reuse is the default when a delegated task is attached to

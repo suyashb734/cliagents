@@ -1150,12 +1150,18 @@ function createOrchestrationRouter(context) {
     const usageAttribution = typeof db?.summarizeUsageAttribution === 'function'
       ? db.summarizeUsageAttribution({ taskAssignmentId: assignment?.id || null })
       : null;
+    const isolation = assignment?.metadata?.isolation
+      && typeof assignment.metadata.isolation === 'object'
+      && !Array.isArray(assignment.metadata.isolation)
+      ? assignment.metadata.isolation
+      : null;
 
     return {
       ...assignment,
       status,
       storedStatus,
       terminalStatus,
+      isolation,
       usageSummary,
       usageAttribution,
       adapter: assignment.adapter || terminal?.adapter || null,

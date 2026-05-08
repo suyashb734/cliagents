@@ -4882,6 +4882,8 @@ async function handleListTaskAssignments(args) {
           assignment.terminalId ? `terminal=${assignment.terminalId}` : null,
           assignment.adapter ? `adapter=${assignment.adapter}` : null,
           assignment.reasoningEffort ? `effort=${assignment.reasoningEffort}` : null,
+          assignment.isolation?.mode ? `isolation=${assignment.isolation.mode}` : null,
+          assignment.isolation?.branch ? `branch=${assignment.isolation.branch}` : null,
           assignment.usageSummary ? `total_tokens=${assignment.usageSummary.totalTokens || 0}` : null
         ].filter(Boolean).join(' • ')).join('\n')
       ].filter(Boolean).join('\n')
@@ -4939,7 +4941,11 @@ async function handleStartTaskAssignment(args) {
         `model: ${assignment.model || data.route?.model || 'n/a'}`,
         assignment.reasoningEffort || data.route?.reasoningEffort ? `reasoning_effort: ${assignment.reasoningEffort || data.route?.reasoningEffort}` : null,
         assignment.worktreePath ? `worktree_path: ${assignment.worktreePath}` : null,
-        assignment.worktreeBranch ? `worktree_branch: ${assignment.worktreeBranch}` : null
+        assignment.worktreeBranch ? `worktree_branch: ${assignment.worktreeBranch}` : null,
+        assignment.isolation?.mode ? `isolation_mode: ${assignment.isolation.mode}` : null,
+        assignment.isolation?.created !== undefined ? `isolation_created: ${assignment.isolation.created === true}` : null,
+        assignment.isolation?.dirty !== undefined && assignment.isolation?.dirty !== null ? `isolation_dirty: ${assignment.isolation.dirty === true}` : null,
+        assignment.isolation?.head ? `isolation_head: ${assignment.isolation.head}` : null
       ].filter(Boolean).join('\n')
     }]
   };

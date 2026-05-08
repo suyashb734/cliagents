@@ -50,6 +50,9 @@ docs remain useful context, but this file is the current entrypoint.
    - Harden git worktree preparation and reporting for assignment execution.
    - Keep worktrees attached to task assignments rather than making them the
      primary product object.
+   - Current V1 hardening validates that existing registered worktrees are on
+     the requested branch before launch and returns the prepared isolation
+     summary on task assignment read surfaces.
 
 5. **Room-native orchestration**
    - Move room UX toward a broker-native moderator model.

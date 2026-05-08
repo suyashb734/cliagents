@@ -208,6 +208,34 @@ function assertRegisteredRepoWorktree(repoRoot, worktreePath) {
   }
 }
 
+function assertRequestedBranchMatchesWorktree(worktreePath, requestedBranch, currentBranch) {
+  if (!requestedBranch) {
+    return;
+  }
+
+  if (!currentBranch) {
+    throw new Error(`Existing worktreePath is detached but assignment requested branch "${requestedBranch}": ${worktreePath}`);
+  }
+
+  if (currentBranch !== requestedBranch) {
+    throw new Error(`Existing worktreePath is on branch "${currentBranch}", expected "${requestedBranch}": ${worktreePath}`);
+  }
+}
+
+function readWorktreeDetails(worktreePath) {
+  const currentBranch = tryRunGit(['-C', worktreePath, 'branch', '--show-current']) || null;
+  const worktreeRepoRoot = tryRunGit(['-C', worktreePath, 'rev-parse', '--show-toplevel']) || null;
+  const head = tryRunGit(['-C', worktreePath, 'rev-parse', 'HEAD']) || null;
+  const statusOutput = tryRunGit(['-C', worktreePath, 'status', '--porcelain=v1']);
+
+  return {
+    branch: currentBranch,
+    worktreeRepoRoot,
+    head,
+    dirty: statusOutput === null ? null : statusOutput.length > 0
+  };
+}
+
 function buildIsolationMetadata(existingMetadata, isolationPatch) {
   const metadata = existingMetadata && typeof existingMetadata === 'object' && !Array.isArray(existingMetadata)
     ? { ...existingMetadata }
@@ -266,23 +294,34 @@ function prepareTaskAssignmentWorktree(task, assignment) {
       assertRegisteredRepoWorktree(repoRoot, realWorktreePath);
     }
 
-    const currentBranch = tryRunGit(['-C', resolvedWorktreePath, 'branch', '--show-current']) || requestedBranch || null;
-    const worktreeRepoRoot = tryRunGit(['-C', resolvedWorktreePath, 'rev-parse', '--show-toplevel']) || null;
+    const details = readWorktreeDetails(resolvedWorktreePath);
+    const isGitWorktree = !!(repoRoot || details.worktreeRepoRoot);
+    if (isGitWorktree) {
+      assertRequestedBranchMatchesWorktree(resolvedWorktreePath, requestedBranch, details.branch);
+    }
     const metadata = buildIsolationMetadata(assignment?.metadata || {}, {
-      mode: 'git_worktree',
-      repoRoot: repoRoot || worktreeRepoRoot || workspaceRoot,
-      worktreeRepoRoot,
+      mode: isGitWorktree ? 'git_worktree' : 'directory',
+      workspaceRoot,
+      repoRoot: repoRoot || details.worktreeRepoRoot || workspaceRoot,
+      worktreeRepoRoot: details.worktreeRepoRoot,
       worktreePath: resolvedWorktreePath,
-      branch: currentBranch,
+      requestedPath,
+      requestedBranch,
+      branch: details.branch,
+      head: details.head,
+      dirty: details.dirty,
+      allowedRoots,
       preparedAt: Date.now(),
       preparedBy: 'start_task_assignment',
+      registered: !!repoRoot,
+      existing: true,
       created: false
     });
 
     return {
       workingDirectory: resolvedWorktreePath,
       worktreePath: resolvedWorktreePath,
-      worktreeBranch: currentBranch,
+      worktreeBranch: details.branch || requestedBranch || null,
       metadata,
       isolation: metadata.isolation
     };
@@ -319,21 +358,30 @@ function prepareTaskAssignmentWorktree(task, assignment) {
     }
     created = true;
   }
-  const currentBranch = tryRunGit(['-C', resolvedWorktreePath, 'branch', '--show-current']) || requestedBranch || null;
+  const details = readWorktreeDetails(resolvedWorktreePath);
   const metadata = buildIsolationMetadata(assignment?.metadata || {}, {
     mode: 'git_worktree',
+    workspaceRoot,
     repoRoot,
+    worktreeRepoRoot: details.worktreeRepoRoot,
     worktreePath: resolvedWorktreePath,
-    branch: currentBranch,
+    requestedPath,
+    requestedBranch,
+    branch: details.branch || requestedBranch || null,
+    head: details.head,
+    dirty: details.dirty,
+    allowedRoots,
     preparedAt: Date.now(),
     preparedBy: 'start_task_assignment',
+    registered: !!repoRoot,
+    existing: !created,
     created
   });
 
   return {
     workingDirectory: resolvedWorktreePath,
     worktreePath: resolvedWorktreePath,
-    worktreeBranch: currentBranch,
+    worktreeBranch: details.branch || requestedBranch || null,
     metadata,
     isolation: metadata.isolation
   };
