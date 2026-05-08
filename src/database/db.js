@@ -374,7 +374,10 @@ const CONTEXT_RETENTION_CLASSES = new Set(['raw-bounded', 'summary-indefinite', 
 const MEMORY_RECORD_TYPE_ALIASES = new Map([
   ['usage', 'usage_record'],
   ['root_io', 'root_io_event'],
-  ['root_io_events', 'root_io_event']
+  ['root_io_events', 'root_io_event'],
+  ['dispatch', 'dispatch_request'],
+  ['context_snapshot', 'run_context_snapshot'],
+  ['session_binding', 'task_session_binding']
 ]);
 const MEMORY_PROJECTION_JSON_FIELDS = new Set([
   'metadata',
@@ -7906,10 +7909,16 @@ class OrchestrationDB {
   }
 
   _memoryRecordsProjectionSql() {
+    const projections = ['SELECT * FROM memory_records_v1'];
     if (this._memoryReadModelHasRelation('memory_records_root_io_v1')) {
-      return `(SELECT * FROM memory_records_v1 UNION ALL SELECT * FROM memory_records_root_io_v1)`;
+      projections.push('SELECT * FROM memory_records_root_io_v1');
     }
-    return 'memory_records_v1';
+    if (this._memoryReadModelHasRelation('memory_records_dispatch_v1')) {
+      projections.push('SELECT * FROM memory_records_dispatch_v1');
+    }
+    return projections.length === 1
+      ? 'memory_records_v1'
+      : `(${projections.join(' UNION ALL ')})`;
   }
 
   _memoryEdgesProjectionSql() {
@@ -7919,6 +7928,9 @@ class OrchestrationDB {
     }
     if (this._memoryReadModelHasRelation('memory_summary_edges_v1')) {
       projections.push('SELECT * FROM memory_summary_edges_v1');
+    }
+    if (this._memoryReadModelHasRelation('memory_dispatch_edges_v1')) {
+      projections.push('SELECT * FROM memory_dispatch_edges_v1');
     }
     return projections.length === 1
       ? 'memory_edges_v1'

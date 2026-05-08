@@ -118,7 +118,9 @@ snapshot captures the redacted assignment prompt and linked task metadata, and
 the task-session binding records the root-scoped terminal/runtime/provider reuse
 decision after spawn. Assignment read surfaces expose compact dispatch and
 session-binding summaries; context snapshots remain durable audit records and
-are not expanded into every task list response.
+are not expanded into every task list response. The memory read model projects
+dispatch requests, context snapshots, and task-session bindings as queryable
+records with task/root/assignment/terminal lineage.
 
 ## Continuity Rule
 

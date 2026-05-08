@@ -99,6 +99,47 @@ function seedMemoryReadModelFixture(db, rootDir) {
       }
     }
   );
+  const dispatch = db.createDispatchRequest({
+    id: 'dispatch-memory-query',
+    taskId: task.id,
+    taskAssignmentId: 'assignment-memory-query',
+    rootSessionId: 'root-memory-query',
+    requestKind: 'assignment_start',
+    status: 'spawned',
+    terminalId: 'terminal-memory-query',
+    metadata: { note: 'memory dispatch projection' },
+    createdAt: now - 3500,
+    updatedAt: now - 3200,
+    dispatchedAt: now - 3200
+  });
+  db.createRunContextSnapshot({
+    id: 'context-memory-query',
+    dispatchRequestId: dispatch.id,
+    workspacePath: workspaceRoot,
+    contextMode: 'task_assignment',
+    promptSummary: 'Implement memory query endpoints',
+    promptBody: 'Implement memory query endpoints',
+    linkedContext: { taskId: task.id, taskAssignmentId: 'assignment-memory-query' },
+    adapter: 'codex-cli',
+    model: 'gpt-5.4',
+    createdAt: now - 3400
+  });
+  db.createTaskSessionBinding({
+    id: 'binding-memory-query',
+    rootSessionId: 'root-memory-query',
+    taskId: task.id,
+    taskAssignmentId: 'assignment-memory-query',
+    adapter: 'codex-cli',
+    model: 'gpt-5.4',
+    reasoningEffort: 'high',
+    terminalId: 'terminal-memory-query',
+    providerSessionId: 'provider-memory-query',
+    runtimeHost: 'tmux',
+    runtimeFidelity: 'managed',
+    reusePolicy: 'prefer_compatible_reuse',
+    reuseDecision: { reused: false },
+    createdAt: now - 3300
+  });
 
   const ledger = new RunLedgerService(db);
   ledger.createRun({
@@ -169,26 +210,30 @@ async function run() {
 
     const queryRes = await request(
       serverHandle.baseUrl,
-      `/orchestration/memory/query?task_id=${fixture.taskId}&types=task,task_assignment,run,terminal,usage,finding,context&q=memory&limit=20`
+      `/orchestration/memory/query?task_id=${fixture.taskId}&types=task,task_assignment,run,terminal,usage,finding,context,dispatch_request,run_context_snapshot,task_session_binding&q=memory&limit=30`
     );
     assert.strictEqual(queryRes.status, 200);
     assert.strictEqual(queryRes.data.filters.taskId, fixture.taskId);
     assert.deepStrictEqual(
       queryRes.data.filters.types,
-      ['task', 'task_assignment', 'run', 'terminal', 'usage', 'finding', 'context']
+      ['task', 'task_assignment', 'run', 'terminal', 'usage', 'finding', 'context', 'dispatch_request', 'run_context_snapshot', 'task_session_binding']
     );
     assert(queryRes.data.records.length >= 5, 'query should return seeded memory records');
     assert(queryRes.data.records.every((record) => record.sourceTable && record.sourceId), 'records should keep source provenance');
     assert(queryRes.data.records.some((record) => record.recordType === 'finding' && record.record?.content?.includes('source provenance')));
+    assert(queryRes.data.records.some((record) => record.recordType === 'dispatch_request' && record.sourceId === 'dispatch-memory-query'));
+    assert(queryRes.data.records.some((record) => record.recordType === 'run_context_snapshot' && record.sourceId === 'context-memory-query'));
+    assert(queryRes.data.records.some((record) => record.recordType === 'task_session_binding' && record.sourceId === 'binding-memory-query'));
 
     const limitedRes = await request(serverHandle.baseUrl, `/orchestration/memory/query?task_id=${fixture.taskId}&limit=1`);
     assert.strictEqual(limitedRes.status, 200);
     assert.strictEqual(limitedRes.data.pagination.returned, 1);
     assert.strictEqual(limitedRes.data.pagination.hasMore, true);
 
-    const edgeRes = await request(serverHandle.baseUrl, `/orchestration/memory/edges?task_id=${fixture.taskId}&limit=20`);
+    const edgeRes = await request(serverHandle.baseUrl, `/orchestration/memory/edges?task_id=${fixture.taskId}&limit=100`);
     assert.strictEqual(edgeRes.status, 200);
     assert(edgeRes.data.edges.some((edge) => edge.targetScopeType === 'task' && edge.targetId === fixture.taskId));
+    assert(edgeRes.data.edges.some((edge) => edge.sourceRecordType === 'dispatch_request' && edge.targetScopeType === 'task_assignment'));
 
     const insightsRes = await request(serverHandle.baseUrl, `/orchestration/memory/insights?task_id=${fixture.taskId}&limit=5`);
     assert.strictEqual(insightsRes.status, 200);

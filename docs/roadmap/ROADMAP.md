@@ -76,7 +76,8 @@ docs remain useful context, but this file is the current entrypoint.
      context snapshots and append-only root-scoped session bindings. Task
      assignment start now populates dispatch, context, and binding rows around
      the existing task/router spawn path, and assignment read surfaces expose
-     compact dispatch/session-binding summaries.
+     compact dispatch/session-binding summaries. The memory read model also
+     projects these records for supervisor query and lineage inspection.
    - Keep this as an execution-control model, not a generic task-board product.
 
 ## Deferred
