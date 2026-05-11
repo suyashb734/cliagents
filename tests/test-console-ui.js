@@ -89,6 +89,9 @@ async function run() {
     assert(routePage.text.includes('Destroy Terminal'), '/console should expose terminal termination controls');
     assert(routePage.text.includes('new WebSocket'), '/console should connect to the existing WebSocket endpoint');
     assert(routePage.text.includes('localStorage.getItem'), '/console should persist API key state locally for remote access');
+    assert(routePage.text.includes('Authentication required.'), '/console should explain broker auth failures instead of rendering an empty agent wall');
+    assert(routePage.text.includes('data/local-api-key'), '/console should point local operators to the generated broker token file');
+    assert(routePage.text.includes('renderAuthRequiredState'), '/console should centralize unauthenticated-state rendering');
     assert(routePage.text.includes('function getOperatorStateDescriptor'), '/console should centralize operator-state derivation for terminals and roots');
     assert(routePage.text.includes('Root Terminal Workspace'), '/console should expose a root-scoped terminal workspace');
     assert(routePage.text.includes('Child terminals are nested inside this root workspace'), '/console should keep child terminal inspection inside the root workspace');

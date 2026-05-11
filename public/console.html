@@ -1467,6 +1467,7 @@
       rootOutputFormat: coerceOutputFormat(urlState.get('rootFormat'), 'ansi'),
       mobileRootView: new Set(['terminal', 'overview', 'history']).has(urlState.get('mobileView')) ? urlState.get('mobileView') : 'terminal',
       mobileFocusedTerminalId: urlState.get('mobileTerminal') || null,
+      authError: null,
       selectedRootSessionId: urlState.get('root') || null,
       selectedTerminalId: urlState.get('terminal') || null,
       selectedDiscussionId: urlState.get('discussion') || null,
@@ -1544,10 +1545,38 @@
 
       if (!response.ok) {
         const message = data?.error?.message || data?.message || text || `${response.status} ${response.statusText}`;
-        throw new Error(message);
+        const error = new Error(message);
+        error.status = response.status;
+        error.payload = data;
+        if (response.status === 401) {
+          state.authError = message || 'Authentication required.';
+        }
+        throw error;
+      }
+
+      if (path.startsWith('/orchestration/') && state.authError) {
+        state.authError = null;
       }
 
       return data;
+    }
+
+    function isAuthError(error) {
+      return error?.status === 401;
+    }
+
+    function renderAuthRequiredState() {
+      const detail = state.authError || 'The broker rejected this browser request.';
+      const keyHint = state.apiKey
+        ? 'The saved API key was rejected. Paste the current broker token and press Save Key.'
+        : 'Paste the broker token into the API key box and press Save Key.';
+      return `
+        <div class="warning-banner">
+          <strong>Authentication required.</strong>
+          <div>${escapeHtml(detail)}</div>
+          <div>${escapeHtml(keyHint)} Local development token: <code>data/local-api-key</code>.</div>
+        </div>
+      `;
     }
 
     async function fetchRunUsageSafe(runId) {
@@ -2221,6 +2250,12 @@
         return;
       }
 
+      if (state.authError) {
+        elements.agentWallSummary.textContent = 'Authentication required';
+        elements.agentWallList.innerHTML = renderAuthRequiredState();
+        return;
+      }
+
       const roots = getVisibleSessionRoots();
       const rootModels = roots.map((root) => {
         const snapshot = getRootSnapshot(root.rootSessionId);
@@ -2331,6 +2366,7 @@
 
     function saveApiKey() {
       state.apiKey = elements.apiKeyInput.value.trim();
+      state.authError = null;
       if (state.apiKey) {
         localStorage.setItem('cliagents.console.apiKey', state.apiKey);
       } else {
@@ -2376,6 +2412,14 @@
     }
 
     function renderTerminals() {
+      if (state.authError) {
+        elements.terminalsSummary.textContent = 'Authentication required';
+        elements.terminalsList.innerHTML = renderAuthRequiredState();
+        updateStats();
+        renderAgentWall();
+        return;
+      }
+
       const staleCount = state.terminals.filter(isTerminalStale).length;
       const waitingCount = state.terminals.filter((terminal) => getOperatorStateDescriptor(terminal, {
         stale: isTerminalStale(terminal)
@@ -2437,6 +2481,13 @@
     }
 
     function renderDiscussions() {
+      if (state.authError) {
+        elements.discussionsSummary.textContent = 'Authentication required';
+        elements.discussionsList.innerHTML = renderAuthRequiredState();
+        updateStats();
+        return;
+      }
+
       elements.discussionsSummary.textContent = `${state.discussionRuns.length} loaded`;
       if (!state.discussionRuns.length) {
         elements.discussionsList.innerHTML = '<div class="empty-state">No discussion runs found. This pane depends on <code>/orchestration/runs?kind=discussion</code>.</div>';
@@ -2474,6 +2525,13 @@
     }
 
     function renderRooms() {
+      if (state.authError) {
+        elements.roomsSummary.textContent = 'Authentication required';
+        elements.roomsList.innerHTML = renderAuthRequiredState();
+        updateStats();
+        return;
+      }
+
       elements.roomsSummary.textContent = `${state.rooms.length} loaded`;
       if (!state.rooms.length) {
         elements.roomsList.innerHTML = '<div class="empty-state">No persisted rooms found yet. This pane depends on <code>/orchestration/rooms</code>.</div>';
@@ -3022,6 +3080,16 @@
     }
 
     function renderSessionRoots() {
+      if (state.authError) {
+        elements.sessionRootsSummary.textContent = 'Authentication required';
+        elements.sessionRootsList.innerHTML = renderAuthRequiredState();
+        updateStats();
+        renderAgentWall();
+        renderMobileRootSelector([]);
+        bindMobileRootControls();
+        return;
+      }
+
       const visibleRoots = getVisibleSessionRoots();
       const archivedSuffix = state.sessionRootsArchivedCount > 0
         ? state.includeArchivedRoots
@@ -3113,8 +3181,15 @@
     }
 
     async function refreshTerminals() {
-      const data = await fetchJson('/orchestration/terminals');
-      state.terminals = (data.terminals || []).slice().sort((a, b) => (b.lastActive || 0) - (a.lastActive || 0));
+      try {
+        const data = await fetchJson('/orchestration/terminals');
+        state.terminals = (data.terminals || []).slice().sort((a, b) => (b.lastActive || 0) - (a.lastActive || 0));
+      } catch (error) {
+        state.terminals = [];
+        if (!isAuthError(error)) {
+          elements.terminalsSummary.textContent = error.message;
+        }
+      }
       renderTerminals();
     }
 
@@ -3166,6 +3241,14 @@
         state.sessionRootsHiddenDetachedCount = Number(data.hiddenDetachedCount || 0);
         state.sessionRootsHiddenNonUserCount = Number(data.hiddenNonUserCount || 0);
       } catch (error) {
+        if (isAuthError(error)) {
+          state.sessionRoots = [];
+          state.sessionRootsArchivedCount = 0;
+          state.sessionRootsHiddenDetachedCount = 0;
+          state.sessionRootsHiddenNonUserCount = 0;
+          renderSessionRoots();
+          return;
+        }
         try {
           const data = await fetchJson('/orchestration/session-events?limit=400');
           state.sessionRoots = deriveSessionRoots(data.events || []);
