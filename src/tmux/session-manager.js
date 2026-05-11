@@ -173,6 +173,22 @@ function summarizeTerminalActivity(content, maxLength = 240) {
   return `${bestLine.slice(0, Math.max(0, maxLength - 1)).trimEnd()}…`;
 }
 
+function isLikelyManagedRootProgressOnly(content) {
+  const normalized = String(content || '').replace(/\s+/g, ' ').trim();
+  if (!normalized) {
+    return false;
+  }
+
+  return (
+    /(?:^|[•\s])Working\s*\(/i.test(normalized)
+    || /Waiting for background terminal/i.test(normalized)
+    || /background terminal (?:running|runs?)/i.test(normalized)
+    || /esc to interrupt/i.test(normalized)
+    || /\/ps to view/i.test(normalized)
+    || /\/stop to close/i.test(normalized)
+  );
+}
+
 function buildTerminalBusyError(terminalId, status) {
   const currentStatus = String(status || TerminalStatus.PROCESSING);
   const error = new Error(
@@ -2256,6 +2272,11 @@ class PersistentSessionManager extends EventEmitter {
     }
 
     const output = extra.runOutput || extra.output || '';
+    const summary = summarizeTerminalActivity(stripAnsiCodes(output), 220);
+    if (isLikelyManagedRootProgressOnly(summary)) {
+      return;
+    }
+
     const payload = {
       type: 'managed_root_status',
       terminalId: terminal.terminalId,
@@ -2271,7 +2292,7 @@ class PersistentSessionManager extends EventEmitter {
       providerThreadRef: terminal.providerThreadRef || null,
       attentionCode: extra.attention?.code || null,
       attentionMessage: extra.attention?.message || null,
-      summary: summarizeTerminalActivity(stripAnsiCodes(output), 220),
+      summary,
       occurredAt: new Date().toISOString()
     };
 
@@ -2308,6 +2329,12 @@ class PersistentSessionManager extends EventEmitter {
     terminal._lastManagedRootNotificationKey = notificationKey;
 
     const output = extra.runOutput || extra.output || '';
+    const summarySource = extra.transcriptSync?.completedTurn?.assistant || output;
+    const summary = summarizeTerminalActivity(stripAnsiCodes(summarySource), 220);
+    if (isLikelyManagedRootProgressOnly(summary)) {
+      return;
+    }
+
     const payload = {
       type: 'managed_root_status',
       terminalId: terminal.terminalId,
@@ -2323,10 +2350,7 @@ class PersistentSessionManager extends EventEmitter {
       providerThreadRef: terminal.providerThreadRef || null,
       attentionCode: extra.attention?.code || null,
       attentionMessage: extra.attention?.message || null,
-      summary: summarizeTerminalActivity(
-        stripAnsiCodes(extra.transcriptSync?.completedTurn?.assistant || output),
-        220
-      ),
+      summary,
       trigger: 'settled_activity',
       occurredAt: new Date().toISOString()
     };

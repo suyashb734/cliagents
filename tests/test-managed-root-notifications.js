@@ -216,11 +216,68 @@ async function testManagedRootFastSettledTurnDispatch() {
   assert.strictEqual(delivered.length, 1, 'observed processing transitions are handled by status-change dispatch');
 }
 
+async function testManagedRootProgressLinesDoNotNotify() {
+  const delivered = [];
+  const manager = new PersistentSessionManager({
+    managedRootNotificationMonitor: false,
+    managedRootNotifier: {
+      isEnabled: () => true,
+      shouldNotifyStatus: (status) => status === TerminalStatus.IDLE,
+      notifyManagedRootStatus: async (payload) => {
+        delivered.push(payload);
+        return [{ ok: true, channel: 'test' }];
+      }
+    }
+  });
+
+  const managedRoot = {
+    terminalId: 'term-progress-root',
+    rootSessionId: 'root-progress',
+    adapter: 'codex-cli',
+    role: 'main',
+    sessionKind: 'main',
+    sessionMetadata: {
+      managedLaunch: true
+    },
+    status: TerminalStatus.IDLE,
+    workDir: '/tmp/project',
+    effectiveModel: 'gpt-5.5',
+    effectiveEffort: 'xhigh'
+  };
+
+  manager._notifyManagedRootSettledActivity(managedRoot, TerminalStatus.IDLE, {
+    previousStatus: TerminalStatus.IDLE,
+    output: [
+      '• Working (35m 09s • esc to interrupt) · 1 background terminal running · /ps to view · /stop to close',
+      '› Summarize recent commits'
+    ].join('\n'),
+    transcriptSync: {
+      insertedAssistantMessage: 'msg-progress-1',
+      completedTurn: {
+        user: 'Summarize recent commits',
+        assistant: 'Working (35m 09s • esc to interrupt) · 1 background terminal running · /ps to view · /stop to close'
+      }
+    }
+  });
+  await new Promise((resolve) => setImmediate(resolve));
+
+  manager._applyStatusUpdate(managedRoot, TerminalStatus.PROCESSING, {
+    output: '• Working (35m 09s • esc to interrupt) · 1 background terminal running'
+  });
+  manager._applyStatusUpdate(managedRoot, TerminalStatus.IDLE, {
+    output: '• Working (35m 12s • esc to interrupt) · 1 background terminal running · /ps to view · /stop to close'
+  });
+  await new Promise((resolve) => setImmediate(resolve));
+
+  assert.strictEqual(delivered.length, 0, 'progress/status lines should not trigger completion notifications');
+}
+
 async function run() {
   await testNotificationConfigDefaults();
   await testWebhookAndTelegramDelivery();
   await testManagedRootStatusTransitionDispatch();
   await testManagedRootFastSettledTurnDispatch();
+  await testManagedRootProgressLinesDoNotNotify();
   console.log('✅ Managed root notification config, delivery, and status dispatch work');
 }
 
