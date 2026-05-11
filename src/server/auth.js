@@ -386,6 +386,7 @@ function authenticateRequest(req, res, next) {
   // Allow health check and static files without auth
   if (req.path === '/health' ||
       req.path === '/auth/local-console/exchange' ||
+      req.path === '/auth/local-console/bootstrap' ||
       req.path === '/' ||
       req.path === '/index.html' ||
       req.path === '/console' ||

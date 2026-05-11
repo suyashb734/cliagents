@@ -94,6 +94,8 @@ async function run() {
     assert(routePage.text.includes('renderAuthRequiredState'), '/console should centralize unauthenticated-state rendering');
     assert(routePage.text.includes("urlState.get('login')"), '/console should accept a short-lived local console login token');
     assert(routePage.text.includes('/auth/local-console/exchange'), '/console should exchange local login tokens before polling protected APIs');
+    assert(routePage.text.includes('/auth/local-console/bootstrap'), '/console should auto-bootstrap loopback same-origin reloads before polling protected APIs');
+    assert(routePage.text.includes('isLoopbackConsoleHost'), '/console should only attempt automatic bootstrap for loopback console hosts');
     assert(routePage.text.includes('Live process:'), '/console should show whether each terminal has a live backing process');
     assert(routePage.text.includes('renderLiveStatePill'), '/console should render explicit live/not-live badges');
     assert(routePage.text.includes('function getOperatorStateDescriptor'), '/console should centralize operator-state derivation for terminals and roots');

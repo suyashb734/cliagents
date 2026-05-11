@@ -1615,6 +1615,11 @@
       `;
     }
 
+    function isLoopbackConsoleHost() {
+      const hostname = String(window.location.hostname || '').trim().toLowerCase();
+      return hostname === 'localhost' || hostname === '::1' || hostname.startsWith('127.');
+    }
+
     async function fetchRunUsageSafe(runId) {
       if (!runId) {
         return null;
@@ -2427,20 +2432,23 @@
     }
 
     async function exchangeLocalConsoleLogin() {
-      if (!state.localLoginToken) {
+      if (!state.localLoginToken && (state.apiKey || !isLoopbackConsoleHost())) {
         return;
       }
 
       try {
-        const response = await fetch('/auth/local-console/exchange', {
-          method: 'POST',
-          headers: {
-            'Content-Type': 'application/json'
-          },
-          body: JSON.stringify({
-            token: state.localLoginToken
-          })
-        });
+        const response = await fetch(
+          state.localLoginToken ? '/auth/local-console/exchange' : '/auth/local-console/bootstrap',
+          {
+            method: 'POST',
+            headers: {
+              'Content-Type': 'application/json'
+            },
+            body: JSON.stringify({
+              token: state.localLoginToken
+            })
+          }
+        );
         const text = await response.text();
         let data = null;
         try {
@@ -2465,7 +2473,9 @@
         }
         state.authError = null;
       } catch (error) {
-        state.authError = `Local console login failed: ${error.message}`;
+        state.authError = state.localLoginToken
+          ? `Local console login failed: ${error.message}`
+          : `Local console bootstrap failed: ${error.message}`;
       } finally {
         state.localLoginToken = null;
         syncUrlState();

@@ -156,6 +156,32 @@ function isLoopbackRequest(req) {
     || isLoopbackHost(req.ip);
 }
 
+function parseRequestOriginHost(req) {
+  const origin = String(req.headers.origin || '').trim();
+  if (!origin) {
+    return null;
+  }
+  return parseOriginHost(origin);
+}
+
+function isLocalConsoleBootstrapRequest(req) {
+  if (!isLoopbackRequest(req)) {
+    return false;
+  }
+
+  const fetchSite = String(req.headers['sec-fetch-site'] || '').trim().toLowerCase();
+  if (fetchSite && !['same-origin', 'none'].includes(fetchSite)) {
+    return false;
+  }
+
+  const originHost = parseRequestOriginHost(req);
+  if (originHost && !isLoopbackHost(originHost)) {
+    return false;
+  }
+
+  return true;
+}
+
 function getDashboardEnvMutationAllowlist(adapterName) {
   const config = getAuthConfig(adapterName);
   if (!config) {
@@ -989,6 +1015,40 @@ class AgentServer {
           apiKey,
           expiresAt: validation.expiresAt
         });
+      } catch (error) {
+        sendError(res, 'INTERNAL_ERROR', { message: error.message });
+      }
+    });
+
+    app.post('/auth/local-console/bootstrap', (req, res) => {
+      try {
+        if (!isLocalConsoleBootstrapRequest(req)) {
+          return res.status(403).json({
+            error: {
+              code: 'local_console_bootstrap_denied',
+              message: 'Local console bootstrap requires a loopback same-origin browser request.'
+            }
+          });
+        }
+
+        if (isUnauthenticatedLocalhostModeEnabled()) {
+          return res.json({
+            apiKey: null,
+            unauthenticatedLocalhost: true
+          });
+        }
+
+        const apiKey = getConfiguredApiKey();
+        if (!apiKey) {
+          return res.status(401).json({
+            error: {
+              code: 'authentication_required',
+              message: 'Authentication required. Configure CLIAGENTS_API_KEY or restart the broker so it creates a local token.'
+            }
+          });
+        }
+
+        res.json({ apiKey });
       } catch (error) {
         sendError(res, 'INTERNAL_ERROR', { message: error.message });
       }

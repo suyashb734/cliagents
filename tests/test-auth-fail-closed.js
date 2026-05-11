@@ -260,6 +260,33 @@ async function testLocalConsoleLoginTokenExchange() {
   }
 }
 
+async function testLocalConsoleBootstrapIsLoopbackSameOriginOnly() {
+  const envSnapshot = snapshotAuthEnv();
+  let serverHandle = null;
+
+  try {
+    applyAuthEnv({});
+    serverHandle = await startServer();
+    const localApiKey = readLocalApiKey({ dataDir: serverHandle.dataDir });
+
+    const sameOrigin = await postJson(serverHandle.baseUrl, '/auth/local-console/bootstrap', {}, {
+      origin: serverHandle.baseUrl,
+      'sec-fetch-site': 'same-origin'
+    });
+    assert.strictEqual(sameOrigin.status, 200, `Expected same-origin local bootstrap success, got ${sameOrigin.status}`);
+    assert.strictEqual(sameOrigin.body?.apiKey, localApiKey, 'Expected bootstrap to return the current broker API key');
+
+    const crossSite = await postJson(serverHandle.baseUrl, '/auth/local-console/bootstrap', {}, {
+      origin: 'https://example.invalid',
+      'sec-fetch-site': 'cross-site'
+    });
+    assert.strictEqual(crossSite.status, 403, `Expected cross-site local bootstrap rejection, got ${crossSite.status}`);
+  } finally {
+    await stopServerHandle(serverHandle);
+    restoreAuthEnv(envSnapshot);
+  }
+}
+
 async function testLocalConsoleLoginTokensExpire() {
   const envSnapshot = snapshotAuthEnv();
 
@@ -391,6 +418,7 @@ async function run() {
     { name: 'WebSocket auth is fail-closed by default', fn: testWebSocketFailClosedByDefault },
     { name: 'local broker token authenticates same-machine CLI calls', fn: testLocalBrokerTokenAuthenticatesSameMachineCli },
     { name: 'local console login token exchanges on loopback', fn: testLocalConsoleLoginTokenExchange },
+    { name: 'local console bootstrap is loopback same-origin only', fn: testLocalConsoleBootstrapIsLoopbackSameOriginOnly },
     { name: 'local console login tokens expire', fn: testLocalConsoleLoginTokensExpire },
     { name: 'API key env aliases are parity-compatible', fn: testEnvAliasParity },
     { name: 'localhost unauthenticated override rejects non-loopback bind host', fn: testLocalhostOverrideRejectsNonLoopbackHost },
