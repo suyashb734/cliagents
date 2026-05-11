@@ -1931,17 +1931,17 @@ class PersistentSessionManager extends EventEmitter {
 
   _syncInteractiveTranscript(terminal, output, nextStatus) {
     if (!this._supportsInteractiveTranscriptSync(terminal)) {
-      return;
+      return null;
     }
 
     const syncState = this._ensureInteractiveTranscriptState(terminal);
     if (!syncState) {
-      return;
+      return null;
     }
 
     const cleanedOutput = this._normalizeInteractiveOutput(output);
     if (!cleanedOutput.trim()) {
-      return;
+      return null;
     }
 
     const isSettledStatus = [
@@ -1951,12 +1951,12 @@ class PersistentSessionManager extends EventEmitter {
     ].includes(nextStatus);
 
     if (!isSettledStatus) {
-      return;
+      return null;
     }
 
     const completedTurn = this._extractLatestCompletedInteractiveTurn(cleanedOutput, terminal.adapter);
     if (!completedTurn) {
-      return;
+      return null;
     }
 
     const insertedUserMessage = this._recordInteractiveTranscriptMessage(terminal, 'user', completedTurn.user);
@@ -1968,6 +1968,12 @@ class PersistentSessionManager extends EventEmitter {
     if (insertedAssistantMessage || this._normalizeMessageContent(completedTurn.assistant) === syncState.latestAssistantContent) {
       syncState.awaitingAssistant = false;
     }
+
+    return {
+      completedTurn,
+      insertedUserMessage,
+      insertedAssistantMessage
+    };
   }
 
   _isShellLikeCommand(command) {
@@ -2266,6 +2272,62 @@ class PersistentSessionManager extends EventEmitter {
       attentionCode: extra.attention?.code || null,
       attentionMessage: extra.attention?.message || null,
       summary: summarizeTerminalActivity(stripAnsiCodes(output), 220),
+      occurredAt: new Date().toISOString()
+    };
+
+    this.emit('managed-root-notification', payload);
+    void this.managedRootNotifier.notifyManagedRootStatus(payload).catch((error) => {
+      this.emit('managed-root-notification-error', {
+        terminalId: terminal.terminalId,
+        rootSessionId: payload.rootSessionId,
+        error: error.message
+      });
+    });
+  }
+
+  _notifyManagedRootSettledActivity(terminal, nextStatus, extra = {}) {
+    if (!this.managedRootNotifier?.isEnabled?.() || !this._isManagedRootTerminal(terminal)) {
+      return;
+    }
+    if (extra.previousStatus === TerminalStatus.PROCESSING) {
+      return;
+    }
+    if (!this.managedRootNotifier.shouldNotifyStatus?.(nextStatus)) {
+      return;
+    }
+
+    const insertedAssistantMessage = extra.transcriptSync?.insertedAssistantMessage || null;
+    if (!insertedAssistantMessage) {
+      return;
+    }
+
+    const notificationKey = `${nextStatus}:${insertedAssistantMessage}`;
+    if (terminal._lastManagedRootNotificationKey === notificationKey) {
+      return;
+    }
+    terminal._lastManagedRootNotificationKey = notificationKey;
+
+    const output = extra.runOutput || extra.output || '';
+    const payload = {
+      type: 'managed_root_status',
+      terminalId: terminal.terminalId,
+      rootSessionId: terminal.rootSessionId || terminal.terminalId,
+      adapter: terminal.adapter,
+      status: nextStatus,
+      previousStatus: extra.previousStatus || terminal.status || null,
+      model: terminal.effectiveModel || terminal.model || terminal.requestedModel || null,
+      reasoningEffort: terminal.effectiveEffort || terminal.requestedEffort || null,
+      workDir: terminal.workDir || null,
+      originClient: terminal.originClient || null,
+      externalSessionRef: terminal.externalSessionRef || null,
+      providerThreadRef: terminal.providerThreadRef || null,
+      attentionCode: extra.attention?.code || null,
+      attentionMessage: extra.attention?.message || null,
+      summary: summarizeTerminalActivity(
+        stripAnsiCodes(extra.transcriptSync?.completedTurn?.assistant || output),
+        220
+      ),
+      trigger: 'settled_activity',
       occurredAt: new Date().toISOString()
     };
 
@@ -4689,11 +4751,18 @@ class PersistentSessionManager extends EventEmitter {
     this._recordRootOutputChunk(reconciledTerminal);
     if (trackedRunStatus) {
       this._recordRootOutputSnapshot(reconciledTerminal, output, { detectedStatus: trackedRunStatus });
-      this._syncInteractiveTranscript(reconciledTerminal, output, trackedRunStatus);
+      const previousStatus = reconciledTerminal.status;
+      const transcriptSync = this._syncInteractiveTranscript(reconciledTerminal, output, trackedRunStatus);
       this._applyStatusUpdate(reconciledTerminal, trackedRunStatus, {
         exitCode: reconciledTerminal.activeRun?.exitCode ?? null,
         attention,
         runOutput: reconciledTerminal.activeRun?.outputText || output
+      });
+      this._notifyManagedRootSettledActivity(reconciledTerminal, trackedRunStatus, {
+        previousStatus,
+        attention,
+        runOutput: reconciledTerminal.activeRun?.outputText || output,
+        transcriptSync
       });
       return trackedRunStatus;
     }
@@ -4701,10 +4770,17 @@ class PersistentSessionManager extends EventEmitter {
     if (detector) {
       const detectedStatus = detector.detectStatus(output);
       this._recordRootOutputSnapshot(reconciledTerminal, output, { detectedStatus });
-      this._syncInteractiveTranscript(reconciledTerminal, output, detectedStatus);
+      const previousStatus = reconciledTerminal.status;
+      const transcriptSync = this._syncInteractiveTranscript(reconciledTerminal, output, detectedStatus);
 
       // Update cached status
       this._applyStatusUpdate(reconciledTerminal, detectedStatus, { attention, output });
+      this._notifyManagedRootSettledActivity(reconciledTerminal, detectedStatus, {
+        previousStatus,
+        attention,
+        output,
+        transcriptSync
+      });
 
       return detectedStatus;
     }

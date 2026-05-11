@@ -139,10 +139,88 @@ async function testManagedRootStatusTransitionDispatch() {
   assert.strictEqual(delivered.length, 1, 'worker transitions should not trigger managed-root notifications');
 }
 
+async function testManagedRootFastSettledTurnDispatch() {
+  const delivered = [];
+  const manager = new PersistentSessionManager({
+    managedRootNotificationMonitor: false,
+    managedRootNotifier: {
+      isEnabled: () => true,
+      shouldNotifyStatus: (status) => status === TerminalStatus.IDLE,
+      notifyManagedRootStatus: async (payload) => {
+        delivered.push(payload);
+        return [{ ok: true, channel: 'test' }];
+      }
+    }
+  });
+
+  const managedRoot = {
+    terminalId: 'term-fast-root',
+    rootSessionId: 'root-fast',
+    adapter: 'codex-cli',
+    role: 'main',
+    sessionKind: 'main',
+    sessionMetadata: {
+      managedLaunch: true
+    },
+    status: TerminalStatus.IDLE,
+    workDir: '/tmp/project',
+    effectiveModel: 'gpt-5.4-mini',
+    effectiveEffort: 'low'
+  };
+
+  manager._notifyManagedRootSettledActivity(managedRoot, TerminalStatus.IDLE, {
+    previousStatus: TerminalStatus.IDLE,
+    output: '› Reply.\n\n• Done.',
+    transcriptSync: {
+      insertedAssistantMessage: 'msg-assistant-1',
+      completedTurn: {
+        user: 'Reply.',
+        assistant: 'Done.'
+      }
+    }
+  });
+  await new Promise((resolve) => setImmediate(resolve));
+
+  assert.strictEqual(delivered.length, 1);
+  assert.strictEqual(delivered[0].rootSessionId, 'root-fast');
+  assert.strictEqual(delivered[0].trigger, 'settled_activity');
+  assert.strictEqual(delivered[0].previousStatus, TerminalStatus.IDLE);
+  assert(delivered[0].summary.includes('Done.'));
+
+  manager._notifyManagedRootSettledActivity(managedRoot, TerminalStatus.IDLE, {
+    previousStatus: TerminalStatus.IDLE,
+    output: '› Reply.\n\n• Done.',
+    transcriptSync: {
+      insertedAssistantMessage: 'msg-assistant-1',
+      completedTurn: {
+        user: 'Reply.',
+        assistant: 'Done.'
+      }
+    }
+  });
+  await new Promise((resolve) => setImmediate(resolve));
+  assert.strictEqual(delivered.length, 1, 'same assistant message should not notify twice');
+
+  manager._notifyManagedRootSettledActivity(managedRoot, TerminalStatus.IDLE, {
+    previousStatus: TerminalStatus.PROCESSING,
+    output: '› Reply again.\n\n• Done again.',
+    transcriptSync: {
+      insertedAssistantMessage: 'msg-assistant-2',
+      completedTurn: {
+        user: 'Reply again.',
+        assistant: 'Done again.'
+      }
+    }
+  });
+  await new Promise((resolve) => setImmediate(resolve));
+  assert.strictEqual(delivered.length, 1, 'observed processing transitions are handled by status-change dispatch');
+}
+
 async function run() {
   await testNotificationConfigDefaults();
   await testWebhookAndTelegramDelivery();
   await testManagedRootStatusTransitionDispatch();
+  await testManagedRootFastSettledTurnDispatch();
   console.log('✅ Managed root notification config, delivery, and status dispatch work');
 }
 
