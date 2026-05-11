@@ -36,6 +36,7 @@ const {
   getConfiguredApiKeySource,
   configureAuth,
   ensureLocalApiKey,
+  validateLocalConsoleLoginToken,
   isLoopbackHost,
   isUnauthenticatedLocalhostModeEnabled,
   assertAuthConfigurationForHost
@@ -148,6 +149,11 @@ function buildApiCorsPolicy() {
 
 function isDashboardEnvMutationDisabled() {
   return process.env[DASHBOARD_ENV_MUTATION_DISABLED_ENV] === '1';
+}
+
+function isLoopbackRequest(req) {
+  return isLoopbackHost(req.socket?.remoteAddress)
+    || isLoopbackHost(req.ip);
 }
 
 function getDashboardEnvMutationAllowlist(adapterName) {
@@ -938,6 +944,54 @@ class AgentServer {
     // Serve live orchestration console
     app.get('/console', (req, res) => {
       res.sendFile(path.join(__dirname, '../../public/console.html'));
+    });
+
+    app.post('/auth/local-console/exchange', (req, res) => {
+      try {
+        if (!isLoopbackRequest(req)) {
+          return res.status(403).json({
+            error: {
+              code: 'loopback_required',
+              message: 'Local console login tokens can only be exchanged from a loopback client.'
+            }
+          });
+        }
+
+        if (isUnauthenticatedLocalhostModeEnabled()) {
+          return res.json({
+            apiKey: null,
+            unauthenticatedLocalhost: true
+          });
+        }
+
+        const token = String(req.body?.token || req.query?.token || '').trim();
+        const validation = validateLocalConsoleLoginToken(token);
+        if (!validation.valid) {
+          return res.status(401).json({
+            error: {
+              code: 'local_console_login_failed',
+              message: `Local console login token rejected: ${validation.reason}`
+            }
+          });
+        }
+
+        const apiKey = getConfiguredApiKey();
+        if (!apiKey) {
+          return res.status(401).json({
+            error: {
+              code: 'authentication_required',
+              message: 'Authentication required. Configure CLIAGENTS_API_KEY or restart the broker so it creates a local token.'
+            }
+          });
+        }
+
+        res.json({
+          apiKey,
+          expiresAt: validation.expiresAt
+        });
+      } catch (error) {
+        sendError(res, 'INTERNAL_ERROR', { message: error.message });
+      }
     });
 
     // Get status for all adapters

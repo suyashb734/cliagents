@@ -10,7 +10,13 @@ const path = require('path');
 const WebSocket = require('ws');
 const AgentServer = require('../src/server');
 const { callCliagentsJson } = require('../src/index');
-const { configureAuth, getLocalApiKeyFilePaths, readLocalApiKey } = require('../src/server/auth');
+const {
+  configureAuth,
+  createLocalConsoleLoginToken,
+  getLocalApiKeyFilePaths,
+  readLocalApiKey,
+  validateLocalConsoleLoginToken
+} = require('../src/server/auth');
 
 const AUTH_ENV_KEYS = [
   'CLIAGENTS_API_KEY',
@@ -109,6 +115,23 @@ async function request(baseUrl, path, headers = {}) {
   return { status: response.status, body };
 }
 
+async function postJson(baseUrl, requestPath, body, headers = {}) {
+  const response = await fetch(baseUrl + requestPath, {
+    method: 'POST',
+    headers: {
+      'content-type': 'application/json',
+      ...headers
+    },
+    body: JSON.stringify(body || {})
+  });
+  const text = await response.text();
+  let parsed = text;
+  try {
+    parsed = JSON.parse(text);
+  } catch {}
+  return { status: response.status, body: parsed };
+}
+
 async function expectWebSocketUnauthorized(wsUrl) {
   await new Promise((resolve, reject) => {
     const ws = new WebSocket(wsUrl);
@@ -203,6 +226,53 @@ async function testLocalBrokerTokenAuthenticatesSameMachineCli() {
     assert(Array.isArray(cliResult.adapters), 'Expected local CLI JSON client to authenticate with the local broker token');
   } finally {
     await stopServerHandle(serverHandle);
+    restoreAuthEnv(envSnapshot);
+  }
+}
+
+async function testLocalConsoleLoginTokenExchange() {
+  const envSnapshot = snapshotAuthEnv();
+  let serverHandle = null;
+
+  try {
+    applyAuthEnv({});
+    serverHandle = await startServer();
+    process.env.CLIAGENTS_DATA_DIR = serverHandle.dataDir;
+    process.env.CLIAGENTS_URL = serverHandle.baseUrl;
+
+    const localApiKey = readLocalApiKey({ dataDir: serverHandle.dataDir });
+    const loginToken = createLocalConsoleLoginToken({ ttlMs: 30000 });
+    assert(loginToken, 'Expected local console login token to be created from the local broker token');
+
+    const exchanged = await postJson(serverHandle.baseUrl, '/auth/local-console/exchange', {
+      token: loginToken
+    });
+    assert.strictEqual(exchanged.status, 200, `Expected local console login exchange success, got ${exchanged.status}`);
+    assert.strictEqual(exchanged.body?.apiKey, localApiKey, 'Expected exchange to return the current broker API key');
+
+    const rejected = await postJson(serverHandle.baseUrl, '/auth/local-console/exchange', {
+      token: `${loginToken}bad`
+    });
+    assert.strictEqual(rejected.status, 401, `Expected invalid local console login token to be rejected, got ${rejected.status}`);
+  } finally {
+    await stopServerHandle(serverHandle);
+    restoreAuthEnv(envSnapshot);
+  }
+}
+
+async function testLocalConsoleLoginTokensExpire() {
+  const envSnapshot = snapshotAuthEnv();
+
+  try {
+    applyAuthEnv({ CLIAGENTS_API_KEY: 'local-console-expiry-secret' });
+    const token = createLocalConsoleLoginToken({ now: 1000, ttlMs: 1000 });
+    assert(token, 'Expected token to be created from env API key');
+    const fresh = validateLocalConsoleLoginToken(token, { now: 1500 });
+    assert.strictEqual(fresh.valid, true, 'Expected token to validate before expiry');
+    const expired = validateLocalConsoleLoginToken(token, { now: 2500 });
+    assert.strictEqual(expired.valid, false, 'Expected token to fail after expiry');
+    assert.strictEqual(expired.reason, 'expired');
+  } finally {
     restoreAuthEnv(envSnapshot);
   }
 }
@@ -320,6 +390,8 @@ async function run() {
     { name: 'HTTP auth is fail-closed by default', fn: testHttpFailClosedByDefault },
     { name: 'WebSocket auth is fail-closed by default', fn: testWebSocketFailClosedByDefault },
     { name: 'local broker token authenticates same-machine CLI calls', fn: testLocalBrokerTokenAuthenticatesSameMachineCli },
+    { name: 'local console login token exchanges on loopback', fn: testLocalConsoleLoginTokenExchange },
+    { name: 'local console login tokens expire', fn: testLocalConsoleLoginTokensExpire },
     { name: 'API key env aliases are parity-compatible', fn: testEnvAliasParity },
     { name: 'localhost unauthenticated override rejects non-loopback bind host', fn: testLocalhostOverrideRejectsNonLoopbackHost },
     { name: 'CLI auth failure explains local-token migration', fn: testCliAuthFailureExplainsLocalTokenMigration },

@@ -34,7 +34,11 @@ const SessionWrapper = require('./utils/session-wrapper');
 
 // Server
 const AgentServer = require('./server');
-const { getConfiguredApiKey, getLocalApiKeyFilePaths } = require('./server/auth');
+const {
+  createLocalConsoleLoginToken,
+  getConfiguredApiKey,
+  getLocalApiKeyFilePaths
+} = require('./server/auth');
 
 // Transcription Service
 const { transcribeAudio } = require('./services/transcriptionService');
@@ -550,6 +554,124 @@ function printAttachRootUsage() {
   console.log('  --workdir <path>              Limit --latest to a specific working directory');
   console.log('  --archived                    Include archived legacy roots when searching');
   console.log('  --print-only                  Print the attach command without attaching');
+}
+
+function parseConsoleArgs(rawArgs = []) {
+  const args = [...rawArgs];
+  const parsed = {
+    rootSessionId: null,
+    terminalId: null,
+    open: true,
+    printUrl: false,
+    loginTtlMs: 60 * 1000
+  };
+
+  while (args.length > 0) {
+    const token = args.shift();
+    switch (token) {
+      case '--root':
+      case '--root-session':
+        parsed.rootSessionId = args.shift() || null;
+        break;
+      case '--terminal':
+        parsed.terminalId = args.shift() || null;
+        break;
+      case '--no-open':
+        parsed.open = false;
+        break;
+      case '--print-url':
+        parsed.printUrl = true;
+        break;
+      case '--ttl-ms': {
+        const value = Number.parseInt(String(args.shift() || '').trim(), 10);
+        if (!Number.isInteger(value) || value < 1000) {
+          throw new Error('Invalid --ttl-ms value; expected at least 1000');
+        }
+        parsed.loginTtlMs = value;
+        break;
+      }
+      case '--help':
+      case '-h':
+        parsed.help = true;
+        break;
+      default:
+        throw new Error(`Unknown console argument: ${token}`);
+    }
+  }
+
+  return parsed;
+}
+
+function printConsoleUsage() {
+  console.log('Usage: cliagents console [options]');
+  console.log('');
+  console.log('Options:');
+  console.log('  --root <id>                   Focus a root session in the console');
+  console.log('  --terminal <id>               Focus a terminal in the console');
+  console.log('  --no-open                     Print the URL without opening a browser');
+  console.log('  --print-url                   Print the URL even when opening a browser');
+  console.log('  --ttl-ms <ms>                 Local login token TTL (default: 60000)');
+}
+
+function buildConsoleLaunchUrl(options = {}) {
+  const url = new URL('/console', options.baseUrl || getCliagentsBaseUrl());
+  if (options.rootSessionId) {
+    url.searchParams.set('root', options.rootSessionId);
+  }
+  if (options.terminalId) {
+    url.searchParams.set('terminal', options.terminalId);
+  }
+  if (options.localLoginToken) {
+    url.searchParams.set('login', options.localLoginToken);
+  }
+  return url.toString();
+}
+
+function openUrlInBrowser(url, dependencies = {}) {
+  const spawn = dependencies.spawnSync || spawnSync;
+  const platform = dependencies.platform || process.platform;
+  const command = platform === 'darwin'
+    ? 'open'
+    : (platform === 'win32' ? 'cmd' : 'xdg-open');
+  const args = platform === 'win32'
+    ? ['/c', 'start', '', url]
+    : [url];
+  return spawn(command, args, {
+    stdio: 'ignore',
+    detached: true
+  });
+}
+
+async function handleConsoleCommand(rawArgs = [], dependencies = {}) {
+  const options = parseConsoleArgs(rawArgs);
+  if (options.help) {
+    printConsoleUsage();
+    return;
+  }
+
+  const loginToken = createLocalConsoleLoginToken({ ttlMs: options.loginTtlMs });
+  const consoleUrl = buildConsoleLaunchUrl({
+    rootSessionId: options.rootSessionId,
+    terminalId: options.terminalId,
+    localLoginToken: loginToken
+  });
+
+  if (options.printUrl || !options.open) {
+    console.log(consoleUrl);
+  }
+
+  if (options.open) {
+    const result = openUrlInBrowser(consoleUrl, dependencies);
+    if (result.error) {
+      throw result.error;
+    }
+    if (typeof result.status === 'number' && result.status !== 0) {
+      throw new Error(`Browser open command exited with status ${result.status}`);
+    }
+    if (!options.printUrl) {
+      console.log(`Opened cliagents console: ${consoleUrl.replace(/([?&]login=)[^&]+/, '$1[redacted]')}`);
+    }
+  }
 }
 
 function parseServePort(value, fallback = 4001) {
@@ -2525,6 +2647,7 @@ module.exports = {
   handleListRootsCommand,
   handleAttachRootCommand,
   handleAdoptCommand,
+  handleConsoleCommand,
   handleServeCommand,
   callCliagentsJson,
   listAdapterModels,
@@ -2532,8 +2655,11 @@ module.exports = {
   getOperatorRootSession,
   parseAdoptArgs,
   parseAttachRootArgs,
+  parseConsoleArgs,
   parseListRootsArgs,
   parseServeArgs,
+  buildConsoleLaunchUrl,
+  openUrlInBrowser,
   adoptManagedRootSession,
 
   // Quick-start factory
@@ -2581,6 +2707,11 @@ if (require.main === module) {
 
   if (command === 'attach-root') {
     runCliCommand(handleAttachRootCommand(args.slice(1)), 'attach-root');
+    return;
+  }
+
+  if (command === 'console') {
+    runCliCommand(handleConsoleCommand(args.slice(1)), 'console');
     return;
   }
 

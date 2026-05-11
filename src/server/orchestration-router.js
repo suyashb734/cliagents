@@ -3897,22 +3897,33 @@ function createOrchestrationRouter(context) {
 
       res.json({
         count: terminals.length,
-        terminals: terminals.map(t => ({
-          terminalId: t.terminalId,
-          adapter: t.adapter,
-          agentProfile: t.agentProfile,
-          role: t.role,
-          status: t.status,
-          taskState: t.taskState || t.status,
-          processState: t.processState || null,
-          createdAt: t.createdAt,
-          lastActive: t.lastActive,
-          runtimeHost: t.runtimeHost || null,
-          runtimeId: t.runtimeId || null,
-          runtimeCapabilities: t.runtimeCapabilities || [],
-          runtimeFidelity: t.runtimeFidelity || null,
-          runtime: t.runtime || null
-        }))
+        terminals: terminals.map(t => {
+          const processState = t.processState || null;
+          const status = t.status || null;
+          return {
+            terminalId: t.terminalId,
+            adapter: t.adapter,
+            agentProfile: t.agentProfile,
+            role: t.role,
+            status,
+            taskState: t.taskState || status,
+            processState,
+            live: processState === 'alive' && status !== 'orphaned',
+            currentCommand: t.currentCommand || null,
+            createdAt: t.createdAt,
+            lastActive: t.lastActive,
+            rootSessionId: t.rootSessionId || t.root_session_id || null,
+            parentSessionId: t.parentSessionId || t.parent_session_id || null,
+            sessionKind: t.sessionKind || t.session_kind || null,
+            sessionName: t.sessionName || t.session_name || null,
+            workDir: t.workDir || t.work_dir || null,
+            runtimeHost: t.runtimeHost || null,
+            runtimeId: t.runtimeId || null,
+            runtimeCapabilities: t.runtimeCapabilities || [],
+            runtimeFidelity: t.runtimeFidelity || null,
+            runtime: t.runtime || null
+          };
+        })
       });
 
     } catch (error) {

@@ -18,6 +18,8 @@ const CANONICAL_API_KEY_ENV = 'CLIAGENTS_API_KEY';
 const LOCAL_API_KEY_FILE_ENV = 'CLIAGENTS_LOCAL_API_KEY_FILE';
 const DATA_DIR_ENV = 'CLIAGENTS_DATA_DIR';
 const LOCAL_API_KEY_FILENAME = 'local-api-key';
+const LOCAL_CONSOLE_LOGIN_VERSION = 'v1';
+const DEFAULT_LOCAL_CONSOLE_LOGIN_TTL_MS = 60 * 1000;
 
 let runtimeAuthConfig = {
   localApiKeyFilePath: null
@@ -136,6 +138,101 @@ function readLocalApiKey(options = {}) {
     }
   }
   return null;
+}
+
+function encodeJsonBase64Url(value) {
+  return Buffer.from(JSON.stringify(value), 'utf8').toString('base64url');
+}
+
+function decodeJsonBase64Url(value) {
+  return JSON.parse(Buffer.from(String(value || ''), 'base64url').toString('utf8'));
+}
+
+function signLocalConsoleLoginPayload(encodedPayload, apiKey) {
+  return crypto
+    .createHmac('sha256', apiKey)
+    .update(`${LOCAL_CONSOLE_LOGIN_VERSION}.${encodedPayload}`)
+    .digest('base64url');
+}
+
+function createLocalConsoleLoginToken(options = {}) {
+  const apiKey = normalizeEnvString(options.apiKey) || getConfiguredApiKey();
+  if (!apiKey) {
+    return null;
+  }
+
+  const now = Number.isFinite(options.now) ? Number(options.now) : Date.now();
+  const ttlMs = Number.isFinite(options.ttlMs)
+    ? Math.max(1, Number(options.ttlMs))
+    : DEFAULT_LOCAL_CONSOLE_LOGIN_TTL_MS;
+  const payload = {
+    purpose: 'local-console-login',
+    expiresAt: now + ttlMs,
+    nonce: crypto.randomBytes(16).toString('base64url')
+  };
+  const encodedPayload = encodeJsonBase64Url(payload);
+  const signature = signLocalConsoleLoginPayload(encodedPayload, apiKey);
+  return `${LOCAL_CONSOLE_LOGIN_VERSION}.${encodedPayload}.${signature}`;
+}
+
+function validateLocalConsoleLoginToken(token, options = {}) {
+  const apiKey = normalizeEnvString(options.apiKey) || getConfiguredApiKey();
+  if (!apiKey) {
+    return {
+      valid: false,
+      reason: 'missing_api_key'
+    };
+  }
+
+  const parts = String(token || '').trim().split('.');
+  if (parts.length !== 3 || parts[0] !== LOCAL_CONSOLE_LOGIN_VERSION) {
+    return {
+      valid: false,
+      reason: 'malformed_token'
+    };
+  }
+
+  const [, encodedPayload, signature] = parts;
+  const expectedSignature = signLocalConsoleLoginPayload(encodedPayload, apiKey);
+  if (!constantTimeCompare(signature, expectedSignature)) {
+    return {
+      valid: false,
+      reason: 'invalid_signature'
+    };
+  }
+
+  let payload = null;
+  try {
+    payload = decodeJsonBase64Url(encodedPayload);
+  } catch {
+    return {
+      valid: false,
+      reason: 'invalid_payload'
+    };
+  }
+
+  if (payload?.purpose !== 'local-console-login') {
+    return {
+      valid: false,
+      reason: 'invalid_purpose'
+    };
+  }
+
+  const now = Number.isFinite(options.now) ? Number(options.now) : Date.now();
+  const expiresAt = Number(payload.expiresAt || 0);
+  if (!Number.isFinite(expiresAt) || expiresAt <= now) {
+    return {
+      valid: false,
+      reason: 'expired',
+      expiresAt
+    };
+  }
+
+  return {
+    valid: true,
+    expiresAt,
+    payload
+  };
 }
 
 function ensureLocalApiKey(options = {}) {
@@ -288,6 +385,7 @@ function assertAuthConfigurationForHost(host) {
 function authenticateRequest(req, res, next) {
   // Allow health check and static files without auth
   if (req.path === '/health' ||
+      req.path === '/auth/local-console/exchange' ||
       req.path === '/' ||
       req.path === '/index.html' ||
       req.path === '/console' ||
@@ -393,6 +491,8 @@ module.exports = {
   getLocalApiKeyFilePath,
   getLocalApiKeyFilePaths,
   readLocalApiKey,
+  createLocalConsoleLoginToken,
+  validateLocalConsoleLoginToken,
   isLoopbackHost,
   isUnauthenticatedLocalhostModeEnabled,
   assertAuthConfigurationForHost

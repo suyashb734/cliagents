@@ -825,6 +825,41 @@
       background: rgba(139, 148, 158, 0.08);
     }
 
+    .live-state-pill {
+      display: inline-flex;
+      align-items: center;
+      gap: 6px;
+      padding: 4px 10px;
+      border-radius: 999px;
+      border: 1px solid var(--border-color);
+      font-size: 11px;
+      font-weight: 800;
+      letter-spacing: 0.04em;
+      text-transform: uppercase;
+      white-space: nowrap;
+    }
+
+    .live-state-pill::before {
+      content: '';
+      width: 7px;
+      height: 7px;
+      border-radius: 50%;
+      background: currentColor;
+      box-shadow: 0 0 0 3px rgba(139, 148, 158, 0.1);
+    }
+
+    .live-state-live {
+      color: var(--accent-green);
+      border-color: rgba(63, 185, 80, 0.35);
+      background: rgba(63, 185, 80, 0.08);
+    }
+
+    .live-state-offline {
+      color: var(--text-secondary);
+      border-color: rgba(139, 148, 158, 0.28);
+      background: rgba(139, 148, 158, 0.08);
+    }
+
     .status-completed,
     .status-idle { color: var(--accent-green); border-color: rgba(63, 185, 80, 0.35); }
     .status-processing,
@@ -1467,6 +1502,7 @@
       rootOutputFormat: coerceOutputFormat(urlState.get('rootFormat'), 'ansi'),
       mobileRootView: new Set(['terminal', 'overview', 'history']).has(urlState.get('mobileView')) ? urlState.get('mobileView') : 'terminal',
       mobileFocusedTerminalId: urlState.get('mobileTerminal') || null,
+      localLoginToken: urlState.get('login') || null,
       authError: null,
       selectedRootSessionId: urlState.get('root') || null,
       selectedTerminalId: urlState.get('terminal') || null,
@@ -1724,6 +1760,19 @@
     function renderOperatorStatePill(descriptor) {
       const safeDescriptor = descriptor || getOperatorStateDescriptor();
       return `<span class="operator-state-pill operator-state-${escapeHtml(safeDescriptor.tone || 'unknown')}">${escapeHtml(safeDescriptor.label || 'Unknown')}</span>`;
+    }
+
+    function isTerminalLive(terminal = {}) {
+      if (typeof terminal?.live === 'boolean') {
+        return terminal.live;
+      }
+      const processState = String(terminal?.processState || terminal?.process_state || '').trim().toLowerCase();
+      const status = String(terminal?.status || '').trim().toLowerCase();
+      return processState === 'alive' && status !== 'orphaned';
+    }
+
+    function renderLiveStatePill(live) {
+      return `<span class="live-state-pill live-state-${live ? 'live' : 'offline'}">${live ? 'Live' : 'Not live'}</span>`;
     }
 
     function escapeHtml(value) {
@@ -2295,6 +2344,7 @@
                     <div class="agent-wall-subtitle">${escapeHtml(root.rootSessionId)}</div>
                   </div>
                   <div class="row-badges">
+                    ${renderLiveStatePill(root.live === true)}
                     ${renderOperatorStatePill(operatorState)}
                     <span class="${statusClass(rootStatus)}">${escapeHtml(rootStatus)}</span>
                   </div>
@@ -2376,6 +2426,52 @@
       refreshAll();
     }
 
+    async function exchangeLocalConsoleLogin() {
+      if (!state.localLoginToken) {
+        return;
+      }
+
+      try {
+        const response = await fetch('/auth/local-console/exchange', {
+          method: 'POST',
+          headers: {
+            'Content-Type': 'application/json'
+          },
+          body: JSON.stringify({
+            token: state.localLoginToken
+          })
+        });
+        const text = await response.text();
+        let data = null;
+        try {
+          data = text ? JSON.parse(text) : null;
+        } catch {
+          data = text;
+        }
+
+        if (!response.ok) {
+          const message = data?.error?.message || data?.message || text || `${response.status} ${response.statusText}`;
+          throw new Error(message);
+        }
+
+        if (data?.apiKey) {
+          state.apiKey = data.apiKey;
+          localStorage.setItem('cliagents.console.apiKey', state.apiKey);
+          elements.apiKeyInput.value = state.apiKey;
+        } else if (data?.unauthenticatedLocalhost) {
+          state.apiKey = '';
+          localStorage.removeItem('cliagents.console.apiKey');
+          elements.apiKeyInput.value = '';
+        }
+        state.authError = null;
+      } catch (error) {
+        state.authError = `Local console login failed: ${error.message}`;
+      } finally {
+        state.localLoginToken = null;
+        syncUrlState();
+      }
+    }
+
     async function reconcileStaleRuns() {
       try {
         const result = await fetchJson('/orchestration/runs/reconcile', {
@@ -2420,6 +2516,7 @@
         return;
       }
 
+      const liveCount = state.terminals.filter(isTerminalLive).length;
       const staleCount = state.terminals.filter(isTerminalStale).length;
       const waitingCount = state.terminals.filter((terminal) => getOperatorStateDescriptor(terminal, {
         stale: isTerminalStale(terminal)
@@ -2429,7 +2526,7 @@
           stale: isTerminalStale(terminal)
         }).tone === 'working'
       )).length;
-      const summaryParts = [`${state.terminals.length} loaded`];
+      const summaryParts = [`${state.terminals.length} loaded`, `${liveCount} live`];
       if (workingCount > 0) {
         summaryParts.push(`${workingCount} working`);
       }
@@ -2446,25 +2543,36 @@
         return;
       }
 
-      elements.terminalsList.innerHTML = state.terminals.map((terminal) => `
-        <div class="row ${terminal.terminalId === state.selectedTerminalId ? 'active' : ''} ${isTerminalStale(terminal) ? 'stale' : ''}" data-terminal-id="${terminal.terminalId}">
-          <div class="row-top">
-            <div class="row-title">${escapeHtml(terminal.agentProfile || terminal.terminalId)}</div>
-            <div class="row-badges">
-              ${renderOperatorStatePill(getOperatorStateDescriptor(terminal, { stale: isTerminalStale(terminal) }))}
-              <span class="${statusClass(terminal.status)}">${escapeHtml(terminal.status)}</span>
+      elements.terminalsList.innerHTML = state.terminals.map((terminal) => {
+        const live = isTerminalLive(terminal);
+        const stale = isTerminalStale(terminal);
+        const operatorState = getOperatorStateDescriptor(terminal, { stale });
+        return `
+          <div class="row ${terminal.terminalId === state.selectedTerminalId ? 'active' : ''} ${stale ? 'stale' : ''}" data-terminal-id="${terminal.terminalId}">
+            <div class="row-top">
+              <div class="row-title">${escapeHtml(terminal.agentProfile || terminal.terminalId)}</div>
+              <div class="row-badges">
+                ${renderLiveStatePill(live)}
+                ${renderOperatorStatePill(operatorState)}
+                <span class="${statusClass(terminal.status)}">${escapeHtml(terminal.status)}</span>
+              </div>
+            </div>
+            <div class="row-meta">
+              <div><strong>Operator:</strong> ${escapeHtml(operatorState.label)}</div>
+              <div><strong>Live process:</strong> ${escapeHtml(live ? 'yes' : 'no')}</div>
+              <div><strong>Process:</strong> ${escapeHtml(terminal.processState || 'unknown')}</div>
+              <div><strong>Adapter:</strong> ${escapeHtml(terminal.adapter)}</div>
+              <div><strong>Role:</strong> ${escapeHtml(terminal.role || 'n/a')}</div>
+              <div><strong>Kind:</strong> ${escapeHtml(terminal.sessionKind || 'n/a')}</div>
+              <div><strong>Root:</strong> ${escapeHtml(terminal.rootSessionId || 'n/a')}</div>
+              <div><strong>Runtime:</strong> ${escapeHtml(terminal.runtimeHost || terminal.runtime || 'n/a')}</div>
+              <div><strong>Created:</strong> ${escapeHtml(formatTimestamp(terminal.createdAt))}</div>
+              <div><strong>Last Active:</strong> ${escapeHtml(formatTimestamp(terminal.lastActive))}</div>
+              <div><strong>Health:</strong> ${escapeHtml(stale ? 'stale' : 'current')}</div>
             </div>
           </div>
-          <div class="row-meta">
-            <div><strong>Operator:</strong> ${escapeHtml(getOperatorStateDescriptor(terminal, { stale: isTerminalStale(terminal) }).label)}</div>
-            <div><strong>Adapter:</strong> ${escapeHtml(terminal.adapter)}</div>
-            <div><strong>Role:</strong> ${escapeHtml(terminal.role || 'n/a')}</div>
-            <div><strong>Created:</strong> ${escapeHtml(formatTimestamp(terminal.createdAt))}</div>
-            <div><strong>Last Active:</strong> ${escapeHtml(formatTimestamp(terminal.lastActive))}</div>
-            <div><strong>Health:</strong> ${escapeHtml(isTerminalStale(terminal) ? 'stale' : 'active')}</div>
-          </div>
-        </div>
-      `).join('');
+        `;
+      }).join('');
 
       elements.terminalsList.querySelectorAll('[data-terminal-id]').forEach((node) => {
         node.addEventListener('click', () => {
@@ -3133,6 +3241,7 @@
                     <div class="root-card-subtitle">${escapeHtml(root.rootSessionId)}</div>
                   </div>
                   <div class="card-badges">
+                    ${renderLiveStatePill(root.live === true)}
                     ${renderOperatorStatePill(operatorState)}
                     <span class="${statusClass(root.status || root.latestEventType || 'unknown')}">${escapeHtml(root.status || root.latestEventType || 'unknown')}</span>
                   </div>
@@ -3710,7 +3819,10 @@
                 <div class="mobile-root-summary-title">${escapeHtml(rootTitle)}</div>
                 <div class="mobile-root-summary-subtitle">${escapeHtml(root.rootSessionId || 'unknown')}</div>
               </div>
-              ${renderOperatorStatePill(operatorState)}
+              <div class="row-badges">
+                ${renderLiveStatePill(root.live === true)}
+                ${renderOperatorStatePill(operatorState)}
+              </div>
             </div>
             <div class="detail-grid">
               <div>
@@ -3724,6 +3836,10 @@
               <div>
                 <div class="detail-label">Mode</div>
                 <div>${escapeHtml(root.rootMode || 'n/a')}</div>
+              </div>
+              <div>
+                <div class="detail-label">Live</div>
+                <div>${escapeHtml(root.live === true ? 'yes' : 'no')}</div>
               </div>
               <div>
                 <div class="detail-label">Last Event</div>
@@ -3750,7 +3866,10 @@
                 <div class="mobile-root-summary-title">${escapeHtml(rootTitle)}</div>
                 <div class="mobile-root-summary-subtitle">Latest activity stays at the bottom. Scroll up for older history.</div>
               </div>
-              ${renderOperatorStatePill(operatorState)}
+              <div class="row-badges">
+                ${renderLiveStatePill(root.live === true)}
+                ${renderOperatorStatePill(operatorState)}
+              </div>
             </div>
             <div class="timeline-list">
               ${events.length ? events.map((event) => `
@@ -4441,10 +4560,15 @@
       await refreshSelectedRoom();
     });
 
-    reconnectSocket();
-    syncUrlState();
-    refreshAll();
-    startPolling();
+    async function bootConsole() {
+      await exchangeLocalConsoleLogin();
+      reconnectSocket();
+      syncUrlState();
+      refreshAll();
+      startPolling();
+    }
+
+    bootConsole();
   </script>
 </body>
 </html>
