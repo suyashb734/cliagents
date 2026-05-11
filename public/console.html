@@ -379,6 +379,154 @@
       gap: 8px;
     }
 
+    .agent-wall {
+      margin-bottom: 24px;
+      background:
+        radial-gradient(circle at top left, rgba(88, 166, 255, 0.14), transparent 36%),
+        radial-gradient(circle at top right, rgba(63, 185, 80, 0.10), transparent 32%),
+        var(--bg-secondary);
+    }
+
+    .agent-wall-grid {
+      display: grid;
+      grid-template-columns: repeat(auto-fit, minmax(280px, 1fr));
+      gap: 14px;
+      padding: 14px;
+    }
+
+    .agent-wall-card {
+      display: grid;
+      gap: 12px;
+      border: 1px solid var(--border-color);
+      border-radius: 14px;
+      padding: 14px;
+      background: rgba(13, 17, 23, 0.88);
+      cursor: pointer;
+      transition: border-color 120ms ease, background 120ms ease, transform 120ms ease;
+    }
+
+    .agent-wall-card:hover,
+    .agent-wall-card.active {
+      border-color: rgba(88, 166, 255, 0.58);
+      background: rgba(88, 166, 255, 0.09);
+      transform: translateY(-1px);
+    }
+
+    .agent-wall-working {
+      border-color: rgba(88, 166, 255, 0.42);
+    }
+
+    .agent-wall-ready {
+      border-color: rgba(63, 185, 80, 0.34);
+    }
+
+    .agent-wall-waiting,
+    .agent-wall-attention,
+    .agent-wall-stale {
+      border-color: rgba(210, 153, 34, 0.48);
+      background: rgba(210, 153, 34, 0.08);
+    }
+
+    .agent-wall-head {
+      display: flex;
+      justify-content: space-between;
+      align-items: flex-start;
+      gap: 12px;
+    }
+
+    .agent-wall-title-wrap {
+      min-width: 0;
+      display: grid;
+      gap: 4px;
+    }
+
+    .agent-wall-title {
+      font-size: 14px;
+      font-weight: 700;
+      word-break: break-word;
+    }
+
+    .agent-wall-subtitle {
+      color: var(--text-secondary);
+      font-size: 12px;
+      word-break: break-all;
+    }
+
+    .agent-wall-metrics {
+      display: grid;
+      grid-template-columns: repeat(4, minmax(0, 1fr));
+      gap: 8px;
+    }
+
+    .agent-wall-metric {
+      border: 1px solid rgba(48, 54, 61, 0.78);
+      border-radius: 10px;
+      padding: 9px 10px;
+      background: rgba(22, 27, 34, 0.72);
+    }
+
+    .agent-wall-metric-value {
+      font-size: 18px;
+      font-weight: 700;
+      line-height: 1;
+    }
+
+    .agent-wall-metric-label {
+      margin-top: 6px;
+      color: var(--text-secondary);
+      font-size: 11px;
+      text-transform: uppercase;
+      letter-spacing: 0.45px;
+    }
+
+    .agent-wall-meta {
+      display: grid;
+      grid-template-columns: repeat(2, minmax(0, 1fr));
+      gap: 6px 12px;
+      color: var(--text-secondary);
+      font-size: 12px;
+    }
+
+    .agent-wall-meta strong {
+      color: var(--text-primary);
+      font-weight: 600;
+    }
+
+    .agent-wall-children {
+      display: flex;
+      flex-wrap: wrap;
+      gap: 6px;
+    }
+
+    .agent-child-pill {
+      display: inline-flex;
+      align-items: center;
+      gap: 6px;
+      max-width: 100%;
+      padding: 5px 8px;
+      border: 1px solid rgba(48, 54, 61, 0.9);
+      border-radius: 999px;
+      background: rgba(22, 27, 34, 0.82);
+      color: var(--text-secondary);
+      font-size: 12px;
+    }
+
+    .agent-child-pill strong {
+      color: var(--text-primary);
+      font-weight: 600;
+      overflow: hidden;
+      text-overflow: ellipsis;
+      white-space: nowrap;
+      max-width: 140px;
+    }
+
+    .agent-wall-summary {
+      color: var(--text-secondary);
+      font-size: 12px;
+      line-height: 1.5;
+      word-break: break-word;
+    }
+
     .hierarchy-flow {
       display: grid;
       gap: 10px;
@@ -1110,6 +1258,19 @@
       </div>
     </div>
 
+    <section class="card agent-wall">
+      <div class="panel-header">
+        <div>
+          <div class="panel-title">Agent Wall</div>
+          <div class="panel-subtitle">All visible root agents at once, with current status and child-session rollups.</div>
+        </div>
+        <div class="panel-actions">
+          <span class="panel-subtitle" id="agent-wall-summary">Loading...</span>
+        </div>
+      </div>
+      <div id="agent-wall-list"></div>
+    </section>
+
     <section class="card mobile-root-shell">
       <div class="panel-header">
         <div>
@@ -1330,6 +1491,8 @@
       statDiscussions: document.getElementById('stat-discussions'),
       statWs: document.getElementById('stat-ws'),
       statSelection: document.getElementById('stat-selection'),
+      agentWallSummary: document.getElementById('agent-wall-summary'),
+      agentWallList: document.getElementById('agent-wall-list'),
       terminalsSummary: document.getElementById('terminals-summary'),
       terminalsList: document.getElementById('terminals-list'),
       includeArchivedRoots: document.getElementById('include-archived-roots'),
@@ -1938,6 +2101,217 @@
       return filtered.sort(compareSessionRoots);
     }
 
+    function getRootAgentAdapter(root, snapshot) {
+      return root?.adapter
+        || snapshot?.rootSession?.adapter
+        || getRootControllerSession(snapshot)?.adapter
+        || 'n/a';
+    }
+
+    function getChildStatusDescriptor(session) {
+      const trackedTerminal = getTrackedTerminal(session?.terminalId);
+      const subject = trackedTerminal || session || {};
+      const status = trackedTerminal?.status
+        || session?.terminalStatus
+        || session?.status
+        || session?.lastEventType
+        || 'unknown';
+      return {
+        status,
+        descriptor: getOperatorStateDescriptor({ ...subject, status }, {
+          stale: trackedTerminal ? isTerminalStale(trackedTerminal) : false,
+          live: subject?.live
+        })
+      };
+    }
+
+    function getRootChildRollup(root, snapshot) {
+      const childSessions = getRootChildSessions(snapshot);
+      const counts = root?.counts || {};
+      const rootStatus = getRootStatus(root);
+      const rootIsWorking = WORKING_TERMINAL_STATUSES.has(rootStatus) || ACTIVE_ROOT_STATUSES.has(rootStatus);
+      const rootIsIdle = rootStatus === 'idle';
+      const rootIsLive = root?.live === true;
+      const fallbackSessions = Math.max(0, Number(counts.sessions || 0) - 1);
+      const fallbackTerminals = Math.max(0, Number(counts.terminals || 0) - (root?.interactiveTerminalId ? 1 : 0));
+
+      const rollup = {
+        total: Math.max(childSessions.length, fallbackSessions, fallbackTerminals),
+        terminalChildren: fallbackTerminals,
+        running: 0,
+        waiting: 0,
+        idle: 0,
+        attention: 0,
+        live: 0,
+        completed: 0
+      };
+
+      if (childSessions.length > 0) {
+        rollup.terminalChildren = childSessions.filter((session) => session?.terminalId).length;
+        for (const session of childSessions) {
+          const { status, descriptor } = getChildStatusDescriptor(session);
+          const normalizedStatus = String(status || '').toLowerCase();
+          if (descriptor.tone === 'working' || WORKING_TERMINAL_STATUSES.has(normalizedStatus)) {
+            rollup.running += 1;
+          } else if (descriptor.waiting || WAITING_TERMINAL_STATUSES.has(normalizedStatus)) {
+            rollup.waiting += 1;
+          } else if (descriptor.tone === 'attention' || ATTENTION_TERMINAL_STATUSES.has(normalizedStatus)) {
+            rollup.attention += 1;
+          } else if (normalizedStatus === 'idle') {
+            rollup.idle += 1;
+          } else if (normalizedStatus === 'completed') {
+            rollup.completed += 1;
+          }
+          if (session?.terminalStatus && !['completed', 'orphaned', 'destroyed'].includes(normalizedStatus)) {
+            rollup.live += 1;
+          }
+        }
+        return rollup;
+      }
+
+      rollup.running = Math.max(0, Number(counts.running || 0) - (rootIsWorking ? 1 : 0));
+      rollup.waiting = Math.max(0, Number(counts.blocked || 0));
+      rollup.idle = Math.max(0, Number(counts.idle || 0) - (rootIsIdle ? 1 : 0));
+      rollup.attention = Math.max(0, Number(counts.failed || 0) + Number(counts.stale || 0));
+      rollup.live = Math.max(0, Number(counts.live || 0) - (rootIsLive ? 1 : 0));
+      rollup.completed = Math.max(0, Number(counts.completed || 0));
+      return rollup;
+    }
+
+    function getRootProviderJobCount(root) {
+      const text = [
+        root?.latestSummary,
+        root?.activityExcerpt
+      ].filter(Boolean).join(' ');
+      const countMatch = text.match(/(\d+)\s+background terminal(?:s)?\s+(?:running|runs?)/i);
+      if (countMatch) {
+        return Number(countMatch[1] || 0) || 0;
+      }
+      return /background terminal\s+(?:running|runs?)/i.test(text) ? 1 : 0;
+    }
+
+    function renderAgentWallChildPills(snapshot, rollup) {
+      const childSessions = getRootChildSessions(snapshot);
+      if (!childSessions.length) {
+        return rollup.total > 0
+          ? `<span class="agent-child-pill"><strong>${escapeHtml(String(rollup.total))}</strong> recorded child${rollup.total === 1 ? '' : 'ren'}</span>`
+          : '<span class="agent-child-pill"><strong>0</strong> no children</span>';
+      }
+
+      const pills = childSessions.slice(0, 4).map((session) => {
+        const { status, descriptor } = getChildStatusDescriptor(session);
+        const title = session?.name || session?.terminalId || session?.sessionId || 'child';
+        return `
+          <span class="agent-child-pill">
+            <strong>${escapeHtml(title)}</strong>
+            ${renderOperatorStatePill(descriptor)}
+            <span class="${statusClass(status)}">${escapeHtml(status)}</span>
+          </span>
+        `;
+      });
+
+      if (childSessions.length > 4) {
+        pills.push(`<span class="agent-child-pill"><strong>+${escapeHtml(String(childSessions.length - 4))}</strong> more</span>`);
+      }
+      return pills.join('');
+    }
+
+    function renderAgentWall() {
+      if (!elements.agentWallList || !elements.agentWallSummary) {
+        return;
+      }
+
+      const roots = getVisibleSessionRoots();
+      const rootModels = roots.map((root) => {
+        const snapshot = getRootSnapshot(root.rootSessionId);
+        const operatorState = getOperatorStateDescriptor(root, { live: root.live });
+        return {
+          root,
+          snapshot,
+          operatorState,
+          rollup: getRootChildRollup(root, snapshot)
+        };
+      });
+      const workingCount = rootModels.filter((entry) => entry.operatorState.tone === 'working').length;
+      const waitingCount = rootModels.filter((entry) => entry.operatorState.waiting || entry.root?.attention?.requiresAttention).length;
+      const childTotal = rootModels.reduce((sum, entry) => sum + entry.rollup.total, 0);
+      const providerJobs = rootModels.reduce((sum, entry) => sum + getRootProviderJobCount(entry.root), 0);
+
+      elements.agentWallSummary.textContent = `${rootModels.length} agents • ${workingCount} working • ${waitingCount} waiting/attention • ${childTotal} broker children • ${providerJobs} provider jobs`;
+
+      if (!rootModels.length) {
+        elements.agentWallList.innerHTML = '<div class="empty-state">No agents match the current root filters.</div>';
+        return;
+      }
+
+      elements.agentWallList.innerHTML = `
+        <div class="agent-wall-grid">
+          ${rootModels.map(({ root, snapshot, operatorState, rollup }) => {
+            const rootTitle = buildRootCardTitle(root);
+            const rootStatus = getRootStatus(root) || 'unknown';
+            const tone = operatorState.tone || 'unknown';
+            const summary = summarizeRootCard(root);
+            const providerJobCount = getRootProviderJobCount(root);
+            return `
+              <div class="agent-wall-card agent-wall-${escapeHtml(tone)} ${root.rootSessionId === state.selectedRootSessionId ? 'active' : ''}" data-agent-wall-root="${escapeHtml(root.rootSessionId)}">
+                <div class="agent-wall-head">
+                  <div class="agent-wall-title-wrap">
+                    <div class="agent-wall-title">${escapeHtml(rootTitle)}</div>
+                    <div class="agent-wall-subtitle">${escapeHtml(root.rootSessionId)}</div>
+                  </div>
+                  <div class="row-badges">
+                    ${renderOperatorStatePill(operatorState)}
+                    <span class="${statusClass(rootStatus)}">${escapeHtml(rootStatus)}</span>
+                  </div>
+                </div>
+                <div class="agent-wall-metrics">
+                  <div class="agent-wall-metric">
+                    <div class="agent-wall-metric-value">${escapeHtml(String(rollup.total))}</div>
+                    <div class="agent-wall-metric-label">Broker Children</div>
+                  </div>
+                  <div class="agent-wall-metric">
+                    <div class="agent-wall-metric-value">${escapeHtml(String(rollup.running))}</div>
+                    <div class="agent-wall-metric-label">Running</div>
+                  </div>
+                  <div class="agent-wall-metric">
+                    <div class="agent-wall-metric-value">${escapeHtml(String(rollup.waiting + rollup.attention))}</div>
+                    <div class="agent-wall-metric-label">Attention</div>
+                  </div>
+                  <div class="agent-wall-metric">
+                    <div class="agent-wall-metric-value">${escapeHtml(String(providerJobCount))}</div>
+                    <div class="agent-wall-metric-label">Provider Jobs</div>
+                  </div>
+                </div>
+                <div class="agent-wall-meta">
+                  <div><strong>Adapter:</strong> ${escapeHtml(getRootAgentAdapter(root, snapshot))}</div>
+                  <div><strong>Model:</strong> ${escapeHtml(root.model || snapshot?.rootSession?.model || 'n/a')}</div>
+                  <div><strong>Mode:</strong> ${escapeHtml(root.rootMode || 'n/a')}</div>
+                  <div><strong>Runtime:</strong> ${escapeHtml(root.runtimeHost || snapshot?.runtimeHost || 'n/a')}</div>
+                  <div><strong>Child terminals:</strong> ${escapeHtml(String(rollup.terminalChildren))}</div>
+                  <div><strong>Last:</strong> ${escapeHtml(formatTimestamp(root.lastOccurredAt))}</div>
+                  <div><strong>Live:</strong> ${escapeHtml(root.live ? 'yes' : 'no')}</div>
+                </div>
+                <div class="agent-wall-children">${renderAgentWallChildPills(snapshot, rollup)}</div>
+                <div class="agent-wall-summary">${escapeHtml(summary)}</div>
+              </div>
+            `;
+          }).join('')}
+        </div>
+      `;
+
+      elements.agentWallList.querySelectorAll('[data-agent-wall-root]').forEach((node) => {
+        node.addEventListener('click', () => {
+          state.selectedRootSessionId = node.dataset.agentWallRoot;
+          state.mobileFocusedTerminalId = null;
+          syncUrlState();
+          renderAgentWall();
+          renderSessionRoots();
+          refreshSelectedSessionRoot();
+          updateStats();
+        });
+      });
+    }
+
     function updateStats() {
       const activeTerminals = state.terminals.filter((terminal) => !isTerminalSettled(terminal.status)).length;
       const waitingTerminals = state.terminals.filter((terminal) => getOperatorStateDescriptor(terminal, {
@@ -2059,6 +2433,7 @@
       });
 
       updateStats();
+      renderAgentWall();
     }
 
     function renderDiscussions() {
@@ -2211,6 +2586,9 @@
         discussionId: root.discussionId || null,
         reuseEvents: counts.reuseEvents || 0,
         reusedSessions: counts.reusedSessions || 0,
+        counts,
+        model: root.model || null,
+        runtimeHost: root.runtimeHost || root.runtime?.host || null,
         status: root.status || 'unknown',
         attention,
         latestConclusion: root.latestConclusion || null,
@@ -2663,11 +3041,13 @@
       if (!state.sessionRoots.length) {
         elements.sessionRootsList.innerHTML = '<div class="empty-state">No control-plane roots recorded yet.</div>';
         updateStats();
+        renderAgentWall();
         return;
       }
       if (!visibleRoots.length) {
         elements.sessionRootsList.innerHTML = '<div class="empty-state">No cliagents root sessions match the current filters.</div>';
         updateStats();
+        renderAgentWall();
         return;
       }
 
@@ -2727,6 +3107,7 @@
       });
 
       updateStats();
+      renderAgentWall();
       renderMobileRootSelector(visibleRoots);
       bindMobileRootControls();
     }

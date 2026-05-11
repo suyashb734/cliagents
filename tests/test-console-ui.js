@@ -31,6 +31,15 @@ async function run() {
     assert(routePage.text.includes('/orchestration/rooms'), '/console should use the room discovery API');
     assert(routePage.text.includes('/orchestration/usage/runs/'), '/console should fetch persisted run usage summaries');
     assert(routePage.text.includes('cliagents Root Sessions'), '/console should expose the cliagents root-session panel');
+    assert(routePage.text.includes('Agent Wall'), '/console should expose a first-class all-agent wall');
+    assert(routePage.text.includes('All visible root agents at once'), '/console should describe the all-agent overview purpose');
+    assert(routePage.text.includes('agent-wall-list'), '/console should include the agent wall mount point');
+    assert(routePage.text.includes('function renderAgentWall'), '/console should render all visible root agents in one view');
+    assert(routePage.text.includes('function getRootChildRollup'), '/console should derive child-session rollups for each root agent');
+    assert(routePage.text.includes('function getRootProviderJobCount'), '/console should distinguish provider-internal background jobs from broker children');
+    assert(routePage.text.includes('data-agent-wall-root'), '/console should let operators select a root from the agent wall');
+    assert(routePage.text.includes('Broker Children'), '/console should label broker-owned child-session counts clearly');
+    assert(routePage.text.includes('Provider Jobs'), '/console should show provider-internal background job counts separately');
     assert(routePage.text.includes('Room Detail'), '/console should expose a first-class room detail surface');
     assert(routePage.text.includes('Run Usage'), '/console should expose run usage in discussion detail');
     assert(routePage.text.includes('Latest Turn Usage'), '/console should expose usage for room-backed audit turns');
