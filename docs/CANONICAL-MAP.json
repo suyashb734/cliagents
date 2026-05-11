@@ -132,6 +132,19 @@
       "last_reviewed": "2026-05-04"
     },
     {
+      "path": "docs/reference/ALPHA-RELEASE.md",
+      "status": "reference",
+      "type": "reference",
+      "scope": ["release", "validation", "security"],
+      "related_code": [
+        "scripts/release-check.js",
+        "scripts/check-pack-contents.js",
+        "scripts/check-tracked-artifacts.js"
+      ],
+      "supersedes": [],
+      "last_reviewed": "2026-05-11"
+    },
+    {
       "path": "docs/reference/KNOWLEDGE-GRAPH.md",
       "status": "reference",
       "type": "reference",

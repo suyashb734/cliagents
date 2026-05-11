@@ -4,8 +4,13 @@ A Node.js server that brokers Codex CLI, Gemini CLI, Qwen CLI, OpenCode CLI, and
 
 [![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](https://opensource.org/licenses/MIT)
 
+> Alpha status: `cliagents` is a GitHub-only alpha. The current package is not
+> intended for npm publication and public APIs/storage shapes may change.
+
 ## Table of Contents
 
+- [Alpha Caveats](#alpha-caveats)
+- [How this differs](#how-this-differs)
 - [Why cliagents?](#why-cliagents)
 - [Key Features](#key-features)
 - [Quick Start](#quick-start)
@@ -20,6 +25,30 @@ A Node.js server that brokers Codex CLI, Gemini CLI, Qwen CLI, OpenCode CLI, and
 - [Development](#development)
 - [Documentation](#documentation)
 - [License](#license)
+
+## Alpha Caveats
+
+- `cliagents` controls local CLI and tmux processes. A valid broker token should be treated as local shell access for the current user.
+- The server binds to `127.0.0.1` by default. Exposing it on a LAN or through a tunnel is an explicit operator decision and requires authentication.
+- Native provider TUIs inside broker-managed tmux roots may not perfectly match direct Codex, Claude, Gemini, Qwen, or OpenCode UI fidelity.
+- MCP stdio clients may need restart after broker restarts so they pick up the current broker and local-token state.
+- Live provider tests depend on local auth, quotas, provider capacity, and upstream CLI behavior. Deterministic tests are the release gate; live tests are adapter-readiness evidence.
+- Qwen CLI is experimental/degraded unless the child adapter reliability matrix proves current auth, follow-up, and resume behavior.
+- Usage and cost fields are limited to provider-reported or broker-observable metadata. `unknown` models, zero costs, or missing durations can be valid alpha outputs.
+
+## How this differs
+
+`cliagents` is a local broker/control plane, not a hosted product, terminal
+replacement, or chat UI. It exposes installed coding CLIs over HTTP, WebSocket,
+OpenAI-compatible APIs, and MCP so other programs can drive durable roots,
+children, rooms, tasks, memory, usage, and replay.
+
+Compared with Chorus, `cliagents` is broader than multi-LLM review templates and
+focuses on persistent broker state. Compared with CAO, it emphasizes memory,
+usage attribution, root/session lineage, and remote-supervision-ready broker
+objects. Compared with Warp, it is not trying to replace the terminal UI.
+Compared with Multica, it is local broker infrastructure rather than a team task
+board or hosted agent platform.
 
 ## Why cliagents?
 
@@ -93,8 +122,9 @@ By orchestrating multiple CLI agents, you can:
 
 ### Prerequisites
 
-- **Node.js** 20+ (v20-v24 supported)
+- **Node.js** 22.12.0 (the supported alpha runtime; see [`.nvmrc`](./.nvmrc))
 - **pnpm** for package management
+- **tmux** for managed roots and child sessions
 - **At least one supported CLI agent installed**:
   - Claude Code: `npm i -g @anthropic-ai/claude-code`
   - Gemini CLI: `npm i -g @google/gemini-cli`
@@ -162,17 +192,17 @@ Agents monitor code changes and automatically update READMEs, API docs, and inli
 
 ## Core Adapters
 
-### Primary (Fully Tested)
+### Alpha Adapter Status
 
-| Adapter | CLI Command | Cost | Install |
-|---------|-------------|------|---------|
-| `claude-code` | `claude` | $20/mo (Pro) | `npm i -g @anthropic-ai/claude-code` |
-| `gemini-cli` | `gemini` | FREE | `npm i -g @google/gemini-cli` |
-| `codex-cli` | `codex` | $20/mo (Plus) | `npm i -g @openai/codex` |
-| `qwen-cli` | `qwen` | Subscription/OAuth | install `qwen` and authenticate |
-| `opencode-cli` | `opencode` | Subscription/OAuth | install `opencode` and authenticate |
+| Adapter | CLI Command | Alpha status | Install |
+|---------|-------------|--------------|---------|
+| `claude-code` | `claude` | Experimental until 3-run child reliability evidence is recorded | `npm i -g @anthropic-ai/claude-code` |
+| `gemini-cli` | `gemini` | Experimental until 3-run child reliability evidence is recorded | `npm i -g @google/gemini-cli` |
+| `codex-cli` | `codex` | Experimental until 3-run child reliability evidence is recorded | `npm i -g @openai/codex` |
+| `qwen-cli` | `qwen` | Experimental/degraded by default | install `qwen` and authenticate |
+| `opencode-cli` | `opencode` | Experimental until 3-run child reliability evidence is recorded | install `opencode` and authenticate |
 
-See [docs/adapters.md](docs/adapters.md) for broader historical adapter notes and [docs/ADAPTER-CONFORMANCE.md](docs/ADAPTER-CONFORMANCE.md) for the active broker contract. The active supported broker surface is `claude-code`, `gemini-cli`, `codex-cli`, `qwen-cli`, and `opencode-cli`.
+See [docs/adapters.md](docs/adapters.md) for the timestamped adapter status table and [docs/reference/ADAPTER-CONTRACT.md](docs/reference/ADAPTER-CONTRACT.md) for the active broker contract. The active alpha surface is `claude-code`, `gemini-cli`, `codex-cli`, `qwen-cli`, and `opencode-cli`, but each adapter's public status depends on the child reliability matrix.
 
 ## OpenAI-Compatible API
 
@@ -452,12 +482,14 @@ pnpm test
 pnpm run test:runtime
 pnpm run test:broad
 pnpm run smoke:deterministic
+pnpm run release:check
 ```
 
 `pnpm test` runs the focused supported broker suite for `claude-code`, `gemini-cli`, `codex-cli`, `qwen-cli`, and `opencode-cli`.
 Use the package scripts instead of ad-hoc `node` invocations when possible; they route through the supported Node `22.12.0` wrapper from [`.nvmrc`](./.nvmrc).
 `pnpm run test:runtime` and `pnpm run test:broad` may report provider-auth, token-expiry, provider-discontinuation, quota, capacity, or timeout conditions as skips when the broker contract itself is still correct.
 `pnpm run smoke:deterministic` runs a deterministic smoke suite for delegated lifecycle success/failure/timeout/retry plus core route health checks, and writes machine-readable + markdown evidence to `artifacts/deterministic-smoke/latest.json` and `artifacts/deterministic-smoke/latest.md`.
+`pnpm run release:check` is the deterministic public-alpha gate. It does not replace the full-history secret scan or opt-in live adapter matrix.
 
 ### Development Mode
 
@@ -476,6 +508,7 @@ See [CONTRIBUTING.md](CONTRIBUTING.md) for guidelines.
 ## Documentation
 
 - [docs/INDEX.md](docs/INDEX.md) is the canonical documentation entrypoint.
+- [docs/reference/ALPHA-RELEASE.md](docs/reference/ALPHA-RELEASE.md) is the public-alpha release checklist.
 - [docs/CANONICAL-MAP.json](docs/CANONICAL-MAP.json) classifies docs for agents and humans.
 - Files in `docs/research/` are context unless the canonical map marks them as canonical or active.
 

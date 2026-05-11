@@ -6,7 +6,9 @@ Thank you for your interest in contributing! This document provides guidelines f
 
 ### Prerequisites
 
-- Node.js >= 18.0.0
+- Node.js 22.12.0 (the supported alpha runtime; see `.nvmrc`)
+- pnpm 10.28.2
+- tmux for managed roots and child sessions
 - At least one supported AI CLI installed (Claude Code, Gemini CLI, etc.)
 
 ### Development Setup
@@ -22,9 +24,11 @@ npm install
 # Start in development mode (auto-reload)
 npm run dev
 
-# Run tests (requires server running)
-npm start &
-npm test
+# Run the focused deterministic suite
+pnpm test
+
+# Run the public-alpha release gate before release branches merge
+pnpm run release:check
 ```
 
 ## Project Structure
@@ -123,21 +127,20 @@ module.exports = YourAdapter;
 ## Testing
 
 ```bash
-# Start the server
-npm start
-
-# In another terminal, run tests
-npm test
+pnpm test
+pnpm run test:runtime
+pnpm run release:check
 ```
 
-All tests must pass before submitting a PR. Add tests for new features.
+The focused deterministic suite must pass before submitting a PR. Release
+branches must also pass `pnpm run release:check`. Add tests for new features.
 
 ## Pull Request Process
 
 1. Fork the repository
 2. Create a feature branch (`git checkout -b feature/your-feature`)
 3. Make your changes
-4. Run tests (`npm test`)
+4. Run tests (`pnpm test`)
 5. Commit with clear messages
 6. Push to your fork
 7. Open a Pull Request
@@ -145,6 +148,7 @@ All tests must pass before submitting a PR. Add tests for new features.
 ### PR Checklist
 
 - [ ] Tests pass
+- [ ] `pnpm run release:check` passes for release-facing changes
 - [ ] New features have tests
 - [ ] Documentation updated (README, JSDoc)
 - [ ] Code follows existing style

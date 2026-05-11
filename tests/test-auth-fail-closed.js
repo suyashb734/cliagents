@@ -84,6 +84,7 @@ async function startServer(host = '127.0.0.1', options = {}) {
   return {
     server,
     dataDir,
+    address,
     baseUrl: `http://127.0.0.1:${port}`,
     wsUrl: `ws://127.0.0.1:${port}/ws`
   };
@@ -155,6 +156,7 @@ async function testHttpFailClosedByDefault() {
   try {
     applyAuthEnv({});
     serverHandle = await startServer();
+    assert.strictEqual(serverHandle.address.address, '127.0.0.1', 'Expected broker default bind host to be loopback');
     const result = await request(serverHandle.baseUrl, '/adapters');
     assert.strictEqual(result.status, 401, `Expected 401 from protected route, got ${result.status}`);
     assert.strictEqual(result.body?.error?.code, 'authentication_required');

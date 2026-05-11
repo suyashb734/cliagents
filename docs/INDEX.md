@@ -12,6 +12,7 @@ older planning notes in `docs/research/`.
 - [Remote API](./reference/REMOTE-API.md): runtime-neutral snapshot and remote access rules.
 - [Terminal Input Queue](./reference/INPUT-QUEUE.md): remote-safe input, approval, denial, and control-mode states.
 - [MCP Tools](./reference/MCP-TOOLS.md): broker tool surface overview.
+- [Alpha Release Checklist](./reference/ALPHA-RELEASE.md): public-alpha release gates and evidence.
 - [Roadmap](./roadmap/ROADMAP.md): active implementation order.
 - [ADR Index](./adr/README.md): durable architecture decision record rules.
 - [Operator Model](./research/CLIAGENTS-OPERATING-MODEL.md): how humans and agents should use roots, children, rooms, usage, and memory.
@@ -32,6 +33,7 @@ older planning notes in `docs/research/`.
 - [Event Normalization](./reference/EVENT-NORMALIZATION.md)
 - [Remote API](./reference/REMOTE-API.md)
 - [Terminal Input Queue](./reference/INPUT-QUEUE.md)
+- [Alpha Release Checklist](./reference/ALPHA-RELEASE.md)
 - [Track A Launch Profile](./reference/LAUNCH-PROFILE.md)
 - [Failure And Retry Taxonomy](./reference/FAILURE-RETRY-TAXONOMY.md)
 - [Troubleshooting](./TROUBLESHOOTING.md)

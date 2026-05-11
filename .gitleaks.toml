@@ -1,0 +1,30 @@
+title = "cliagents gitleaks configuration"
+
+[[allowlists]]
+description = "Historical README placeholder API key examples, not real credentials."
+condition = "AND"
+regexTarget = "match"
+paths = ['''README\.md$''']
+regexes = [
+  '''Authorization:\s*Bearer your-secret-key''',
+  '''X-API-Key:\s*your-secret-key''',
+]
+
+[[allowlists]]
+description = "Historical redaction fixture for fake OpenAI-style dispatch context keys."
+condition = "AND"
+regexTarget = "match"
+paths = ['''tests/test-long-horizon-dispatch-foundation\.js$''']
+regexes = [
+  '''OPENAI_API_KEY=sk-12345678901234567890''',
+]
+
+[[allowlists]]
+description = "Historical redaction fixtures for fake root IO event API keys."
+condition = "AND"
+regexTarget = "match"
+paths = ['''tests/test-root-io-events\.js$''']
+regexes = [
+  '''api_key=sk-1234567890abcdef1234567890''',
+  '''apiKey:\s*['"]sk-1234567890abcdef1234567890['"]''',
+]

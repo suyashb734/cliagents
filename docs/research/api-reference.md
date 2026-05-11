@@ -34,7 +34,7 @@ List available adapters and their availability.
   "adapters": [
     {
       "name": "claude-code",
-      "version": "1.0.0",
+      "version": "0.1.0-alpha.0",
       "config": { "timeout": 60000, "workDir": "/tmp/agent" },
       "available": true,
       "models": ["claude-3-5-sonnet-20241022"]
