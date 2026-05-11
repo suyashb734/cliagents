@@ -18,6 +18,7 @@ const { getModelRoutingService } = require('../services/model-routing');
 const { resolveClaudeCliPath } = require('../utils/claude-cli-path');
 const { isAdapterAuthenticated } = require('../utils/adapter-auth');
 const { extractOutput, stripAnsiCodes } = require('../utils/output-extractor');
+const { createManagedRootNotifierFromEnv } = require('../services/managed-root-notifier');
 const {
   RUNTIME_HOSTS,
   RUNTIME_FIDELITY,
@@ -103,6 +104,7 @@ const DEFAULT_WORKER_STARTUP_DELAY_MS = 250;
 const DEFAULT_DEFERRED_PROVIDER_ATTACH_TIMEOUT_MS = 20000;
 const DEFERRED_PROVIDER_ATTACH_POLL_INTERVAL_MS = 150;
 const DEFAULT_POST_ATTACH_PROVIDER_START_DELAY_MS = 120;
+const DEFAULT_MANAGED_ROOT_NOTIFICATION_POLL_MS = 3000;
 const DEFAULT_CODEX_ORCHESTRATION_MODEL = process.env.CLIAGENTS_CODEX_ORCHESTRATION_MODEL || 'gpt-5.4';
 const ENABLE_STATUS_DEBUG_LOGS = process.env.CLIAGENTS_STATUS_DEBUG === '1';
 const REASONING_EFFORT_LEVELS = new Set(['none', 'minimal', 'low', 'medium', 'high', 'xhigh']);
@@ -1329,6 +1331,14 @@ class PersistentSessionManager extends EventEmitter {
     this.modelRoutingService = options.modelRoutingService || getModelRoutingService({
       configPath: options.modelRoutingPath || path.join(process.cwd(), 'config', 'model-routing.json')
     });
+    this.managedRootNotifier = Object.prototype.hasOwnProperty.call(options, 'managedRootNotifier')
+      ? options.managedRootNotifier
+      : createManagedRootNotifierFromEnv();
+    this.managedRootNotificationPollMs = Math.max(
+      Number(options.managedRootNotificationPollMs || process.env.CLIAGENTS_NOTIFY_POLL_MS || DEFAULT_MANAGED_ROOT_NOTIFICATION_POLL_MS),
+      500
+    );
+    this.managedRootNotificationMonitor = null;
 
     // Ensure directories exist
     if (!fs.existsSync(this.logDir)) {
@@ -1337,6 +1347,10 @@ class PersistentSessionManager extends EventEmitter {
 
     // Recover terminals from database on startup
     this._recoverFromDatabase();
+
+    if (options.managedRootNotificationMonitor !== false) {
+      this._startManagedRootNotificationMonitor();
+    }
   }
 
   /**
@@ -2177,6 +2191,94 @@ class PersistentSessionManager extends EventEmitter {
     return Boolean(this.modelRoutingService?.getAdapterPolicy?.(terminal.adapter));
   }
 
+  _isManagedRootTerminal(terminal) {
+    if (!terminal) {
+      return false;
+    }
+
+    return (
+      terminal.role === 'main'
+      || terminal.sessionKind === 'main'
+      || terminal.sessionMetadata?.managedLaunch === true
+      || terminal.sessionMetadata?.attachMode === 'managed-root-launch'
+    );
+  }
+
+  _startManagedRootNotificationMonitor() {
+    if (this.managedRootNotificationMonitor || !this.managedRootNotifier?.isEnabled?.()) {
+      return;
+    }
+
+    this.managedRootNotificationMonitor = setInterval(() => {
+      for (const terminal of this.terminals.values()) {
+        if (!this._isManagedRootTerminal(terminal)) {
+          continue;
+        }
+        if (terminal.status === 'orphaned' || terminal.destroyed) {
+          continue;
+        }
+        try {
+          this.getStatus(terminal.terminalId);
+        } catch {
+          // Status polling is best-effort; notification failures must not affect the root.
+        }
+      }
+    }, this.managedRootNotificationPollMs);
+
+    if (typeof this.managedRootNotificationMonitor.unref === 'function') {
+      this.managedRootNotificationMonitor.unref();
+    }
+  }
+
+  stopManagedRootNotificationMonitor() {
+    if (!this.managedRootNotificationMonitor) {
+      return;
+    }
+    clearInterval(this.managedRootNotificationMonitor);
+    this.managedRootNotificationMonitor = null;
+  }
+
+  _notifyManagedRootStatusChange(terminal, previousStatus, nextStatus, extra = {}) {
+    if (!this.managedRootNotifier?.isEnabled?.() || !this._isManagedRootTerminal(terminal)) {
+      return;
+    }
+    if (previousStatus !== TerminalStatus.PROCESSING || nextStatus === TerminalStatus.PROCESSING) {
+      return;
+    }
+    if (!this.managedRootNotifier.shouldNotifyStatus?.(nextStatus)) {
+      return;
+    }
+
+    const output = extra.runOutput || extra.output || '';
+    const payload = {
+      type: 'managed_root_status',
+      terminalId: terminal.terminalId,
+      rootSessionId: terminal.rootSessionId || terminal.terminalId,
+      adapter: terminal.adapter,
+      status: nextStatus,
+      previousStatus,
+      model: terminal.effectiveModel || terminal.model || terminal.requestedModel || null,
+      reasoningEffort: terminal.effectiveEffort || terminal.requestedEffort || null,
+      workDir: terminal.workDir || null,
+      originClient: terminal.originClient || null,
+      externalSessionRef: terminal.externalSessionRef || null,
+      providerThreadRef: terminal.providerThreadRef || null,
+      attentionCode: extra.attention?.code || null,
+      attentionMessage: extra.attention?.message || null,
+      summary: summarizeTerminalActivity(stripAnsiCodes(output), 220),
+      occurredAt: new Date().toISOString()
+    };
+
+    this.emit('managed-root-notification', payload);
+    void this.managedRootNotifier.notifyManagedRootStatus(payload).catch((error) => {
+      this.emit('managed-root-notification-error', {
+        terminalId: terminal.terminalId,
+        rootSessionId: payload.rootSessionId,
+        error: error.message
+      });
+    });
+  }
+
   _classifyModelExecutionFailure(terminal, nextStatus, extra = {}) {
     const attentionCode = String(extra.attention?.code || '').trim();
     if (attentionCode) {
@@ -2266,6 +2368,7 @@ class PersistentSessionManager extends EventEmitter {
       });
     }
     this.emit('status-change', { terminalId: terminal.terminalId, status: nextStatus });
+    this._notifyManagedRootStatusChange(terminal, previousStatus, nextStatus, extra);
 
     if ([TerminalStatus.COMPLETED, TerminalStatus.ERROR].includes(nextStatus)) {
       this._recordSessionTerminated(terminal, nextStatus, extra);
@@ -4601,7 +4704,7 @@ class PersistentSessionManager extends EventEmitter {
       this._syncInteractiveTranscript(reconciledTerminal, output, detectedStatus);
 
       // Update cached status
-      this._applyStatusUpdate(reconciledTerminal, detectedStatus, { attention });
+      this._applyStatusUpdate(reconciledTerminal, detectedStatus, { attention, output });
 
       return detectedStatus;
     }

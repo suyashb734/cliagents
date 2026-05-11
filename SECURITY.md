@@ -47,6 +47,10 @@ be used with tunnels or non-loopback hosts.
   diagnostic bundles.
 - Rotate the broker token if it appears in logs, screenshots, shell history, or
   issue reports.
+- Treat `CLIAGENTS_NOTIFY_WEBHOOK_URL`, `CLIAGENTS_TELEGRAM_BOT_TOKEN`, and
+  `CLIAGENTS_TELEGRAM_CHAT_ID` as sensitive operator configuration. Notification
+  payloads may include workspace names, adapter/model names, root ids, and short
+  activity summaries.
 - Use `pnpm run release:check` plus a full-history secret scan before making a
   repository public.
 

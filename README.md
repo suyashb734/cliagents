@@ -115,6 +115,7 @@ By orchestrating multiple CLI agents, you can:
 - **OpenAI-Compatible API** - Drop-in replacement using existing SDKs
 - **Multi-Agent Orchestration** - Coordinate tasks across local CLI agents including Claude Code, Gemini, Codex, Qwen, and OpenCode
 - **Persistent Sessions** - Maintain context across multiple interactions
+- **Managed-Root Notifications** - macOS, webhook, and Telegram completion/attention alerts for broker-managed roots
 - **Skills System** - Reusable workflows for TDD, debugging, code review
 - **MCP Integration** - Use from Claude Code or other MCP-enabled tools
 
@@ -441,6 +442,12 @@ Use that index to distinguish current source-of-truth docs from research notes.
 | `CLIAGENTS_TMUX_SOCKET` | Broker-specific tmux socket path | shared default tmux server |
 | `CLIAGENTS_WORK_DIR` | Default orchestration working directory | current working directory |
 | `CLIAGENTS_DESTROY_TERMINALS_ON_STOP` | Destroy broker terminals on shutdown when set to `1` | `0` |
+| `CLIAGENTS_NOTIFICATIONS` | Managed-root notification channels: `off`, `macos`, `webhook`, `telegram`, `all` | `macos` on macOS |
+| `CLIAGENTS_NOTIFY_ON` | Notification status aliases or statuses: `done`, `blocked`, `error`, `idle`, `completed`, `waiting_permission`, `waiting_user_answer` | `idle,completed,waiting_permission,waiting_user_answer,error` |
+| `CLIAGENTS_NOTIFY_WEBHOOK_URL` | Optional webhook URL for managed-root notification JSON payloads | None |
+| `CLIAGENTS_TELEGRAM_BOT_TOKEN` | Optional Telegram bot token for direct Telegram notifications | None |
+| `CLIAGENTS_TELEGRAM_CHAT_ID` | Optional Telegram chat id for direct Telegram notifications | None |
+| `CLIAGENTS_NOTIFY_POLL_MS` | Managed-root status polling interval for notification detection | `3000` |
 
 ### Programmatic Configuration
 

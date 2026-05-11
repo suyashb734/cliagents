@@ -30,6 +30,7 @@ const TEST_FILES = [
   'test-runtime-host-model.js',
   'test-session-control-plane-schema.js',
   'test-session-control-plane-runtime.js',
+  'test-managed-root-notifications.js',
   'test-root-session-binding-lookup.js',
   'test-task-routes.js',
   'test-task-worktree-isolation.js',
