@@ -9,6 +9,7 @@ Keep it short. Do not duplicate transient runtime configuration, MCP server list
 - Start with [`docs/INDEX.md`](./docs/INDEX.md) for canonical architecture, roadmap, reference, and research status.
 - Use [`CLAUDE.md`](./CLAUDE.md) and the docs folder for architecture notes, API details, and user-facing documentation.
 - Use [`docs/research/CLIAGENTS-OPERATING-MODEL.md`](./docs/research/CLIAGENTS-OPERATING-MODEL.md) as the canonical operator policy for roots, child sessions, rooms, persistence, usage, and broker routing.
+- Use [`docs/reference/BRANCH-MANAGEMENT.md`](./docs/reference/BRANCH-MANAGEMENT.md) before starting or delegating broad work.
 - If guidance belongs to the current machine, shell session, or MCP profile, it does not belong here.
 
 ## Toolchain
@@ -25,6 +26,7 @@ Keep it short. Do not duplicate transient runtime configuration, MCP server list
 - Focused regression suite: `npm test`
 - Runtime consistency suite: `npm run test:runtime`
 - Broad API surface suite: `npm run test:broad`
+- Branch hygiene check: `npm run branch:check`
 
 ## Architecture Defaults
 

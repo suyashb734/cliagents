@@ -146,6 +146,18 @@
       "last_reviewed": "2026-05-11"
     },
     {
+      "path": "docs/reference/BRANCH-MANAGEMENT.md",
+      "status": "canonical",
+      "type": "reference",
+      "scope": ["branch-management", "worktrees", "delegation", "release"],
+      "related_code": [
+        "scripts/check-branch-hygiene.js",
+        "package.json"
+      ],
+      "supersedes": [],
+      "last_reviewed": "2026-05-12"
+    },
+    {
       "path": "docs/reference/KNOWLEDGE-GRAPH.md",
       "status": "reference",
       "type": "reference",

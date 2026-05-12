@@ -19,6 +19,7 @@
     "test:broad": "node scripts/run-with-supported-node.js tests/test-broad-api-surface.js",
     "smoke:deterministic": "node scripts/run-with-supported-node.js scripts/deterministic-smoke-suite.js",
     "test:rooms:live": "node scripts/run-with-supported-node.js tests/test-room-continuity-live.js",
+    "branch:check": "node scripts/run-with-supported-node.js scripts/check-branch-hygiene.js",
     "release:check": "node scripts/run-with-supported-node.js scripts/release-check.js"
   },
   "keywords": [

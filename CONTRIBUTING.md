@@ -31,6 +31,29 @@ pnpm test
 pnpm run release:check
 ```
 
+## Branch Management
+
+Read `docs/reference/BRANCH-MANAGEMENT.md` before starting broad feature,
+release, or delegated work. Use one branch for one coherent outcome.
+
+Recommended branch roles:
+
+- `feature/<slug>` for one product or runtime capability.
+- `fix/<slug>` for one bug fix or narrow regression.
+- `docs/<slug>` for documentation-only changes.
+- `release/<slug>` for release hardening and release blockers.
+- `task/<slug>-<date>` for delegated or worktree-isolated slices.
+- `safety/<slug>-<date>` for temporary backup branches before risky integration.
+
+Run the local branch hygiene check before non-trivial work:
+
+```bash
+pnpm run branch:check
+```
+
+If a branch name no longer describes the commits on it, split the work, create a
+truthful successor branch, or merge intentionally before starting the next scope.
+
 ## Project Structure
 
 ```
@@ -138,7 +161,7 @@ branches must also pass `pnpm run release:check`. Add tests for new features.
 ## Pull Request Process
 
 1. Fork the repository
-2. Create a feature branch (`git checkout -b feature/your-feature`)
+2. Create a scoped branch (`git checkout -b feature/your-feature`)
 3. Make your changes
 4. Run tests (`pnpm test`)
 5. Commit with clear messages

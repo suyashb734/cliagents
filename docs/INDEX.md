@@ -13,6 +13,7 @@ older planning notes in `docs/research/`.
 - [Terminal Input Queue](./reference/INPUT-QUEUE.md): remote-safe input, approval, denial, and control-mode states.
 - [MCP Tools](./reference/MCP-TOOLS.md): broker tool surface overview.
 - [Alpha Release Checklist](./reference/ALPHA-RELEASE.md): public-alpha release gates and evidence.
+- [Branch Management](./reference/BRANCH-MANAGEMENT.md): branch roles, delegated worktrees, and pre-merge gates.
 - [Roadmap](./roadmap/ROADMAP.md): active implementation order.
 - [ADR Index](./adr/README.md): durable architecture decision record rules.
 - [Agent Control Taxonomy ADR](./adr/0001-agent-control-taxonomy.md): canonical nouns for providers, profiles, roots, workspaces, sessions, tasks, assignments, rooms, and memory.
@@ -38,6 +39,7 @@ older planning notes in `docs/research/`.
 - [Remote API](./reference/REMOTE-API.md)
 - [Terminal Input Queue](./reference/INPUT-QUEUE.md)
 - [Alpha Release Checklist](./reference/ALPHA-RELEASE.md)
+- [Branch Management](./reference/BRANCH-MANAGEMENT.md)
 - [Track A Launch Profile](./reference/LAUNCH-PROFILE.md)
 - [Failure And Retry Taxonomy](./reference/FAILURE-RETRY-TAXONOMY.md)
 - [Troubleshooting](./TROUBLESHOOTING.md)
