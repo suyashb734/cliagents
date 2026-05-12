@@ -96,6 +96,78 @@ function normalizeReasoningEffort(value) {
     : null;
 }
 
+function normalizeTaskAssignmentBranchStatus(value, fallback = null) {
+  const normalized = String(value || '').trim().toLowerCase();
+  return [
+    'planned',
+    'created',
+    'running',
+    'ready_for_review',
+    'accepted',
+    'integrated',
+    'failed'
+  ].includes(normalized)
+    ? normalized
+    : fallback;
+}
+
+function normalizeTaskAssignmentPathLeaseStatus(value, fallback = 'active') {
+  const normalized = String(value || '').trim().toLowerCase();
+  return ['active', 'released', 'expired', 'revoked'].includes(normalized)
+    ? normalized
+    : fallback;
+}
+
+function normalizeWritePathList(value) {
+  const rawPaths = Array.isArray(value)
+    ? value
+    : (typeof value === 'string'
+      ? (() => {
+        const parsed = parseJsonField(value);
+        return Array.isArray(parsed) ? parsed : value.split(',');
+      })()
+      : []);
+  const normalized = [];
+  for (const rawPath of rawPaths) {
+    const trimmed = String(rawPath || '').trim();
+    if (!trimmed) {
+      continue;
+    }
+    const normalizedPath = trimmed
+      .replace(/\\/g, '/')
+      .replace(/^\.\/+/, '')
+      .replace(/\/+/g, '/')
+      .replace(/\/$/, '');
+    if (
+      path.isAbsolute(normalizedPath)
+      || normalizedPath === '..'
+      || normalizedPath.startsWith('../')
+      || normalizedPath.includes('/../')
+    ) {
+      throw new Error(`writePaths must be relative paths inside the workspace: ${trimmed}`);
+    }
+    if (!normalized.includes(normalizedPath || '.')) {
+      normalized.push(normalizedPath || '.');
+    }
+  }
+  return normalized.sort();
+}
+
+function writePathsOverlap(leftPaths = [], rightPaths = []) {
+  const left = normalizeWritePathList(leftPaths);
+  const right = normalizeWritePathList(rightPaths);
+  if (left.length === 0 || right.length === 0) {
+    return false;
+  }
+  return left.some((leftPath) => right.some((rightPath) => (
+    leftPath === '.'
+    || rightPath === '.'
+    || leftPath === rightPath
+    || leftPath.startsWith(`${rightPath}/`)
+    || rightPath.startsWith(`${leftPath}/`)
+  )));
+}
+
 function normalizeUsageRole(value) {
   const normalized = String(value || '').trim().toLowerCase();
   return normalized || 'unknown';
@@ -3202,6 +3274,235 @@ class OrchestrationDB {
     return this.getTerminalInputLease(normalizedId);
   }
 
+  _parseTaskAssignmentPathLeaseRow(row) {
+    if (!row) {
+      return null;
+    }
+    return {
+      id: row.id,
+      taskId: row.task_id,
+      taskAssignmentId: row.task_assignment_id,
+      workspaceRoot: row.workspace_root,
+      branchName: row.branch_name || null,
+      holder: row.holder,
+      status: row.status,
+      writePaths: normalizeWritePathList(row.write_paths || []),
+      expiresAt: row.expires_at || null,
+      releasedAt: row.released_at || null,
+      metadata: parseJsonField(row.metadata) || {},
+      createdAt: row.created_at,
+      updatedAt: row.updated_at
+    };
+  }
+
+  expireTaskAssignmentPathLeases(now = Date.now()) {
+    if (!this._hasTable('task_assignment_path_leases')) {
+      return 0;
+    }
+    const result = this.db.prepare(`
+      UPDATE task_assignment_path_leases
+      SET status = 'expired', updated_at = ?
+      WHERE status = 'active'
+        AND expires_at IS NOT NULL
+        AND expires_at <= ?
+    `).run(now, now);
+    return result.changes || 0;
+  }
+
+  getTaskAssignmentPathLease(id) {
+    if (!this._hasTable('task_assignment_path_leases')) {
+      return null;
+    }
+    const normalizedId = String(id || '').trim();
+    if (!normalizedId) {
+      return null;
+    }
+    const row = this.db.prepare('SELECT * FROM task_assignment_path_leases WHERE id = ?').get(normalizedId);
+    return this._parseTaskAssignmentPathLeaseRow(row);
+  }
+
+  listTaskAssignmentPathLeases(options = {}) {
+    if (!this._hasTable('task_assignment_path_leases')) {
+      return [];
+    }
+    const clauses = [];
+    const params = [];
+    if (options.taskId || options.task_id) {
+      clauses.push('task_id = ?');
+      params.push(String(options.taskId || options.task_id).trim());
+    }
+    if (options.taskAssignmentId || options.task_assignment_id) {
+      clauses.push('task_assignment_id = ?');
+      params.push(String(options.taskAssignmentId || options.task_assignment_id).trim());
+    }
+    if (options.workspaceRoot || options.workspace_root) {
+      clauses.push('workspace_root = ?');
+      params.push(normalizeWorkspaceRoot(options.workspaceRoot || options.workspace_root) || String(options.workspaceRoot || options.workspace_root).trim());
+    }
+    if (options.status) {
+      const statuses = Array.isArray(options.status) ? options.status : [options.status];
+      const normalizedStatuses = statuses
+        .map((status) => normalizeTaskAssignmentPathLeaseStatus(status, null))
+        .filter(Boolean);
+      if (normalizedStatuses.length > 0) {
+        clauses.push(`status IN (${normalizedStatuses.map(() => '?').join(', ')})`);
+        params.push(...normalizedStatuses);
+      }
+    }
+    const whereSql = clauses.length ? `WHERE ${clauses.join(' AND ')}` : '';
+    const limit = clampLimit(options.limit, 100, 500);
+    const rows = this.db.prepare(`
+      SELECT *
+      FROM task_assignment_path_leases
+      ${whereSql}
+      ORDER BY created_at DESC, id DESC
+      LIMIT ?
+    `).all(...params, limit);
+    return rows.map((row) => this._parseTaskAssignmentPathLeaseRow(row));
+  }
+
+  acquireTaskAssignmentPathLease(input = {}) {
+    if (!this._hasTable('task_assignment_path_leases')) {
+      return { acquired: false, reason: 'unavailable', lease: null };
+    }
+    const taskId = String(input.taskId || input.task_id || '').trim();
+    const taskAssignmentId = String(input.taskAssignmentId || input.task_assignment_id || '').trim();
+    const workspaceRoot = normalizeWorkspaceRoot(input.workspaceRoot || input.workspace_root)
+      || String(input.workspaceRoot || input.workspace_root || '').trim();
+    const writePaths = normalizeWritePathList(input.writePaths ?? input.write_paths ?? []);
+    const branchName = String(input.branchName || input.branch_name || '').trim() || null;
+    const holder = String(input.holder || input.requestedBy || input.requested_by || taskAssignmentId || '').trim();
+    const now = Number.isFinite(input.now) ? input.now : Date.now();
+    const expiresAt = Number.isFinite(input.expiresAt ?? input.expires_at)
+      ? normalizeOptionalInteger(input.expiresAt ?? input.expires_at)
+      : null;
+    const leaseId = String(input.id || input.leaseId || input.lease_id || `path_lease_${generateId()}`).trim();
+    const metadata = input.metadata && typeof input.metadata === 'object' && !Array.isArray(input.metadata)
+      ? redactSecretObject({ ...input.metadata })
+      : {};
+
+    if (!taskId) {
+      throw new Error('taskId is required');
+    }
+    if (!taskAssignmentId) {
+      throw new Error('taskAssignmentId is required');
+    }
+    if (!workspaceRoot) {
+      throw new Error('workspaceRoot is required');
+    }
+    if (writePaths.length === 0) {
+      return { acquired: true, reason: 'no_write_paths', lease: null };
+    }
+
+    const acquire = this.db.transaction(() => {
+      this.expireTaskAssignmentPathLeases(now);
+      const existingForAssignment = this.listTaskAssignmentPathLeases({
+        taskAssignmentId,
+        status: 'active',
+        limit: 10
+      }).find((lease) => lease.workspaceRoot === workspaceRoot);
+      if (existingForAssignment) {
+        return { acquired: true, reason: 'already_held', lease: existingForAssignment };
+      }
+
+      const activeLeases = this.listTaskAssignmentPathLeases({
+        workspaceRoot,
+        status: 'active',
+        limit: 500
+      });
+      const conflict = activeLeases.find((lease) => (
+        lease.taskAssignmentId !== taskAssignmentId
+        && writePathsOverlap(lease.writePaths, writePaths)
+      ));
+      if (conflict) {
+        return { acquired: false, reason: 'path_conflict', lease: conflict };
+      }
+
+      this.db.prepare(`
+        INSERT INTO task_assignment_path_leases (
+          id,
+          task_id,
+          task_assignment_id,
+          workspace_root,
+          branch_name,
+          holder,
+          status,
+          write_paths,
+          expires_at,
+          metadata,
+          created_at,
+          updated_at
+        ) VALUES (?, ?, ?, ?, ?, ?, 'active', ?, ?, ?, ?, ?)
+      `).run(
+        leaseId,
+        taskId,
+        taskAssignmentId,
+        workspaceRoot,
+        branchName,
+        holder,
+        JSON.stringify(writePaths),
+        expiresAt,
+        JSON.stringify(metadata),
+        now,
+        now
+      );
+      return { acquired: true, reason: 'acquired', lease: this.getTaskAssignmentPathLease(leaseId) };
+    });
+
+    return acquire.immediate();
+  }
+
+  updateTaskAssignmentPathLease(id, patch = {}) {
+    if (!this._hasTable('task_assignment_path_leases')) {
+      return null;
+    }
+    const normalizedId = String(id || '').trim();
+    if (!normalizedId) {
+      throw new Error('pathLeaseId is required');
+    }
+    const existing = this.getTaskAssignmentPathLease(normalizedId);
+    if (!existing) {
+      throw new Error(`Path lease not found: ${normalizedId}`);
+    }
+
+    const updates = [];
+    const params = [];
+    const addUpdate = (column, value) => {
+      updates.push(`${column} = ?`);
+      params.push(value);
+    };
+
+    if (patch.status !== undefined) {
+      addUpdate('status', normalizeTaskAssignmentPathLeaseStatus(patch.status));
+    }
+    if (patch.expiresAt !== undefined || patch.expires_at !== undefined) {
+      addUpdate('expires_at', normalizeOptionalInteger(patch.expiresAt ?? patch.expires_at));
+    }
+    if (patch.releasedAt !== undefined || patch.released_at !== undefined) {
+      addUpdate('released_at', normalizeOptionalInteger(patch.releasedAt ?? patch.released_at));
+    }
+    if (patch.metadata !== undefined) {
+      addUpdate('metadata', patch.metadata == null
+        ? null
+        : (typeof patch.metadata === 'string' ? patch.metadata : JSON.stringify(redactSecretObject(patch.metadata))));
+    }
+
+    if (updates.length === 0) {
+      return existing;
+    }
+    addUpdate('updated_at', Number.isFinite(patch.updatedAt || patch.updated_at)
+      ? (patch.updatedAt || patch.updated_at)
+      : Date.now());
+
+    this.db.prepare(`
+      UPDATE task_assignment_path_leases
+      SET ${updates.join(', ')}
+      WHERE id = ?
+    `).run(...params, normalizedId);
+
+    return this.getTaskAssignmentPathLease(normalizedId);
+  }
+
   /**
    * Get the next session-event sequence number for a root session.
    */
@@ -6066,6 +6367,18 @@ class OrchestrationDB {
       status: row.status || 'queued',
       worktreePath: row.worktree_path || null,
       worktreeBranch: row.worktree_branch || null,
+      baseBranch: row.base_branch || null,
+      branchName: row.branch_name || null,
+      mergeTarget: row.merge_target || null,
+      branchStatus: row.branch_status || null,
+      writePaths: normalizeWritePathList(row.write_paths || []),
+      pathLeaseId: row.path_lease_id || null,
+      baseSha: row.base_sha || null,
+      headSha: row.head_sha || null,
+      diffStats: parseJsonField(row.diff_stats) || null,
+      testStatus: row.test_status || null,
+      reviewStatus: row.review_status || null,
+      integratedAt: row.integrated_at || null,
       acceptanceCriteria: row.acceptance_criteria || null,
       metadata: parseJsonField(row.metadata) || {},
       startedAt: row.started_at || null,
@@ -6216,6 +6529,23 @@ class OrchestrationDB {
     const status = String(input.status || 'queued').trim().toLowerCase() || 'queued';
     const worktreePath = String(input.worktreePath || '').trim() || null;
     const worktreeBranch = String(input.worktreeBranch || '').trim() || null;
+    const baseBranch = String(input.baseBranch || input.base_branch || '').trim() || null;
+    const branchName = String(input.branchName || input.branch_name || '').trim() || null;
+    const mergeTarget = String(input.mergeTarget || input.merge_target || '').trim() || null;
+    const branchStatus = normalizeTaskAssignmentBranchStatus(
+      input.branchStatus || input.branch_status,
+      branchName || worktreeBranch ? 'planned' : null
+    );
+    const writePaths = normalizeWritePathList(input.writePaths ?? input.write_paths ?? []);
+    const pathLeaseId = String(input.pathLeaseId || input.path_lease_id || '').trim() || null;
+    const baseSha = String(input.baseSha || input.base_sha || '').trim() || null;
+    const headSha = String(input.headSha || input.head_sha || '').trim() || null;
+    const diffStats = input.diffStats ?? input.diff_stats ?? null;
+    const testStatus = String(input.testStatus || input.test_status || '').trim() || null;
+    const reviewStatus = String(input.reviewStatus || input.review_status || '').trim() || null;
+    const integratedAt = Number.isFinite(input.integratedAt ?? input.integrated_at)
+      ? (input.integratedAt ?? input.integrated_at)
+      : null;
     const acceptanceCriteria = typeof input.acceptanceCriteria === 'string' ? input.acceptanceCriteria : null;
     const metadata = input.metadata && typeof input.metadata === 'object' && !Array.isArray(input.metadata)
       ? input.metadata
@@ -6261,6 +6591,24 @@ class OrchestrationDB {
       columns.splice(7, 0, 'reasoning_effort');
       values.splice(7, 0, reasoningEffort);
     }
+    const addOptionalColumn = (column, value) => {
+      if (this._hasColumn('task_assignments', column)) {
+        columns.push(column);
+        values.push(value);
+      }
+    };
+    addOptionalColumn('base_branch', baseBranch);
+    addOptionalColumn('branch_name', branchName);
+    addOptionalColumn('merge_target', mergeTarget);
+    addOptionalColumn('branch_status', branchStatus);
+    addOptionalColumn('write_paths', writePaths.length > 0 ? JSON.stringify(writePaths) : null);
+    addOptionalColumn('path_lease_id', pathLeaseId);
+    addOptionalColumn('base_sha', baseSha);
+    addOptionalColumn('head_sha', headSha);
+    addOptionalColumn('diff_stats', diffStats ? JSON.stringify(diffStats) : null);
+    addOptionalColumn('test_status', testStatus);
+    addOptionalColumn('review_status', reviewStatus);
+    addOptionalColumn('integrated_at', integratedAt);
 
     this.db.prepare(`
       INSERT INTO task_assignments (${columns.join(', ')})
@@ -6332,6 +6680,80 @@ class OrchestrationDB {
     if (patch.worktreeBranch !== undefined) {
       updates.push('worktree_branch = ?');
       params.push(String(patch.worktreeBranch || '').trim() || null);
+    }
+    if (patch.baseBranch !== undefined || patch.base_branch !== undefined) {
+      if (this._hasColumn('task_assignments', 'base_branch')) {
+        updates.push('base_branch = ?');
+        params.push(String((patch.baseBranch ?? patch.base_branch) || '').trim() || null);
+      }
+    }
+    if (patch.branchName !== undefined || patch.branch_name !== undefined) {
+      if (this._hasColumn('task_assignments', 'branch_name')) {
+        updates.push('branch_name = ?');
+        params.push(String((patch.branchName ?? patch.branch_name) || '').trim() || null);
+      }
+    }
+    if (patch.mergeTarget !== undefined || patch.merge_target !== undefined) {
+      if (this._hasColumn('task_assignments', 'merge_target')) {
+        updates.push('merge_target = ?');
+        params.push(String((patch.mergeTarget ?? patch.merge_target) || '').trim() || null);
+      }
+    }
+    if (patch.branchStatus !== undefined || patch.branch_status !== undefined) {
+      if (this._hasColumn('task_assignments', 'branch_status')) {
+        updates.push('branch_status = ?');
+        params.push(normalizeTaskAssignmentBranchStatus(patch.branchStatus ?? patch.branch_status, null));
+      }
+    }
+    if (patch.writePaths !== undefined || patch.write_paths !== undefined) {
+      if (this._hasColumn('task_assignments', 'write_paths')) {
+        const writePaths = normalizeWritePathList(patch.writePaths ?? patch.write_paths ?? []);
+        updates.push('write_paths = ?');
+        params.push(writePaths.length > 0 ? JSON.stringify(writePaths) : null);
+      }
+    }
+    if (patch.pathLeaseId !== undefined || patch.path_lease_id !== undefined) {
+      if (this._hasColumn('task_assignments', 'path_lease_id')) {
+        updates.push('path_lease_id = ?');
+        params.push(String((patch.pathLeaseId ?? patch.path_lease_id) || '').trim() || null);
+      }
+    }
+    if (patch.baseSha !== undefined || patch.base_sha !== undefined) {
+      if (this._hasColumn('task_assignments', 'base_sha')) {
+        updates.push('base_sha = ?');
+        params.push(String((patch.baseSha ?? patch.base_sha) || '').trim() || null);
+      }
+    }
+    if (patch.headSha !== undefined || patch.head_sha !== undefined) {
+      if (this._hasColumn('task_assignments', 'head_sha')) {
+        updates.push('head_sha = ?');
+        params.push(String((patch.headSha ?? patch.head_sha) || '').trim() || null);
+      }
+    }
+    if (patch.diffStats !== undefined || patch.diff_stats !== undefined) {
+      if (this._hasColumn('task_assignments', 'diff_stats')) {
+        const diffStats = patch.diffStats ?? patch.diff_stats;
+        updates.push('diff_stats = ?');
+        params.push(diffStats == null ? null : (typeof diffStats === 'string' ? diffStats : JSON.stringify(diffStats)));
+      }
+    }
+    if (patch.testStatus !== undefined || patch.test_status !== undefined) {
+      if (this._hasColumn('task_assignments', 'test_status')) {
+        updates.push('test_status = ?');
+        params.push(String((patch.testStatus ?? patch.test_status) || '').trim() || null);
+      }
+    }
+    if (patch.reviewStatus !== undefined || patch.review_status !== undefined) {
+      if (this._hasColumn('task_assignments', 'review_status')) {
+        updates.push('review_status = ?');
+        params.push(String((patch.reviewStatus ?? patch.review_status) || '').trim() || null);
+      }
+    }
+    if (patch.integratedAt !== undefined || patch.integrated_at !== undefined) {
+      if (this._hasColumn('task_assignments', 'integrated_at')) {
+        updates.push('integrated_at = ?');
+        params.push(Number.isFinite(patch.integratedAt ?? patch.integrated_at) ? (patch.integratedAt ?? patch.integrated_at) : null);
+      }
     }
     if (patch.acceptanceCriteria !== undefined) {
       updates.push('acceptance_criteria = ?');
@@ -8324,6 +8746,17 @@ class OrchestrationDB {
       reasoningEffort: assignment.reasoningEffort || null,
       worktreePath: assignment.worktreePath,
       worktreeBranch: assignment.worktreeBranch,
+      baseBranch: assignment.baseBranch,
+      branchName: assignment.branchName,
+      mergeTarget: assignment.mergeTarget,
+      branchStatus: assignment.branchStatus,
+      writePaths: assignment.writePaths,
+      pathLeaseId: assignment.pathLeaseId,
+      baseSha: assignment.baseSha,
+      headSha: assignment.headSha,
+      testStatus: assignment.testStatus,
+      reviewStatus: assignment.reviewStatus,
+      integratedAt: assignment.integratedAt,
       startedAt: assignment.startedAt,
       completedAt: assignment.completedAt,
       updatedAt: assignment.updatedAt,

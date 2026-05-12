@@ -128,6 +128,25 @@ worktrees must be under an allowed worktree root, outside the primary repo, and
 already checked out on the requested branch. Missing worktree paths require a
 branch and are created with `git worktree add`.
 
+## Assignment Branch State
+
+Branch-orchestrated assignments add broker-owned branch metadata above raw
+worktree isolation:
+
+- `baseBranch`: source branch or ref the assignment starts from.
+- `branchName`: durable assignment branch.
+- `mergeTarget`: branch the accepted assignment should integrate into.
+- `writePaths`: relative paths the assignment intends to edit.
+- `pathLeaseId`: active write-path lease, when conflict protection is requested.
+- `branchStatus`: `planned`, `created`, `running`, `ready_for_review`,
+  `accepted`, `integrated`, or `failed`.
+
+`autoBranch: true` creates deterministic assignment branch/worktree metadata from
+the task workspace. `writePaths` acquire an active path lease so two running
+assignments do not silently edit overlapping files. Integration is explicit:
+accepted branches can be merged into their `mergeTarget`, releasing the path
+lease and marking the branch `integrated`.
+
 ## Room Moderator Readout
 
 Room discussions keep raw discussion runs and optional curated transcript

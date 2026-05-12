@@ -188,6 +188,11 @@ async function runMigrationAssertions() {
       assert(getColumnNames(migratedDb, 'rooms').includes('task_id'), 'rooms.task_id should exist after migration');
       assert(getColumnNames(migratedDb, 'tasks').includes('workspace_root'), 'tasks table should exist after migration');
       assert(getColumnNames(migratedDb, 'task_assignments').includes('instructions'), 'task_assignments table should exist after migration');
+      assert(getColumnNames(migratedDb, 'task_assignments').includes('branch_name'), 'task_assignments should include branch orchestration columns');
+      assert(
+        migratedDb.db.prepare("SELECT name FROM sqlite_master WHERE type='table' AND name='task_assignment_path_leases'").get(),
+        'task_assignment_path_leases table should exist after migration'
+      );
 
       const runBackfilled = migratedDb.getTask('task-legacy-run');
       assert(runBackfilled, 'run-backed task should be materialized');
@@ -296,13 +301,32 @@ async function runRouteAssertions() {
       instructions: 'Implement the feature and add tests.',
       reasoningEffort: 'high',
       worktreePath,
-      worktreeBranch: 'task/tasks-v1'
+      worktreeBranch: 'task/tasks-v1',
+      branchName: 'task/tasks-v1',
+      baseBranch: 'main',
+      mergeTarget: 'main',
+      writePaths: ['src/tasks.js']
     });
     assert.strictEqual(createAssignmentRes.status, 200);
     assert.strictEqual(createAssignmentRes.data.assignment.status, 'queued');
     assert.strictEqual(createAssignmentRes.data.assignment.reasoningEffort, 'high');
     assert.strictEqual(createAssignmentRes.data.assignment.worktreePath, worktreePath);
+    assert.strictEqual(createAssignmentRes.data.assignment.branch.branchName, 'task/tasks-v1');
+    assert.strictEqual(createAssignmentRes.data.assignment.branch.status, 'planned');
+    assert.deepStrictEqual(createAssignmentRes.data.assignment.branch.writePaths, ['src/tasks.js']);
+    assert(createAssignmentRes.data.assignment.branch.pathLeaseId, 'assignment with write paths should acquire a path lease');
     const assignmentId = createAssignmentRes.data.assignment.id;
+
+    const conflictingAssignmentRes = await request(serverHandle.baseUrl, 'POST', `/orchestration/tasks/${taskId}/assignments`, {
+      role: 'executor',
+      instructions: 'Try to edit the same file.',
+      worktreePath: path.join(rootDir, 'conflicting-task-worktree'),
+      worktreeBranch: 'task/tasks-v1-conflict',
+      branchName: 'task/tasks-v1-conflict',
+      writePaths: ['src/tasks.js']
+    });
+    assert.strictEqual(conflictingAssignmentRes.status, 409);
+    assert.strictEqual(conflictingAssignmentRes.data.error.code, 'path_lease_conflict');
 
     const patchAssignmentRes = await request(serverHandle.baseUrl, 'PATCH', `/orchestration/tasks/${taskId}/assignments/${assignmentId}`, {
       instructions: 'Implement the feature, add tests, and report status.',
@@ -324,6 +348,8 @@ async function runRouteAssertions() {
     assert.strictEqual(startAssignmentRes.status, 200);
     assert.strictEqual(startAssignmentRes.data.assignment.status, 'running');
     assert.strictEqual(startAssignmentRes.data.assignment.reasoningEffort, 'xhigh');
+    assert.strictEqual(startAssignmentRes.data.assignment.branch.status, 'running');
+    assert.strictEqual(startAssignmentRes.data.assignment.branch.pathLease.status, 'active');
     assert(startAssignmentRes.data.assignment.terminalId, 'started assignment should be linked to a terminal');
     assert.strictEqual(startAssignmentRes.data.assignment.dispatch.status, 'spawned');
     assert.strictEqual(startAssignmentRes.data.assignment.dispatchRequests.length, 1);
@@ -358,6 +384,8 @@ async function runRouteAssertions() {
     assert.strictEqual(contextSnapshot.linkedContext.task.id, taskId);
     assert.strictEqual(contextSnapshot.linkedContext.assignment.id, assignmentId);
     assert.strictEqual(contextSnapshot.linkedContext.assignment.reasoningEffort, 'xhigh');
+    assert.strictEqual(contextSnapshot.linkedContext.assignment.branchName, 'task/tasks-v1');
+    assert.deepStrictEqual(contextSnapshot.linkedContext.assignment.writePaths, ['src/tasks.js']);
 
     const sessionBindings = db.listTaskSessionBindings({ taskAssignmentId: assignmentId });
     assert.strictEqual(sessionBindings.length, 1);

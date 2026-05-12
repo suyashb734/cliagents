@@ -11,8 +11,9 @@ The MCP server is the primary agent-facing control surface for `cliagents`.
   transcripts.
 - **Runs**: list runs, inspect run detail, replay discussion outputs, and review
   persisted execution records.
-- **Tasks**: create tasks, create assignments, start assignments, list tasks,
-  and inspect task state.
+- **Tasks**: create tasks, create branch-aware assignments, start assignments,
+  update assignment branch state, integrate accepted assignment branches, list
+  tasks, and inspect task state.
 - **Adapter readiness**: list or inspect effective child and collaborator
   readiness before delegating.
 - **Usage**: summarize usage by root, terminal, run, task, or assignment.

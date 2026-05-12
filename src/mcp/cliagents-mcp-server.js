@@ -2391,6 +2391,27 @@ This calls cliagents' direct-session discussion route and returns the completed 
           type: 'string',
           description: 'Optional worktree branch metadata.'
         },
+        autoBranch: {
+          type: 'boolean',
+          description: 'When true, allocate a deterministic assignment branch and git worktree from the task workspace.'
+        },
+        baseBranch: {
+          type: 'string',
+          description: 'Optional source branch for assignment branch orchestration.'
+        },
+        branchName: {
+          type: 'string',
+          description: 'Optional assignment branch name.'
+        },
+        mergeTarget: {
+          type: 'string',
+          description: 'Optional branch to integrate into after review.'
+        },
+        writePaths: {
+          type: 'array',
+          items: { type: 'string' },
+          description: 'Optional relative workspace paths this assignment intends to edit; used for conflict leases.'
+        },
         acceptanceCriteria: {
           type: 'string',
           description: 'Optional acceptance criteria for the assignment.'
@@ -2456,6 +2477,42 @@ This calls cliagents' direct-session discussion route and returns the completed 
           enum: ['none', 'minimal', 'low', 'medium', 'high', 'xhigh'],
           description: 'Optional reasoning effort override at start time.'
         }
+      },
+      required: ['taskId', 'assignmentId']
+    }
+  },
+  {
+    name: 'update_task_assignment_branch',
+    description: 'Update branch lifecycle metadata for a task assignment.',
+    inputSchema: {
+      type: 'object',
+      properties: {
+        taskId: { type: 'string', description: 'Task ID that owns the assignment.' },
+        assignmentId: { type: 'string', description: 'Assignment ID to update.' },
+        branchStatus: {
+          type: 'string',
+          enum: ['planned', 'created', 'running', 'ready_for_review', 'accepted', 'integrated', 'failed'],
+          description: 'Optional branch lifecycle status.'
+        },
+        testStatus: { type: 'string', description: 'Optional test gate status.' },
+        reviewStatus: { type: 'string', description: 'Optional review gate status.' },
+        headSha: { type: 'string', description: 'Optional branch head SHA.' },
+        refresh: { type: 'boolean', description: 'Refresh branch head and diff metadata from git when possible.' }
+      },
+      required: ['taskId', 'assignmentId']
+    }
+  },
+  {
+    name: 'integrate_task_assignment_branch',
+    description: 'Integrate an accepted assignment branch into its merge target.',
+    inputSchema: {
+      type: 'object',
+      properties: {
+        taskId: { type: 'string', description: 'Task ID that owns the assignment.' },
+        assignmentId: { type: 'string', description: 'Assignment ID to integrate.' },
+        mergeTarget: { type: 'string', description: 'Optional merge target override.' },
+        force: { type: 'boolean', description: 'Allow integration before branchStatus is accepted.' },
+        completeAssignment: { type: 'boolean', description: 'Whether integration should mark the assignment completed. Default true.' }
       },
       required: ['taskId', 'assignmentId']
     }
@@ -4826,6 +4883,11 @@ async function handleCreateTaskAssignment(args) {
     reasoningEffort: args?.reasoningEffort || args?.reasoning_effort || null,
     worktreePath: args?.worktreePath || null,
     worktreeBranch: args?.worktreeBranch || null,
+    autoBranch: args?.autoBranch === true || args?.auto_branch === true,
+    baseBranch: args?.baseBranch || args?.base_branch || null,
+    branchName: args?.branchName || args?.branch_name || null,
+    mergeTarget: args?.mergeTarget || args?.merge_target || null,
+    writePaths: Array.isArray(args?.writePaths) ? args.writePaths : (Array.isArray(args?.write_paths) ? args.write_paths : undefined),
     acceptanceCriteria: args?.acceptanceCriteria || null,
     metadata: args?.metadata || {}
   });
@@ -4847,7 +4909,10 @@ async function handleCreateTaskAssignment(args) {
         `status: ${assignment.status || 'queued'}`,
         assignment.adapter ? `adapter: ${assignment.adapter}` : null,
         assignment.model ? `model: ${assignment.model}` : null,
-        assignment.reasoningEffort ? `reasoning_effort: ${assignment.reasoningEffort}` : null
+        assignment.reasoningEffort ? `reasoning_effort: ${assignment.reasoningEffort}` : null,
+        assignment.branch?.branchName ? `branch: ${assignment.branch.branchName}` : null,
+        assignment.branch?.status ? `branch_status: ${assignment.branch.status}` : null,
+        assignment.branch?.pathLeaseId ? `path_lease_id: ${assignment.branch.pathLeaseId}` : null
       ].filter(Boolean).join('\n')
     }]
   };
@@ -4886,6 +4951,9 @@ async function handleListTaskAssignments(args) {
           Array.isArray(assignment.taskSessionBindings) && assignment.taskSessionBindings.length > 0
             ? `bindings=${assignment.taskSessionBindings.length}`
             : null,
+          assignment.branch?.branchName ? `branch=${assignment.branch.branchName}` : null,
+          assignment.branch?.status ? `branch_status=${assignment.branch.status}` : null,
+          assignment.branch?.pathLeaseId ? `path_lease=${assignment.branch.pathLeaseId}` : null,
           assignment.isolation?.mode ? `isolation=${assignment.isolation.mode}` : null,
           assignment.isolation?.branch ? `branch=${assignment.isolation.branch}` : null,
           assignment.usageSummary ? `total_tokens=${assignment.usageSummary.totalTokens || 0}` : null
@@ -4946,6 +5014,9 @@ async function handleStartTaskAssignment(args) {
         assignment.reasoningEffort || data.route?.reasoningEffort ? `reasoning_effort: ${assignment.reasoningEffort || data.route?.reasoningEffort}` : null,
         assignment.worktreePath ? `worktree_path: ${assignment.worktreePath}` : null,
         assignment.worktreeBranch ? `worktree_branch: ${assignment.worktreeBranch}` : null,
+        assignment.branch?.branchName ? `branch: ${assignment.branch.branchName}` : null,
+        assignment.branch?.status ? `branch_status: ${assignment.branch.status}` : null,
+        assignment.branch?.pathLeaseId ? `path_lease_id: ${assignment.branch.pathLeaseId}` : null,
         assignment.dispatch?.id || data.dispatch?.dispatchRequestId ? `dispatch_request_id: ${assignment.dispatch?.id || data.dispatch?.dispatchRequestId}` : null,
         assignment.dispatch?.status || data.dispatch?.status ? `dispatch_status: ${assignment.dispatch?.status || data.dispatch?.status}` : null,
         data.dispatch?.contextSnapshotId ? `context_snapshot_id: ${data.dispatch.contextSnapshotId}` : null,
@@ -4957,6 +5028,73 @@ async function handleStartTaskAssignment(args) {
         assignment.isolation?.created !== undefined ? `isolation_created: ${assignment.isolation.created === true}` : null,
         assignment.isolation?.dirty !== undefined && assignment.isolation?.dirty !== null ? `isolation_dirty: ${assignment.isolation.dirty === true}` : null,
         assignment.isolation?.head ? `isolation_head: ${assignment.isolation.head}` : null
+      ].filter(Boolean).join('\n')
+    }]
+  };
+}
+
+async function handleUpdateTaskAssignmentBranch(args) {
+  const res = await callCliagents(
+    'PATCH',
+    `/orchestration/tasks/${encodeURIComponent(args?.taskId || '')}/assignments/${encodeURIComponent(args?.assignmentId || '')}/branch`,
+    {
+      branchStatus: args?.branchStatus || args?.branch_status || null,
+      testStatus: args?.testStatus || args?.test_status || null,
+      reviewStatus: args?.reviewStatus || args?.review_status || null,
+      headSha: args?.headSha || args?.head_sha || null,
+      refresh: args?.refresh === true
+    }
+  );
+  if (res.status !== 200) {
+    throw new Error(`Failed to update task assignment branch: ${JSON.stringify(res.data)}`);
+  }
+  const assignment = res.data?.assignment || {};
+  return {
+    content: [{
+      type: 'text',
+      text: [
+        '## Task Assignment Branch Updated',
+        '',
+        `task_id: ${args?.taskId || 'n/a'}`,
+        `assignment_id: ${assignment.id || args?.assignmentId || 'n/a'}`,
+        assignment.branch?.branchName ? `branch: ${assignment.branch.branchName}` : null,
+        assignment.branch?.status ? `branch_status: ${assignment.branch.status}` : null,
+        assignment.branch?.headSha ? `head_sha: ${assignment.branch.headSha}` : null,
+        assignment.branch?.testStatus ? `test_status: ${assignment.branch.testStatus}` : null,
+        assignment.branch?.reviewStatus ? `review_status: ${assignment.branch.reviewStatus}` : null
+      ].filter(Boolean).join('\n')
+    }]
+  };
+}
+
+async function handleIntegrateTaskAssignmentBranch(args) {
+  const res = await callCliagents(
+    'POST',
+    `/orchestration/tasks/${encodeURIComponent(args?.taskId || '')}/assignments/${encodeURIComponent(args?.assignmentId || '')}/integrate`,
+    {
+      mergeTarget: args?.mergeTarget || args?.merge_target || null,
+      force: args?.force === true,
+      completeAssignment: args?.completeAssignment !== false && args?.complete_assignment !== false
+    }
+  );
+  if (res.status !== 200) {
+    throw new Error(`Failed to integrate task assignment branch: ${JSON.stringify(res.data)}`);
+  }
+  const assignment = res.data?.assignment || {};
+  const integration = res.data?.integration || {};
+  return {
+    content: [{
+      type: 'text',
+      text: [
+        '## Task Assignment Branch Integrated',
+        '',
+        `task_id: ${args?.taskId || 'n/a'}`,
+        `assignment_id: ${assignment.id || args?.assignmentId || 'n/a'}`,
+        assignment.branch?.branchName ? `branch: ${assignment.branch.branchName}` : null,
+        integration.targetBranch ? `merge_target: ${integration.targetBranch}` : null,
+        integration.afterSha ? `head_sha: ${integration.afterSha}` : null,
+        `assignment_status: ${assignment.status || 'n/a'}`,
+        assignment.branch?.status ? `branch_status: ${assignment.branch.status}` : null
       ].filter(Boolean).join('\n')
     }]
   };
@@ -6021,6 +6159,12 @@ async function handleRequest(request) {
           case 'start_task_assignment':
             result = await handleStartTaskAssignment(args);
             break;
+          case 'update_task_assignment_branch':
+            result = await handleUpdateTaskAssignmentBranch(args);
+            break;
+          case 'integrate_task_assignment_branch':
+            result = await handleIntegrateTaskAssignmentBranch(args);
+            break;
           case 'create_room':
             result = await handleCreateRoom(args);
             break;
@@ -6141,6 +6285,8 @@ module.exports = {
   handleCreateTaskAssignment,
   handleListTaskAssignments,
   handleStartTaskAssignment,
+  handleUpdateTaskAssignmentBranch,
+  handleIntegrateTaskAssignmentBranch,
   handleCreateRoom,
   handleListRooms,
   handleSendRoomMessage,

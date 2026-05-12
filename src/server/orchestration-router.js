@@ -29,6 +29,14 @@ const {
 const { getChildSessionSupport } = require('../orchestration/child-session-support');
 const { AdapterReadinessService } = require('../orchestration/adapter-readiness');
 const { prepareTaskAssignmentWorktree } = require('../orchestration/task-worktree');
+const {
+  buildAssignmentBranchPlan,
+  integrateAssignmentBranch,
+  normalizeWritePaths,
+  readBranchSnapshot,
+  readDiffStats,
+  shouldAllocateBranch
+} = require('../orchestration/assignment-branching');
 const { sendMessage, broadcastMessage } = require('../orchestration/send-message');
 const {
   createBrowserPerceptionEngineClient,
@@ -1090,6 +1098,15 @@ function createOrchestrationRouter(context) {
     ['judge', 'review']
   ]);
   const REASONING_EFFORT_LEVELS = new Set(['none', 'minimal', 'low', 'medium', 'high', 'xhigh']);
+  const TASK_ASSIGNMENT_BRANCH_STATUSES = new Set([
+    'planned',
+    'created',
+    'running',
+    'ready_for_review',
+    'accepted',
+    'integrated',
+    'failed'
+  ]);
 
   function normalizeReasoningEffort(value) {
     const normalized = String(value || '').trim().toLowerCase();
@@ -1112,6 +1129,57 @@ function createOrchestrationRouter(context) {
       return { provided: true, error: String(raw) };
     }
     return { provided: true, value: normalized };
+  }
+
+  function normalizeBranchStatus(value, fallback = null) {
+    const normalized = String(value || '').trim().toLowerCase();
+    return TASK_ASSIGNMENT_BRANCH_STATUSES.has(normalized) ? normalized : fallback;
+  }
+
+  function readAssignmentBranchFields(body = {}) {
+    const patch = {};
+    if (body.baseBranch !== undefined || body.base_branch !== undefined) {
+      patch.baseBranch = body.baseBranch ?? body.base_branch;
+    }
+    if (body.branchName !== undefined || body.branch_name !== undefined) {
+      patch.branchName = body.branchName ?? body.branch_name;
+    }
+    if (body.mergeTarget !== undefined || body.merge_target !== undefined) {
+      patch.mergeTarget = body.mergeTarget ?? body.merge_target;
+    }
+    if (body.branchStatus !== undefined || body.branch_status !== undefined) {
+      const branchStatus = normalizeBranchStatus(body.branchStatus ?? body.branch_status, null);
+      if (!branchStatus && (body.branchStatus ?? body.branch_status)) {
+        return { error: { code: 'invalid_parameter', message: 'branchStatus is invalid', param: 'branchStatus' } };
+      }
+      patch.branchStatus = branchStatus;
+    }
+    if (body.writePaths !== undefined || body.write_paths !== undefined) {
+      try {
+        patch.writePaths = normalizeWritePaths(body.writePaths ?? body.write_paths);
+      } catch (error) {
+        return { error: { code: 'invalid_parameter', message: error.message, param: 'writePaths' } };
+      }
+    }
+    if (body.baseSha !== undefined || body.base_sha !== undefined) {
+      patch.baseSha = body.baseSha ?? body.base_sha;
+    }
+    if (body.headSha !== undefined || body.head_sha !== undefined) {
+      patch.headSha = body.headSha ?? body.head_sha;
+    }
+    if (body.diffStats !== undefined || body.diff_stats !== undefined) {
+      patch.diffStats = body.diffStats ?? body.diff_stats;
+    }
+    if (body.testStatus !== undefined || body.test_status !== undefined) {
+      patch.testStatus = body.testStatus ?? body.test_status;
+    }
+    if (body.reviewStatus !== undefined || body.review_status !== undefined) {
+      patch.reviewStatus = body.reviewStatus ?? body.review_status;
+    }
+    if (body.integratedAt !== undefined || body.integrated_at !== undefined) {
+      patch.integratedAt = body.integratedAt ?? body.integrated_at;
+    }
+    return { patch };
   }
 
   function normalizeTaskAssignmentStatus(status, fallback = 'queued') {
@@ -1216,6 +1284,26 @@ function createOrchestrationRouter(context) {
         lastVerifiedAt: binding.lastVerifiedAt
       }))
       : [];
+    const pathLease = assignment?.pathLeaseId && typeof db?.getTaskAssignmentPathLease === 'function'
+      ? db.getTaskAssignmentPathLease(assignment.pathLeaseId)
+      : null;
+    const branch = {
+      baseBranch: assignment?.baseBranch || null,
+      branchName: assignment?.branchName || assignment?.worktreeBranch || null,
+      mergeTarget: assignment?.mergeTarget || null,
+      status: assignment?.branchStatus || null,
+      worktreePath: assignment?.worktreePath || null,
+      worktreeBranch: assignment?.worktreeBranch || null,
+      writePaths: Array.isArray(assignment?.writePaths) ? assignment.writePaths : [],
+      pathLeaseId: assignment?.pathLeaseId || null,
+      pathLease,
+      baseSha: assignment?.baseSha || null,
+      headSha: assignment?.headSha || isolation?.head || null,
+      diffStats: assignment?.diffStats || null,
+      testStatus: assignment?.testStatus || null,
+      reviewStatus: assignment?.reviewStatus || null,
+      integratedAt: assignment?.integratedAt || null
+    };
 
     return {
       ...assignment,
@@ -1223,6 +1311,7 @@ function createOrchestrationRouter(context) {
       storedStatus,
       terminalStatus,
       isolation,
+      branch,
       dispatch: dispatchRequests[0] || null,
       dispatchRequests,
       taskSessionBindings,
@@ -1575,6 +1664,10 @@ function createOrchestrationRouter(context) {
         requestedAdapter: assignment.adapter || null,
         requestedModel: assignment.model || null,
         requestedReasoningEffort: reasoningEffort || assignment.reasoningEffort || null,
+        branchName: assignment.branchName || assignment.worktreeBranch || null,
+        baseBranch: assignment.baseBranch || null,
+        mergeTarget: assignment.mergeTarget || null,
+        writePaths: assignment.writePaths || [],
         preferReuse: req.body?.preferReuse,
         forceFreshSession: req.body?.forceFreshSession === true,
         systemPromptProvided: Boolean(req.body?.systemPrompt),
@@ -1649,6 +1742,12 @@ function createOrchestrationRouter(context) {
           reasoningEffort: reasoningEffort || assignment.reasoningEffort || null,
           worktreePath: assignment.worktreePath || null,
           worktreeBranch: assignment.worktreeBranch || null,
+          baseBranch: assignment.baseBranch || null,
+          branchName: assignment.branchName || null,
+          mergeTarget: assignment.mergeTarget || null,
+          branchStatus: assignment.branchStatus || null,
+          writePaths: assignment.writePaths || [],
+          pathLeaseId: assignment.pathLeaseId || null,
           acceptanceCriteria: assignment.acceptanceCriteria || null
         }
       },
@@ -1660,6 +1759,39 @@ function createOrchestrationRouter(context) {
       model: assignment.model || null,
       reasoningEffort: reasoningEffort || assignment.reasoningEffort || null
     });
+  }
+
+  function acquireAssignmentWriteLease({ task, assignment, branchPlan, requestedBy = 'api' }) {
+    const writePaths = branchPlan?.writePaths || assignment?.writePaths || [];
+    if (!Array.isArray(writePaths) || writePaths.length === 0 || typeof db?.acquireTaskAssignmentPathLease !== 'function') {
+      return { lease: null, patch: {} };
+    }
+
+    const result = db.acquireTaskAssignmentPathLease({
+      taskId: task.id,
+      taskAssignmentId: assignment.id,
+      workspaceRoot: task.workspaceRoot,
+      branchName: branchPlan?.branchName || assignment.branchName || assignment.worktreeBranch || null,
+      writePaths,
+      holder: requestedBy || assignment.id,
+      metadata: {
+        taskTitle: task.title,
+        assignmentRole: assignment.role
+      }
+    });
+
+    if (!result.acquired) {
+      const conflict = result.lease;
+      const error = new Error(`write path lease conflict with assignment ${conflict?.taskAssignmentId || 'unknown'}`);
+      error.code = 'path_lease_conflict';
+      error.conflict = conflict;
+      throw error;
+    }
+
+    return {
+      lease: result.lease || null,
+      patch: result.lease ? { pathLeaseId: result.lease.id } : {}
+    };
   }
 
   function updateAssignmentStartDispatch(dispatchRequest, patch = {}) {
@@ -2273,6 +2405,7 @@ function createOrchestrationRouter(context) {
    * Create a queued assignment for a task.
    */
   router.post('/tasks/:taskId/assignments', (req, res) => {
+    let precreatedPathLease = null;
     try {
       if (!db?.getTask || !db?.createTaskAssignment) {
         return res.status(503).json({
@@ -2311,16 +2444,58 @@ function createOrchestrationRouter(context) {
       }
 
       const now = Date.now();
+      let branchPlan = null;
+      if (shouldAllocateBranch(req.body || {})) {
+        branchPlan = buildAssignmentBranchPlan(task, {
+          ...req.body,
+          role
+        }, { now });
+      }
+      const branchFields = readAssignmentBranchFields(req.body || {});
+      if (branchFields.error) {
+        return res.status(400).json({ error: branchFields.error });
+      }
+      const assignmentId = String(req.body?.assignmentId || req.body?.id || `assignment_${crypto.randomBytes(8).toString('hex')}`).trim();
+      const assignmentWritePaths = branchPlan?.writePaths || branchFields.patch.writePaths || [];
+      if (assignmentWritePaths.length > 0) {
+        const leaseResult = acquireAssignmentWriteLease({
+          task,
+          assignment: {
+            id: assignmentId,
+            role,
+            branchName: branchPlan?.branchName || branchFields.patch.branchName || null,
+            worktreeBranch: branchPlan?.worktreeBranch || req.body?.worktreeBranch || null,
+            writePaths: assignmentWritePaths
+          },
+          branchPlan: {
+            branchName: branchPlan?.branchName || branchFields.patch.branchName || req.body?.worktreeBranch || null,
+            writePaths: assignmentWritePaths
+          },
+          requestedBy: req.body?.requestedBy || req.body?.requested_by || 'api'
+        });
+        precreatedPathLease = leaseResult.lease || null;
+      }
       const assignment = db.createTaskAssignment({
-        id: req.body?.assignmentId || req.body?.id || null,
+        id: assignmentId,
         taskId: task.id,
         role,
         instructions,
         adapter: req.body?.adapter || null,
         model: req.body?.model || null,
         reasoningEffort: reasoningEffortInput.provided ? reasoningEffortInput.value : null,
-        worktreePath: req.body?.worktreePath || null,
-        worktreeBranch: req.body?.worktreeBranch || null,
+        worktreePath: branchPlan?.worktreePath || req.body?.worktreePath || null,
+        worktreeBranch: branchPlan?.worktreeBranch || req.body?.worktreeBranch || null,
+        baseBranch: branchPlan?.baseBranch || branchFields.patch.baseBranch || null,
+        branchName: branchPlan?.branchName || branchFields.patch.branchName || null,
+        mergeTarget: branchPlan?.mergeTarget || branchFields.patch.mergeTarget || null,
+        branchStatus: branchPlan?.branchStatus || branchFields.patch.branchStatus || null,
+        writePaths: assignmentWritePaths,
+        pathLeaseId: precreatedPathLease?.id || null,
+        baseSha: branchPlan?.baseSha || branchFields.patch.baseSha || null,
+        headSha: branchFields.patch.headSha || null,
+        diffStats: branchFields.patch.diffStats || null,
+        testStatus: branchFields.patch.testStatus || null,
+        reviewStatus: branchFields.patch.reviewStatus || null,
         acceptanceCriteria: req.body?.acceptanceCriteria || null,
         metadata: req.body?.metadata || {},
         status: 'queued',
@@ -2333,9 +2508,36 @@ function createOrchestrationRouter(context) {
         assignment: buildTaskAssignmentPayload(assignment)
       });
     } catch (error) {
+      if (precreatedPathLease?.id && typeof db?.updateTaskAssignmentPathLease === 'function') {
+        try {
+          db.updateTaskAssignmentPathLease(precreatedPathLease.id, {
+            status: 'released',
+            releasedAt: Date.now(),
+            metadata: {
+              ...(precreatedPathLease.metadata || {}),
+              releasedBy: 'assignment_create_failed',
+              releaseReason: error.message || String(error)
+            }
+          });
+        } catch {}
+      }
       if (error?.code === 'SQLITE_CONSTRAINT_PRIMARYKEY' || error?.code === 'SQLITE_CONSTRAINT_UNIQUE') {
         return res.status(409).json({
           error: { code: 'task_assignment_exists', message: error.message }
+        });
+      }
+      if (error?.code === 'path_lease_conflict') {
+        return res.status(409).json({
+          error: {
+            code: 'path_lease_conflict',
+            message: error.message,
+            conflict: error.conflict || null
+          }
+        });
+      }
+      if (/writePaths|autoBranch/.test(error.message || '')) {
+        return res.status(400).json({
+          error: { code: 'invalid_parameter', message: error.message }
         });
       }
       res.status(500).json({
@@ -2397,7 +2599,7 @@ function createOrchestrationRouter(context) {
         });
       }
 
-      const assignment = db.getTaskAssignment(req.params.assignmentId);
+      let assignment = db.getTaskAssignment(req.params.assignmentId);
       if (!assignment || assignment.taskId !== task.id) {
         return res.status(404).json({
           error: { code: 'task_assignment_not_found', message: `Assignment ${req.params.assignmentId} not found for task ${task.id}` }
@@ -2448,6 +2650,11 @@ function createOrchestrationRouter(context) {
       if (req.body?.metadata !== undefined) {
         patch.metadata = req.body.metadata;
       }
+      const branchFields = readAssignmentBranchFields(req.body || {});
+      if (branchFields.error) {
+        return res.status(400).json({ error: branchFields.error });
+      }
+      Object.assign(patch, branchFields.patch);
 
       if (patch.instructions !== undefined && !patch.instructions) {
         return res.status(400).json({
@@ -2459,6 +2666,31 @@ function createOrchestrationRouter(context) {
           task: buildTaskPayload(task.id),
           assignment: buildTaskAssignmentPayload(assignment)
         });
+      }
+      if (Array.isArray(patch.writePaths)) {
+        if (patch.writePaths.length > 0) {
+          const leaseResult = acquireAssignmentWriteLease({
+            task,
+            assignment: {
+              ...assignment,
+              ...patch
+            },
+            branchPlan: {
+              branchName: patch.branchName || assignment.branchName || patch.worktreeBranch || assignment.worktreeBranch || null,
+              writePaths: patch.writePaths
+            },
+            requestedBy: req.body?.requestedBy || req.body?.requested_by || 'api'
+          });
+          if (leaseResult.patch.pathLeaseId) {
+            patch.pathLeaseId = leaseResult.patch.pathLeaseId;
+          }
+        } else if (assignment.pathLeaseId && typeof db?.updateTaskAssignmentPathLease === 'function') {
+          db.updateTaskAssignmentPathLease(assignment.pathLeaseId, {
+            status: 'released',
+            releasedAt: Date.now()
+          });
+          patch.pathLeaseId = null;
+        }
       }
 
       const now = Date.now();
@@ -2473,6 +2705,15 @@ function createOrchestrationRouter(context) {
         assignment: buildTaskAssignmentPayload(updated)
       });
     } catch (error) {
+      if (error?.code === 'path_lease_conflict') {
+        return res.status(409).json({
+          error: {
+            code: 'path_lease_conflict',
+            message: error.message,
+            conflict: error.conflict || null
+          }
+        });
+      }
       res.status(500).json({
         error: { code: 'internal_error', message: error.message }
       });
@@ -2527,10 +2768,19 @@ function createOrchestrationRouter(context) {
           instructions: replacementSpec.instructions || assignment.instructions,
           adapter: replacementSpec.adapter !== undefined ? replacementSpec.adapter : assignment.adapter,
           model: replacementSpec.model !== undefined ? replacementSpec.model : assignment.model,
-          reasoningEffort: replacementSpec.reasoningEffort !== undefined ? replacementSpec.reasoningEffort : assignment.reasoningEffort,
-          worktreePath: replacementSpec.worktreePath !== undefined ? replacementSpec.worktreePath : assignment.worktreePath,
-          worktreeBranch: replacementSpec.worktreeBranch !== undefined ? replacementSpec.worktreeBranch : assignment.worktreeBranch,
-          acceptanceCriteria: replacementSpec.acceptanceCriteria !== undefined ? replacementSpec.acceptanceCriteria : assignment.acceptanceCriteria,
+	          reasoningEffort: replacementSpec.reasoningEffort !== undefined ? replacementSpec.reasoningEffort : assignment.reasoningEffort,
+	          worktreePath: replacementSpec.worktreePath !== undefined ? replacementSpec.worktreePath : assignment.worktreePath,
+	          worktreeBranch: replacementSpec.worktreeBranch !== undefined ? replacementSpec.worktreeBranch : assignment.worktreeBranch,
+	          baseBranch: replacementSpec.baseBranch !== undefined ? replacementSpec.baseBranch : assignment.baseBranch,
+	          branchName: replacementSpec.branchName !== undefined ? replacementSpec.branchName : assignment.branchName,
+	          mergeTarget: replacementSpec.mergeTarget !== undefined ? replacementSpec.mergeTarget : assignment.mergeTarget,
+	          branchStatus: replacementSpec.branchStatus !== undefined ? replacementSpec.branchStatus : assignment.branchStatus,
+	          writePaths: replacementSpec.writePaths !== undefined ? replacementSpec.writePaths : assignment.writePaths,
+	          baseSha: replacementSpec.baseSha !== undefined ? replacementSpec.baseSha : assignment.baseSha,
+	          headSha: replacementSpec.headSha !== undefined ? replacementSpec.headSha : assignment.headSha,
+	          testStatus: replacementSpec.testStatus !== undefined ? replacementSpec.testStatus : assignment.testStatus,
+	          reviewStatus: replacementSpec.reviewStatus !== undefined ? replacementSpec.reviewStatus : assignment.reviewStatus,
+	          acceptanceCriteria: replacementSpec.acceptanceCriteria !== undefined ? replacementSpec.acceptanceCriteria : assignment.acceptanceCriteria,
           metadata: {
             ...(assignment.metadata || {}),
             ...(replacementSpec.metadata && typeof replacementSpec.metadata === 'object' && !Array.isArray(replacementSpec.metadata)
@@ -2545,9 +2795,10 @@ function createOrchestrationRouter(context) {
         });
       }
 
-      const superseded = db.updateTaskAssignment(assignment.id, {
-        status: 'superseded',
-        completedAt: now,
+	      const superseded = db.updateTaskAssignment(assignment.id, {
+	        status: 'superseded',
+	        branchStatus: assignment.branchStatus === 'integrated' ? 'integrated' : (assignment.branchName || assignment.worktreeBranch ? 'failed' : assignment.branchStatus || null),
+	        completedAt: now,
         metadata: {
           ...(assignment.metadata || {}),
           supersededAt: now,
@@ -2555,7 +2806,20 @@ function createOrchestrationRouter(context) {
           supersedeReason: reason
         },
         updatedAt: now
-      });
+	      });
+	      if (assignment.pathLeaseId && typeof db?.updateTaskAssignmentPathLease === 'function') {
+	        db.updateTaskAssignmentPathLease(assignment.pathLeaseId, {
+	          status: 'released',
+	          releasedAt: now,
+	          metadata: {
+	            ...(db.getTaskAssignmentPathLease(assignment.pathLeaseId)?.metadata || {}),
+	            releasedBy: 'assignment_supersede',
+	            supersededAt: now,
+	            supersededBy: replacement?.id || null
+	          },
+	          updatedAt: now
+	        });
+	      }
       db.updateTask(task.id, { updatedAt: now });
 
       res.json({
@@ -2578,6 +2842,7 @@ function createOrchestrationRouter(context) {
     let dispatchRequest = null;
     let contextSnapshot = null;
     let taskSessionBinding = null;
+    let assignmentForFailure = null;
     try {
       if (!db?.getTask || !db?.getTaskAssignment) {
         return res.status(503).json({
@@ -2593,6 +2858,7 @@ function createOrchestrationRouter(context) {
       }
 
       const assignment = db.getTaskAssignment(req.params.assignmentId);
+      assignmentForFailure = assignment;
       if (!assignment || assignment.taskId !== task.id) {
         return res.status(404).json({
           error: { code: 'task_assignment_not_found', message: `Assignment ${req.params.assignmentId} not found for task ${task.id}` }
@@ -2641,6 +2907,24 @@ function createOrchestrationRouter(context) {
       const requestedReasoningEffort = reasoningEffortInput.provided
         ? reasoningEffortInput.value
         : (assignment.reasoningEffort || null);
+      if (Array.isArray(assignment.writePaths) && assignment.writePaths.length > 0 && !assignment.pathLeaseId) {
+        const leaseResult = acquireAssignmentWriteLease({
+          task,
+          assignment,
+          branchPlan: {
+            branchName: assignment.branchName || assignment.worktreeBranch || null,
+            writePaths: assignment.writePaths
+          },
+          requestedBy: req.body?.requestedBy || req.body?.requested_by || executionControlPlane.originClient || 'api'
+        });
+        if (leaseResult.patch.pathLeaseId) {
+          assignment = db.updateTaskAssignment(assignment.id, {
+            pathLeaseId: leaseResult.patch.pathLeaseId,
+            updatedAt: Date.now()
+          });
+          assignmentForFailure = assignment;
+        }
+      }
       const deferUntilInput = parseOptionalTimestamp(req.body?.deferUntil ?? req.body?.defer_until, 'deferUntil');
       if (deferUntilInput.error) {
         return res.status(400).json({ error: deferUntilInput.error });
@@ -2694,6 +2978,9 @@ function createOrchestrationRouter(context) {
       }
       const preparedWorktree = assignment.worktreePath
         ? prepareTaskAssignmentWorktree(task, assignment)
+        : null;
+      const preparedBranchSnapshot = assignment.branchName || preparedWorktree?.worktreeBranch
+        ? readBranchSnapshot(task.workspaceRoot, assignment.branchName || preparedWorktree?.worktreeBranch)
         : null;
       const workingDirectory = preparedWorktree?.workingDirectory
         || task.workspaceRoot
@@ -2796,6 +3083,11 @@ function createOrchestrationRouter(context) {
         status: 'running',
         worktreePath: preparedWorktree?.worktreePath || assignment.worktreePath || null,
         worktreeBranch: preparedWorktree?.worktreeBranch || assignment.worktreeBranch || null,
+        branchName: assignment.branchName || preparedWorktree?.worktreeBranch || null,
+        branchStatus: assignment.branchName || assignment.worktreeBranch || preparedWorktree?.worktreeBranch
+          ? 'running'
+          : assignment.branchStatus || null,
+        headSha: preparedBranchSnapshot?.headSha || preparedWorktree?.isolation?.head || assignment.headSha || null,
         startedAt: now,
         updatedAt: now,
         metadata: {
@@ -2837,6 +3129,17 @@ function createOrchestrationRouter(context) {
         parentSessionId: resolvedControlPlane.parentSessionId || null
       });
     } catch (error) {
+      if (assignmentForFailure?.id && db?.updateTaskAssignment) {
+        try {
+          const branchTracked = assignmentForFailure.branchName || assignmentForFailure.worktreeBranch;
+          if (branchTracked) {
+            db.updateTaskAssignment(assignmentForFailure.id, {
+              branchStatus: 'failed',
+              updatedAt: Date.now()
+            });
+          }
+        } catch {}
+      }
       if (dispatchRequest?.id && db?.updateDispatchRequest) {
         try {
           updateAssignmentStartDispatch(dispatchRequest, {
@@ -2851,8 +3154,157 @@ function createOrchestrationRouter(context) {
           });
         } catch {}
       }
+      if (error?.code === 'path_lease_conflict') {
+        return res.status(409).json({
+          error: {
+            code: 'path_lease_conflict',
+            message: error.message,
+            conflict: error.conflict || null
+          }
+        });
+      }
       res.status(500).json({
         error: { code: 'task_assignment_start_failed', message: error.message }
+      });
+    }
+  });
+
+  /**
+   * PATCH /orchestration/tasks/:taskId/assignments/:assignmentId/branch
+   * Update branch lifecycle metadata for an assignment.
+   */
+  router.patch('/tasks/:taskId/assignments/:assignmentId/branch', (req, res) => {
+    try {
+      if (!db?.getTask || !db?.getTaskAssignment || !db?.updateTaskAssignment) {
+        return res.status(503).json({
+          error: { code: 'unavailable', message: 'task assignments are not configured' }
+        });
+      }
+
+      const task = db.getTask(req.params.taskId);
+      if (!task) {
+        return res.status(404).json({
+          error: { code: 'task_not_found', message: `Task ${req.params.taskId} not found` }
+        });
+      }
+      const assignment = db.getTaskAssignment(req.params.assignmentId);
+      if (!assignment || assignment.taskId !== task.id) {
+        return res.status(404).json({
+          error: { code: 'task_assignment_not_found', message: `Assignment ${req.params.assignmentId} not found for task ${task.id}` }
+        });
+      }
+
+      const branchFields = readAssignmentBranchFields(req.body || {});
+      if (branchFields.error) {
+        return res.status(400).json({ error: branchFields.error });
+      }
+      const patch = { ...branchFields.patch };
+      const branchName = patch.branchName || assignment.branchName || assignment.worktreeBranch || null;
+      const shouldRefresh = parseQueryBoolean(req.body?.refresh ?? req.query?.refresh, false);
+      if (shouldRefresh && branchName) {
+        const snapshot = readBranchSnapshot(task.workspaceRoot, branchName);
+        patch.headSha = snapshot.headSha || patch.headSha || assignment.headSha || null;
+        const baseRef = patch.baseSha || assignment.baseSha || assignment.baseBranch || assignment.mergeTarget || null;
+        if (baseRef && snapshot.headSha) {
+          patch.diffStats = readDiffStats(task.workspaceRoot, baseRef, branchName);
+        }
+      }
+
+      if (Object.keys(patch).length === 0) {
+        return res.json({
+          task: buildTaskPayload(task.id),
+          assignment: buildTaskAssignmentPayload(assignment)
+        });
+      }
+
+      const now = Date.now();
+      const updated = db.updateTaskAssignment(assignment.id, {
+        ...patch,
+        updatedAt: now
+      });
+      db.updateTask(task.id, { updatedAt: now });
+
+      res.json({
+        task: buildTaskPayload(task.id),
+        assignment: buildTaskAssignmentPayload(updated)
+      });
+    } catch (error) {
+      res.status(500).json({
+        error: { code: 'task_assignment_branch_update_failed', message: error.message }
+      });
+    }
+  });
+
+  /**
+   * POST /orchestration/tasks/:taskId/assignments/:assignmentId/integrate
+   * Merge an accepted assignment branch into its merge target.
+   */
+  router.post('/tasks/:taskId/assignments/:assignmentId/integrate', (req, res) => {
+    try {
+      if (!db?.getTask || !db?.getTaskAssignment || !db?.updateTaskAssignment) {
+        return res.status(503).json({
+          error: { code: 'unavailable', message: 'task assignments are not configured' }
+        });
+      }
+
+      const task = db.getTask(req.params.taskId);
+      if (!task) {
+        return res.status(404).json({
+          error: { code: 'task_not_found', message: `Task ${req.params.taskId} not found` }
+        });
+      }
+      const assignment = db.getTaskAssignment(req.params.assignmentId);
+      if (!assignment || assignment.taskId !== task.id) {
+        return res.status(404).json({
+          error: { code: 'task_assignment_not_found', message: `Assignment ${req.params.assignmentId} not found for task ${task.id}` }
+        });
+      }
+      if (assignment.branchStatus !== 'accepted' && req.body?.force !== true) {
+        return res.status(409).json({
+          error: {
+            code: 'assignment_branch_not_accepted',
+            message: `Assignment ${assignment.id} branch must be accepted before integration`
+          }
+        });
+      }
+
+      const integration = integrateAssignmentBranch(task, assignment, {
+        mergeTarget: req.body?.mergeTarget || req.body?.merge_target || null
+      });
+      const now = Date.now();
+      if (assignment.pathLeaseId && typeof db?.updateTaskAssignmentPathLease === 'function') {
+        db.updateTaskAssignmentPathLease(assignment.pathLeaseId, {
+          status: 'released',
+          releasedAt: now,
+          metadata: {
+            ...(db.getTaskAssignmentPathLease(assignment.pathLeaseId)?.metadata || {}),
+            releasedBy: 'assignment_integrate',
+            integratedAt: now
+          },
+          updatedAt: now
+        });
+      }
+      const completeAssignment = req.body?.completeAssignment !== false && req.body?.complete_assignment !== false;
+      const updated = db.updateTaskAssignment(assignment.id, {
+        branchStatus: 'integrated',
+        mergeTarget: integration.targetBranch,
+        headSha: integration.afterSha,
+        diffStats: integration.diffStats,
+        integratedAt: now,
+        ...(completeAssignment ? { status: 'completed', completedAt: now } : {}),
+        updatedAt: now
+      });
+      db.updateTask(task.id, { updatedAt: now });
+
+      res.json({
+        task: buildTaskPayload(task.id),
+        assignment: buildTaskAssignmentPayload(updated),
+        integration
+      });
+    } catch (error) {
+      const status = /uncommitted changes|must be accepted/.test(error.message || '') ? 409 : 500;
+      res.status(status).json({
+        error: { code: 'task_assignment_integration_failed', message: error.message }
       });
     }
   });

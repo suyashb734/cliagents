@@ -50,6 +50,12 @@ For `cliagents` task assignments, keep `worktreePath` and `worktreeBranch`
 metadata aligned with the actual git worktree so persisted assignment history can
 explain where the work happened.
 
+Branch-orchestrated assignments may also store `baseBranch`, `branchName`,
+`mergeTarget`, `writePaths`, `pathLeaseId`, and `branchStatus`. Use
+`autoBranch: true` when the broker should allocate a deterministic worker branch
+and worktree. Use `writePaths` for swarm execution so overlapping edit lanes are
+blocked before agents start.
+
 ## Pre-Work Check
 
 Run this before starting non-trivial work:

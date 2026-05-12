@@ -39,7 +39,9 @@
       "related_code": [
         "src/models/terminal-status.js",
         "src/tmux/session-manager.js",
-        "src/server/orchestration-router.js"
+        "src/server/orchestration-router.js",
+        "src/orchestration/assignment-branching.js",
+        "src/database/migrations/0025_branch_orchestrated_assignments.sql"
       ],
       "supersedes": ["docs/research/RUN-LEDGER-STATE-MACHINE.md"],
       "last_reviewed": "2026-05-04"
@@ -128,7 +130,10 @@
       "status": "reference",
       "type": "reference",
       "scope": ["mcp", "tools"],
-      "related_code": ["src/mcp/cliagents-mcp-server.js"],
+      "related_code": [
+        "src/mcp/cliagents-mcp-server.js",
+        "src/server/orchestration-router.js"
+      ],
       "supersedes": [],
       "last_reviewed": "2026-05-04"
     },
@@ -151,6 +156,8 @@
       "type": "reference",
       "scope": ["branch-management", "worktrees", "delegation", "release"],
       "related_code": [
+        "src/orchestration/assignment-branching.js",
+        "src/database/migrations/0025_branch_orchestrated_assignments.sql",
         "scripts/check-branch-hygiene.js",
         "package.json"
       ],
