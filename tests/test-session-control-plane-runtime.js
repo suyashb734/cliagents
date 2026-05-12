@@ -35,6 +35,8 @@ class FakeTmuxClient {
     this.createCalls = [];
     this.resizeCalls = [];
     this.statusVisibilityCalls = [];
+    this.historyLimitCalls = [];
+    this.clearHistoryCalls = [];
     this.respawnCalls = [];
     this.specialKeys = [];
     this.existingSessions = new Set();
@@ -70,6 +72,16 @@ class FakeTmuxClient {
 
   setSessionStatusVisible(sessionName, visible) {
     this.statusVisibilityCalls.push({ sessionName, visible });
+    return true;
+  }
+
+  setHistoryLimit(sessionName, windowName, historyLimit) {
+    this.historyLimitCalls.push({ sessionName, windowName, historyLimit });
+    return true;
+  }
+
+  clearHistory(sessionName, windowName) {
+    this.clearHistoryCalls.push({ sessionName, windowName });
     return true;
   }
 
@@ -198,6 +210,7 @@ async function run() {
     assert.strictEqual(workerCreateCall.options.env.CLIAGENTS_URL, 'http://127.0.0.1:4999');
     assert.strictEqual(workerCreateCall.options.env.CLIAGENTS_DATA_DIR, rootDir);
     assert.strictEqual(workerCreateCall.options.env.CLIAGENTS_LOCAL_API_KEY_FILE, path.join(rootDir, 'local-api-key'));
+    assert.strictEqual(workerCreateCall.options.historyLimit, null, 'worker sessions should not get managed-root tmux history policy');
 
     const recoveredRoot = await manager.createTerminal({
       adapter: 'codex-cli',
@@ -216,12 +229,22 @@ async function run() {
       }
     });
     const recoveredHistory = fakeTmux.getHistory(recoveredRoot.sessionName, recoveredRoot.windowName);
+    const recoveredCreateCall = fakeTmux.createCalls.find((call) => call.terminalId === recoveredRoot.terminalId);
+    assert.strictEqual(recoveredCreateCall.options.historyLimit, 5000, 'managed roots should get bounded tmux history by default');
     assert(recoveredHistory.includes('codex resume 019d94a6-2cd8-7742-8e4e-123456789abc'), 'expected recovered root to launch Codex in resume mode');
     assert(fakeTmux.respawnCalls.some((call) => call.sessionName === recoveredRoot.sessionName),
       'expected managed Codex root startup to respawn the pane directly');
     assert.strictEqual(recoveredRoot.providerThreadRef, '019d94a6-2cd8-7742-8e4e-123456789abc');
     const persistedRecoveredRoot = db.getTerminal(recoveredRoot.terminalId);
     assert.strictEqual(persistedRecoveredRoot.provider_thread_ref, '019d94a6-2cd8-7742-8e4e-123456789abc');
+
+    const trimResult = manager.trimTerminalTmuxHistory(recoveredRoot.terminalId);
+    assert.strictEqual(trimResult.trimmed, true);
+    assert.strictEqual(trimResult.historyLimit, 5000);
+    assert(fakeTmux.historyLimitCalls.some((call) => call.sessionName === recoveredRoot.sessionName && call.historyLimit === 5000),
+      'expected explicit trim to enforce managed-root history limit');
+    assert(fakeTmux.clearHistoryCalls.some((call) => call.sessionName === recoveredRoot.sessionName),
+      'expected explicit trim to clear tmux scrollback');
 
     const claudeRootSessionId = 'bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb';
     const claudeProviderThreadRef = 'bbbbbbbb-bbbb-bbbb-bbbb-bbbbbbbbbbbb';

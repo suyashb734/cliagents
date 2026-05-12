@@ -3513,6 +3513,7 @@
         </div>
 
         <div class="detail-actions">
+          <button class="btn" id="${prefix}-trim-history" type="button">Trim Tmux History</button>
           <button class="btn" id="${prefix}-destroy" type="button">Destroy Terminal</button>
           <button class="btn" id="${prefix}-reconcile-runs" type="button">Reconcile Stale Runs</button>
           <div class="hint">Attach command: <code>${escapeHtml(terminal.attachCommand || 'n/a')}</code></div>
@@ -3637,6 +3638,20 @@
       }
 
       bindOutputPreferenceControls(prefix, refreshFn);
+      document.getElementById(`${prefix}-trim-history`)?.addEventListener('click', async () => {
+        if (!window.confirm('Trim tmux scrollback for this terminal? Broker logs and persisted messages are preserved.')) {
+          return;
+        }
+        try {
+          await fetchJson(`/orchestration/terminals/${encodeURIComponent(terminal.terminalId)}/trim-history`, {
+            method: 'POST',
+            body: JSON.stringify({})
+          });
+          await refreshFn();
+        } catch (error) {
+          window.alert(`Trim failed: ${error.message}`);
+        }
+      });
       document.getElementById(`${prefix}-destroy`)?.addEventListener('click', () => destroySelectedTerminal(terminal.terminalId));
       document.getElementById(`${prefix}-reconcile-runs`)?.addEventListener('click', reconcileStaleRuns);
     }

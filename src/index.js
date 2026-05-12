@@ -556,6 +556,77 @@ function printAttachRootUsage() {
   console.log('  --print-only                  Print the attach command without attaching');
 }
 
+function parseTrimHistoryArgs(rawArgs = [], defaultScope = 'terminal') {
+  const args = [...rawArgs];
+  const parsed = {
+    scope: defaultScope,
+    rootSessionId: null,
+    terminalId: null,
+    historyLimit: null,
+    json: false
+  };
+
+  if (args[0] && !args[0].startsWith('-')) {
+    if (parsed.scope === 'root') {
+      parsed.rootSessionId = args.shift();
+    } else {
+      parsed.terminalId = args.shift();
+    }
+  }
+
+  while (args.length > 0) {
+    const token = args.shift();
+    switch (token) {
+      case '--root':
+      case '--root-session':
+        parsed.scope = 'root';
+        parsed.rootSessionId = args.shift() || null;
+        break;
+      case '--terminal':
+        parsed.scope = 'terminal';
+        parsed.terminalId = args.shift() || null;
+        break;
+      case '--history-limit': {
+        const value = Number.parseInt(String(args.shift() || '').trim(), 10);
+        if (!Number.isInteger(value) || value <= 0) {
+          throw new Error('Invalid --history-limit value; expected a positive integer');
+        }
+        parsed.historyLimit = value;
+        break;
+      }
+      case '--json':
+        parsed.json = true;
+        break;
+      case '--help':
+      case '-h':
+        parsed.help = true;
+        break;
+      default:
+        throw new Error(`Unknown trim-history argument: ${token}`);
+    }
+  }
+
+  if (!parsed.help && parsed.scope === 'root' && !parsed.rootSessionId) {
+    throw new Error('root trim-history requires a <rootSessionId>');
+  }
+  if (!parsed.help && parsed.scope === 'terminal' && !parsed.terminalId) {
+    throw new Error('trim-history requires a <terminalId> or --root <rootSessionId>');
+  }
+
+  return parsed;
+}
+
+function printTrimHistoryUsage() {
+  console.log('Usage: cliagents trim-history <terminalId> [options]');
+  console.log('   or: cliagents root trim-history <rootSessionId> [options]');
+  console.log('');
+  console.log('Options:');
+  console.log('  --root <id>                   Trim live managed root terminal history for a root session');
+  console.log('  --terminal <id>               Trim one terminal by terminal id');
+  console.log('  --history-limit <n>           Override the configured tmux history limit for this trim');
+  console.log('  --json                        Emit JSON instead of text');
+}
+
 function parseConsoleArgs(rawArgs = []) {
   const args = [...rawArgs];
   const parsed = {
@@ -1646,6 +1717,42 @@ async function handleAttachRootCommand(rawArgs = [], dependencies = {}) {
   }
 }
 
+async function handleTrimHistoryCommand(rawArgs = [], dependencies = {}, defaultScope = 'terminal') {
+  const options = parseTrimHistoryArgs(rawArgs, defaultScope);
+  if (options.help) {
+    printTrimHistoryUsage();
+    return;
+  }
+
+  const callJson = dependencies.callCliagentsJson || callCliagentsJson;
+  const route = options.scope === 'root'
+    ? `/orchestration/root-sessions/${encodeURIComponent(options.rootSessionId)}/trim-history`
+    : `/orchestration/terminals/${encodeURIComponent(options.terminalId)}/trim-history`;
+  const result = await callJson(route, {
+    method: 'POST',
+    body: {
+      historyLimit: options.historyLimit || undefined
+    }
+  });
+
+  if (options.json) {
+    console.log(JSON.stringify(result, null, 2));
+    return;
+  }
+
+  if (options.scope === 'root') {
+    console.log('Root Tmux History Trimmed');
+    console.log(`  root_session_id: ${result.rootSessionId}`);
+    console.log(`  trimmed_terminals: ${result.trimmedCount || 0}/${result.count || 0}`);
+  } else {
+    console.log('Terminal Tmux History Trimmed');
+    console.log(`  terminal_id: ${result.terminalId}`);
+    console.log(`  root_session_id: ${result.rootSessionId || 'n/a'}`);
+    console.log(`  history_limit: ${result.historyLimit || 'n/a'}`);
+  }
+  console.log('  preserved: broker logs, persisted messages, database records');
+}
+
 async function getManagedRootResumeCandidate(rootSessionId, options = {}, dependencies = {}) {
   if (!rootSessionId) {
     return null;
@@ -2646,6 +2753,7 @@ module.exports = {
   handleLaunchCommand,
   handleListRootsCommand,
   handleAttachRootCommand,
+  handleTrimHistoryCommand,
   handleAdoptCommand,
   handleConsoleCommand,
   handleServeCommand,
@@ -2655,6 +2763,7 @@ module.exports = {
   getOperatorRootSession,
   parseAdoptArgs,
   parseAttachRootArgs,
+  parseTrimHistoryArgs,
   parseConsoleArgs,
   parseListRootsArgs,
   parseServeArgs,
@@ -2710,6 +2819,11 @@ if (require.main === module) {
     return;
   }
 
+  if (command === 'trim-history') {
+    runCliCommand(handleTrimHistoryCommand(args.slice(1), {}, 'terminal'), 'trim-history');
+    return;
+  }
+
   if (command === 'console') {
     runCliCommand(handleConsoleCommand(args.slice(1)), 'console');
     return;
@@ -2717,6 +2831,11 @@ if (require.main === module) {
 
   if (command === 'root' && args[1] === 'attach') {
     runCliCommand(handleAttachRootCommand(args.slice(2)), 'root attach');
+    return;
+  }
+
+  if (command === 'root' && args[1] === 'trim-history') {
+    runCliCommand(handleTrimHistoryCommand(args.slice(2), {}, 'root'), 'root trim-history');
     return;
   }
 

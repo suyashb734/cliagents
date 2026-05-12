@@ -231,7 +231,7 @@ class TmuxClient {
     this._validateName(sessionName, 'session');
     this._validateName(windowName, 'window');
 
-    const { workingDir, env = {}, width = null, height = null } = options;
+    const { workingDir, env = {}, width = null, height = null, historyLimit = null } = options;
 
     // Check if session already exists
     if (this.sessionExists(sessionName)) {
@@ -276,6 +276,10 @@ class TmuxClient {
       env: spawnEnv
     });
     TMUX_SERVER_BOOTSTRAP_STATE.add(bootstrapKey);
+
+    if (Number.isInteger(historyLimit) && historyLimit > 0) {
+      this.setHistoryLimit(sessionName, windowName, historyLimit);
+    }
 
     // Set environment variables in the session
     for (const [key, value] of Object.entries(envVars)) {
@@ -404,6 +408,50 @@ class TmuxClient {
       sessionName,
       'status',
       visible ? 'on' : 'off'
+    ]);
+    return true;
+  }
+
+  /**
+   * Set the tmux scrollback history limit for one window.
+   * @param {string} sessionName
+   * @param {string} windowName
+   * @param {number} limit
+   * @returns {boolean}
+   */
+  setHistoryLimit(sessionName, windowName, limit) {
+    this._validateName(sessionName, 'session');
+    this._validateName(windowName, 'window');
+
+    if (!Number.isInteger(limit) || limit <= 0) {
+      throw new Error('historyLimit must be a positive integer');
+    }
+
+    this._exec([
+      'set-window-option',
+      '-t',
+      `${sessionName}:${windowName}`,
+      'history-limit',
+      String(limit)
+    ]);
+    return true;
+  }
+
+  /**
+   * Clear tmux scrollback for one window while preserving the visible screen.
+   * This does not remove broker logs, persisted messages, or DB records.
+   * @param {string} sessionName
+   * @param {string} windowName
+   * @returns {boolean}
+   */
+  clearHistory(sessionName, windowName) {
+    this._validateName(sessionName, 'session');
+    this._validateName(windowName, 'window');
+
+    this._exec([
+      'clear-history',
+      '-t',
+      `${sessionName}:${windowName}`
     ]);
     return true;
   }

@@ -25,6 +25,7 @@ const CodexCliAdapter = require('../src/adapters/codex-cli');
 const {
   parseAdoptArgs,
   parseServeArgs,
+  parseTrimHistoryArgs,
   attachToManagedSession,
   launchManagedRootSession,
   buildManagedRootLaunchCandidate,
@@ -580,6 +581,18 @@ test('CLI supports root attach alias', () => {
   const args = ['root', 'attach', '--external-session-ref', 'mcp:thread-1'];
   // This is a representative test of the alias expectation
   assert(args[0] === 'root' && args[1] === 'attach', 'CLI must support "root attach" as a command alias');
+});
+
+test('CLI parses tmux history trim commands', () => {
+  const rootParsed = parseTrimHistoryArgs(['root-abc', '--history-limit', '7000', '--json'], 'root');
+  assert.strictEqual(rootParsed.scope, 'root');
+  assert.strictEqual(rootParsed.rootSessionId, 'root-abc');
+  assert.strictEqual(rootParsed.historyLimit, 7000);
+  assert.strictEqual(rootParsed.json, true);
+
+  const terminalParsed = parseTrimHistoryArgs(['--terminal', 'term-abc'], 'terminal');
+  assert.strictEqual(terminalParsed.scope, 'terminal');
+  assert.strictEqual(terminalParsed.terminalId, 'term-abc');
 });
 
 console.log('\n--- Serve CLI ---');

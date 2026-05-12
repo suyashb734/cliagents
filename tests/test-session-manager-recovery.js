@@ -19,6 +19,8 @@ function makeTempDir(prefix) {
 class FakeRecoveryTmux {
   constructor(activeSessionNames = []) {
     this.activeSessionNames = new Set(activeSessionNames);
+    this.historyLimitCalls = [];
+    this.clearHistoryCalls = [];
   }
 
   sessionExists(sessionName) {
@@ -37,6 +39,16 @@ class FakeRecoveryTmux {
 
   getPaneCurrentCommand() {
     return 'zsh';
+  }
+
+  setHistoryLimit(sessionName, windowName, historyLimit) {
+    this.historyLimitCalls.push({ sessionName, windowName, historyLimit });
+    return true;
+  }
+
+  clearHistory(sessionName, windowName) {
+    this.clearHistoryCalls.push({ sessionName, windowName });
+    return true;
   }
 
   killSession() {
@@ -79,6 +91,34 @@ async function run() {
     }
   );
 
+  const managedRootTerminalId = '11111111111111111111111111111111';
+  db.registerTerminal(
+    managedRootTerminalId,
+    'cliagents-111111',
+    'codex-cli-11111111111111111111111111',
+    'codex-cli',
+    null,
+    'main',
+    rootDir,
+    path.join(rootDir, 'logs', `${managedRootTerminalId}.log`),
+    {
+      rootSessionId: managedRootTerminalId,
+      parentSessionId: null,
+      sessionKind: 'main',
+      originClient: 'codex',
+      externalSessionRef: 'codex:managed:history-recovery',
+      lineageDepth: 0,
+      sessionMetadata: {
+        clientName: 'codex',
+        attachMode: 'managed-root-launch',
+        managedLaunch: true
+      },
+      model: 'gpt-5.5',
+      requestedModel: 'gpt-5.5',
+      effectiveModel: 'gpt-5.5'
+    }
+  );
+
   const warnings = [];
   const originalWarn = console.warn;
   console.warn = (...args) => {
@@ -112,9 +152,10 @@ async function run() {
     assert.strictEqual(db.listSessionEvents({ rootSessionId: 'feedfeedfeedfeedfeedfeedfeedfeed' }).filter((event) => event.event_type === 'session_stale').length, 1);
     assert.strictEqual(warnings.length, orphanWarningsBefore);
 
+    const recoveryTmux = new FakeRecoveryTmux(['cliagents-abcdab', 'cliagents-111111']);
     const recoveredManager = new PersistentSessionManager({
       db,
-      tmuxClient: new FakeRecoveryTmux(['cliagents-abcdab']),
+      tmuxClient: recoveryTmux,
       logDir: path.join(rootDir, 'logs'),
       workDir: rootDir,
       sessionGraphWritesEnabled: true,
@@ -131,6 +172,16 @@ async function run() {
     assert.strictEqual(recoveredTerminal.effectiveModel, 'gpt-5.4');
     assert.strictEqual(recoveredTerminal.model, 'gpt-5.4');
     assert(!warnings.some((message) => message.includes('sessionId is required')));
+
+    assert(recoveryTmux.historyLimitCalls.some((call) => (
+      call.sessionName === 'cliagents-111111'
+      && call.windowName === 'codex-cli-11111111111111111111111111'
+      && call.historyLimit === 5000
+    )), 'managed roots recovered from DB should get a tmux history limit');
+    assert(recoveryTmux.clearHistoryCalls.some((call) => (
+      call.sessionName === 'cliagents-111111'
+      && call.windowName === 'codex-cli-11111111111111111111111111'
+    )), 'managed roots recovered from DB should trim tmux scrollback automatically');
 
     db.addSessionEvent({
       rootSessionId: 'root-root-root-root-root-root-root-1',

@@ -3960,6 +3960,35 @@ function createOrchestrationRouter(context) {
   });
 
   /**
+   * POST /orchestration/terminals/:id/trim-history
+   * Trim tmux pane scrollback while preserving broker logs and persisted messages.
+   */
+  router.post('/terminals/:id/trim-history', (req, res) => {
+    try {
+      if (typeof sessionManager.trimTerminalTmuxHistory !== 'function') {
+        return res.status(503).json({
+          error: { code: 'unavailable', message: 'tmux history trimming is not supported by this session manager' }
+        });
+      }
+
+      const result = sessionManager.trimTerminalTmuxHistory(req.params.id, {
+        historyLimit: req.body?.historyLimit || req.body?.history_limit || null
+      });
+      if (!result) {
+        return res.status(404).json({
+          error: { code: 'terminal_not_found', message: `Terminal ${req.params.id} not found` }
+        });
+      }
+
+      res.json(result);
+    } catch (error) {
+      res.status(500).json({
+        error: { code: 'internal_error', message: error.message }
+      });
+    }
+  });
+
+  /**
    * GET /orchestration/terminals/:id/output
    * Get terminal output
    */
@@ -5727,6 +5756,36 @@ function createOrchestrationRouter(context) {
       }
 
       res.json(snapshot);
+    } catch (error) {
+      res.status(500).json({
+        error: { code: 'internal_error', message: error.message }
+      });
+    }
+  });
+
+  /**
+   * POST /orchestration/root-sessions/:rootSessionId/trim-history
+   * Trim tmux pane scrollback for live managed root terminals in this root.
+   */
+  router.post('/root-sessions/:rootSessionId/trim-history', (req, res) => {
+    try {
+      if (typeof sessionManager.trimRootSessionTmuxHistory !== 'function') {
+        return res.status(503).json({
+          error: { code: 'unavailable', message: 'tmux history trimming is not supported by this session manager' }
+        });
+      }
+
+      const result = sessionManager.trimRootSessionTmuxHistory(req.params.rootSessionId, {
+        historyLimit: req.body?.historyLimit || req.body?.history_limit || null,
+        managedOnly: req.body?.managedOnly !== false
+      });
+      if (!result) {
+        return res.status(404).json({
+          error: { code: 'root_session_not_found', message: `Root session ${req.params.rootSessionId} not found` }
+        });
+      }
+
+      res.json(result);
     } catch (error) {
       res.status(500).json({
         error: { code: 'internal_error', message: error.message }

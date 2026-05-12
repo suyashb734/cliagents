@@ -359,6 +359,37 @@ async function testSetSessionStatusVisible() {
   console.log('  ✅ setSessionStatusVisible builds the expected tmux commands');
 }
 
+async function testHistoryLimitAndClearCommands() {
+  console.log('\n📝 Test: tmux history limit and clear commands are targeted to one window');
+
+  const stubClient = Object.create(TmuxClient.prototype);
+  stubClient._validateName = () => {};
+
+  const executed = [];
+  stubClient._exec = (args) => {
+    executed.push(args);
+    return '';
+  };
+
+  stubClient.setHistoryLimit('history-session', 'main', 5000);
+  stubClient.clearHistory('history-session', 'main');
+
+  assert.deepStrictEqual(executed[0], [
+    'set-window-option',
+    '-t',
+    'history-session:main',
+    'history-limit',
+    '5000'
+  ]);
+  assert.deepStrictEqual(executed[1], [
+    'clear-history',
+    '-t',
+    'history-session:main'
+  ]);
+
+  console.log('  ✅ history limit and clear commands are correct');
+}
+
 // Test: Dangerous session name rejected at creation
 async function testDangerousSessionCreation() {
   console.log('\n📝 Test: Dangerous session name rejected at creation');
@@ -534,6 +565,7 @@ async function runTests() {
     testInlineBootstrapOnFirstSessionCreate,
     testRespawnPaneCommand,
     testSetSessionStatusVisible,
+    testHistoryLimitAndClearCommands,
     testDangerousSessionCreation,
     testIsMissingTargetError,
     testGetHistoryNoSpamOnMissingSession,

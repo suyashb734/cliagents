@@ -105,6 +105,7 @@ const DEFAULT_DEFERRED_PROVIDER_ATTACH_TIMEOUT_MS = 20000;
 const DEFERRED_PROVIDER_ATTACH_POLL_INTERVAL_MS = 150;
 const DEFAULT_POST_ATTACH_PROVIDER_START_DELAY_MS = 120;
 const DEFAULT_MANAGED_ROOT_NOTIFICATION_POLL_MS = 3000;
+const DEFAULT_MANAGED_ROOT_TMUX_HISTORY_LIMIT = 5000;
 const DEFAULT_CODEX_ORCHESTRATION_MODEL = process.env.CLIAGENTS_CODEX_ORCHESTRATION_MODEL || 'gpt-5.4';
 const ENABLE_STATUS_DEBUG_LOGS = process.env.CLIAGENTS_STATUS_DEBUG === '1';
 const REASONING_EFFORT_LEVELS = new Set(['none', 'minimal', 'low', 'medium', 'high', 'xhigh']);
@@ -125,6 +126,24 @@ const BROKER_MODEL_ALIASES = Object.freeze({
 
 function hashSessionShape(value) {
   return crypto.createHash('sha256').update(String(value || ''), 'utf8').digest('hex');
+}
+
+function normalizeTmuxHistoryLimit(value, fallback = DEFAULT_MANAGED_ROOT_TMUX_HISTORY_LIMIT) {
+  if (value === null || value === undefined || value === '') {
+    return fallback;
+  }
+
+  const normalized = typeof value === 'string' ? value.trim().toLowerCase() : value;
+  if (normalized === false || normalized === 'false' || normalized === 'off' || normalized === 'disabled') {
+    return null;
+  }
+
+  const parsed = Number.parseInt(String(value), 10);
+  if (!Number.isInteger(parsed) || parsed <= 0) {
+    return fallback;
+  }
+
+  return Math.min(Math.max(parsed, 100), 200000);
 }
 
 function summarizeMessage(content, maxLength = 120) {
@@ -1355,6 +1374,14 @@ class PersistentSessionManager extends EventEmitter {
       500
     );
     this.managedRootNotificationMonitor = null;
+    this.managedRootTmuxHistoryLimit = normalizeTmuxHistoryLimit(
+      options.managedRootTmuxHistoryLimit
+        ?? process.env.CLIAGENTS_MANAGED_ROOT_TMUX_HISTORY_LIMIT
+        ?? process.env.CLIAGENTS_TMUX_HISTORY_LIMIT,
+      DEFAULT_MANAGED_ROOT_TMUX_HISTORY_LIMIT
+    );
+    this.managedRootTmuxAutoTrim = options.managedRootTmuxAutoTrim
+      ?? process.env.CLIAGENTS_MANAGED_ROOT_TMUX_AUTOTRIM !== '0';
 
     // Ensure directories exist
     if (!fs.existsSync(this.logDir)) {
@@ -1504,6 +1531,9 @@ class PersistentSessionManager extends EventEmitter {
             sessionKind: recoveredTerminal.sessionKind
           }));
           this.terminals.set(terminalId, recoveredTerminal);
+          this._applyManagedRootTmuxHistoryPolicy(recoveredTerminal, {
+            trim: this.managedRootTmuxAutoTrim
+          });
           recovered++;
         } else {
           // Session no longer exists, mark as orphaned in DB
@@ -2224,6 +2254,108 @@ class PersistentSessionManager extends EventEmitter {
       || terminal.sessionMetadata?.managedLaunch === true
       || terminal.sessionMetadata?.attachMode === 'managed-root-launch'
     );
+  }
+
+  _getManagedRootTmuxHistoryLimit(terminal) {
+    return this._isManagedRootTerminal(terminal) ? this.managedRootTmuxHistoryLimit : null;
+  }
+
+  _applyManagedRootTmuxHistoryPolicy(terminal, options = {}) {
+    const limit = this._getManagedRootTmuxHistoryLimit(terminal);
+    if (!terminal || !limit || !terminal.sessionName || !terminal.windowName) {
+      return null;
+    }
+
+    try {
+      if (typeof this.tmux.setHistoryLimit === 'function') {
+        this.tmux.setHistoryLimit(terminal.sessionName, terminal.windowName, limit);
+      }
+      if (options.trim === true && typeof this.tmux.clearHistory === 'function') {
+        this.tmux.clearHistory(terminal.sessionName, terminal.windowName);
+      }
+    } catch (error) {
+      console.warn(`[SessionManager] Failed to apply managed root tmux history policy for ${terminal.terminalId}: ${error.message}`);
+      return null;
+    }
+
+    terminal.tmuxHistoryLimit = limit;
+    return limit;
+  }
+
+  trimTerminalTmuxHistory(terminalId, options = {}) {
+    const terminal = this.terminals.get(terminalId);
+    if (!terminal) {
+      return null;
+    }
+
+    const reconciledTerminal = this._reconcileTerminalBacking(terminal);
+    if (!reconciledTerminal) {
+      return null;
+    }
+
+    const limit = this._getManagedRootTmuxHistoryLimit(reconciledTerminal)
+      || normalizeTmuxHistoryLimit(options.historyLimit, this.managedRootTmuxHistoryLimit);
+    if (!limit) {
+      return {
+        terminalId,
+        rootSessionId: reconciledTerminal.rootSessionId || terminalId,
+        trimmed: false,
+        reason: 'tmux_history_limit_disabled'
+      };
+    }
+
+    if (typeof this.tmux.setHistoryLimit === 'function') {
+      this.tmux.setHistoryLimit(reconciledTerminal.sessionName, reconciledTerminal.windowName, limit);
+    }
+    if (typeof this.tmux.clearHistory === 'function') {
+      this.tmux.clearHistory(reconciledTerminal.sessionName, reconciledTerminal.windowName);
+    }
+
+    reconciledTerminal.tmuxHistoryLimit = limit;
+    return {
+      terminalId,
+      rootSessionId: reconciledTerminal.rootSessionId || terminalId,
+      sessionName: reconciledTerminal.sessionName,
+      windowName: reconciledTerminal.windowName,
+      historyLimit: limit,
+      trimmed: true,
+      preserved: ['broker_logs', 'persisted_messages', 'database_records']
+    };
+  }
+
+  trimRootSessionTmuxHistory(rootSessionId, options = {}) {
+    const normalizedRootSessionId = String(rootSessionId || '').trim();
+    if (!normalizedRootSessionId) {
+      return null;
+    }
+
+    const terminals = Array.from(this.terminals.values()).filter((terminal) => (
+      terminal.rootSessionId === normalizedRootSessionId
+      || terminal.terminalId === normalizedRootSessionId
+    ));
+    if (terminals.length === 0) {
+      return null;
+    }
+
+    const managedOnly = options.managedOnly !== false;
+    const results = [];
+    for (const terminal of terminals) {
+      if (managedOnly && !this._isManagedRootTerminal(terminal)) {
+        continue;
+      }
+      const result = this.trimTerminalTmuxHistory(terminal.terminalId, options);
+      if (result) {
+        results.push(result);
+      }
+    }
+
+    return {
+      rootSessionId: normalizedRootSessionId,
+      managedOnly,
+      count: results.length,
+      trimmedCount: results.filter((result) => result.trimmed).length,
+      terminals: results
+    };
   }
 
   _startManagedRootNotificationMonitor() {
@@ -3954,12 +4086,18 @@ class PersistentSessionManager extends EventEmitter {
     const launchGeometry = preserveRichTerminalUi
       ? resolveLaunchGeometry(launchEnvironment || resolvedSessionMetadata?.launchEnvironment)
       : null;
+    const tmuxHistoryLimit = this._getManagedRootTmuxHistoryLimit({
+      role,
+      sessionKind: resolvedSessionKind,
+      sessionMetadata: Object.keys(resolvedSessionMetadata).length > 0 ? resolvedSessionMetadata : null
+    });
 
     this.tmux.createSession(sessionName, windowName, terminalId, {
       workingDir: workDir,
       env: sessionEnv,
       width: launchGeometry?.width || null,
-      height: launchGeometry?.height || null
+      height: launchGeometry?.height || null,
+      historyLimit: tmuxHistoryLimit || null
     });
     if (preserveRichTerminalUi && typeof this.tmux.setSessionStatusVisible === 'function') {
       this.tmux.setSessionStatusVisible(sessionName, false);
@@ -4044,6 +4182,7 @@ class PersistentSessionManager extends EventEmitter {
         runtimeHost: RUNTIME_HOSTS.TMUX,
         runtimeFidelity: RUNTIME_FIDELITY.MANAGED
       }),
+      tmuxHistoryLimit,
       deferredProviderStart: shouldDeferProviderStart,
       providerStartState: shouldDeferProviderStart ? 'pending_attach' : 'immediate',
       pendingProviderCommand: shouldDeferProviderStart ? cliCommand : null
@@ -4348,6 +4487,10 @@ class PersistentSessionManager extends EventEmitter {
       terminal.runtimeFidelity = runtimeMetadata.runtimeFidelity;
       terminal.lastActive = new Date();
     }
+
+    this._applyManagedRootTmuxHistoryPolicy(terminal, {
+      trim: this.managedRootTmuxAutoTrim
+    });
 
     this.tmux.pipePaneToFile(sessionName, windowName, terminal.logPath);
 
