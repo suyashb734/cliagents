@@ -64,11 +64,7 @@ function normalizeChannels(value, options = {}) {
 
   const entries = splitList(value);
   if (entries.length === 0) {
-    return unique([
-      platform === 'darwin' ? 'macos' : null,
-      webhookUrl ? 'webhook' : null,
-      hasTelegram ? 'telegram' : null
-    ]);
+    return [];
   }
 
   const expanded = [];

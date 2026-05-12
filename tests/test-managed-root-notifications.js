@@ -15,8 +15,8 @@ const {
 
 async function testNotificationConfigDefaults() {
   const config = resolveManagedRootNotificationConfig({}, { platform: 'darwin' });
-  assert.strictEqual(config.enabled, true);
-  assert.deepStrictEqual(config.channels, ['macos']);
+  assert.strictEqual(config.enabled, false);
+  assert.deepStrictEqual(config.channels, []);
   assert(config.statuses.includes('idle'));
   assert(config.statuses.includes('error'));
 
@@ -28,6 +28,7 @@ async function testNotificationConfigDefaults() {
   assert.deepStrictEqual(disabled.channels, []);
 
   const webhookAndTelegram = resolveManagedRootNotificationConfig({
+    CLIAGENTS_NOTIFICATIONS: 'webhook,telegram',
     CLIAGENTS_NOTIFY_WEBHOOK_URL: 'https://example.invalid/hook',
     CLIAGENTS_TELEGRAM_BOT_TOKEN: 'token:secret',
     CLIAGENTS_TELEGRAM_CHAT_ID: '12345',
@@ -41,6 +42,12 @@ async function testNotificationConfigDefaults() {
     'waiting_user_answer',
     'error'
   ]);
+
+  const macos = resolveManagedRootNotificationConfig({
+    CLIAGENTS_NOTIFICATIONS: 'macos'
+  }, { platform: 'darwin' });
+  assert.strictEqual(macos.enabled, true);
+  assert.deepStrictEqual(macos.channels, ['macos']);
 }
 
 async function testWebhookAndTelegramDelivery() {
