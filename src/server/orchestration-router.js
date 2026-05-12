@@ -36,6 +36,7 @@ const {
   FAILURE_CLASSES: BPE_FAILURE_CLASSES
 } = require('../orchestration/browser-perception-engine');
 const { getAgentProfiles, resolveProfile } = require('../services/agent-profiles');
+const { deriveSessionState } = require('../services/session-peek');
 const { createMemoryRouter } = require('../routes/memory');
 const { isAdapterAuthenticated } = require('../utils/adapter-auth');
 const { redactSecretsInText } = require('../security/secret-redaction');
@@ -1489,11 +1490,13 @@ function createOrchestrationRouter(context) {
 
     if (status === 'claimed') {
       return {
-        state: 'claimed',
-        stale: false,
-        nextAction: 'wait_for_spawn',
+        state: dispatch.claimExpiresAt && dispatch.claimExpiresAt <= now ? 'stale' : 'claimed',
+        stale: Boolean(dispatch.claimExpiresAt && dispatch.claimExpiresAt <= now),
+        nextAction: dispatch.claimExpiresAt && dispatch.claimExpiresAt <= now ? 'recover_or_fail_claimed_dispatch' : 'wait_for_spawn',
         ageMs,
         deferUntil: dispatch.deferUntil || null,
+        claimOwner: dispatch.claimOwner || null,
+        claimExpiresAt: dispatch.claimExpiresAt || null,
         terminalStatus: null
       };
     }
@@ -1534,6 +1537,9 @@ function createOrchestrationRouter(context) {
       boundSessionId: dispatch.boundSessionId,
       runId: dispatch.runId,
       terminalId: dispatch.terminalId,
+      claimOwner: dispatch.claimOwner,
+      claimedAt: dispatch.claimedAt,
+      claimExpiresAt: dispatch.claimExpiresAt,
       coalescedCount: dispatch.coalescedCount,
       deferUntil: dispatch.deferUntil,
       createdAt: dispatch.createdAt,
@@ -1550,13 +1556,14 @@ function createOrchestrationRouter(context) {
     }
 
     const now = Date.now();
-    const status = Number.isFinite(deferUntil) && deferUntil > now ? 'deferred' : 'claimed';
+    const claimOwner = req.body?.requestedBy || executionControlPlane.originClient || 'api';
+    const status = Number.isFinite(deferUntil) && deferUntil > now ? 'deferred' : 'queued';
     const payload = {
       idempotencyKey: buildAssignmentStartIdempotencyKey(req, task, assignment),
       taskId: task.id,
       taskAssignmentId: assignment.id,
       rootSessionId: executionControlPlane.rootSessionId || task.rootSessionId || null,
-      requestedBy: req.body?.requestedBy || executionControlPlane.originClient || 'api',
+      requestedBy: claimOwner,
       requestKind: 'assignment_start',
       status,
       coalesceKey: `task:${task.id}:assignment:${assignment.id}:start`,
@@ -1576,17 +1583,41 @@ function createOrchestrationRouter(context) {
       }
     };
 
-    if (typeof db.createOrCoalesceDispatchRequest === 'function') {
-      return db.createOrCoalesceDispatchRequest(payload, {
+    const created = typeof db.createOrCoalesceDispatchRequest === 'function'
+      ? db.createOrCoalesceDispatchRequest(payload, {
         coalesceActive: true,
         now
-      });
+      })
+      : {
+        dispatch: db.createDispatchRequest(payload),
+        action: status === 'deferred' ? 'deferred' : 'created',
+        coalesced: false
+      };
+
+    if (!created.dispatch?.id || created.coalesced || created.dispatch.status === 'deferred' || typeof db.claimDispatchRequest !== 'function') {
+      return created;
+    }
+
+    const claim = db.claimDispatchRequest(created.dispatch.id, {
+      claimOwner,
+      ttlMs: Number.parseInt(req.body?.claimTtlMs ?? req.body?.claim_ttl_ms ?? '', 10) || dispatchStaleMs,
+      now
+    });
+
+    if (!claim.claimed) {
+      return {
+        dispatch: claim.dispatch || created.dispatch,
+        action: `claim_${claim.reason || 'conflict'}`,
+        coalesced: true,
+        claim
+      };
     }
 
     return {
-      dispatch: db.createDispatchRequest(payload),
-      action: status === 'deferred' ? 'deferred' : 'created',
-      coalesced: false
+      dispatch: claim.dispatch,
+      action: 'claimed',
+      coalesced: false,
+      claim
     };
   }
 
@@ -3900,12 +3931,19 @@ function createOrchestrationRouter(context) {
         terminals: terminals.map(t => {
           const processState = t.processState || null;
           const status = t.status || null;
+          const sessionState = deriveSessionState({
+            ...t,
+            status,
+            processState,
+            live: processState === 'alive' && status !== 'orphaned'
+          });
           return {
             terminalId: t.terminalId,
             adapter: t.adapter,
             agentProfile: t.agentProfile,
             role: t.role,
             status,
+            sessionState,
             taskState: t.taskState || status,
             processState,
             live: processState === 'alive' && status !== 'orphaned',
@@ -3949,6 +3987,7 @@ function createOrchestrationRouter(context) {
 
       res.json({
         ...terminal,
+        sessionState: deriveSessionState(terminal),
         attachCommand: sessionManager.getAttachCommand(req.params.id)
       });
 
@@ -4356,6 +4395,52 @@ function createOrchestrationRouter(context) {
     };
   }
 
+  function buildInputLeasePayload(lease, extra = {}) {
+    return {
+      lease,
+      terminal: lease?.terminalId && typeof db?.getTerminal === 'function' ? db.getTerminal(lease.terminalId) : null,
+      ...extra
+    };
+  }
+
+  function getRequestLeaseId(req) {
+    return String(req.body?.leaseId || req.body?.lease_id || req.query?.leaseId || req.query?.lease_id || '').trim() || null;
+  }
+
+  function validateTerminalInputLeaseAccess(req, terminalId) {
+    if (!db?.getActiveTerminalInputLease) {
+      return { ok: true };
+    }
+    const activeLease = db.getActiveTerminalInputLease(terminalId);
+    if (!activeLease) {
+      return { ok: true };
+    }
+
+    const requestLeaseId = getRequestLeaseId(req);
+    const requestedBy = parseActionActorIdentity(req.body?.requestedBy || req.body?.requested_by || req.body?.operator);
+    if (requestLeaseId && requestLeaseId === activeLease.id) {
+      return { ok: true, lease: activeLease };
+    }
+    if (requestedBy && requestedBy === activeLease.holder) {
+      return { ok: true, lease: activeLease };
+    }
+    return {
+      ok: false,
+      status: 423,
+      body: {
+        error: {
+          code: 'terminal_input_lease_held',
+          message: `Terminal ${terminalId} input is leased by ${activeLease.holder}.`,
+          terminalId,
+          leaseId: activeLease.id,
+          holder: activeLease.holder,
+          expiresAt: activeLease.expiresAt,
+          nextAction: 'retry after the lease expires, or provide the active leaseId'
+        }
+      }
+    };
+  }
+
   async function deliverInputQueueItem(item) {
     const deliveryMetadata = {
       source: 'terminal-input-queue',
@@ -4407,6 +4492,11 @@ function createOrchestrationRouter(context) {
         return;
       }
 
+      const leaseAccess = validateTerminalInputLeaseAccess(req, req.params.id);
+      if (!leaseAccess.ok) {
+        return res.status(leaseAccess.status).json(leaseAccess.body);
+      }
+
       const sensitiveInput = detectSensitiveTerminalInput(message);
       if (sensitiveInput) {
         return res.status(403).json({
@@ -4455,6 +4545,194 @@ function createOrchestrationRouter(context) {
         });
       }
 
+      res.status(500).json({
+        error: { code: 'internal_error', message: error.message }
+      });
+    }
+  });
+
+  /**
+   * GET /orchestration/terminals/:id/input-lease
+   * Return the active terminal input lease, if any.
+   */
+  router.get('/terminals/:id/input-lease', (req, res) => {
+    try {
+      if (!db?.getActiveTerminalInputLease) {
+        return res.status(503).json({
+          error: { code: 'unavailable', message: 'terminal input leases are not configured' }
+        });
+      }
+      db.expireTerminalInputLeases?.();
+      const lease = db.getActiveTerminalInputLease(req.params.id);
+      res.json(buildInputLeasePayload(lease, {
+        terminalId: req.params.id,
+        active: Boolean(lease)
+      }));
+    } catch (error) {
+      res.status(500).json({
+        error: { code: 'internal_error', message: error.message }
+      });
+    }
+  });
+
+  /**
+   * POST /orchestration/terminals/:id/input-lease
+   * Acquire or refresh a short terminal input ownership lease.
+   */
+  router.post('/terminals/:id/input-lease', (req, res) => {
+    try {
+      if (!db?.acquireTerminalInputLease) {
+        return res.status(503).json({
+          error: { code: 'unavailable', message: 'terminal input leases are not configured' }
+        });
+      }
+
+      const ownership = requireTerminalInputOwnershipByTerminalId(
+        req,
+        res,
+        '/orchestration/terminals/:id/input-lease',
+        req.params.id
+      );
+      if (!ownership) {
+        return;
+      }
+
+      const holder = parseActionActorIdentity(req.body?.holder || req.body?.requestedBy || req.body?.requested_by || req.body?.operator);
+      if (!holder) {
+        return res.status(400).json({
+          error: { code: 'missing_parameter', message: 'holder is required', param: 'holder' }
+        });
+      }
+
+      const result = db.acquireTerminalInputLease({
+        id: req.body?.leaseId || req.body?.lease_id || req.body?.id || null,
+        terminalId: req.params.id,
+        rootSessionId: ownership.ownerRootSessionId,
+        sessionId: req.body?.sessionId || req.body?.session_id || null,
+        holder,
+        purpose: req.body?.purpose || null,
+        ttlMs: Number.parseInt(req.body?.ttlMs ?? req.body?.ttl_ms ?? '', 10) || 60 * 1000,
+        metadata: req.body?.metadata || null
+      });
+
+      if (!result.acquired) {
+        return res.status(423).json(buildInputLeasePayload(result.lease, {
+          acquired: false,
+          reason: result.reason,
+          error: {
+            code: 'terminal_input_lease_held',
+            message: `Terminal ${req.params.id} input is already leased.`,
+            terminalId: req.params.id
+          }
+        }));
+      }
+
+      res.json(buildInputLeasePayload(result.lease, {
+        acquired: true,
+        reason: result.reason
+      }));
+    } catch (error) {
+      if (error.message.includes('not found')) {
+        return denyTerminalInputOwnership(res, {
+          terminalId: req.params.id,
+          callerRootSessionId: String(req.body?.rootSessionId || req.body?.root_session_id || '').trim() || null,
+          ownerRootSessionId: null,
+          reason: 'unknown_terminal'
+        });
+      }
+      res.status(500).json({
+        error: { code: 'internal_error', message: error.message }
+      });
+    }
+  });
+
+  router.post('/input-leases/:leaseId/heartbeat', (req, res) => {
+    try {
+      if (!db?.getTerminalInputLease || !db?.updateTerminalInputLease) {
+        return res.status(503).json({
+          error: { code: 'unavailable', message: 'terminal input leases are not configured' }
+        });
+      }
+      db.expireTerminalInputLeases?.();
+      const lease = db.getTerminalInputLease(req.params.leaseId);
+      if (!lease) {
+        return res.status(404).json({
+          error: { code: 'input_lease_not_found', message: `Input lease ${req.params.leaseId} not found` }
+        });
+      }
+      if (lease.status !== 'active') {
+        return res.status(409).json({
+          error: { code: 'input_lease_not_active', message: `Input lease ${lease.id} is ${lease.status}.`, status: lease.status }
+        });
+      }
+      const ttlMs = Number.parseInt(req.body?.ttlMs ?? req.body?.ttl_ms ?? '', 10) || 60 * 1000;
+      const now = Date.now();
+      const updated = db.updateTerminalInputLease(lease.id, {
+        heartbeatAt: now,
+        expiresAt: now + Math.max(1000, ttlMs),
+        updatedAt: now
+      });
+      res.json(buildInputLeasePayload(updated, { heartbeated: true }));
+    } catch (error) {
+      res.status(500).json({
+        error: { code: 'internal_error', message: error.message }
+      });
+    }
+  });
+
+  router.post('/input-leases/:leaseId/release', (req, res) => {
+    try {
+      if (!db?.getTerminalInputLease || !db?.updateTerminalInputLease) {
+        return res.status(503).json({
+          error: { code: 'unavailable', message: 'terminal input leases are not configured' }
+        });
+      }
+      const lease = db.getTerminalInputLease(req.params.leaseId);
+      if (!lease) {
+        return res.status(404).json({
+          error: { code: 'input_lease_not_found', message: `Input lease ${req.params.leaseId} not found` }
+        });
+      }
+      const now = Date.now();
+      const updated = db.updateTerminalInputLease(lease.id, {
+        status: 'released',
+        releasedAt: now,
+        updatedAt: now
+      });
+      res.json(buildInputLeasePayload(updated, { released: true }));
+    } catch (error) {
+      res.status(500).json({
+        error: { code: 'internal_error', message: error.message }
+      });
+    }
+  });
+
+  router.post('/input-leases/:leaseId/revoke', (req, res) => {
+    try {
+      if (!db?.getTerminalInputLease || !db?.updateTerminalInputLease) {
+        return res.status(503).json({
+          error: { code: 'unavailable', message: 'terminal input leases are not configured' }
+        });
+      }
+      const lease = db.getTerminalInputLease(req.params.leaseId);
+      if (!lease) {
+        return res.status(404).json({
+          error: { code: 'input_lease_not_found', message: `Input lease ${req.params.leaseId} not found` }
+        });
+      }
+      const now = Date.now();
+      const updated = db.updateTerminalInputLease(lease.id, {
+        status: 'revoked',
+        revokedAt: now,
+        updatedAt: now,
+        metadata: {
+          ...(lease.metadata || {}),
+          revokedBy: parseActionActorIdentity(req.body?.revokedBy || req.body?.revoked_by || req.body?.operator) || null,
+          revokeReason: req.body?.reason || null
+        }
+      });
+      res.json(buildInputLeasePayload(updated, { revoked: true }));
+    } catch (error) {
       res.status(500).json({
         error: { code: 'internal_error', message: error.message }
       });
@@ -4768,6 +5046,10 @@ function createOrchestrationRouter(context) {
         return;
       }
       const item = ownership.item;
+      const leaseAccess = validateTerminalInputLeaseAccess(req, item.terminalId);
+      if (!leaseAccess.ok) {
+        return res.status(leaseAccess.status).json(leaseAccess.body);
+      }
       if (item.status !== 'pending') {
         return res.status(409).json({
           error: {

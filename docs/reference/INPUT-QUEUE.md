@@ -2,7 +2,7 @@
 
 Status: `reference`
 
-Last reviewed: `2026-05-07`
+Last reviewed: `2026-05-12`
 
 ## Purpose
 
@@ -23,8 +23,20 @@ untracked raw keystrokes.
 
 - `observer`: read-only. Inputs in this mode cannot be delivered.
 - `operator`: normal remote operator mode.
-- `exclusive`: reserved for stronger ownership/lease rules later; V1 records
-  the mode and otherwise treats it as operator-capable.
+- `exclusive`: normal operator-capable mode plus explicit lease intent. If an
+  active input lease exists, direct input and queued delivery must present the
+  active lease id or holder identity.
+
+## Input Leases
+
+Input leases are short-lived ownership records for terminal input surfaces.
+
+- One terminal may have one active lease.
+- A lease has `holder`, `expiresAt`, optional `rootSessionId`, optional
+  `sessionId`, and optional metadata.
+- Heartbeats extend active leases.
+- Release ends a lease voluntarily.
+- Revoke lets the server or operator clear a wedged lease.
 
 ## Input Kinds
 
@@ -47,6 +59,11 @@ Approval and denial delivery requires the runtime to advertise
 - `POST /orchestration/input-queue/:inputId/deny`
 - `POST /orchestration/input-queue/:inputId/cancel`
 - `POST /orchestration/input-queue/:inputId/deliver`
+- `GET /orchestration/terminals/:id/input-lease`
+- `POST /orchestration/terminals/:id/input-lease`
+- `POST /orchestration/input-leases/:leaseId/heartbeat`
+- `POST /orchestration/input-leases/:leaseId/release`
+- `POST /orchestration/input-leases/:leaseId/revoke`
 
 Direct `/orchestration/terminals/:id/input` remains available for immediate
 operator input, but it uses the same runtime capability and session-control
@@ -63,6 +80,6 @@ checks as queued delivery.
 
 ## Non-Goals
 
-- No multi-operator lease protocol in V1.
+- No full moderator workflow in V1.
 - No full diff renderer in V1; queue metadata may carry diff references.
 - No provider-specific permission parser changes in this slice.

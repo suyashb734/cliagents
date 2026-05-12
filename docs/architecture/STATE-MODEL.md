@@ -25,15 +25,43 @@ tasks, and assignments.
 Busy terminals reject new input with `terminal_busy` instead of silently mixing
 turns.
 
+## Derived Session State
+
+`sessionState` is derived on read and does not replace raw terminal or API
+session status.
+
+- `task`: one of `working`, `needs_input`, `idle`, `completed`, `failed`, or
+  `stopped`.
+- `liveness`: one of `alive`, `exited`, `orphaned`, `evicted`, or `unknown`.
+- `attention`: true when the session needs human action or failure inspection.
+
+`GET /sessions/:sessionId/status` remains lifecycle-focused. `GET
+/sessions/:sessionId/peek` returns a bounded read-only operational snapshot with
+derived `sessionState`, pending input, active input lease, and optional output
+tail. `sessionId` means an API session id for API sessions and a terminal id for
+broker-managed terminals.
+
 ## Session Control Mode
 
 - `observer`: remote clients may inspect but not deliver input.
 - `operator`: normal remote-control mode.
-- `exclusive`: marks exclusive operator intent; V1 records it, with lease
-  enforcement deferred.
+- `exclusive`: marks exclusive operator intent. V1 enforces active input leases
+  when a lease exists.
 
 Queued input also records a control mode so mobile/web clients can audit why an
 input was deliverable or blocked.
+
+## Terminal Input Lease Status
+
+Terminal input leases are short-lived ownership records around remote input.
+
+- `active`: holder owns the input surface until expiry or release.
+- `released`: holder voluntarily released the lease.
+- `revoked`: server or operator revoked the lease.
+- `expired`: lease timed out without heartbeat.
+
+One terminal can have at most one active lease. Heartbeats extend the lease,
+and the server can revoke it to avoid deadlock.
 
 ## Terminal Input Queue Status
 
@@ -118,7 +146,8 @@ are append-only records of the selected adapter, model, effort, runtime, provide
 thread, and reuse decision for a task or assignment lane.
 
 Task assignment start now creates this boundary on the existing broker route.
-Normal starts claim a dispatch request before worktree preparation/spawn, capture
+Normal starts create a queued dispatch request, claim it with a conditional
+single-row update before worktree preparation/spawn, capture
 the redacted assignment prompt and linked task metadata in a context snapshot,
 and write a root-scoped task-session binding after the terminal/runtime/provider
 decision is known. Duplicate active starts for the same assignment coalesce into

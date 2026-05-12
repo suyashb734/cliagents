@@ -30,6 +30,10 @@ const {
 } = require('../utils/adapter-auth');
 const { createOpenAIRouter } = require('./openai-compat');
 const {
+  buildApiSessionPeek,
+  buildTerminalPeek
+} = require('../services/session-peek');
+const {
   authenticateRequest,
   validateApiKey,
   getConfiguredApiKey,
@@ -488,6 +492,77 @@ class AgentServer {
     });
   }
 
+  _buildSessionPeek(sessionId, options = {}) {
+    const apiStatus = this.sessionManager.getSessionStatus(sessionId);
+    if (apiStatus) {
+      return buildApiSessionPeek(sessionId, {
+        ...apiStatus,
+        createdAt: this.sessionManager.getSession(sessionId)?.createdAt || null
+      });
+    }
+
+    const orchestrationSessionManager = this.orchestration?.sessionManager;
+    const db = this.orchestration?.db;
+    const terminal = typeof orchestrationSessionManager?.getTerminal === 'function'
+      ? orchestrationSessionManager.getTerminal(sessionId)
+      : null;
+    const persistedTerminal = !terminal && typeof db?.getTerminal === 'function'
+      ? db.getTerminal(sessionId)
+      : null;
+    if (!terminal && !persistedTerminal) {
+      return null;
+    }
+
+    const includeTail = options.includeTail !== false;
+    const outputMode = options.outputMode === 'history' ? 'history' : 'visible';
+    const outputFormat = options.outputFormat === 'ansi' ? 'ansi' : 'plain';
+    const outputLines = Number.isFinite(options.outputLines) ? options.outputLines : 80;
+    let tail = null;
+    if (includeTail && typeof orchestrationSessionManager?.getOutput === 'function') {
+      try {
+        tail = {
+          mode: outputMode,
+          format: outputFormat,
+          lines: outputLines,
+          output: orchestrationSessionManager.getOutput(sessionId, {
+            lines: outputLines,
+            mode: outputMode,
+            format: outputFormat
+          })
+        };
+      } catch {
+        tail = null;
+      }
+    }
+
+    if (typeof db?.expireTerminalInputQueueItems === 'function') {
+      db.expireTerminalInputQueueItems();
+    }
+    if (typeof db?.expireTerminalInputLeases === 'function') {
+      db.expireTerminalInputLeases();
+    }
+
+    const pendingInput = typeof db?.listTerminalInputQueue === 'function'
+      ? db.listTerminalInputQueue({
+        terminalId: sessionId,
+        status: ['pending', 'held_for_approval'],
+        limit: 10
+      })
+      : [];
+    const inputLease = typeof db?.getActiveTerminalInputLease === 'function'
+      ? db.getActiveTerminalInputLease(sessionId)
+      : null;
+
+    return buildTerminalPeek({
+      sessionId,
+      terminal,
+      persistedTerminal,
+      pendingInput,
+      inputLease,
+      tail
+    });
+  }
+
   _setupRoutes() {
     const app = this.app;
 
@@ -615,6 +690,26 @@ class AgentServer {
           return sendError(res, 'SESSION_NOT_FOUND');
         }
         res.json(status);
+      } catch (error) {
+        sendError(res, 'INTERNAL_ERROR', { message: error.message });
+      }
+    });
+
+    // Get read-only session peek (bounded pending input/output snapshot)
+    app.get('/sessions/:sessionId/peek', (req, res) => {
+      try {
+        const lines = Number.parseInt(req.query.lines, 10);
+        const peek = this._buildSessionPeek(req.params.sessionId, {
+          includeTail: req.query.tail !== '0' && req.query.includeTail !== '0',
+          outputMode: String(req.query.mode || '').trim().toLowerCase() === 'history' ? 'history' : 'visible',
+          outputFormat: String(req.query.format || '').trim().toLowerCase() === 'ansi' ? 'ansi' : 'plain',
+          outputLines: Number.isFinite(lines) && lines > 0 ? Math.min(lines, 250) : 80
+        });
+        if (!peek) {
+          return sendError(res, 'SESSION_NOT_FOUND');
+        }
+        res.setHeader('Cache-Control', 'private, max-age=1');
+        res.json(peek);
       } catch (error) {
         sendError(res, 'INTERNAL_ERROR', { message: error.message });
       }

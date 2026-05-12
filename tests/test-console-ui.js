@@ -99,6 +99,9 @@ async function run() {
     assert(routePage.text.includes('Live process:'), '/console should show whether each terminal has a live backing process');
     assert(routePage.text.includes('renderLiveStatePill'), '/console should render explicit live/not-live badges');
     assert(routePage.text.includes('function getOperatorStateDescriptor'), '/console should centralize operator-state derivation for terminals and roots');
+    assert(routePage.text.includes('function getDerivedTaskState'), '/console should consume broker-derived sessionState when available');
+    assert(routePage.text.includes('/sessions/${encodeURIComponent(terminalId)}/peek'), '/console should use bounded session peek for terminal detail output');
+    assert(routePage.text.includes('Derived Session'), '/console should display derived session state in terminal detail');
     assert(routePage.text.includes('Root Terminal Workspace'), '/console should expose a root-scoped terminal workspace');
     assert(routePage.text.includes('Child terminals are nested inside this root workspace'), '/console should keep child terminal inspection inside the root workspace');
     assert(routePage.text.includes('data-terminal-workspace-target'), '/console should wire inline root-child terminal switching controls');

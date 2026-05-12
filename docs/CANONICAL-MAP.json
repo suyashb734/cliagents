@@ -94,10 +94,11 @@
         "src/server/orchestration-router.js",
         "src/mcp/cliagents-mcp-server.js",
         "src/database/db.js",
-        "src/database/migrations/0016_terminal_input_queue.sql"
+        "src/database/migrations/0016_terminal_input_queue.sql",
+        "src/database/migrations/0024_agent_control_foundation.sql"
       ],
       "supersedes": [],
-      "last_reviewed": "2026-05-07"
+      "last_reviewed": "2026-05-12"
     },
     {
       "path": "docs/reference/LAUNCH-PROFILE.md",
@@ -170,6 +171,57 @@
       "related_code": [],
       "supersedes": [],
       "last_reviewed": "2026-05-04"
+    },
+    {
+      "path": "docs/adr/0001-agent-control-taxonomy.md",
+      "status": "canonical",
+      "type": "adr",
+      "scope": ["taxonomy", "agent-control", "sessions", "workspaces"],
+      "related_code": [
+        "src/server/index.js",
+        "src/server/orchestration-router.js",
+        "src/services/session-peek.js"
+      ],
+      "supersedes": [],
+      "last_reviewed": "2026-05-12"
+    },
+    {
+      "path": "docs/adr/0002-session-peek-and-status.md",
+      "status": "canonical",
+      "type": "adr",
+      "scope": ["sessions", "status", "peek", "console"],
+      "related_code": [
+        "src/services/session-peek.js",
+        "src/server/index.js",
+        "public/console.html"
+      ],
+      "supersedes": [],
+      "last_reviewed": "2026-05-12"
+    },
+    {
+      "path": "docs/adr/0003-workspace-and-worktree.md",
+      "status": "canonical",
+      "type": "adr",
+      "scope": ["workspace", "worktree", "execution-isolation"],
+      "related_code": [
+        "src/orchestration/task-worktree.js",
+        "src/server/orchestration-router.js"
+      ],
+      "supersedes": [],
+      "last_reviewed": "2026-05-12"
+    },
+    {
+      "path": "docs/adr/0004-atomic-claims-and-input-leases.md",
+      "status": "canonical",
+      "type": "adr",
+      "scope": ["dispatch", "claims", "terminal-input", "leases"],
+      "related_code": [
+        "src/database/migrations/0024_agent_control_foundation.sql",
+        "src/database/db.js",
+        "src/server/orchestration-router.js"
+      ],
+      "supersedes": [],
+      "last_reviewed": "2026-05-12"
     },
     {
       "path": "docs/research/CLIAGENTS-OPERATING-MODEL.md",

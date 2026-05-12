@@ -359,6 +359,7 @@ const MEMORY_SNAPSHOT_SCOPES = new Set(['run', 'root', 'room', 'task', 'project'
 const MEMORY_SNAPSHOT_GENERATION_TRIGGERS = new Set(['run_completed', 'root_refresh', 'repair', 'manual']);
 const MEMORY_SNAPSHOT_GENERATION_STRATEGIES = new Set(['rule_based']);
 const TERMINAL_INPUT_QUEUE_STATUSES = new Set(['pending', 'held_for_approval', 'delivered', 'expired', 'cancelled']);
+const TERMINAL_INPUT_LEASE_STATUSES = new Set(['active', 'released', 'revoked', 'expired']);
 const TERMINAL_INPUT_KINDS = new Set(['message', 'approval', 'denial']);
 const ROOM_TURN_ACTIVE_STATUSES = new Set(['pending', 'running']);
 const ROOM_TURN_TERMINAL_STATUSES = new Set(['completed', 'partial', 'failed']);
@@ -408,6 +409,7 @@ const MEMORY_PROJECTION_SOURCE_LOOKUPS = {
   run_tool_events: { primaryKey: 'id' },
   usage_records: { primaryKey: 'id' },
   terminal_input_queue: { primaryKey: 'id' },
+  terminal_input_leases: { primaryKey: 'id' },
   discussions: { primaryKey: 'id' },
   discussion_messages: { primaryKey: 'id' },
   artifacts: { primaryKey: 'id' },
@@ -426,6 +428,11 @@ const MEMORY_PROJECTION_SOURCE_LOOKUPS = {
 function normalizeTerminalInputQueueStatus(value, fallback = 'pending') {
   const normalized = String(value || '').trim().toLowerCase();
   return TERMINAL_INPUT_QUEUE_STATUSES.has(normalized) ? normalized : fallback;
+}
+
+function normalizeTerminalInputLeaseStatus(value, fallback = 'active') {
+  const normalized = String(value || '').trim().toLowerCase();
+  return TERMINAL_INPUT_LEASE_STATUSES.has(normalized) ? normalized : fallback;
 }
 
 function normalizeTerminalInputKind(value, fallback = 'message') {
@@ -2993,6 +3000,208 @@ class OrchestrationDB {
     return result.changes || 0;
   }
 
+  _parseTerminalInputLeaseRow(row) {
+    if (!row) {
+      return null;
+    }
+    return {
+      id: row.id,
+      terminalId: row.terminal_id,
+      rootSessionId: row.root_session_id || null,
+      sessionId: row.session_id || null,
+      holder: row.holder,
+      purpose: row.purpose || null,
+      status: row.status,
+      expiresAt: row.expires_at,
+      heartbeatAt: row.heartbeat_at || null,
+      releasedAt: row.released_at || null,
+      revokedAt: row.revoked_at || null,
+      metadata: parseJsonField(row.metadata) || null,
+      createdAt: row.created_at,
+      updatedAt: row.updated_at
+    };
+  }
+
+  expireTerminalInputLeases(now = Date.now()) {
+    if (!this._hasTable('terminal_input_leases')) {
+      return 0;
+    }
+    const result = this.db.prepare(`
+      UPDATE terminal_input_leases
+      SET status = 'expired', updated_at = ?
+      WHERE status = 'active'
+        AND expires_at <= ?
+    `).run(now, now);
+    return result.changes || 0;
+  }
+
+  getTerminalInputLease(id) {
+    if (!this._hasTable('terminal_input_leases')) {
+      return null;
+    }
+    const normalizedId = String(id || '').trim();
+    if (!normalizedId) {
+      return null;
+    }
+    return this._parseTerminalInputLeaseRow(
+      this.db.prepare('SELECT * FROM terminal_input_leases WHERE id = ?').get(normalizedId)
+    );
+  }
+
+  getActiveTerminalInputLease(terminalId, options = {}) {
+    if (!this._hasTable('terminal_input_leases')) {
+      return null;
+    }
+    const normalizedTerminalId = String(terminalId || '').trim();
+    if (!normalizedTerminalId) {
+      return null;
+    }
+    const now = Number.isFinite(options.now) ? options.now : Date.now();
+    this.expireTerminalInputLeases(now);
+    const row = this.db.prepare(`
+      SELECT *
+      FROM terminal_input_leases
+      WHERE terminal_id = ?
+        AND status = 'active'
+        AND expires_at > ?
+      ORDER BY created_at DESC
+      LIMIT 1
+    `).get(normalizedTerminalId, now);
+    return this._parseTerminalInputLeaseRow(row);
+  }
+
+  acquireTerminalInputLease(input = {}) {
+    if (!this._hasTable('terminal_input_leases')) {
+      return { acquired: false, reason: 'unavailable', lease: null };
+    }
+    const terminalId = String(input.terminalId || input.terminal_id || '').trim();
+    if (!terminalId) {
+      throw new Error('terminalId is required');
+    }
+    if (!this.getTerminal(terminalId)) {
+      throw new Error(`Terminal not found: ${terminalId}`);
+    }
+    const holder = String(input.holder || input.requestedBy || input.requested_by || '').trim();
+    if (!holder) {
+      throw new Error('holder is required');
+    }
+
+    const now = Number.isFinite(input.now) ? input.now : Date.now();
+    const ttlMs = Math.max(1000, normalizeInteger(input.ttlMs ?? input.ttl_ms, 60 * 1000));
+    const expiresAt = Number.isFinite(input.expiresAt ?? input.expires_at)
+      ? normalizeOptionalInteger(input.expiresAt ?? input.expires_at)
+      : now + ttlMs;
+    const leaseId = String(input.id || input.leaseId || input.lease_id || `lease_${generateId()}`).trim();
+    const metadata = input.metadata && typeof input.metadata === 'object' && !Array.isArray(input.metadata)
+      ? redactSecretObject({ ...input.metadata })
+      : null;
+
+    const acquire = this.db.transaction(() => {
+      this.expireTerminalInputLeases(now);
+      const active = this.getActiveTerminalInputLease(terminalId, { now });
+      if (active && active.holder !== holder) {
+        return { acquired: false, reason: 'lease_held', lease: active };
+      }
+      if (active && active.holder === holder) {
+        const refreshed = this.updateTerminalInputLease(active.id, {
+          expiresAt,
+          heartbeatAt: now,
+          updatedAt: now,
+          metadata: metadata || active.metadata
+        });
+        return { acquired: true, reason: 'refreshed', lease: refreshed };
+      }
+
+      this.db.prepare(`
+        INSERT INTO terminal_input_leases (
+          id,
+          terminal_id,
+          root_session_id,
+          session_id,
+          holder,
+          purpose,
+          status,
+          expires_at,
+          heartbeat_at,
+          metadata,
+          created_at,
+          updated_at
+        ) VALUES (?, ?, ?, ?, ?, ?, 'active', ?, ?, ?, ?, ?)
+      `).run(
+        leaseId,
+        terminalId,
+        String(input.rootSessionId || input.root_session_id || '').trim() || null,
+        String(input.sessionId || input.session_id || '').trim() || null,
+        holder,
+        String(input.purpose || '').trim() || null,
+        expiresAt,
+        now,
+        metadata ? JSON.stringify(metadata) : null,
+        now,
+        now
+      );
+      return { acquired: true, reason: 'acquired', lease: this.getTerminalInputLease(leaseId) };
+    });
+
+    return acquire.immediate();
+  }
+
+  updateTerminalInputLease(id, patch = {}) {
+    if (!this._hasTable('terminal_input_leases')) {
+      return null;
+    }
+    const normalizedId = String(id || '').trim();
+    if (!normalizedId) {
+      throw new Error('leaseId is required');
+    }
+    const existing = this.getTerminalInputLease(normalizedId);
+    if (!existing) {
+      throw new Error(`Input lease not found: ${normalizedId}`);
+    }
+
+    const updates = [];
+    const params = [];
+    const addUpdate = (column, value) => {
+      updates.push(`${column} = ?`);
+      params.push(value);
+    };
+    if (patch.status !== undefined) {
+      addUpdate('status', normalizeTerminalInputLeaseStatus(patch.status));
+    }
+    if (patch.expiresAt !== undefined || patch.expires_at !== undefined) {
+      addUpdate('expires_at', normalizeOptionalInteger(patch.expiresAt ?? patch.expires_at));
+    }
+    if (patch.heartbeatAt !== undefined || patch.heartbeat_at !== undefined) {
+      addUpdate('heartbeat_at', normalizeOptionalInteger(patch.heartbeatAt ?? patch.heartbeat_at));
+    }
+    if (patch.releasedAt !== undefined || patch.released_at !== undefined) {
+      addUpdate('released_at', normalizeOptionalInteger(patch.releasedAt ?? patch.released_at));
+    }
+    if (patch.revokedAt !== undefined || patch.revoked_at !== undefined) {
+      addUpdate('revoked_at', normalizeOptionalInteger(patch.revokedAt ?? patch.revoked_at));
+    }
+    if (patch.metadata !== undefined) {
+      addUpdate('metadata', patch.metadata == null
+        ? null
+        : (typeof patch.metadata === 'string' ? patch.metadata : JSON.stringify(redactSecretObject(patch.metadata))));
+    }
+
+    if (updates.length === 0) {
+      return existing;
+    }
+    addUpdate('updated_at', Number.isFinite(patch.updatedAt || patch.updated_at)
+      ? (patch.updatedAt || patch.updated_at)
+      : Date.now());
+
+    this.db.prepare(`
+      UPDATE terminal_input_leases
+      SET ${updates.join(', ')}
+      WHERE id = ?
+    `).run(...params, normalizedId);
+
+    return this.getTerminalInputLease(normalizedId);
+  }
+
   /**
    * Get the next session-event sequence number for a root session.
    */
@@ -3682,6 +3891,9 @@ class OrchestrationDB {
       boundSessionId: row.bound_session_id || null,
       runId: row.run_id || null,
       terminalId: row.terminal_id || null,
+      claimOwner: row.claim_owner || null,
+      claimedAt: row.claimed_at || null,
+      claimExpiresAt: row.claim_expires_at || null,
       metadata: parseJsonField(row.metadata) || {},
       createdAt: row.created_at,
       updatedAt: row.updated_at,
@@ -3741,12 +3953,15 @@ class OrchestrationDB {
           bound_session_id,
           run_id,
           terminal_id,
+          claim_owner,
+          claimed_at,
+          claim_expires_at,
           metadata,
           created_at,
           updated_at,
           dispatched_at,
           cancelled_at
-        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
       `,
       dispatchRequestId,
       idempotencyKey,
@@ -3766,6 +3981,9 @@ class OrchestrationDB {
       String(input.boundSessionId || input.bound_session_id || '').trim() || null,
       String(input.runId || input.run_id || '').trim() || null,
       String(input.terminalId || input.terminal_id || '').trim() || null,
+      String(input.claimOwner || input.claim_owner || '').trim() || null,
+      normalizeOptionalInteger(input.claimedAt ?? input.claimed_at),
+      normalizeOptionalInteger(input.claimExpiresAt ?? input.claim_expires_at),
       JSON.stringify(metadata),
       now,
       updatedAt,
@@ -4033,6 +4251,18 @@ class OrchestrationDB {
       updates.push('terminal_id = ?');
       params.push(String(patch.terminalId || patch.terminal_id || '').trim() || null);
     }
+    if (patch.claimOwner !== undefined || patch.claim_owner !== undefined) {
+      updates.push('claim_owner = ?');
+      params.push(String(patch.claimOwner || patch.claim_owner || '').trim() || null);
+    }
+    if (patch.claimedAt !== undefined || patch.claimed_at !== undefined) {
+      updates.push('claimed_at = ?');
+      params.push(normalizeOptionalInteger(patch.claimedAt ?? patch.claimed_at));
+    }
+    if (patch.claimExpiresAt !== undefined || patch.claim_expires_at !== undefined) {
+      updates.push('claim_expires_at = ?');
+      params.push(normalizeOptionalInteger(patch.claimExpiresAt ?? patch.claim_expires_at));
+    }
     if (patch.coalescedCount !== undefined || patch.coalesced_count !== undefined) {
       updates.push('coalesced_count = ?');
       params.push(normalizeInteger(patch.coalescedCount ?? patch.coalesced_count, 0));
@@ -4074,6 +4304,69 @@ class OrchestrationDB {
       WHERE dispatch_request_id = ?
     `, ...params);
     return this.getDispatchRequest(dispatchRequestId);
+  }
+
+  claimDispatchRequest(dispatchRequestId, options = {}) {
+    if (!this._hasTable('dispatch_requests')) {
+      return { claimed: false, reason: 'unavailable', dispatch: null };
+    }
+
+    const id = String(dispatchRequestId || '').trim();
+    if (!id) {
+      throw new Error('dispatchRequestId is required');
+    }
+
+    const now = Number.isFinite(options.now)
+      ? options.now
+      : (Number.isFinite(options.now_ms) ? options.now_ms : Date.now());
+    const owner = String(options.claimOwner || options.claim_owner || options.owner || '').trim() || null;
+    const ttlMs = normalizeInteger(options.ttlMs ?? options.ttl_ms, 10 * 60 * 1000);
+    const claimExpiresAt = Number.isFinite(options.claimExpiresAt ?? options.claim_expires_at)
+      ? normalizeOptionalInteger(options.claimExpiresAt ?? options.claim_expires_at)
+      : now + ttlMs;
+
+    const claim = this.db.transaction(() => {
+      const existing = this.getDispatchRequest(id);
+      if (!existing) {
+        return { claimed: false, reason: 'not_found', dispatch: null };
+      }
+
+      if (existing.status === 'deferred' && existing.deferUntil && existing.deferUntil > now) {
+        return { claimed: false, reason: 'deferred', dispatch: existing };
+      }
+
+      if (existing.status === 'claimed' && existing.claimExpiresAt && existing.claimExpiresAt > now) {
+        return { claimed: false, reason: 'already_claimed', dispatch: existing };
+      }
+
+      if (!['queued', 'claimed', 'deferred'].includes(existing.status)) {
+        return { claimed: false, reason: `not_claimable:${existing.status}`, dispatch: existing };
+      }
+
+      const result = this.db.prepare(`
+        UPDATE dispatch_requests
+        SET status = 'claimed',
+            claim_owner = ?,
+            claimed_at = ?,
+            claim_expires_at = ?,
+            updated_at = ?
+        WHERE dispatch_request_id = ?
+          AND (
+            status = 'queued'
+            OR (status = 'deferred' AND (defer_until IS NULL OR defer_until <= ?))
+            OR (status = 'claimed' AND (claim_expires_at IS NULL OR claim_expires_at <= ?))
+          )
+      `).run(owner, now, claimExpiresAt, now, id, now, now);
+
+      const dispatch = this.getDispatchRequest(id);
+      return {
+        claimed: result.changes === 1,
+        reason: result.changes === 1 ? 'claimed' : 'claim_conflict',
+        dispatch
+      };
+    });
+
+    return claim.immediate();
   }
 
   _parseRunContextSnapshotRow(row) {

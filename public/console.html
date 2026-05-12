@@ -1682,6 +1682,14 @@
       return ['completed', 'idle', 'error', 'failed', 'cancelled', 'abandoned'].includes(String(status || '').toLowerCase());
     }
 
+    function getDerivedTaskState(subject = {}) {
+      return String(subject?.sessionState?.task || subject?.session_state?.task || '').trim().toLowerCase();
+    }
+
+    function getDerivedLiveness(subject = {}) {
+      return String(subject?.sessionState?.liveness || subject?.session_state?.liveness || '').trim().toLowerCase();
+    }
+
     function isTerminalStale(terminal) {
       return !!terminal && !isTerminalSettled(terminal.status) && timestampAgeMs(terminal.lastActive || terminal.createdAt) > STALE_TERMINAL_MS;
     }
@@ -1693,12 +1701,14 @@
     function getOperatorStateDescriptor(subject = {}, options = {}) {
       const status = String(subject?.status || subject?.latestEventType || 'unknown').trim().toLowerCase();
       const processState = String(subject?.processState || subject?.process_state || '').trim().toLowerCase();
+      const derivedTask = getDerivedTaskState(subject);
+      const derivedLiveness = getDerivedLiveness(subject);
       const stale = options.stale === true;
       const live = typeof options.live === 'boolean'
         ? options.live
         : (typeof subject?.live === 'boolean' ? subject.live : null);
 
-      if (stale || status === 'stale') {
+      if (stale || status === 'stale' || derivedLiveness === 'orphaned') {
         return {
           label: 'Stale',
           tone: 'stale',
@@ -1706,7 +1716,7 @@
         };
       }
 
-      if (WAITING_TERMINAL_STATUSES.has(status)) {
+      if (derivedTask === 'needs_input' || WAITING_TERMINAL_STATUSES.has(status)) {
         return {
           label: 'Waiting for input',
           tone: 'waiting',
@@ -1715,7 +1725,7 @@
         };
       }
 
-      if (WORKING_TERMINAL_STATUSES.has(status)) {
+      if (derivedTask === 'working' || WORKING_TERMINAL_STATUSES.has(status)) {
         return {
           label: 'Working',
           tone: 'working',
@@ -1723,7 +1733,7 @@
         };
       }
 
-      if (status === 'idle' && processState !== 'exited' && (live !== false || subject?.terminalId)) {
+      if ((derivedTask === 'idle' || status === 'idle') && processState !== 'exited' && (live !== false || subject?.terminalId)) {
         return {
           label: 'At prompt',
           tone: 'ready',
@@ -1731,7 +1741,7 @@
         };
       }
 
-      if (status === 'completed') {
+      if (derivedTask === 'completed' || status === 'completed') {
         return {
           label: 'Finished',
           tone: 'ready',
@@ -1739,7 +1749,7 @@
         };
       }
 
-      if (ATTENTION_TERMINAL_STATUSES.has(status)) {
+      if (derivedTask === 'failed' || ATTENTION_TERMINAL_STATUSES.has(status)) {
         return {
           label: 'Needs attention',
           tone: 'attention',
@@ -3447,6 +3457,10 @@
             </div>
           </div>
           <div>
+            <div class="detail-label">Derived Session</div>
+            <div>${escapeHtml(terminal.sessionState ? `${terminal.sessionState.task}/${terminal.sessionState.liveness}` : 'n/a')}</div>
+          </div>
+          <div>
             <div class="detail-label">Raw Status</div>
             <div><span class="${statusClass(status)}">${escapeHtml(status)}</span></div>
           </div>
@@ -3526,22 +3540,28 @@
         mode: coerceOutputMode(preferences.mode, 'history'),
         format: coerceOutputFormat(preferences.format, 'plain')
       };
-      const outputParams = new URLSearchParams({
-        lines: '250',
+      const peekParams = new URLSearchParams({
+        lines: '120',
         mode: outputPreferences.mode,
         format: outputPreferences.format
       });
-      const [terminal, output, messages] = await Promise.all([
+      const [terminal, peek, messages] = await Promise.all([
         fetchJson(`/orchestration/terminals/${encodeURIComponent(terminalId)}`),
-        fetchJson(`/orchestration/terminals/${encodeURIComponent(terminalId)}/output?${outputParams.toString()}`),
+        fetchJson(`/sessions/${encodeURIComponent(terminalId)}/peek?${peekParams.toString()}`),
         fetchJson(`/orchestration/terminals/${encodeURIComponent(terminalId)}/messages?limit=200`)
       ]);
 
       return {
-        terminal,
-        outputText: output.output || '',
-        outputMode: output.mode || outputPreferences.mode,
-        outputFormat: output.format || outputPreferences.format,
+        terminal: {
+          ...terminal,
+          sessionState: peek.sessionState || terminal.sessionState || null,
+          inputLease: peek.inputLease || null,
+          pendingInput: peek.pendingInput || []
+        },
+        peek,
+        outputText: peek.tail?.output || '',
+        outputMode: peek.tail?.mode || outputPreferences.mode,
+        outputFormat: peek.tail?.format || outputPreferences.format,
         messages: messages.messages || []
       };
     }
