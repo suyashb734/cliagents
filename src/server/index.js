@@ -986,6 +986,19 @@ class AgentServer {
           workDir, workingDirectory,
           temperature, top_p, top_k, max_output_tokens
         } = req.body;
+        const askStartedAt = Date.now();
+        const numericTimeout = Number(timeout);
+        const hasTotalTimeout = Number.isFinite(numericTimeout) && numericTimeout > 0;
+        const getRemainingTimeout = () => {
+          if (!hasTotalTimeout) {
+            return timeout;
+          }
+          const remaining = Math.floor(numericTimeout - (Date.now() - askStartedAt));
+          if (remaining <= 0) {
+            throw new Error(`Request timed out after ${Math.floor(numericTimeout)}ms`);
+          }
+          return remaining;
+        };
         if (!message) {
           return sendError(res, 'MISSING_PARAMETER', { message: 'Message is required', param: 'message' });
         }
@@ -1021,6 +1034,7 @@ class AgentServer {
           jsonSchema,      // JSON schema for structured output (Claude only)
           allowedTools,    // Allowed tools
           model,           // Model selection
+          timeout: getRemainingTimeout(),
           workDir: effectiveWorkDir,
           temperature,
           top_p,
@@ -1029,7 +1043,7 @@ class AgentServer {
         });
 
         const response = await this.sessionManager.send(session.sessionId, message, {
-          timeout,
+          timeout: getRemainingTimeout(),
           jsonSchema      // Also pass per-message for Claude
         });
 

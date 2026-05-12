@@ -4,11 +4,21 @@
 
 const assert = require('assert');
 const childProcess = require('child_process');
+const fs = require('fs');
+const os = require('os');
+const path = require('path');
+const { EventEmitter } = require('events');
+const { PassThrough } = require('stream');
 
 const GeminiCliAdapter = require('../src/adapters/gemini-cli');
 
 const originalExecSync = childProcess.execSync;
 const originalExecFile = childProcess.execFile;
+const originalSpawn = childProcess.spawn;
+
+function sleep(ms) {
+  return new Promise((resolve) => setTimeout(resolve, ms));
+}
 
 async function withMockedExecFile(mock, fn) {
   childProcess.execFile = (path, args, options, callback) => {
@@ -61,6 +71,24 @@ async function run() {
     assert.strictEqual(index, '1');
   });
   console.log('  ✓ resolves an existing session on the first list call');
+
+  const missingWorkDir = path.join(os.tmpdir(), `cliagents-gemini-missing-${Date.now()}`);
+  fs.rmSync(missingWorkDir, { recursive: true, force: true });
+  await withMockedExecFile((command, args, options) => {
+    assert(args.includes('--list-sessions'), 'expected session list command');
+    assert(fs.existsSync(options.cwd), 'expected list-sessions cwd to be created before spawn');
+    assert.strictEqual(
+      String(options.env?.PATH || '').split(path.delimiter)[0],
+      path.dirname(process.execPath),
+      'expected Gemini subprocess PATH to prefer the current Node runtime'
+    );
+    return '';
+  }, async () => {
+    const sessions = await adapter._listGeminiSessions(missingWorkDir, { maxAttempts: 1 });
+    assert.deepStrictEqual(sessions, []);
+  });
+  fs.rmSync(missingWorkDir, { recursive: true, force: true });
+  console.log('  ✓ creates missing list-session workdirs and pins Gemini subprocess PATH');
 
   await withMockedExecFile((command, args) => {
     if (args.includes('--list-sessions')) {
@@ -160,6 +188,68 @@ async function run() {
     assert(elapsedMs < 250, `expected explicit deadline to bound detection, took ${elapsedMs}ms`);
   });
   console.log('  ✓ honors caller-supplied deadline during new-session detection');
+
+  const budgetAdapter = new GeminiCliAdapter({ workDir: '/tmp/gemini-test' });
+  const budgetWorkDir = fs.mkdtempSync(path.join(os.tmpdir(), 'cliagents-gemini-budget-'));
+  let capturedInitTimeout = null;
+  budgetAdapter._listGeminiSessions = async () => {
+    await sleep(20);
+    return [];
+  };
+  budgetAdapter._runGeminiCommand = async (args, options) => {
+    capturedInitTimeout = options.timeout;
+    return {
+      text: 'READY',
+      raw: { session_id: 'budget-session-id' },
+      stats: {}
+    };
+  };
+
+  try {
+    await budgetAdapter.spawn('budget-session', {
+      workDir: budgetWorkDir,
+      timeout: 80
+    });
+    assert(capturedInitTimeout > 0 && capturedInitTimeout < 80, `expected init timeout to use remaining budget, got ${capturedInitTimeout}`);
+  } finally {
+    await budgetAdapter.terminate('budget-session').catch(() => {});
+    fs.rmSync(budgetWorkDir, { recursive: true, force: true });
+  }
+  console.log('  ✓ bounds Gemini init by remaining spawn deadline after session listing');
+
+  const timeoutWorkDir = fs.mkdtempSync(path.join(os.tmpdir(), 'cliagents-gemini-timeout-'));
+  const timeoutSignals = [];
+  childProcess.spawn = () => {
+    const proc = new EventEmitter();
+    proc.stdout = new PassThrough();
+    proc.stderr = new PassThrough();
+    proc.kill = (signal) => {
+      timeoutSignals.push(signal);
+      if (signal === 'SIGKILL') {
+        proc.stdout.end();
+        proc.stderr.end();
+        process.nextTick(() => proc.emit('close', null));
+      }
+      return true;
+    };
+    return proc;
+  };
+
+  try {
+    const chunks = [];
+    for await (const chunk of adapter._runGeminiCommandStreaming(['-p', 'never returns'], {
+      timeout: 5,
+      workDir: timeoutWorkDir
+    })) {
+      chunks.push(chunk);
+    }
+    assert.deepStrictEqual(timeoutSignals, ['SIGTERM', 'SIGKILL']);
+    assert(chunks.some((chunk) => chunk.type === 'error' && chunk.timedOut === true), 'expected timed-out error chunk');
+  } finally {
+    childProcess.spawn = originalSpawn;
+    fs.rmSync(timeoutWorkDir, { recursive: true, force: true });
+  }
+  console.log('  ✓ force-kills Gemini streaming commands that ignore SIGTERM');
   
   console.log('Gemini resume resilience tests passed.');
 }
@@ -170,4 +260,5 @@ run().catch((error) => {
 }).finally(() => {
   childProcess.execFile = originalExecFile;
   childProcess.execSync = originalExecSync;
+  childProcess.spawn = originalSpawn;
 });

@@ -164,6 +164,7 @@ class SessionManager extends EventEmitter {
       workDir: effectiveWorkDir,
       model: effectiveModel,          // Model selection (adapter-specific)
       providerSessionId: effectiveProviderSessionId,
+      timeout: options.timeout,
       jsonSchema: options.jsonSchema, // JSON Schema for structured output (Claude only)
       jsonMode: options.jsonMode,
       // Generation parameters (Gemini only - writes to ~/.gemini/config.yaml)

@@ -83,7 +83,7 @@ async function run() {
     server.sessionManager.send = async (sessionId, message, options = {}) => {
       assert.strictEqual(sessionId, 'test-ask-session');
       assert.strictEqual(message, 'Reply with JSON.');
-      assert.strictEqual(options.timeout, 1234);
+      assert(options.timeout > 0 && options.timeout <= 1234, `expected remaining timeout budget, got ${options.timeout}`);
       return { result: '{"ok":true}' };
     };
 
@@ -106,6 +106,7 @@ async function run() {
     assert.deepStrictEqual(data, { result: '{"ok":true}' });
     assert(createSessionOptions, 'expected createSession to be called');
     assert.strictEqual(createSessionOptions.adapter, 'gemini-cli');
+    assert(createSessionOptions.timeout > 0 && createSessionOptions.timeout <= 1234, `expected create timeout budget, got ${createSessionOptions.timeout}`);
     assert.strictEqual(createSessionOptions.temperature, 0.25);
     assert.strictEqual(createSessionOptions.top_p, 0.8);
     assert.strictEqual(createSessionOptions.top_k, 20);
