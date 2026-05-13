@@ -2599,7 +2599,7 @@ function createOrchestrationRouter(context) {
         });
       }
 
-      let assignment = db.getTaskAssignment(req.params.assignmentId);
+      const assignment = db.getTaskAssignment(req.params.assignmentId);
       if (!assignment || assignment.taskId !== task.id) {
         return res.status(404).json({
           error: { code: 'task_assignment_not_found', message: `Assignment ${req.params.assignmentId} not found for task ${task.id}` }
@@ -2857,7 +2857,7 @@ function createOrchestrationRouter(context) {
         });
       }
 
-      const assignment = db.getTaskAssignment(req.params.assignmentId);
+      let assignment = db.getTaskAssignment(req.params.assignmentId);
       assignmentForFailure = assignment;
       if (!assignment || assignment.taskId !== task.id) {
         return res.status(404).json({

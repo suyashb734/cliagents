@@ -387,6 +387,39 @@ async function runRouteAssertions() {
     assert.strictEqual(contextSnapshot.linkedContext.assignment.branchName, 'task/tasks-v1');
     assert.deepStrictEqual(contextSnapshot.linkedContext.assignment.writePaths, ['src/tasks.js']);
 
+    const lateLeaseTaskRes = await request(serverHandle.baseUrl, 'POST', '/orchestration/tasks', {
+      title: 'Late lease task',
+      workspaceRoot: rootDir
+    });
+    assert.strictEqual(lateLeaseTaskRes.status, 200);
+    const lateLeaseTaskId = lateLeaseTaskRes.data.task.id;
+    const lateLeaseAssignment = db.createTaskAssignment({
+      id: 'assignment-late-lease',
+      taskId: lateLeaseTaskId,
+      role: 'executor',
+      instructions: 'Start from a legacy row that has write paths but no lease.',
+      branchName: 'task/late-lease',
+      baseBranch: 'main',
+      mergeTarget: 'main',
+      branchStatus: 'planned',
+      writePaths: ['src/late-lease.js'],
+      status: 'queued',
+      createdAt: Date.now()
+    });
+    assert.strictEqual(lateLeaseAssignment.pathLeaseId, null);
+    const lateLeaseStartRes = await request(serverHandle.baseUrl, 'POST', `/orchestration/tasks/${lateLeaseTaskId}/assignments/${lateLeaseAssignment.id}/start`, {
+      rootSessionId: 'root-task-routes',
+      parentSessionId: 'root-task-routes',
+      originClient: 'test',
+      externalSessionRef: 'test:task-routes'
+    });
+    assert.strictEqual(lateLeaseStartRes.status, 200, JSON.stringify(lateLeaseStartRes.data));
+    assert.strictEqual(lateLeaseStartRes.data.assignment.status, 'running');
+    assert.strictEqual(lateLeaseStartRes.data.assignment.branch.status, 'running');
+    assert(lateLeaseStartRes.data.assignment.branch.pathLeaseId, 'start should acquire a missing path lease for legacy assignment rows');
+    assert.strictEqual(lateLeaseStartRes.data.assignment.branch.pathLease.status, 'active');
+    assert.strictEqual(db.getTaskAssignment(lateLeaseAssignment.id).pathLeaseId, lateLeaseStartRes.data.assignment.branch.pathLeaseId);
+
     const sessionBindings = db.listTaskSessionBindings({ taskAssignmentId: assignmentId });
     assert.strictEqual(sessionBindings.length, 1);
     assert.strictEqual(sessionBindings[0].rootSessionId, 'root-task-routes');
