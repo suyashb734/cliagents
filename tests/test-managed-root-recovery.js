@@ -131,10 +131,12 @@ async function run() {
     const launch = await request(serverOne.baseUrl, 'POST', '/orchestration/root-sessions/launch', {
       adapter: 'claude',
       externalSessionRef: 'claude:test-managed-root-recovery',
-      workDir
+      workDir,
+      deferProviderStartUntilAttached: true
     });
 
     assert.strictEqual(launch.status, 200);
+    assert.strictEqual(launch.data.providerStartMode, 'after-attach');
     launchedTerminalId = launch.data.terminalId;
     sessionName = launch.data.sessionName;
     assert(launchedTerminalId, 'expected launched terminal id');
