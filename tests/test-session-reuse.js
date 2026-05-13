@@ -132,6 +132,15 @@ async function run() {
       }
     });
     await manager.sendInput(first.terminalId, 'Review the implementation.');
+    const firstInputEvents = db.listRootIoEvents({
+      terminalId: first.terminalId,
+      eventKind: 'input',
+      limit: 10
+    });
+    assert(
+      firstInputEvents.some((event) => event.contentFull === 'Review the implementation.' && event.metadata.source === 'session-manager.sendInput'),
+      'sendInput should persist broker-sent input as a root IO event'
+    );
     const firstLiveTerminal = manager.terminals.get(first.terminalId);
     fs.writeFileSync(
       firstLiveTerminal.logPath,
@@ -157,17 +166,33 @@ async function run() {
       }
     });
 
-    assert.strictEqual(second.terminalId, first.terminalId);
-    assert.strictEqual(second.reused, true);
-    assert.strictEqual(fakeTmux.createCalls.length, 1);
-    assert.strictEqual(db.listTerminals({ rootSessionId: reusableRoot }).length, 1);
-    const reusedLiveTerminal = manager.terminals.get(second.terminalId);
-    assert.strictEqual(reusedLiveTerminal.sessionMetadata.taskId, 'task-reuse-b');
-    assert.strictEqual(reusedLiveTerminal.sessionMetadata.taskAssignmentId, 'assignment-reuse-b');
-    const reusedDbTerminal = db.getTerminal(second.terminalId);
-    const reusedDbMetadata = JSON.parse(reusedDbTerminal.session_metadata);
-    assert.strictEqual(reusedDbMetadata.taskId, 'task-reuse-b');
-    assert.strictEqual(reusedDbMetadata.taskAssignmentId, 'assignment-reuse-b');
+    assert.notStrictEqual(second.terminalId, first.terminalId);
+    assert.strictEqual(second.reused, false);
+    assert.deepStrictEqual(
+      {
+        preferred: second.reuseDecision.preferred,
+        selected: second.reuseDecision.selected,
+        reason: second.reuseDecision.reason,
+        candidateTerminalId: second.reuseDecision.candidateTerminalId,
+        requiredNewBinding: second.reuseDecision.requiredNewBinding
+      },
+      {
+        preferred: true,
+        selected: false,
+        reason: 'task_id_mismatch',
+        candidateTerminalId: first.terminalId,
+        requiredNewBinding: true
+      }
+    );
+    assert.strictEqual(fakeTmux.createCalls.length, 2);
+    assert.strictEqual(db.listTerminals({ rootSessionId: reusableRoot }).length, 2);
+    const secondLiveTerminal = manager.terminals.get(second.terminalId);
+    assert.strictEqual(secondLiveTerminal.sessionMetadata.taskId, 'task-reuse-b');
+    assert.strictEqual(secondLiveTerminal.sessionMetadata.taskAssignmentId, 'assignment-reuse-b');
+    const secondDbTerminal = db.getTerminal(second.terminalId);
+    const secondDbMetadata = JSON.parse(secondDbTerminal.session_metadata);
+    assert.strictEqual(secondDbMetadata.taskId, 'task-reuse-b');
+    assert.strictEqual(secondDbMetadata.taskAssignmentId, 'assignment-reuse-b');
     db.addMessage(second.terminalId, 'assistant', 'Second assignment usage.', {
       metadata: {
         inputTokens: 11,
@@ -179,8 +204,22 @@ async function run() {
     const reuseUsageRecords = db.listUsageRecords({ terminalId: second.terminalId });
     assert.strictEqual(reuseUsageRecords[0].task_id, 'task-reuse-b');
     assert.strictEqual(reuseUsageRecords[0].task_assignment_id, 'assignment-reuse-b');
+
+    await manager.sendInput(second.terminalId, 'Review second assignment.');
+    fs.writeFileSync(
+      secondLiveTerminal.logPath,
+      [
+        secondLiveTerminal.activeRun.startMarker,
+        'Second assignment complete.',
+        `${secondLiveTerminal.activeRun.exitMarkerPrefix}0`
+      ].join('\n'),
+      'utf8'
+    );
+    fakeTmux.setCurrentCommand(secondLiveTerminal.sessionName, secondLiveTerminal.windowName, 'zsh');
+    assert.strictEqual(manager.getStatus(second.terminalId), TerminalStatus.COMPLETED);
+
     const reuseEvents = db.listSessionEvents({ rootSessionId: reusableRoot });
-    assert(reuseEvents.some((event) => event.event_type === 'session_resumed'));
+    assert(!reuseEvents.some((event) => event.event_type === 'session_resumed'));
 
     const forcedFresh = await manager.createTerminal({
       ...baseOptions,
@@ -191,6 +230,8 @@ async function run() {
     });
     assert.notStrictEqual(forcedFresh.terminalId, first.terminalId);
     assert.strictEqual(forcedFresh.reused, false);
+    assert.strictEqual(forcedFresh.reuseDecision.reason, 'force_fresh_session');
+    assert.strictEqual(forcedFresh.reuseDecision.requiredNewBinding, true);
 
     const busyRoot = 'bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb';
     const busy = await manager.createTerminal({
@@ -239,6 +280,8 @@ async function run() {
       sessionKind: 'reviewer'
     });
     assert.notStrictEqual(busyFollowUp.terminalId, busy.terminalId);
+    assert.strictEqual(busyFollowUp.reuseDecision.reason, 'candidate_processing_not_reusable');
+    assert.strictEqual(busyFollowUp.reuseDecision.candidateTerminalId, busy.terminalId);
 
     const modelRoot = 'cccccccccccccccccccccccccccccccc';
     const modelOne = await manager.createTerminal({
@@ -255,8 +298,10 @@ async function run() {
       model: 'gpt-5'
     });
     assert.notStrictEqual(modelTwo.terminalId, modelOne.terminalId);
+    assert.strictEqual(modelTwo.reuseDecision.reason, 'model_mismatch');
+    assert.strictEqual(modelTwo.reuseDecision.candidateTerminalId, modelOne.terminalId);
 
-    console.log('✅ Session manager reuses compatible worker terminals, skips busy terminals, and honors force-fresh/model boundaries');
+    console.log('✅ Session manager isolates reuse by task scope, skips busy terminals, and honors force-fresh/model boundaries');
   } finally {
     global.setTimeout = realSetTimeout;
     db.close();

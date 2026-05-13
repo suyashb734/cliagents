@@ -10,9 +10,16 @@ older planning notes in `docs/research/`.
 - [Adapter Contract](./reference/ADAPTER-CONTRACT.md): adapter lifecycle and collaborator readiness.
 - [Event Normalization](./reference/EVENT-NORMALIZATION.md): normalized broker event contract and adapter gaps.
 - [Remote API](./reference/REMOTE-API.md): runtime-neutral snapshot and remote access rules.
+- [Terminal Input Queue](./reference/INPUT-QUEUE.md): remote-safe input, approval, denial, and control-mode states.
 - [MCP Tools](./reference/MCP-TOOLS.md): broker tool surface overview.
+- [Alpha Release Checklist](./reference/ALPHA-RELEASE.md): public-alpha release gates and evidence.
+- [Branch Management](./reference/BRANCH-MANAGEMENT.md): branch roles, delegated worktrees, and pre-merge gates.
 - [Roadmap](./roadmap/ROADMAP.md): active implementation order.
 - [ADR Index](./adr/README.md): durable architecture decision record rules.
+- [Agent Control Taxonomy ADR](./adr/0001-agent-control-taxonomy.md): canonical nouns for providers, profiles, roots, workspaces, sessions, tasks, assignments, rooms, and memory.
+- [Session Peek And Status ADR](./adr/0002-session-peek-and-status.md): `status` lifecycle contract and bounded `peek` snapshot contract.
+- [Workspace And Worktree ADR](./adr/0003-workspace-and-worktree.md): durable workspace boundary versus git worktree isolation.
+- [Atomic Claims And Input Leases ADR](./adr/0004-atomic-claims-and-input-leases.md): dispatch claim and terminal input lease rules.
 - [Operator Model](./research/CLIAGENTS-OPERATING-MODEL.md): how humans and agents should use roots, children, rooms, usage, and memory.
 - [Feature Acceptance Matrix](./research/FEATURE-ACCEPTANCE-MATRIX.md): proof status by subsystem.
 - [Canonical Map](./CANONICAL-MAP.json): machine-readable index for coding agents.
@@ -30,6 +37,11 @@ older planning notes in `docs/research/`.
 - [Knowledge Graph Guidance](./reference/KNOWLEDGE-GRAPH.md)
 - [Event Normalization](./reference/EVENT-NORMALIZATION.md)
 - [Remote API](./reference/REMOTE-API.md)
+- [Terminal Input Queue](./reference/INPUT-QUEUE.md)
+- [Alpha Release Checklist](./reference/ALPHA-RELEASE.md)
+- [Branch Management](./reference/BRANCH-MANAGEMENT.md)
+- [Track A Launch Profile](./reference/LAUNCH-PROFILE.md)
+- [Failure And Retry Taxonomy](./reference/FAILURE-RETRY-TAXONOMY.md)
 - [Troubleshooting](./TROUBLESHOOTING.md)
 - [Adding Adapters](./adding-adapters.md)
 - [Historical Adapter Notes](./adapters.md)

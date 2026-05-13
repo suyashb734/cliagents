@@ -29,7 +29,22 @@ const {
   isAdapterAuthenticated
 } = require('../utils/adapter-auth');
 const { createOpenAIRouter } = require('./openai-compat');
-const { authenticateRequest, validateApiKey } = require('./auth');
+const {
+  buildApiSessionPeek,
+  buildTerminalPeek
+} = require('../services/session-peek');
+const {
+  authenticateRequest,
+  validateApiKey,
+  getConfiguredApiKey,
+  getConfiguredApiKeySource,
+  configureAuth,
+  ensureLocalApiKey,
+  validateLocalConsoleLoginToken,
+  isLoopbackHost,
+  isUnauthenticatedLocalhostModeEnabled,
+  assertAuthConfigurationForHost
+} = require('./auth');
 
 // Orchestration components
 const { PersistentSessionManager } = require('../tmux/session-manager');
@@ -47,10 +62,159 @@ function isProviderCapacityError(message) {
   return /rate.?limit|quota|resourceexhausted|quota_exhausted|exhausted your capacity|capacity on this model/i.test(text);
 }
 
+const API_CORS_ALLOWED_ORIGINS_ENV = 'CLIAGENTS_API_CORS_ALLOWED_ORIGINS';
+const API_CORS_ALLOW_LOOPBACK_ENV = 'CLIAGENTS_API_CORS_ALLOW_LOOPBACK';
+const DASHBOARD_ENV_MUTATION_DISABLED_ENV = 'CLIAGENTS_DISABLE_DASHBOARD_ENV_MUTATION';
+const DASHBOARD_ENV_MUTATION_EXTRA_KEYS_ENV = 'CLIAGENTS_DASHBOARD_ENV_MUTATION_EXTRA_KEYS';
+
+const API_ROUTE_PREFIXES = [
+  '/health',
+  '/openapi.json',
+  '/adapters',
+  '/sessions',
+  '/ask',
+  '/dashboard/adapters',
+  '/orchestration',
+  '/v1'
+];
+
+function normalizeEnvList(value) {
+  if (typeof value !== 'string') {
+    return [];
+  }
+  return value
+    .split(',')
+    .map((entry) => entry.trim())
+    .filter(Boolean);
+}
+
+function isValidEnvVarName(name) {
+  return typeof name === 'string' && /^[A-Z_][A-Z0-9_]*$/.test(name);
+}
+
+function shouldApplyApiCors(pathname) {
+  if (typeof pathname !== 'string' || !pathname) {
+    return false;
+  }
+  return API_ROUTE_PREFIXES.some((prefix) => pathname === prefix || pathname.startsWith(`${prefix}/`));
+}
+
+function parseOriginHost(origin) {
+  if (typeof origin !== 'string') {
+    return null;
+  }
+
+  try {
+    const parsed = new URL(origin);
+    if (parsed.protocol !== 'http:' && parsed.protocol !== 'https:') {
+      return null;
+    }
+    return parsed.hostname;
+  } catch {
+    return null;
+  }
+}
+
+function isAllowedApiCorsOrigin(origin, explicitOrigins, allowLoopbackOrigins) {
+  if (typeof origin !== 'string' || !origin.trim()) {
+    return true;
+  }
+
+  const normalizedOrigin = origin.trim();
+  if (explicitOrigins.has(normalizedOrigin)) {
+    return true;
+  }
+
+  if (allowLoopbackOrigins) {
+    const originHost = parseOriginHost(normalizedOrigin);
+    if (originHost && isLoopbackHost(originHost)) {
+      return true;
+    }
+  }
+
+  return false;
+}
+
+function buildApiCorsPolicy() {
+  const explicitOrigins = new Set(normalizeEnvList(process.env[API_CORS_ALLOWED_ORIGINS_ENV]));
+  const allowLoopbackOrigins = process.env[API_CORS_ALLOW_LOOPBACK_ENV] !== '0';
+  const isOriginAllowed = (origin) => isAllowedApiCorsOrigin(origin, explicitOrigins, allowLoopbackOrigins);
+
+  const middleware = cors({
+    origin(origin, callback) {
+      callback(null, isOriginAllowed(origin));
+    },
+    methods: ['GET', 'POST', 'PUT', 'PATCH', 'DELETE', 'OPTIONS'],
+    allowedHeaders: ['Authorization', 'Content-Type', 'X-API-Key']
+  });
+
+  return { middleware, isOriginAllowed };
+}
+
+function isDashboardEnvMutationDisabled() {
+  return process.env[DASHBOARD_ENV_MUTATION_DISABLED_ENV] === '1';
+}
+
+function isLoopbackRequest(req) {
+  return isLoopbackHost(req.socket?.remoteAddress)
+    || isLoopbackHost(req.ip);
+}
+
+function parseRequestOriginHost(req) {
+  const origin = String(req.headers.origin || '').trim();
+  if (!origin) {
+    return null;
+  }
+  return parseOriginHost(origin);
+}
+
+function isLocalConsoleBootstrapRequest(req) {
+  if (!isLoopbackRequest(req)) {
+    return false;
+  }
+
+  const fetchSite = String(req.headers['sec-fetch-site'] || '').trim().toLowerCase();
+  if (fetchSite && !['same-origin', 'none'].includes(fetchSite)) {
+    return false;
+  }
+
+  const originHost = parseRequestOriginHost(req);
+  if (originHost && !isLoopbackHost(originHost)) {
+    return false;
+  }
+
+  return true;
+}
+
+function getDashboardEnvMutationAllowlist(adapterName) {
+  const config = getAuthConfig(adapterName);
+  if (!config) {
+    return null;
+  }
+
+  const allowedKeys = new Set();
+  for (const key of (Array.isArray(config.envVars) ? config.envVars : [])) {
+    if (isValidEnvVarName(key)) {
+      allowedKeys.add(key);
+    }
+  }
+
+  for (const key of normalizeEnvList(process.env[DASHBOARD_ENV_MUTATION_EXTRA_KEYS_ENV])) {
+    if (isValidEnvVarName(key)) {
+      allowedKeys.add(key);
+    }
+  }
+
+  return allowedKeys;
+}
+
 class AgentServer {
   constructor(options = {}) {
     this.port = options.port ?? 4001;
     this.host = options.host ?? '127.0.0.1';
+    this.dataDir = options.orchestration?.dataDir || process.env.CLIAGENTS_DATA_DIR || path.join(process.cwd(), 'data');
+    this.localApiKey = ensureLocalApiKey({ dataDir: this.dataDir });
+    configureAuth({ localApiKeyFilePath: this.localApiKey.filePath });
     this.cleanupOrphans = options.cleanupOrphans ?? process.env.CLI_AGENTS_CLEANUP_ORPHANS === '1';
     this.destroyOrchestrationTerminalsOnStop = options.orchestration?.destroyTerminalsOnStop
       ?? process.env.CLI_AGENTS_DESTROY_TERMINALS_ON_STOP === '1';
@@ -85,7 +249,20 @@ class AgentServer {
 
     // Express app
     this.app = express();
-    this.app.use(cors());
+    const apiCorsPolicy = buildApiCorsPolicy();
+    this.app.use((req, res, next) => {
+      if (!shouldApplyApiCors(req.path)) {
+        return next();
+      }
+      const requestOrigin = req.headers.origin;
+      if (requestOrigin && !apiCorsPolicy.isOriginAllowed(requestOrigin)) {
+        return res.status(403).json({
+          success: false,
+          error: `Origin is not allowed by ${API_CORS_ALLOWED_ORIGINS_ENV}`
+        });
+      }
+      return apiCorsPolicy.middleware(req, res, next);
+    });
     this.app.use(express.json({ limit: '50mb' }));
 
     // Security: Add authentication middleware
@@ -136,12 +313,15 @@ class AgentServer {
 
       // Initialize database
       const db = getDB({
-        dataDir: options.orchestration?.dataDir || path.join(process.cwd(), 'data')
+        dataDir: this.dataDir
       });
 
       // Initialize persistent session manager
       const persistentSessionManager = new PersistentSessionManager({
         db,
+        dataDir: this.dataDir,
+        localApiKeyFilePath: this.localApiKey.filePath,
+        brokerBaseUrl: `http://${this.host === '0.0.0.0' ? '127.0.0.1' : this.host}:${this.port}`,
         logDir: options.orchestration?.logDir || path.join(process.cwd(), 'logs'),
         workDir: options.orchestration?.workDir || process.cwd(),
         tmuxSocketPath: options.orchestration?.tmuxSocketPath || null
@@ -312,6 +492,77 @@ class AgentServer {
     });
   }
 
+  _buildSessionPeek(sessionId, options = {}) {
+    const apiStatus = this.sessionManager.getSessionStatus(sessionId);
+    if (apiStatus) {
+      return buildApiSessionPeek(sessionId, {
+        ...apiStatus,
+        createdAt: this.sessionManager.getSession(sessionId)?.createdAt || null
+      });
+    }
+
+    const orchestrationSessionManager = this.orchestration?.sessionManager;
+    const db = this.orchestration?.db;
+    const terminal = typeof orchestrationSessionManager?.getTerminal === 'function'
+      ? orchestrationSessionManager.getTerminal(sessionId)
+      : null;
+    const persistedTerminal = !terminal && typeof db?.getTerminal === 'function'
+      ? db.getTerminal(sessionId)
+      : null;
+    if (!terminal && !persistedTerminal) {
+      return null;
+    }
+
+    const includeTail = options.includeTail !== false;
+    const outputMode = options.outputMode === 'history' ? 'history' : 'visible';
+    const outputFormat = options.outputFormat === 'ansi' ? 'ansi' : 'plain';
+    const outputLines = Number.isFinite(options.outputLines) ? options.outputLines : 80;
+    let tail = null;
+    if (includeTail && typeof orchestrationSessionManager?.getOutput === 'function') {
+      try {
+        tail = {
+          mode: outputMode,
+          format: outputFormat,
+          lines: outputLines,
+          output: orchestrationSessionManager.getOutput(sessionId, {
+            lines: outputLines,
+            mode: outputMode,
+            format: outputFormat
+          })
+        };
+      } catch {
+        tail = null;
+      }
+    }
+
+    if (typeof db?.expireTerminalInputQueueItems === 'function') {
+      db.expireTerminalInputQueueItems();
+    }
+    if (typeof db?.expireTerminalInputLeases === 'function') {
+      db.expireTerminalInputLeases();
+    }
+
+    const pendingInput = typeof db?.listTerminalInputQueue === 'function'
+      ? db.listTerminalInputQueue({
+        terminalId: sessionId,
+        status: ['pending', 'held_for_approval'],
+        limit: 10
+      })
+      : [];
+    const inputLease = typeof db?.getActiveTerminalInputLease === 'function'
+      ? db.getActiveTerminalInputLease(sessionId)
+      : null;
+
+    return buildTerminalPeek({
+      sessionId,
+      terminal,
+      persistedTerminal,
+      pendingInput,
+      inputLease,
+      tail
+    });
+  }
+
   _setupRoutes() {
     const app = this.app;
 
@@ -439,6 +690,26 @@ class AgentServer {
           return sendError(res, 'SESSION_NOT_FOUND');
         }
         res.json(status);
+      } catch (error) {
+        sendError(res, 'INTERNAL_ERROR', { message: error.message });
+      }
+    });
+
+    // Get read-only session peek (bounded pending input/output snapshot)
+    app.get('/sessions/:sessionId/peek', (req, res) => {
+      try {
+        const lines = Number.parseInt(req.query.lines, 10);
+        const peek = this._buildSessionPeek(req.params.sessionId, {
+          includeTail: req.query.tail !== '0' && req.query.includeTail !== '0',
+          outputMode: String(req.query.mode || '').trim().toLowerCase() === 'history' ? 'history' : 'visible',
+          outputFormat: String(req.query.format || '').trim().toLowerCase() === 'ansi' ? 'ansi' : 'plain',
+          outputLines: Number.isFinite(lines) && lines > 0 ? Math.min(lines, 250) : 80
+        });
+        if (!peek) {
+          return sendError(res, 'SESSION_NOT_FOUND');
+        }
+        res.setHeader('Cache-Control', 'private, max-age=1');
+        res.json(peek);
       } catch (error) {
         sendError(res, 'INTERNAL_ERROR', { message: error.message });
       }
@@ -715,6 +986,19 @@ class AgentServer {
           workDir, workingDirectory,
           temperature, top_p, top_k, max_output_tokens
         } = req.body;
+        const askStartedAt = Date.now();
+        const numericTimeout = Number(timeout);
+        const hasTotalTimeout = Number.isFinite(numericTimeout) && numericTimeout > 0;
+        const getRemainingTimeout = () => {
+          if (!hasTotalTimeout) {
+            return timeout;
+          }
+          const remaining = Math.floor(numericTimeout - (Date.now() - askStartedAt));
+          if (remaining <= 0) {
+            throw new Error(`Request timed out after ${Math.floor(numericTimeout)}ms`);
+          }
+          return remaining;
+        };
         if (!message) {
           return sendError(res, 'MISSING_PARAMETER', { message: 'Message is required', param: 'message' });
         }
@@ -750,6 +1034,7 @@ class AgentServer {
           jsonSchema,      // JSON schema for structured output (Claude only)
           allowedTools,    // Allowed tools
           model,           // Model selection
+          timeout: getRemainingTimeout(),
           workDir: effectiveWorkDir,
           temperature,
           top_p,
@@ -758,7 +1043,7 @@ class AgentServer {
         });
 
         const response = await this.sessionManager.send(session.sessionId, message, {
-          timeout,
+          timeout: getRemainingTimeout(),
           jsonSchema      // Also pass per-message for Claude
         });
 
@@ -794,6 +1079,88 @@ class AgentServer {
     // Serve live orchestration console
     app.get('/console', (req, res) => {
       res.sendFile(path.join(__dirname, '../../public/console.html'));
+    });
+
+    app.post('/auth/local-console/exchange', (req, res) => {
+      try {
+        if (!isLoopbackRequest(req)) {
+          return res.status(403).json({
+            error: {
+              code: 'loopback_required',
+              message: 'Local console login tokens can only be exchanged from a loopback client.'
+            }
+          });
+        }
+
+        if (isUnauthenticatedLocalhostModeEnabled()) {
+          return res.json({
+            apiKey: null,
+            unauthenticatedLocalhost: true
+          });
+        }
+
+        const token = String(req.body?.token || req.query?.token || '').trim();
+        const validation = validateLocalConsoleLoginToken(token);
+        if (!validation.valid) {
+          return res.status(401).json({
+            error: {
+              code: 'local_console_login_failed',
+              message: `Local console login token rejected: ${validation.reason}`
+            }
+          });
+        }
+
+        const apiKey = getConfiguredApiKey();
+        if (!apiKey) {
+          return res.status(401).json({
+            error: {
+              code: 'authentication_required',
+              message: 'Authentication required. Configure CLIAGENTS_API_KEY or restart the broker so it creates a local token.'
+            }
+          });
+        }
+
+        res.json({
+          apiKey,
+          expiresAt: validation.expiresAt
+        });
+      } catch (error) {
+        sendError(res, 'INTERNAL_ERROR', { message: error.message });
+      }
+    });
+
+    app.post('/auth/local-console/bootstrap', (req, res) => {
+      try {
+        if (!isLocalConsoleBootstrapRequest(req)) {
+          return res.status(403).json({
+            error: {
+              code: 'local_console_bootstrap_denied',
+              message: 'Local console bootstrap requires a loopback same-origin browser request.'
+            }
+          });
+        }
+
+        if (isUnauthenticatedLocalhostModeEnabled()) {
+          return res.json({
+            apiKey: null,
+            unauthenticatedLocalhost: true
+          });
+        }
+
+        const apiKey = getConfiguredApiKey();
+        if (!apiKey) {
+          return res.status(401).json({
+            error: {
+              code: 'authentication_required',
+              message: 'Authentication required. Configure CLIAGENTS_API_KEY or restart the broker so it creates a local token.'
+            }
+          });
+        }
+
+        res.json({ apiKey });
+      } catch (error) {
+        sendError(res, 'INTERNAL_ERROR', { message: error.message });
+      }
     });
 
     // Get status for all adapters
@@ -867,20 +1234,69 @@ class AgentServer {
     // Set environment variables for adapter
     app.post('/dashboard/adapters/:name/env', async (req, res) => {
       try {
+        const adapterName = req.params.name;
+        if (isDashboardEnvMutationDisabled()) {
+          return res.status(403).json({
+            success: false,
+            error: `${DASHBOARD_ENV_MUTATION_DISABLED_ENV}=1 disabled this endpoint`
+          });
+        }
+
+        const allowedKeys = getDashboardEnvMutationAllowlist(adapterName);
+        if (!allowedKeys) {
+          return res.status(404).json({ success: false, error: 'Adapter not found' });
+        }
+
         const { envVars } = req.body;
 
-        if (!envVars || typeof envVars !== 'object') {
+        if (!envVars || typeof envVars !== 'object' || Array.isArray(envVars)) {
           return res.status(400).json({ success: false, error: 'envVars object required' });
         }
 
-        // Set each environment variable
+        const rejectedKeys = [];
+        const invalidValueKeys = [];
+        const acceptedEntries = [];
+
         for (const [key, value] of Object.entries(envVars)) {
-          if (value && typeof value === 'string') {
-            setEnvVar(key, value);
+          if (!allowedKeys.has(key)) {
+            rejectedKeys.push(key);
+            continue;
           }
+          if (typeof value !== 'string') {
+            invalidValueKeys.push(key);
+            continue;
+          }
+          acceptedEntries.push([key, value]);
         }
 
-        res.json({ success: true, message: 'Environment variables set' });
+        if (rejectedKeys.length > 0) {
+          return res.status(400).json({
+            success: false,
+            error: 'Unsupported environment variable key(s)',
+            rejectedKeys
+          });
+        }
+
+        if (invalidValueKeys.length > 0) {
+          return res.status(400).json({
+            success: false,
+            error: 'Environment variable values must be strings',
+            invalidValueKeys
+          });
+        }
+
+        for (const [key, value] of acceptedEntries) {
+          setEnvVar(key, value);
+        }
+
+        const acceptedKeys = acceptedEntries.map(([key]) => key);
+        console.info(
+          `[Security] dashboard env mutation accepted adapter=${adapterName} keys=${
+            acceptedKeys.length > 0 ? acceptedKeys.join(',') : '(none)'
+          }`
+        );
+
+        res.json({ success: true, message: 'Environment variables set', acceptedKeys });
       } catch (error) {
         res.json({ success: false, error: error.message });
       }
@@ -908,9 +1324,9 @@ class AgentServer {
         const url = new URL(info.req.url, 'http://localhost');
         const queryKey = url.searchParams.get('apiKey');
         const protocols = info.req.headers['sec-websocket-protocol'];
-        
-        // If authentication is disabled (dev mode), validateApiKey returns true immediately
-        if (validateApiKey(null)) {
+
+        // Explicit localhost-only development override.
+        if (isUnauthenticatedLocalhostModeEnabled()) {
           return cb(true);
         }
 
@@ -1125,6 +1541,9 @@ class AgentServer {
     this._cleanupOrphanProcesses();
     this._pruneHistoricalOrphanedTerminals();
 
+    // Ensure insecure localhost override cannot be combined with non-loopback bind hosts.
+    assertAuthConfigurationForHost(this.host);
+
     // Setup graceful shutdown handlers
     this._setupShutdownHandlers();
 
@@ -1152,11 +1571,22 @@ class AgentServer {
         }
         console.log('');
 
-        // Security Warning
-        if (!process.env.CLI_AGENTS_API_KEY) {
-          console.warn('\n[SECURITY WARNING] CLI_AGENTS_API_KEY environment variable is not set.');
-          console.warn('The server is running without authentication (dev mode).');
-          console.warn('Set CLI_AGENTS_API_KEY to enable authentication.\n');
+        const configuredApiKey = getConfiguredApiKey();
+        const configuredApiKeySource = getConfiguredApiKeySource();
+        if (configuredApiKey) {
+          if (configuredApiKeySource === 'local-file') {
+            console.log(`[Security] API key authentication is enabled via local broker token: ${this.localApiKey.filePath}`);
+          } else {
+            console.log('[Security] API key authentication is enabled.');
+          }
+        } else if (isUnauthenticatedLocalhostModeEnabled()) {
+          console.warn('\n[SECURITY WARNING] CLIAGENTS_ALLOW_UNAUTHENTICATED_LOCALHOST=1 is enabled.');
+          console.warn(`Unauthenticated access is allowed only on loopback host "${this.host}" for local development.`);
+          console.warn('Unset CLIAGENTS_ALLOW_UNAUTHENTICATED_LOCALHOST and configure CLIAGENTS_API_KEY for normal use.\n');
+        } else {
+          console.warn('\n[SECURITY WARNING] No API key configured.');
+          console.warn('Protected routes require authentication and currently fail closed (401).');
+          console.warn('Set CLIAGENTS_API_KEY (or CLI_AGENTS_API_KEY) to allow authenticated clients.\n');
         }
 
         resolve(this.server);

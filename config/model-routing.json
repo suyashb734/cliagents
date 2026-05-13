@@ -23,13 +23,13 @@
         "gpt5": {
           "description": "High-capability Codex lane verified with the current installed CLI.",
           "providers": {
-            "openai": ["gpt-5.4"]
+            "openai": ["gpt-5.5", "gpt-5.4", "gpt-5.3-codex", "gpt-5.2"]
           }
         },
         "mini": {
           "description": "Lower-cost fallback lanes for small bounded tasks.",
           "providers": {
-            "openai": ["o4-mini", "o3-mini"]
+            "openai": ["gpt-5.4-mini", "gpt-5.3-codex-spark", "o4-mini", "o3-mini"]
           }
         }
       }

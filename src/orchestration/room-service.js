@@ -207,6 +207,73 @@ function computeTurnStatus(results) {
   return 'completed';
 }
 
+function buildRoomModeratorReadout(result = {}, participants = [], writebackMode = 'summary') {
+  const participantResults = Array.isArray(result.participants) ? result.participants : [];
+  const expectedParticipantCount = participants.length || participantResults.length;
+  const successfulCount = participantResults.filter((entry) => entry.success).length;
+  const failedCount = Math.max(0, expectedParticipantCount - successfulCount);
+  const rounds = (Array.isArray(result.rounds) ? result.rounds : []).map((round) => {
+    const responses = Array.isArray(round.responses) ? round.responses : [];
+    return {
+      name: round.name || 'round',
+      responseCount: responses.length,
+      successfulCount: responses.filter((entry) => entry.success).length,
+      failedCount: responses.filter((entry) => !entry.success).length
+    };
+  });
+  const status = successfulCount === 0
+    ? 'failed'
+    : (successfulCount < expectedParticipantCount ? 'partial' : 'completed');
+  const judge = result.judge ? {
+    success: result.judge.success === true,
+    adapter: result.judge.adapter || null,
+    name: result.judge.name || null,
+    output: result.judge.output ? truncateText(result.judge.output, 900) : null,
+    error: result.judge.error || null,
+    failureClass: result.judge.failureClass || null
+  } : null;
+
+  const summary = [
+    `Room discussion completed with ${successfulCount}/${expectedParticipantCount} participant(s).`,
+    judge?.success && judge.output ? `Judge:\n${judge.output}` : null,
+    judge && !judge.success ? `Judge failed: ${judge.error || judge.failureClass || 'unknown error'}` : null,
+    rounds.length > 0
+      ? `Rounds:\n${rounds.map((round) => `${round.name}: ${round.successfulCount}/${round.responseCount} succeeded`).join('\n')}`
+      : null
+  ].filter(Boolean).join('\n\n');
+
+  return {
+    kind: 'room_moderator_readout',
+    status,
+    summary,
+    participantCount: expectedParticipantCount,
+    successfulCount,
+    failedCount,
+    rounds,
+    judge,
+    runId: result.runId || null,
+    discussionId: result.discussionId || null,
+    writebackMode
+  };
+}
+
+function buildRoomModeratorFailureReadout(error, identifiers = {}, participants = [], writebackMode = 'summary') {
+  return {
+    kind: 'room_moderator_readout',
+    status: 'failed',
+    summary: `Room discussion failed: ${error?.message || 'unknown error'}`,
+    participantCount: participants.length,
+    successfulCount: 0,
+    failedCount: participants.length,
+    rounds: [],
+    judge: null,
+    runId: identifiers.runId || null,
+    discussionId: identifiers.discussionId || null,
+    writebackMode,
+    error: error?.message || 'unknown error'
+  };
+}
+
 class RoomService {
   constructor(options = {}) {
     this.db = options.db;
@@ -264,11 +331,13 @@ class RoomService {
     if (!room) {
       return null;
     }
+    const latestTurn = this.db.getLatestRoomTurn(roomId) || null;
 
     return {
       room,
       participants: this.db.listRoomParticipants(roomId),
-      latestTurn: this.db.getLatestRoomTurn(roomId) || null
+      latestTurn,
+      moderator: latestTurn?.metadata?.moderator || null
     };
   }
 
@@ -279,6 +348,7 @@ class RoomService {
       return {
         room,
         latestTurn,
+        moderator: latestTurn?.metadata?.moderator || null,
         participantCount: participants.length,
         messageCount: this.db.countRoomMessages(room.id)
       };
@@ -326,6 +396,38 @@ class RoomService {
     };
   }
 
+  _appendRoomSnapshotLineage(snapshot, room, recentMessages) {
+    if (!snapshot?.id || !room?.id || typeof this.db.appendMemorySummaryEdge !== 'function') {
+      return;
+    }
+
+    const sources = [
+      { scopeType: 'room', scopeId: room.id },
+      ...recentMessages.map((message) => ({
+        scopeType: 'room_message',
+        scopeId: String(message.id)
+      }))
+    ];
+    for (const source of sources) {
+      try {
+        this.db.appendMemorySummaryEdge({
+          edgeNamespace: 'derivation',
+          parentScopeType: 'memory_snapshot',
+          parentScopeId: snapshot.id,
+          childScopeType: source.scopeType,
+          childScopeId: source.scopeId,
+          edgeKind: 'summarizes',
+          metadata: {
+            source: 'room-service.refreshRoomSnapshot',
+            roomId: room.id
+          }
+        });
+      } catch (error) {
+        console.warn(`[RoomService] Room snapshot lineage failed for ${room.id}: ${error.message}`);
+      }
+    }
+  }
+
   refreshRoomSnapshot(roomId) {
     const room = this.db.getRoom(roomId);
     if (!room) {
@@ -334,10 +436,11 @@ class RoomService {
 
     const participants = this.db.listRoomParticipants(roomId);
     const recentMessages = this.db.getRecentRoomMessages(roomId, 12, { artifactMode: 'exclude' });
-    return this.db.upsertMemorySnapshot({
-      scope: 'root',
-      scopeId: room.rootSessionId,
+    this.db.upsertMemorySnapshot({
+      scope: 'room',
+      scopeId: room.id,
       rootSessionId: room.rootSessionId,
+      taskId: room.taskId || null,
       brief: buildRoomSnapshotBrief(room, participants, recentMessages),
       keyDecisions: buildRoomSnapshotKeyDecisions(recentMessages),
       pendingItems: buildRoomSnapshotPendingItems(recentMessages),
@@ -350,6 +453,9 @@ class RoomService {
         lastMessageAt: recentMessages[recentMessages.length - 1]?.createdAt || null
       }
     });
+    const snapshot = this.db.getMemorySnapshot('room', room.id);
+    this._appendRoomSnapshotLineage(snapshot, room, recentMessages);
+    return snapshot;
   }
 
   _resolveMentionedParticipants(roomId, mentions = []) {
@@ -589,12 +695,12 @@ class RoomService {
 
     let results;
     try {
-      const bundle = this.db.getMemoryBundle(room.rootSessionId, 'root', {
+      const bundle = this.db.getMemoryBundle(room.id, 'room', {
         recentRunsLimit: 3,
         includeRawPointers: true
       });
       if (!bundle) {
-        console.debug(`[RoomService] No root memory bundle available yet for room ${roomId} (${room.rootSessionId})`);
+        console.debug(`[RoomService] No room memory bundle available yet for room ${roomId}`);
       }
       const recentMessages = this.db.getRecentRoomMessages(roomId, 12);
       results = await Promise.all(participants.map((participant) => (
@@ -737,12 +843,12 @@ class RoomService {
     };
     try {
       const discussionTimeoutMs = resolveDiscussionTimeoutMs(input.timeout, this.defaultDiscussionTimeoutMs);
-      const bundle = this.db.getMemoryBundle(room.rootSessionId, 'root', {
+      const bundle = this.db.getMemoryBundle(room.id, 'room', {
         recentRunsLimit: 3,
         includeRawPointers: true
       });
       if (!bundle) {
-        console.debug(`[RoomService] No root memory bundle available yet for room discussion ${roomId} (${room.rootSessionId})`);
+        console.debug(`[RoomService] No room memory bundle available yet for room discussion ${roomId}`);
       }
       const recentMessages = this.db.getRecentRoomMessages(roomId, 12, { artifactMode: 'exclude' });
       const discussionPromise = Promise.resolve().then(() => this.runDiscussion(this.sessionManager, input.message, {
@@ -786,6 +892,7 @@ class RoomService {
     } catch (error) {
       const failedAt = Date.now();
       const identifiers = extractDiscussionIdentifiers(discussionEvents);
+      const moderator = buildRoomModeratorFailureReadout(error, identifiers, participants, writebackMode);
       discussionEvents.push({
         type: 'discussion_failed',
         runId: identifiers.runId,
@@ -811,10 +918,12 @@ class RoomService {
         roomId,
         turnId: turn.id,
         role: 'system',
-        content: `Room discussion failed: ${error.message}`,
+        content: moderator.summary,
         metadata: {
           mode: 'discussion-summary',
           writebackMode,
+          roomModerator: true,
+          moderator,
           runId: identifiers.runId,
           discussionId: identifiers.discussionId,
           failure: true
@@ -829,6 +938,7 @@ class RoomService {
           ...(turn.metadata || {}),
           mode: 'discussion',
           writebackMode,
+          moderator,
           runId: identifiers.runId,
           discussionId: identifiers.discussionId,
           participantIds: participants.map((participant) => participant.id)
@@ -863,22 +973,18 @@ class RoomService {
       }
     }
 
-    const discussionSummary = [
-      `Room discussion completed with ${(result.participants || []).length} participant(s).`,
-      result.judge?.success && result.judge.output ? `Judge:\n${truncateText(result.judge.output, 900)}` : null,
-      Array.isArray(result.rounds) && result.rounds.length > 0
-        ? `Rounds:\n${result.rounds.map((round) => `${round.name}: ${round.responses.filter((entry) => entry.success).length}/${round.responses.length} succeeded`).join('\n')}`
-        : null
-    ].filter(Boolean).join('\n\n');
+    const moderator = buildRoomModeratorReadout(result, participants, writebackMode);
 
     this.db.addRoomMessage({
       roomId,
       turnId: turn.id,
       role: 'system',
-      content: discussionSummary,
+      content: moderator.summary,
       metadata: {
         mode: 'discussion-summary',
         writebackMode,
+        roomModerator: true,
+        moderator,
         runId: result.runId || null,
         discussionId: result.discussionId || null
       },
@@ -897,6 +1003,7 @@ class RoomService {
         ...(turn.metadata || {}),
         mode: 'discussion',
         writebackMode,
+        moderator,
         runId: result.runId || null,
         discussionId: result.discussionId || null,
         participantIds: participants.map((participant) => participant.id)
@@ -912,6 +1019,7 @@ class RoomService {
       participants: result.participants || [],
       rounds: result.rounds || [],
       judge: result.judge || null,
+      moderator: updatedTurn.metadata?.moderator || null,
       messages: this.db.listRoomMessages(roomId, { turnId: turn.id, artifactMode: 'include', limit: 500 })
     };
   }

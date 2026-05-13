@@ -132,6 +132,7 @@ async function run() {
   const repoNestedWorktreeDir = path.join(repoDir, 'nested-task-exec');
   const invalidBranchWorktreeDir = path.join(rootDir, 'repo-worktrees', 'invalid-branch');
   const unregisteredWorktreeDir = path.join(rootDir, 'repo-worktrees', 'unregistered');
+  const existingBranchWorktreeDir = path.join(rootDir, 'repo-worktrees', 'existing-branch');
   const branchName = 'task/task-exec';
   initRepo(repoDir);
 
@@ -225,6 +226,30 @@ async function run() {
     assert.match(invalidBranchStartRes.data.error.message, /Invalid worktreeBranch/);
     assert.strictEqual(sessionManager.state.createCalls.length, 0);
 
+    runGit(repoDir, ['worktree', 'add', '-b', 'task/existing-branch', existingBranchWorktreeDir, 'HEAD']);
+    const branchMismatchAssignmentRes = await request(serverHandle.baseUrl, 'POST', `/orchestration/tasks/${taskId}/assignments`, {
+      role: 'executor',
+      instructions: 'Attempt to reuse a worktree on the wrong branch.',
+      worktreePath: existingBranchWorktreeDir,
+      worktreeBranch: 'task/different-branch'
+    });
+    assert.strictEqual(branchMismatchAssignmentRes.status, 200);
+    const branchMismatchStartRes = await request(
+      serverHandle.baseUrl,
+      'POST',
+      `/orchestration/tasks/${taskId}/assignments/${branchMismatchAssignmentRes.data.assignment.id}/start`,
+      {
+        rootSessionId: 'root-task-isolation',
+        parentSessionId: 'root-task-isolation',
+        originClient: 'test',
+        externalSessionRef: 'test:task-isolation'
+      }
+    );
+    assert.strictEqual(branchMismatchStartRes.status, 500);
+    assert.strictEqual(branchMismatchStartRes.data.error.code, 'task_assignment_start_failed');
+    assert.match(branchMismatchStartRes.data.error.message, /expected "task\/different-branch"/);
+    assert.strictEqual(sessionManager.state.createCalls.length, 0);
+
     fs.mkdirSync(unregisteredWorktreeDir, { recursive: true });
     const unregisteredAssignmentRes = await request(serverHandle.baseUrl, 'POST', `/orchestration/tasks/${taskId}/assignments`, {
       role: 'executor',
@@ -269,6 +294,12 @@ async function run() {
     assert.strictEqual(startAssignmentRes.data.assignment.worktreeBranch, branchName);
     assert.strictEqual(startAssignmentRes.data.assignment.metadata.isolation.mode, 'git_worktree');
     assert.strictEqual(startAssignmentRes.data.assignment.metadata.isolation.created, true);
+    assert.strictEqual(startAssignmentRes.data.assignment.metadata.isolation.existing, false);
+    assert.strictEqual(startAssignmentRes.data.assignment.metadata.isolation.dirty, false);
+    assert.strictEqual(startAssignmentRes.data.assignment.metadata.isolation.requestedBranch, branchName);
+    assert(startAssignmentRes.data.assignment.metadata.isolation.head, 'isolation metadata should record the prepared HEAD');
+    assert.strictEqual(startAssignmentRes.data.assignment.isolation.mode, 'git_worktree');
+    assert.strictEqual(startAssignmentRes.data.assignment.isolation.branch, branchName);
     assert.strictEqual(sessionManager.state.createCalls[0].workDir, worktreeDir);
 
     assert(fs.existsSync(worktreeDir), 'worktree directory should be created on start');
@@ -283,6 +314,73 @@ async function run() {
       listedWorktrees.includes(fs.realpathSync(worktreeDir)),
       'git worktree list should include the prepared assignment worktree'
     );
+
+    const autoAssignmentRes = await request(serverHandle.baseUrl, 'POST', `/orchestration/tasks/${taskId}/assignments`, {
+      role: 'executor',
+      instructions: 'Implement an automatically branched slice.',
+      autoBranch: true,
+      writePaths: ['src/auto.js']
+    });
+    assert.strictEqual(autoAssignmentRes.status, 200);
+    assert(autoAssignmentRes.data.assignment.branch.branchName.startsWith('task/'), 'auto branch should use task namespace');
+    assert(autoAssignmentRes.data.assignment.branch.worktreePath.includes('repo-worktrees'), 'auto branch should allocate a worktree path');
+    assert.deepStrictEqual(autoAssignmentRes.data.assignment.branch.writePaths, ['src/auto.js']);
+    assert.strictEqual(autoAssignmentRes.data.assignment.branch.pathLease.status, 'active');
+
+    const autoConflictRes = await request(serverHandle.baseUrl, 'POST', `/orchestration/tasks/${taskId}/assignments`, {
+      role: 'executor',
+      instructions: 'Attempt to edit the same auto path.',
+      autoBranch: true,
+      writePaths: ['src']
+    });
+    assert.strictEqual(autoConflictRes.status, 409);
+    assert.strictEqual(autoConflictRes.data.error.code, 'path_lease_conflict');
+
+    const autoAssignmentId = autoAssignmentRes.data.assignment.id;
+    const autoStartRes = await request(serverHandle.baseUrl, 'POST', `/orchestration/tasks/${taskId}/assignments/${autoAssignmentId}/start`, {
+      rootSessionId: 'root-task-isolation',
+      parentSessionId: 'root-task-isolation',
+      originClient: 'test',
+      externalSessionRef: 'test:task-isolation'
+    });
+    assert.strictEqual(autoStartRes.status, 200);
+    assert.strictEqual(autoStartRes.data.assignment.branch.status, 'running');
+    const autoWorktreePath = autoStartRes.data.assignment.worktreePath;
+    const autoBranchName = autoStartRes.data.assignment.branch.branchName;
+    assert.strictEqual(runGit(autoWorktreePath, ['branch', '--show-current']), autoBranchName);
+
+    fs.mkdirSync(path.join(autoWorktreePath, 'src'), { recursive: true });
+    fs.writeFileSync(path.join(autoWorktreePath, 'src', 'auto.js'), 'module.exports = 42;\n', 'utf8');
+    runGit(autoWorktreePath, ['add', 'src/auto.js']);
+    runGit(autoWorktreePath, ['commit', '-m', 'add auto branch file']);
+
+    const acceptBranchRes = await request(
+      serverHandle.baseUrl,
+      'PATCH',
+      `/orchestration/tasks/${taskId}/assignments/${autoAssignmentId}/branch`,
+      {
+        branchStatus: 'accepted',
+        testStatus: 'passed',
+        reviewStatus: 'approved',
+        refresh: true
+      }
+    );
+    assert.strictEqual(acceptBranchRes.status, 200);
+    assert.strictEqual(acceptBranchRes.data.assignment.branch.status, 'accepted');
+    assert.strictEqual(acceptBranchRes.data.assignment.branch.testStatus, 'passed');
+    assert(acceptBranchRes.data.assignment.branch.headSha, 'accepted branch should record head sha');
+
+    const integrateRes = await request(
+      serverHandle.baseUrl,
+      'POST',
+      `/orchestration/tasks/${taskId}/assignments/${autoAssignmentId}/integrate`,
+      {}
+    );
+    assert.strictEqual(integrateRes.status, 200);
+    assert.strictEqual(integrateRes.data.assignment.branch.status, 'integrated');
+    assert.strictEqual(integrateRes.data.assignment.status, 'completed');
+    assert.strictEqual(integrateRes.data.assignment.branch.pathLease.status, 'released');
+    assert(fs.existsSync(path.join(repoDir, 'src', 'auto.js')), 'integrated branch should merge into the primary workspace');
 
     console.log('✅ Task assignment start prepares and uses a real git worktree isolation path');
   } finally {

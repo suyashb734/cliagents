@@ -9,8 +9,10 @@
 const assert = require('assert');
 const {
   parseAttachRootArgs,
+  parseConsoleArgs,
   parseLaunchArgs,
   parseListRootsArgs,
+  buildConsoleLaunchUrl,
   buildManagedRootLaunchCandidate,
   normalizeManagedRootResumeCandidate,
   normalizeManagedRootRecoveryCandidate,
@@ -104,6 +106,32 @@ async function run() {
 
     const freshProvider = parseLaunchArgs(['codex', '--fresh-provider-session']);
     assert.strictEqual(freshProvider.freshProviderSession, true);
+  });
+
+  await test('Console args build an authenticated focused console URL', async () => {
+    const parsed = parseConsoleArgs([
+      '--root', 'root-123',
+      '--terminal', 'term-456',
+      '--print-url',
+      '--no-open',
+      '--ttl-ms', '30000'
+    ]);
+    assert.strictEqual(parsed.rootSessionId, 'root-123');
+    assert.strictEqual(parsed.terminalId, 'term-456');
+    assert.strictEqual(parsed.printUrl, true);
+    assert.strictEqual(parsed.open, false);
+    assert.strictEqual(parsed.loginTtlMs, 30000);
+
+    const url = new URL(buildConsoleLaunchUrl({
+      baseUrl: 'http://127.0.0.1:4001',
+      rootSessionId: parsed.rootSessionId,
+      terminalId: parsed.terminalId,
+      localLoginToken: 'login-token'
+    }));
+    assert.strictEqual(url.pathname, '/console');
+    assert.strictEqual(url.searchParams.get('root'), 'root-123');
+    assert.strictEqual(url.searchParams.get('terminal'), 'term-456');
+    assert.strictEqual(url.searchParams.get('login'), 'login-token');
   });
 
   await test('Launch args reject mixed resume and recover combinations', async () => {

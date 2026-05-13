@@ -386,7 +386,8 @@ function runPrerequisiteGuardTest() {
   copyRepoMigrations(migrationsDir, {
     omit: [
       '0013_memory_read_model_projects.sql',
-      '0014_memory_read_model_projections.sql'
+      '0014_memory_read_model_projections.sql',
+      '0020_memory_snapshot_scopes.sql'
     ]
   });
   const db = new OrchestrationDB({

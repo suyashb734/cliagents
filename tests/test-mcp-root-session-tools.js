@@ -43,6 +43,7 @@ async function startFakeCliagentsServer() {
           description: 'Codex CLI',
           models: [
             { id: 'default', name: 'Default', description: 'Uses the CLI default model' },
+            { id: 'gpt-5.5', name: 'GPT-5.5', description: 'Frontier model' },
             { id: 'o4-mini', name: 'o4-mini', description: 'Fast reasoning model' }
           ],
           runtimeProviders: []
@@ -51,7 +52,7 @@ async function startFakeCliagentsServer() {
           description: 'Claude Code',
           models: [
             { id: 'default', name: 'Default', description: 'Uses Claude default model' },
-            { id: 'claude-opus-4-5-20250514', name: 'Claude Opus 4.5', description: 'Most capable Claude model' }
+            { id: 'claude-opus-4-7', name: 'Claude Opus 4.7', description: 'Latest Opus model' }
           ],
           runtimeProviders: [
             { name: 'anthropic' }
@@ -112,7 +113,11 @@ async function startFakeCliagentsServer() {
     lastRouteBody: null,
     lastOutputUrl: null,
     inputResponses: [],
-    inputBodies: []
+    inputBodies: [],
+    inputQueueBodies: [],
+    inputQueueResponses: [],
+    inputQueueListResponse: null,
+    inputQueueActionBodies: []
   };
 
   const server = http.createServer(async (req, res) => {
@@ -399,6 +404,67 @@ async function startFakeCliagentsServer() {
       return writeJson(200, response.body || response);
     }
 
+    const inputQueueEnqueueMatch = req.url.match(/^\/orchestration\/terminals\/([^/]+)\/input-queue$/);
+    if (req.method === 'POST' && inputQueueEnqueueMatch) {
+      const body = await readBody();
+      state.inputQueueBodies.push({ terminalId: inputQueueEnqueueMatch[1], body });
+      const response = state.inputQueueResponses.length > 0
+        ? state.inputQueueResponses.shift()
+        : {
+            input: {
+              id: 'input-queued-1',
+              terminalId: inputQueueEnqueueMatch[1],
+              inputKind: body.inputKind || 'message',
+              status: body.approvalRequired ? 'held_for_approval' : 'pending',
+              controlMode: body.controlMode || 'operator'
+            }
+          };
+      if (response.status && response.status !== 200) {
+        return writeJson(response.status, response.body);
+      }
+      return writeJson(200, response.body || response);
+    }
+
+    if (req.method === 'GET' && req.url.startsWith('/orchestration/input-queue')) {
+      return writeJson(200, state.inputQueueListResponse || {
+        inputs: [
+          {
+            id: 'input-queued-1',
+            terminalId: 'child-terminal-1',
+            inputKind: 'message',
+            status: 'pending',
+            controlMode: 'operator'
+          }
+        ]
+      });
+    }
+
+    const inputQueueActionMatch = req.url.match(/^\/orchestration\/input-queue\/([^/]+)\/(approve|deny|cancel|deliver)$/);
+    if (req.method === 'POST' && inputQueueActionMatch) {
+      const body = await readBody();
+      state.inputQueueActionBodies.push({
+        inputId: inputQueueActionMatch[1],
+        action: inputQueueActionMatch[2],
+        body
+      });
+      const statusByAction = {
+        approve: 'pending',
+        deny: 'cancelled',
+        cancel: 'cancelled',
+        deliver: 'delivered'
+      };
+      return writeJson(200, {
+        success: inputQueueActionMatch[2] === 'deliver' ? true : undefined,
+        input: {
+          id: inputQueueActionMatch[1],
+          terminalId: 'child-terminal-1',
+          inputKind: 'message',
+          status: statusByAction[inputQueueActionMatch[2]],
+          controlMode: 'operator'
+        }
+      });
+    }
+
     return writeJson(404, { error: { message: `Unhandled route ${req.method} ${req.url}` } });
   });
 
@@ -614,12 +680,12 @@ async function run() {
     const modelsSummary = await mod.handleListModels({});
     const modelsSummaryText = modelsSummary.content[0].text;
     assert(modelsSummaryText.includes('Adapter Models'));
-    assert(modelsSummaryText.includes('codex-cli: 2 models'));
+    assert(modelsSummaryText.includes('codex-cli: 3 models'));
 
     const claudeModels = await mod.handleListModels({ adapter: 'claude-code' });
     const claudeModelsText = claudeModels.content[0].text;
     assert(claudeModelsText.includes('Models: claude-code'));
-    assert(claudeModelsText.includes('claude-opus-4-5-20250514'));
+    assert(claudeModelsText.includes('claude-opus-4-7'));
     assert(claudeModelsText.includes('runtime_providers: anthropic'));
 
     const recommended = await mod.handleRecommendModel({
@@ -770,6 +836,10 @@ async function run() {
             id: 'turn-1',
             status: 'completed'
           },
+          moderator: {
+            status: 'completed',
+            summary: 'Room discussion completed with 2/2 participant(s).'
+          },
           participantCount: 2,
           messageCount: 5
         }
@@ -780,6 +850,7 @@ async function run() {
     assert(listRoomsText.includes('## Rooms'));
     assert(listRoomsText.includes('room-1'));
     assert(listRoomsText.includes('participants=2'));
+    assert(listRoomsText.includes('moderator=completed'));
 
     fakeServer.state.roomById.set('room-1', {
       room: {
@@ -794,6 +865,10 @@ async function run() {
       latestTurn: {
         id: 'turn-1',
         status: 'completed'
+      },
+      moderator: {
+        status: 'completed',
+        summary: 'Room discussion completed with 2/2 participant(s).'
       }
     });
     const getRoomResult = await mod.handleGetRoom({ roomId: 'room-1' });
@@ -801,6 +876,7 @@ async function run() {
     assert(getRoomText.includes('## Room'));
     assert(getRoomText.includes('room_id: room-1'));
     assert(getRoomText.includes('latest_turn_status: completed'));
+    assert(getRoomText.includes('moderator_status: completed'));
 
     fakeServer.state.roomMessageResponses = [
       {
@@ -854,9 +930,23 @@ async function run() {
     fakeServer.state.roomDiscussResponses = [
       {
         roomId: 'room-1',
-        turn: { id: 'turn-discuss-1', status: 'completed' },
+        turn: {
+          id: 'turn-discuss-1',
+          status: 'completed',
+          metadata: {
+            writebackMode: 'curated_transcript',
+            moderator: {
+              status: 'completed',
+              summary: 'Room discussion completed with 2/2 participant(s).'
+            }
+          }
+        },
         runId: 'run-room-1',
-        discussionId: 'discussion-room-1'
+        discussionId: 'discussion-room-1',
+        moderator: {
+          status: 'completed',
+          summary: 'Room discussion completed with 2/2 participant(s).'
+        }
       }
     ];
     const discussRoomResult = await mod.handleDiscussRoom({
@@ -868,6 +958,7 @@ async function run() {
     assert(discussRoomText.includes('Room Discussion Completed'));
     assert(discussRoomText.includes('discussion_id: discussion-room-1'));
     assert(discussRoomText.includes('writeback_mode: curated_transcript'));
+    assert(discussRoomText.includes('moderator_status: completed'));
     assert.strictEqual(fakeServer.state.roomDiscussBodies.at(-1).roomId, 'room-1');
     assert.strictEqual(fakeServer.state.roomDiscussBodies.at(-1).body.message, 'Debate the persistence plan.');
     assert.strictEqual(fakeServer.state.roomDiscussBodies.at(-1).body.writebackMode, 'curated_transcript');
@@ -1266,6 +1357,45 @@ async function run() {
     });
     assert(replyResult.content[0].text.includes('Terminal Updated'));
     assert(replyResult.content[0].text.includes('child-terminal-1'));
+    assert.strictEqual(fakeServer.state.inputBodies.at(-1).rootSessionId, 'attached-root-123');
+    assert(typeof fakeServer.state.inputBodies.at(-1).externalSessionRef === 'string');
+    assert(fakeServer.state.inputBodies.at(-1).externalSessionRef.length > 0);
+
+    const queuedResult = await mod.handleEnqueueTerminalInput({
+      terminalId: 'child-terminal-1',
+      message: 'Queue this first.',
+      approvalRequired: true,
+      requestedBy: 'mcp-test'
+    });
+    assert(queuedResult.content[0].text.includes('Terminal Input Queued'));
+    assert(queuedResult.content[0].text.includes('status: held_for_approval'));
+    assert.strictEqual(fakeServer.state.inputQueueBodies.at(-1).terminalId, 'child-terminal-1');
+    assert.strictEqual(fakeServer.state.inputQueueBodies.at(-1).body.approvalRequired, true);
+    assert.strictEqual(fakeServer.state.inputQueueBodies.at(-1).body.rootSessionId, 'attached-root-123');
+    assert(typeof fakeServer.state.inputQueueBodies.at(-1).body.externalSessionRef === 'string');
+    assert(fakeServer.state.inputQueueBodies.at(-1).body.externalSessionRef.length > 0);
+
+    const queueList = await mod.handleListTerminalInputQueue({
+      terminalId: 'child-terminal-1',
+      status: 'pending'
+    });
+    assert(queueList.content[0].text.includes('Terminal Input Queue'));
+    assert(queueList.content[0].text.includes('input-queued-1'));
+
+    const approveInput = await mod.handleApproveTerminalInput({
+      inputId: 'input-queued-1',
+      approvedBy: 'mcp-test'
+    });
+    assert(approveInput.content[0].text.includes('Terminal Input Approved'));
+    assert.strictEqual(fakeServer.state.inputQueueActionBodies.at(-1).action, 'approve');
+    assert.strictEqual(fakeServer.state.inputQueueActionBodies.at(-1).body.rootSessionId, 'attached-root-123');
+
+    const deliverInput = await mod.handleDeliverTerminalInput({
+      inputId: 'input-queued-1'
+    });
+    assert(deliverInput.content[0].text.includes('Terminal Input Delivered'));
+    assert.strictEqual(fakeServer.state.inputQueueActionBodies.at(-1).action, 'deliver');
+    assert.strictEqual(fakeServer.state.inputQueueActionBodies.at(-1).body.rootSessionId, 'attached-root-123');
 
     const implicitUpgrade = loadMcpModule({
       ...envOverrides,

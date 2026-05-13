@@ -11,6 +11,21 @@ It is intentionally narrower than a generic task board. The goal is not to add
 "tasks everywhere." The goal is to make long-horizon multi-agent execution
 durable, inspectable, resumable, and operator-controlled.
 
+The persistence goal is broader than restart safety. `cliagents` should become
+the broker memory substrate for supervisors such as OpenClaw, Hermes, or a
+future desktop/mobile control app. Those supervisors should be able to ask:
+
+- what work was requested
+- which roots, children, rooms, and models worked on it
+- what prompts, visible responses, tool actions, files, findings, usage, and
+  outcomes were produced
+- what is currently blocked or needs operator attention
+- what summary context should be carried into the next run or resume
+
+Raw event history stays canonical. Summaries are derived memory: brief,
+decisions, blockers, next actions, and eventually a tree or graph of
+conversation, run, task, and project summaries.
+
 ## Problem Statement
 
 `cliagents` already has useful building blocks:
@@ -20,6 +35,7 @@ durable, inspectable, resumable, and operator-controlled.
 - persisted room state
 - shared `taskId` memory for artifacts, findings, and context
 - async delegation and grouped task monitoring
+- raw terminal logs for managed interactive roots
 
 That is enough for bounded delegation, review loops, and discussion workflows.
 It is not enough for true long-horizon team execution.
@@ -32,6 +48,11 @@ The current gaps are:
 4. no reliable dependency-aware execution model above raw runs
 5. `run_workflow` async mode launches all steps immediately, which is not valid
    for dependent implementation phases
+6. native interactive roots are mostly raw terminal capture rather than
+   normalized messages, tool events, usage, and continuation memory
+7. derived memory exists, but there is not yet a clear summary tree or graph
+   connecting root conversations, dispatches, runs, tasks, rooms, artifacts,
+   findings, and usage
 
 The result is that teams can be approximated, but not supervised cleanly.
 
@@ -40,14 +61,79 @@ The result is that teams can be approximated, but not supervised cleanly.
 The correct center of gravity is:
 
 - `runs` remain the execution-history substrate
+- `dispatch_requests` become the pre-run intent and coalescing surface
 - `orchestration` becomes the top-level long-horizon object
 - `phases`, `gates`, and `handoffs` model execution semantics
 - `specialists` define routing and policy
+- native interactive roots get their own event-capture path, owned by the Memory
+  Read Model plan, so human-managed TUI sessions become queryable broker memory
+  instead of only replayable terminal logs
+- memory snapshots become layered derived summaries over raw events, suitable
+  for external supervisors and future summary-tree/summary-graph navigation
 
 Do not start with a generic first-class `task` object.
 
 For long-horizon coding work, the broker needs an execution model more than it
 needs a backlog model.
+
+## Native Interactive Root Persistence Gap
+
+Managed native roots are essential for human-facing fidelity, but they are a
+different capture problem than broker-delegated runs.
+
+Today, a native Codex or Claude root can be visible and resumable while the
+database only stores terminal metadata, a `session_started` event, and a raw TTY
+log. That is not enough for OpenClaw, Hermes, or another supervisor to reliably
+understand what happened.
+
+Interactive root persistence should become a first-class branch with this V1
+scope:
+
+- persist broker-sent inputs as durable input events
+- persist terminal output chunks with timestamps, terminal id, root id, and
+  screen/log offsets
+- best-effort parse visible user and assistant messages from native TUI output
+  into `messages`
+- record tool, MCP, shell, browser, and filesystem events when cliagents
+  mediates them or when the provider emits machine-readable metadata
+- extract model, effort, and usage when the provider exposes it; never invent
+  usage when it is not observable
+- maintain raw terminal logs as the audit fallback
+- generate continuation summaries for roots, tasks, rooms, and projects from
+  the persisted raw event stream
+
+Hidden model thoughts are not a persistence target. Providers do not expose
+private reasoning. The broker should only persist visible responses, provider
+reported summaries, tool events, metadata, and raw terminal output.
+
+This branch is separate from dispatch requests. Dispatch requests control
+future work before spawn. Interactive-root persistence records what happened in
+human-managed native roots after launch.
+
+## Paperclip-Derived Mechanics To Adopt
+
+Paperclip's strongest orchestration lesson is that run spawning should not be
+the first durable event. A broker should record the requested work before it
+decides whether to launch, defer, coalesce, retry, or bind to an existing
+session.
+
+Add these mechanics to the V1 direction:
+
+- `dispatch_requests`: durable pre-run requests that can be queued, coalesced,
+  deferred, cancelled, or converted into a run.
+- `run_context_snapshots`: immutable context packets captured at dispatch time
+  so a run can be replayed and audited without depending on later memory drift.
+- `task_session_bindings`: explicit adapter/model/effort/session bindings for
+  a task or phase, so provider continuity is intentional instead of inferred
+  from terminal reuse.
+- `liveness_policies`: explicit timeout, heartbeat, stale-session, and recovery
+  rules for requests, phases, and runtime hosts.
+- `adapter_lifecycle_callbacks`: a cleaner contract for execute, log, metadata,
+  spawn, result, retry, resume, and failure classification events.
+
+These do not change the product scope. They make the execution model more
+deterministic while preserving the broker thesis: durable, inspectable,
+operator-controlled agent work rather than a generic project-management board.
 
 ## Final Model
 
@@ -79,6 +165,57 @@ Runs do not answer:
 - what phase is currently active
 - which approvals are pending
 - which downstream work is now eligible
+
+#### 1a. Dispatch Request
+
+A dispatch request is the durable intent record before a run exists.
+
+It answers:
+
+- what work was requested
+- what context packet should be used
+- whether equivalent work is already pending or running
+- whether the broker should launch now, defer, coalesce, or cancel
+- which task, phase, gate, or room requested the work
+
+Runs should be created from dispatch requests, not directly from every API call,
+once long-horizon orchestration is active.
+
+#### 1b. Run Context Snapshot
+
+A run context snapshot is an immutable packet captured at dispatch time.
+
+It should include:
+
+- prompt or instruction body
+- selected workspace and context mode
+- linked task, assignment, phase, room, and root ids
+- relevant artifacts, findings, handoffs, and memory excerpts
+- selected adapter, model, effort, tool policy, and runtime host constraints
+
+This is the audit boundary for "what the agent saw." Later memory updates should
+not silently change the replay context for an already-launched run.
+
+#### 1c. Task Session Binding
+
+A task session binding records the intended execution identity for a task,
+assignment, or phase.
+
+It should include:
+
+- task or phase id
+- adapter
+- model
+- reasoning effort
+- provider session id when known
+- runtime host and fidelity
+- reuse policy
+- created and last-verified timestamps
+
+This makes session reuse, model changes, and provider continuity explicit.
+Changing model or effort can be allowed for roots, but it should create a new
+binding event for child/specialist lanes unless the operator deliberately
+chooses continuity over strict attribution.
 
 #### 2. Orchestration
 
@@ -229,7 +366,7 @@ The existing run ledger remains canonical for execution history.
 
 Add orchestration-specific state keyed by `run_id`.
 
-### New Tables
+### Long-Horizon-Owned Tables
 
 #### `orchestrations`
 
@@ -248,6 +385,128 @@ Add orchestration-specific state keyed by `run_id`.
 - `created_at`
 - `updated_at`
 - `completed_at`
+
+#### `dispatch_requests`
+
+- `dispatch_request_id`
+- `idempotency_key`
+- `orchestration_id`
+- `phase_id`
+- `task_id`
+- `task_assignment_id`
+- `room_id`
+- `root_session_id`
+- `requested_by`
+- `request_kind`
+- `status`
+- `coalesce_key`
+- `coalesced_count`
+- `defer_until`
+- `context_snapshot_id`
+- `bound_session_id`
+- `run_id`
+- `terminal_id`
+- `metadata`
+- `created_at`
+- `updated_at`
+- `dispatched_at`
+- `cancelled_at`
+
+#### `run_context_snapshots`
+
+- `context_snapshot_id`
+- `dispatch_request_id`
+- `workspace_path`
+- `context_mode`
+- `prompt_summary`
+- `prompt_body`
+- `linked_context_json`
+- `tool_policy_json`
+- `adapter`
+- `model`
+- `reasoning_effort`
+- `content_sha256`
+- `retention_class`
+- `metadata`
+- `created_at`
+
+#### `task_session_bindings`
+
+Append-only. A model, effort, worktree, tool policy, provider-thread, or
+compatible-reuse decision change creates a new binding row instead of mutating
+historical attribution.
+
+- `binding_id`
+- `root_session_id`
+- `task_id`
+- `task_assignment_id`
+- `orchestration_id`
+- `phase_id`
+- `adapter`
+- `model`
+- `reasoning_effort`
+- `terminal_id`
+- `provider_session_id`
+- `runtime_host`
+- `runtime_fidelity`
+- `reuse_policy`
+- `reuse_decision_json`
+- `status`
+- `metadata`
+- `created_at`
+- `last_verified_at`
+
+### Prerequisite Memory Read Model Tables
+
+`root_io_events` and `memory_summary_edges` are prerequisites owned by the Memory
+Read Model plan, not Long-Horizon execution-control tables. Long-Horizon may
+reference them for supervisor reconstruction, continuation summaries, and
+orchestration lineage, but it must not introduce competing migrations for them.
+
+#### `root_io_events`
+
+- `root_io_event_id`
+- `root_session_id`
+- `terminal_id`
+- `event_kind` (`input`, `output`, `screen_snapshot`, `parsed_message`,
+  `tool_event`, `usage`, `liveness`)
+- `source` (`broker`, `terminal_log`, `provider_metadata`, `parser`)
+- `sequence_no`
+- `content_preview`
+- `content_full`
+- `content_sha256`
+- `log_path`
+- `log_offset_start`
+- `log_offset_end`
+- `screen_rows`
+- `screen_cols`
+- `parsed_role`
+- `confidence`
+- `metadata`
+- `occurred_at`
+- `recorded_at`
+
+Normative contract:
+
+`content_full` and `content_preview` store redacted payloads. Raw terminal bytes
+remain in the existing tmux log path and are governed by their own retention
+policy. Offsets (`log_offset_start`, `log_offset_end`) plus `content_sha256` are
+sufficient to reconstruct provenance while the raw log exists. A workspace may
+opt in to a separate raw side store, but that side store is purgeable
+independently of `root_io_events`.
+
+#### `memory_summary_edges`
+
+- `edge_id`
+- `edge_namespace` (`structural`, `derivation`, `execution`)
+- `parent_scope_type`
+- `parent_scope_id`
+- `child_scope_type`
+- `child_scope_id`
+- `edge_kind` (`contains`, `continues`, `summarizes`, `supersedes`,
+  `derived_from`, `blocks`, `unblocks`)
+- `metadata`
+- `created_at`
 
 #### `orchestration_phases`
 
@@ -312,13 +571,47 @@ Continue using:
 - `run_outputs`
 - `run_tool_events`
 - `messages`
+- `session_events`
 - `artifacts`
 - `findings`
 - `context`
 - `memory_snapshots`
-- `session_events`
+
+`root_io_events` and `memory_summary_edges` should complement these tables, not
+replace them. The raw terminal log remains the audit fallback, but query APIs
+should prefer normalized event rows and derived summaries.
 
 ## Phase Order
+
+### Phase 0: Contract Freeze
+
+Owner: supervisor. No implementation workers.
+
+Deliverables:
+
+- exact schema for `orchestrations`, `dispatch_requests`,
+  `run_context_snapshots`, `task_session_bindings`, `orchestration_phases`,
+  `orchestration_gates`, `orchestration_handoffs`, and additive
+  `operator_actions` semantics
+- imported Memory Read Model contracts for `root_io_events` and
+  `memory_summary_edges`
+- dispatch request state machine, coalescing semantics, defer/cancel behavior,
+  idempotency keys, and restart reconciliation rules
+- immutable `run_context_snapshots`: redacted on creation, update-blocked after
+  insert, and purge-only for post-hoc privacy operations
+- append-only `task_session_bindings`, including model/effort/tool/worktree
+  changes and compatible-reuse decisions
+- redaction contract for `prompt_body`, `content_full`, `content_preview`,
+  `parsed_message`, metadata, and every `*_json` field that may carry user
+  content; `content_sha256` is computed over redacted bytes
+- retention contract: every new table declares a retention class and ships the
+  columns needed to enforce it without future migration
+- liveness and timeout values for `dispatch_requests`, phases,
+  `task_session_bindings`, and runtime hosts
+- acceptance fixtures for dispatch coalescing/defer, blocked-state replay,
+  root IO capture, and gate approval/rejection
+
+Workers may not edit implementation files until Phase 0 is signed off.
 
 ### Phase 1: Harden Runs
 
@@ -341,6 +634,38 @@ Primary touchpoints:
 - `src/database/db.js`
 - `src/database/migrations`
 
+### Prerequisite: Memory Read Model Phase 2a
+
+Goal:
+Make broker-managed native roots inspectable as structured broker memory before
+Long-Horizon uses those events for supervisor reconstruction.
+
+Required work:
+
+1. add `root_io_events` persistence and projection helpers in the Memory Read
+   Model branch
+2. record broker-sent terminal input, permission replies, approvals, denials,
+   interrupts, detach, resize, and kill actions as durable events
+3. persist terminal output chunks with log offsets and timestamps
+4. add best-effort native TUI parsers that extract visible user/assistant
+   messages into `messages` without treating parser output as more canonical
+   than the raw log
+5. record provider-reported model, effort, and usage when observable
+6. generate root continuation summaries from root IO plus existing messages,
+   session events, artifacts, findings, and usage
+7. expose native-root memory through `get_message_window`, `get_memory_bundle`,
+   and memory query surfaces
+
+Primary touchpoints:
+
+- `src/orchestration/session-manager.js`
+- `src/orchestration/terminal-manager.js`
+- `src/database/db.js`
+- `src/database/migrations`
+- `src/services/memory-snapshot-service.js`
+- `src/server/orchestration-router.js`
+- `src/mcp/cliagents-mcp-server.js`
+
 ### Phase 2: Add Orchestration State
 
 Goal:
@@ -353,6 +678,10 @@ Required work:
 3. attach orchestrations to root sessions and run ids
 4. surface orchestration status in MCP and HTTP
 5. allow orchestration creation without immediately launching every phase
+6. introduce dispatch requests as queued pre-run intent records
+7. capture immutable run context snapshots before launching child work
+8. record explicit task/session bindings when a phase selects adapter, model,
+   effort, and reuse policy
 
 Primary touchpoints:
 
@@ -373,6 +702,10 @@ Required work:
 3. require structured handoffs between dependent phases
 4. route blocked child prompts back through broker-owned operator actions
 5. reconcile child terminal status back into phase status
+6. apply coalescing and defer policies before dispatching duplicate or
+   dependency-blocked requests
+7. model liveness and recovery outcomes explicitly for stale dispatch requests,
+   phases, and task-session bindings
 
 Primary touchpoints:
 
@@ -492,20 +825,47 @@ This plan is successful when:
 5. specialist routing is data-driven rather than hardcoded inside one workflow
    function
 6. the full execution history is inspectable from the broker after restart
+7. native interactive roots produce enough structured broker events for an
+   external supervisor to understand visible conversation, actions, status,
+   continuation summary, and known usage without reading raw tmux logs directly
+8. root, task, room, run, and project summaries can be linked into a derived
+   memory tree or graph without overriding raw event truth
+9. raw `root_io_events.content_full` storage is bounded by its declared
+   retention class; offsets and `content_sha256` remain queryable after raw
+   payload purge
+10. any new persistence path that captures user prompt or terminal output
+    content is covered by redaction-conformance tests, including derived
+    summaries and `memory_summary_edges` traversals
+11. an operator-initiated purge by `root_session_id` reaches every table that
+    stores user content for that root, including derived summaries and reachable
+    memory summary edges
+12. route and dispatch responses expose compatible-reuse decisions so supervisors
+    can tell whether an existing child lane was reused or why a new binding was
+    created
 
 ## Recommended Initial Implementation Order
 
 1. fix run-state and blocked-state durability
-2. add orchestration tables and service layer
-3. add phase and gate state with minimal HTTP routes
-4. move async workflow execution to orchestration-engine readiness logic
-5. replace hardcoded workflow routing with specialist registry config
+2. finish Memory Read Model Phase 2a for native interactive-root persistence,
+   parsed messages, continuation summaries, and summary lineage
+3. add orchestration tables and service layer
+4. add dispatch request, context snapshot, and task-session binding records
+5. add phase and gate state with minimal HTTP routes
+6. move async workflow execution to orchestration-engine readiness logic
+7. replace hardcoded workflow routing with specialist registry config
 
 ## Initial Test Gates
 
 Add or extend tests for:
 
 - run blocked-state persistence and replay
+- native root input/output event capture and replay after restart
+- best-effort native TUI message parsing with raw-log fallback
+- root continuation summary creation and refresh behavior
+- memory summary edge creation for root -> run/task/room/project rollups
+- dispatch request queue/coalesce/defer/cancel behavior
+- immutable run context snapshot creation before launch
+- task-session binding behavior for adapter, model, effort, and reuse policy
 - orchestration create/get/list lifecycle
 - ready-phase computation for sequential and parallel plans
 - gate approval and rejection behavior
@@ -518,4 +878,3 @@ Existing suites that should remain healthy include:
 - [tests/test-run-ledger-routes.js](/Users/mojave/Documents/AI-projects/cliagents/tests/test-run-ledger-routes.js)
 - [tests/test-orchestration-introspection-routes.js](/Users/mojave/Documents/AI-projects/cliagents/tests/test-orchestration-introspection-routes.js)
 - [tests/test-mcp-root-session-tools.js](/Users/mojave/Documents/AI-projects/cliagents/tests/test-mcp-root-session-tools.js)
-

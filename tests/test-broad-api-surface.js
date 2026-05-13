@@ -204,6 +204,7 @@ async function testHealth() {
     assert(data.info?.title === 'cliagents API', 'Should have correct title');
     assert(data.paths?.['/health'], 'Should have /health path');
     assert(data.paths?.['/sessions/{sessionId}/status'], 'Should have /status path');
+    assert(data.paths?.['/sessions/{sessionId}/peek'], 'Should have /peek path');
     assert(data.paths?.['/sessions/{sessionId}/interrupt'], 'Should have /interrupt path');
     // OpenAI-compatible endpoints
     assert(data.paths?.['/v1/models'], 'Should have /v1/models path');

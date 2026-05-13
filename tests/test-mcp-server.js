@@ -8,7 +8,7 @@
 const assert = require('assert');
 const http = require('http');
 
-const BASE_URL = 'http://localhost:4001';
+const BASE_URL = process.env.CLIAGENTS_TEST_URL || 'http://localhost:4001';
 
 // HTTP helper
 async function request(method, path, body = null) {
@@ -50,6 +50,37 @@ async function checkServer() {
   } catch {
     return false;
   }
+}
+
+async function attachRootSession(label) {
+  const externalSessionRef = `${label}:${Date.now()}:${Math.random().toString(16).slice(2)}`;
+  const res = await request('POST', '/orchestration/root-sessions/attach', {
+    originClient: 'test',
+    externalSessionRef,
+    clientName: 'test-mcp-server',
+    sessionMetadata: {
+      clientName: 'test-mcp-server',
+      externalSessionRef,
+      purpose: label
+    }
+  });
+
+  assert.strictEqual(res.status, 200, `Expected root attach 200, got ${res.status}`);
+  assert(res.data.rootSessionId, 'Root attach should return rootSessionId');
+
+  return {
+    rootSessionId: res.data.rootSessionId,
+    parentSessionId: res.data.rootSessionId,
+    sessionKind: 'subagent',
+    originClient: 'test',
+    externalSessionRef,
+    lineageDepth: 1,
+    sessionMetadata: {
+      clientName: 'test-mcp-server',
+      externalSessionRef,
+      purpose: label
+    }
+  };
 }
 
 // ═══════════════════════════════════════════════════════════════════
@@ -99,10 +130,12 @@ async function testRouteValidation() {
 
 async function testRouteExecution() {
   console.log('\n📝 Test: Route execution (task routing)');
+  const rootContext = await attachRootSession('route-execution');
 
   // The /route endpoint routes a task to an appropriate profile and creates a terminal
   // It does NOT execute and wait for output - that's done via /handoff
   const res = await request('POST', '/orchestration/route', {
+    ...rootContext,
     message: 'What is 5+3? Answer with just the number.'
     // Not specifying profile - let the router choose
   });

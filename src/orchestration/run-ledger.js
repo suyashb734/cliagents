@@ -1,6 +1,7 @@
 const crypto = require('crypto');
 const zlib = require('zlib');
 const { getDB } = require('../database/db');
+const { redactSecretsInText, redactSecretObject } = require('../security/secret-redaction');
 
 const OUTPUT_POLICY = {
   previewBytes: 16 * 1024,
@@ -123,6 +124,37 @@ function serializeJson(value) {
   return typeof value === 'string' ? value : JSON.stringify(value);
 }
 
+function sanitizeMetadata(value) {
+  if (value === undefined || value === null) {
+    return value;
+  }
+  if (typeof value === 'string') {
+    return redactSecretsInText(value).content;
+  }
+  if (typeof value === 'object') {
+    return redactSecretObject(value);
+  }
+  return value;
+}
+
+function attachRedactionMetadata(metadata, redaction) {
+  if (!redaction?.redacted) {
+    return metadata;
+  }
+  if (!metadata || typeof metadata !== 'object' || Array.isArray(metadata)) {
+    return metadata;
+  }
+
+  const base = { ...metadata };
+  const security = base.security && typeof base.security === 'object'
+    ? { ...base.security }
+    : {};
+  security.redactedSecretLikeContent = true;
+  security.redactionReasonCodes = redaction.reasons || [];
+  base.security = security;
+  return base;
+}
+
 function parseJson(value) {
   if (!value || typeof value !== 'string') {
     return value || null;
@@ -140,7 +172,8 @@ function encodeBlob(value) {
 }
 
 function preparePayload(content, policy) {
-  const text = String(content || '');
+  const redaction = redactSecretsInText(content);
+  const text = String(redaction.content || '');
   const originalBytes = Buffer.byteLength(text, 'utf8');
   const previewText = truncateUtf8(text, policy.previewBytes);
   const contentSha256 = sha256Text(text);
@@ -155,7 +188,8 @@ function preparePayload(content, policy) {
       compressedBytes: null,
       compression: 'none',
       storageMode: 'inline_text',
-      isTruncated: 0
+      isTruncated: 0,
+      redaction
     };
   }
 
@@ -170,7 +204,8 @@ function preparePayload(content, policy) {
       compressedBytes: compressedBlob.byteLength,
       compression: 'gzip',
       storageMode: 'compressed',
-      isTruncated: 0
+      isTruncated: 0,
+      redaction
     };
   }
 
@@ -183,7 +218,8 @@ function preparePayload(content, policy) {
     compressedBytes: compressedBlob.byteLength,
     compression: 'gzip',
     storageMode: 'preview_only',
-    isTruncated: 1
+    isTruncated: 1,
+    redaction
   };
 }
 
@@ -232,6 +268,7 @@ class RunLedgerService {
   appendInput(input) {
     const inputId = input.id || generateId('input');
     const payload = this.prepareInput(input.content);
+    const metadata = attachRedactionMetadata(sanitizeMetadata(input.metadata), payload.redaction);
 
     this.db.db.prepare(`
       INSERT INTO run_inputs (
@@ -253,7 +290,7 @@ class RunLedgerService {
       payload.compression,
       payload.storageMode,
       payload.isTruncated,
-      serializeJson(input.metadata),
+      serializeJson(metadata),
       input.createdAt || Date.now()
     );
 
@@ -483,6 +520,7 @@ class RunLedgerService {
     const outputId = input.id || generateId('output');
     const payload = this.prepareOutput(input.content);
     const createdAt = input.createdAt || Date.now();
+    const metadata = attachRedactionMetadata(sanitizeMetadata(input.metadata), payload.redaction);
 
     this.db.db.prepare(`
       INSERT INTO run_outputs (
@@ -504,15 +542,15 @@ class RunLedgerService {
       payload.compression,
       payload.storageMode,
       payload.isTruncated,
-      serializeJson(input.metadata),
+      serializeJson(metadata),
       createdAt
     );
 
     if (
       input.participantId &&
-      input.metadata &&
-      typeof input.metadata === 'object' &&
-      !Array.isArray(input.metadata)
+      metadata &&
+      typeof metadata === 'object' &&
+      !Array.isArray(metadata)
     ) {
       if (typeof this.db.addUsageRecordFromMetadata !== 'function') {
         console.warn('[RunLedgerService] Skipping usage persistence because db.addUsageRecordFromMetadata is unavailable');
@@ -533,7 +571,7 @@ class RunLedgerService {
           participantId: input.participantId,
           adapter: participant?.adapter || null,
           role: participant?.participant_role || null,
-          metadata: input.metadata,
+          metadata,
           createdAt
         });
       }
@@ -545,6 +583,10 @@ class RunLedgerService {
   appendToolEvent(input) {
     const eventId = input.id || generateId('tool');
     const payload = this.prepareToolEventPayload(input.content);
+    const metadata = attachRedactionMetadata(sanitizeMetadata(input.metadata), payload.redaction);
+    const status = input.status || 'completed';
+    const startedAt = input.startedAt || Date.now();
+    const completedAt = input.completedAt || null;
 
     this.db.db.prepare(`
       INSERT INTO run_tool_events (
@@ -570,11 +612,47 @@ class RunLedgerService {
       payload.compression,
       payload.storageMode,
       payload.isTruncated,
-      input.status || 'completed',
-      input.startedAt || Date.now(),
-      input.completedAt || null,
-      serializeJson(input.metadata)
+      status,
+      startedAt,
+      completedAt,
+      serializeJson(metadata)
     );
+
+    if (typeof this.db.appendRootIoEvent === 'function' && typeof this.db.getRunById === 'function') {
+      const run = this.db.getRunById(input.runId);
+      if (run?.rootSessionId) {
+        try {
+          this.db.appendRootIoEvent({
+            idempotencyKey: `run_tool_events:${eventId}`,
+            rootSessionId: run.rootSessionId,
+            terminalId: input.participantId || null,
+            runId: input.runId,
+            taskId: run.taskId || null,
+            discussionId: run.discussionId || null,
+            traceId: run.traceId || null,
+            eventKind: 'tool_event',
+            source: 'provider_metadata',
+            contentPreview: payload.previewText || `${input.toolClass || 'tool'}:${input.toolName || 'unknown'} ${status}`,
+            contentFull: payload.fullText || null,
+            metadata: {
+              sourceTable: 'run_tool_events',
+              toolEventId: eventId,
+              participantId: input.participantId || null,
+              stepId: input.stepId || null,
+              toolClass: input.toolClass || null,
+              toolName: input.toolName || null,
+              idempotency: input.idempotency || 'unknown',
+              status
+            },
+            occurredAt: startedAt,
+            recordedAt: completedAt || startedAt,
+            retentionClass: 'metadata-indefinite'
+          });
+        } catch (error) {
+          console.warn('[RunLedgerService] Failed to append root IO event for tool event:', error.message);
+        }
+      }
+    }
 
     return eventId;
   }

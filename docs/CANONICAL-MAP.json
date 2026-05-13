@@ -1,6 +1,6 @@
 {
   "version": 1,
-  "lastReviewed": "2026-05-06",
+  "lastReviewed": "2026-05-07",
   "allowedStatuses": [
     "canonical",
     "active-plan",
@@ -39,7 +39,9 @@
       "related_code": [
         "src/models/terminal-status.js",
         "src/tmux/session-manager.js",
-        "src/server/orchestration-router.js"
+        "src/server/orchestration-router.js",
+        "src/orchestration/assignment-branching.js",
+        "src/database/migrations/0025_branch_orchestrated_assignments.sql"
       ],
       "supersedes": ["docs/research/RUN-LEDGER-STATE-MACHINE.md"],
       "last_reviewed": "2026-05-04"
@@ -86,13 +88,81 @@
       "last_reviewed": "2026-05-06"
     },
     {
+      "path": "docs/reference/INPUT-QUEUE.md",
+      "status": "reference",
+      "type": "reference",
+      "scope": ["remote-control", "terminal-input", "approvals", "session-control"],
+      "related_code": [
+        "src/server/orchestration-router.js",
+        "src/mcp/cliagents-mcp-server.js",
+        "src/database/db.js",
+        "src/database/migrations/0016_terminal_input_queue.sql",
+        "src/database/migrations/0024_agent_control_foundation.sql"
+      ],
+      "supersedes": [],
+      "last_reviewed": "2026-05-12"
+    },
+    {
+      "path": "docs/reference/LAUNCH-PROFILE.md",
+      "status": "reference",
+      "type": "reference",
+      "scope": ["onboarding", "deployment-profile", "validation"],
+      "related_code": [
+        "scripts/track-a-launch-smoke.js",
+        "tests/test-track-a-launch-smoke.js"
+      ],
+      "supersedes": [],
+      "last_reviewed": "2026-05-07"
+    },
+    {
+      "path": "docs/reference/FAILURE-RETRY-TAXONOMY.md",
+      "status": "reference",
+      "type": "reference",
+      "scope": ["error-taxonomy", "retry-policy", "operations"],
+      "related_code": [
+        "scripts/track-a-launch-smoke.js"
+      ],
+      "supersedes": [],
+      "last_reviewed": "2026-05-07"
+    },
+    {
       "path": "docs/reference/MCP-TOOLS.md",
       "status": "reference",
       "type": "reference",
       "scope": ["mcp", "tools"],
-      "related_code": ["src/mcp/cliagents-mcp-server.js"],
+      "related_code": [
+        "src/mcp/cliagents-mcp-server.js",
+        "src/server/orchestration-router.js"
+      ],
       "supersedes": [],
       "last_reviewed": "2026-05-04"
+    },
+    {
+      "path": "docs/reference/ALPHA-RELEASE.md",
+      "status": "reference",
+      "type": "reference",
+      "scope": ["release", "validation", "security"],
+      "related_code": [
+        "scripts/release-check.js",
+        "scripts/check-pack-contents.js",
+        "scripts/check-tracked-artifacts.js"
+      ],
+      "supersedes": [],
+      "last_reviewed": "2026-05-11"
+    },
+    {
+      "path": "docs/reference/BRANCH-MANAGEMENT.md",
+      "status": "canonical",
+      "type": "reference",
+      "scope": ["branch-management", "worktrees", "delegation", "release"],
+      "related_code": [
+        "src/orchestration/assignment-branching.js",
+        "src/database/migrations/0025_branch_orchestrated_assignments.sql",
+        "scripts/check-branch-hygiene.js",
+        "package.json"
+      ],
+      "supersedes": [],
+      "last_reviewed": "2026-05-12"
     },
     {
       "path": "docs/reference/KNOWLEDGE-GRAPH.md",
@@ -120,6 +190,57 @@
       "related_code": [],
       "supersedes": [],
       "last_reviewed": "2026-05-04"
+    },
+    {
+      "path": "docs/adr/0001-agent-control-taxonomy.md",
+      "status": "canonical",
+      "type": "adr",
+      "scope": ["taxonomy", "agent-control", "sessions", "workspaces"],
+      "related_code": [
+        "src/server/index.js",
+        "src/server/orchestration-router.js",
+        "src/services/session-peek.js"
+      ],
+      "supersedes": [],
+      "last_reviewed": "2026-05-12"
+    },
+    {
+      "path": "docs/adr/0002-session-peek-and-status.md",
+      "status": "canonical",
+      "type": "adr",
+      "scope": ["sessions", "status", "peek", "console"],
+      "related_code": [
+        "src/services/session-peek.js",
+        "src/server/index.js",
+        "public/console.html"
+      ],
+      "supersedes": [],
+      "last_reviewed": "2026-05-12"
+    },
+    {
+      "path": "docs/adr/0003-workspace-and-worktree.md",
+      "status": "canonical",
+      "type": "adr",
+      "scope": ["workspace", "worktree", "execution-isolation"],
+      "related_code": [
+        "src/orchestration/task-worktree.js",
+        "src/server/orchestration-router.js"
+      ],
+      "supersedes": [],
+      "last_reviewed": "2026-05-12"
+    },
+    {
+      "path": "docs/adr/0004-atomic-claims-and-input-leases.md",
+      "status": "canonical",
+      "type": "adr",
+      "scope": ["dispatch", "claims", "terminal-input", "leases"],
+      "related_code": [
+        "src/database/migrations/0024_agent_control_foundation.sql",
+        "src/database/db.js",
+        "src/server/orchestration-router.js"
+      ],
+      "supersedes": [],
+      "last_reviewed": "2026-05-12"
     },
     {
       "path": "docs/research/CLIAGENTS-OPERATING-MODEL.md",

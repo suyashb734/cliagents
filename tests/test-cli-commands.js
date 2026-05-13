@@ -7,18 +7,25 @@
 const assert = require('assert');
 const {
   PersistentSessionManager,
+  TerminalStatus,
   CLI_COMMANDS,
   resolveTerminalStartupDelayMs,
   extractProviderThreadRefFromOutput,
+  inferEffectiveModelFromOutput,
+  inferEffectiveReasoningEffortFromOutput,
+  extractUsageMetadataFromOutput,
   buildGeminiOneShotRunnerCommand,
+  buildClaudeOneShotCommand,
   buildCodexOneShotCommand,
   buildQwenOneShotCommand,
   buildOpencodeOneShotCommand
 } = require('../src/tmux/session-manager');
 const ClaudeCodeAdapter = require('../src/adapters/claude-code');
+const CodexCliAdapter = require('../src/adapters/codex-cli');
 const {
   parseAdoptArgs,
   parseServeArgs,
+  parseTrimHistoryArgs,
   attachToManagedSession,
   launchManagedRootSession,
   buildManagedRootLaunchCandidate,
@@ -259,6 +266,26 @@ test('Codex one-shot builder stays stateless and preserves JSON mode', () => {
   assert(!cmd.includes('019d94a6-2cd8-7742-8e4e-123456789abc'), `Did not expect worker thread id in command, got: ${cmd}`);
 });
 
+test('Codex model aliases resolve to exact broker model ids', () => {
+  const cmd = buildCodexOneShotCommand('Continue review.', {
+    model: 'gpt5mini',
+    messageCount: 0
+  });
+
+  assert(cmd.includes('-m gpt-5.4-mini'), `Expected exact mini model id, got: ${cmd}`);
+});
+
+test('Codex one-shot builder can pin reasoning effort', () => {
+  const cmd = buildCodexOneShotCommand('Continue review.', {
+    model: 'gpt-5.5',
+    reasoningEffort: 'xhigh',
+    messageCount: 0
+  });
+
+  assert(cmd.includes('-m gpt-5.5'), `Expected exact model id, got: ${cmd}`);
+  assert(cmd.includes('-c \'model_reasoning_effort="xhigh"\''), `Expected reasoning effort config, got: ${cmd}`);
+});
+
 test('Codex one-shot builder pins a broker-safe default model', () => {
   const cmd = buildCodexOneShotCommand('Continue review.', {
     model: null,
@@ -338,6 +365,28 @@ test('Claude interactive command respects explicit default permission mode', () 
   assert(cmd.includes('--model claude-sonnet-4-5-20250514'), `Expected model flag, got: ${cmd}`);
 });
 
+test('Claude broker aliases resolve to exact current model ids', () => {
+  const cmd = CLI_COMMANDS['claude-code']({
+    role: 'main',
+    permissionMode: 'default',
+    model: 'opus'
+  });
+
+  assert(cmd.includes('--model claude-opus-4-7'), `Expected Opus alias to resolve to 4.7, got: ${cmd}`);
+});
+
+test('Claude one-shot command resolves aliases before launch', () => {
+  const { command } = buildClaudeOneShotCommand('Review this diff.', {
+    workDir: '/tmp/project',
+    model: 'sonnet',
+    providerThreadRef: null,
+    messageCount: 0,
+    permissionMode: 'default'
+  });
+
+  assert(command.includes('--model "claude-sonnet-4-6"'), `Expected Sonnet alias to resolve to 4.6, got: ${command}`);
+});
+
 test('Claude interactive command omits allowedTools when the list is empty', () => {
   const cmd = CLI_COMMANDS['claude-code']({
     role: 'main',
@@ -346,6 +395,14 @@ test('Claude interactive command omits allowedTools when the list is empty', () 
   });
 
   assert(!cmd.includes('--allowedTools'), `Did not expect empty allowedTools flag, got: ${cmd}`);
+});
+
+test('Adapter model catalogs include current exact Codex and Claude ids', () => {
+  const codexModels = new CodexCliAdapter().getAvailableModels().map((model) => model.id);
+  const claudeModels = new ClaudeCodeAdapter().getAvailableModels().map((model) => model.id);
+
+  assert(codexModels.includes('gpt-5.5'), `Expected Codex catalog to include gpt-5.5, got: ${codexModels.join(', ')}`);
+  assert(claudeModels.includes('claude-opus-4-7'), `Expected Claude catalog to include claude-opus-4-7, got: ${claudeModels.join(', ')}`);
 });
 
 test('Claude managed root binds a provider session id on first launch', () => {
@@ -526,6 +583,18 @@ test('CLI supports root attach alias', () => {
   assert(args[0] === 'root' && args[1] === 'attach', 'CLI must support "root attach" as a command alias');
 });
 
+test('CLI parses tmux history trim commands', () => {
+  const rootParsed = parseTrimHistoryArgs(['root-abc', '--history-limit', '7000', '--json'], 'root');
+  assert.strictEqual(rootParsed.scope, 'root');
+  assert.strictEqual(rootParsed.rootSessionId, 'root-abc');
+  assert.strictEqual(rootParsed.historyLimit, 7000);
+  assert.strictEqual(rootParsed.json, true);
+
+  const terminalParsed = parseTrimHistoryArgs(['--terminal', 'term-abc'], 'terminal');
+  assert.strictEqual(terminalParsed.scope, 'terminal');
+  assert.strictEqual(terminalParsed.terminalId, 'term-abc');
+});
+
 console.log('\n--- Serve CLI ---');
 
 test('Serve CLI parses broker isolation flags and explicit shutdown policy', () => {
@@ -613,6 +682,244 @@ test('Worker terminals keep a minimal startup delay by default', () => {
       process.env.CLIAGENTS_WORKER_STARTUP_DELAY_MS = originalValue;
     }
   }
+});
+
+console.log('\n--- Effective Model Verification ---');
+
+test('Effective model parser reads provider-reported model ids', () => {
+  assert.strictEqual(
+    inferEffectiveModelFromOutput('codex-cli', '│ model:     gpt-5.5 xhigh   /model to change  │'),
+    'gpt-5.5'
+  );
+  assert.strictEqual(
+    inferEffectiveModelFromOutput('claude-code', '{"type":"result","modelUsage":{"claude-opus-4-7":{"inputTokens":12}}}'),
+    'claude-opus-4-7'
+  );
+  assert.strictEqual(
+    inferEffectiveModelFromOutput(
+      'gemini-cli',
+      '{"type":"init","model":"gemini-2.5-flash"}\n{"type":"result","stats":{"models":{"gemini-3-pro-preview":{"tokens":{"total":42}}}}}'
+    ),
+    'gemini-3-pro-preview'
+  );
+  assert.strictEqual(
+    inferEffectiveModelFromOutput('opencode-cli', '{"model":"minimax-coding-plan/MiniMax-M2.7"}'),
+    'minimax-coding-plan/MiniMax-M2.7'
+  );
+});
+
+test('Effective reasoning effort parser reads Codex UI effort', () => {
+  assert.strictEqual(
+    inferEffectiveReasoningEffortFromOutput('│ model:     gpt-5.5 xhigh   /model to change  │'),
+    'xhigh'
+  );
+  assert.strictEqual(
+    inferEffectiveReasoningEffortFromOutput('gpt-5.4 high · ~/Documents/AI-projects/cliagents'),
+    'high'
+  );
+});
+
+test('Session manager persists verified effective model changes', () => {
+  const events = [];
+  const touches = [];
+  const manager = new PersistentSessionManager({
+    sessionEventsEnabled: true,
+    tmuxClient: {
+      listSessions() {
+        return [];
+      }
+    },
+    db: {
+      listTerminals() {
+        return [];
+      },
+      touchTerminalMessage(terminalId, payload) {
+        touches.push({ terminalId, payload });
+      },
+      addSessionEvent(event) {
+        events.push(event);
+        return event;
+      }
+    }
+  });
+  const terminal = {
+    terminalId: 'term-model-1',
+    rootSessionId: 'root-model-1',
+    parentSessionId: 'root-model-1',
+    adapter: 'claude-code',
+    requestedModel: 'claude-opus-4-7',
+    effectiveModel: 'claude-opus-4-6',
+    model: 'claude-opus-4-6',
+    originClient: 'test',
+    activeRun: { runId: 'abc123def4567890' },
+    sessionMetadata: { purpose: 'model-verification-test' }
+  };
+
+  manager._syncEffectiveModelFromOutput(
+    terminal,
+    '{"type":"result","modelUsage":{"claude-opus-4-7":{"inputTokens":12}}}',
+    { source: 'unit-test' }
+  );
+
+  assert.strictEqual(terminal.model, 'claude-opus-4-7');
+  assert.strictEqual(terminal.requestedModel, 'claude-opus-4-7');
+  assert.strictEqual(terminal.effectiveModel, 'claude-opus-4-7');
+  assert.strictEqual(touches.length, 1);
+  assert.strictEqual(touches[0].payload.model, 'claude-opus-4-7');
+  assert.strictEqual(touches[0].payload.requestedModel, 'claude-opus-4-7');
+  assert.strictEqual(touches[0].payload.effectiveModel, 'claude-opus-4-7');
+  assert.strictEqual(events.length, 1);
+  assert.strictEqual(events[0].eventType, 'model_verified');
+  assert.strictEqual(events[0].payloadJson.requestedModel, 'claude-opus-4-7');
+  assert.strictEqual(events[0].payloadJson.previousEffectiveModel, 'claude-opus-4-6');
+  assert.strictEqual(events[0].payloadJson.effectiveModel, 'claude-opus-4-7');
+  assert.strictEqual(events[0].payloadJson.changed, true);
+  assert.strictEqual(events[0].payloadJson.requestedModelMatched, true);
+});
+
+test('Tracked-run usage parser reads Claude stream-json result usage', () => {
+  const metadata = extractUsageMetadataFromOutput(
+    'claude-code',
+    [
+      '{"type":"assistant","message":{"usage":{"input_tokens":10,"cache_creation_input_tokens":24457,"output_tokens":7}}}',
+      '{"type":"result","total_cost_usd":0.03092125,"usage":{"input_tokens":10,"cache_creation_input_tokens":24457,"cache_read_input_tokens":0,"output_tokens":68},"modelUsage":{"claude-haiku-4-5":{"inputTokens":10,"outputTokens":68,"cacheReadInputTokens":0,"cacheCreationInputTokens":24457,"costUSD":0.03092125}}}'
+    ].join('\n')
+  );
+
+  assert(metadata, 'usage metadata should be extracted from result JSON');
+  assert.strictEqual(metadata.usage.inputTokens, 10);
+  assert.strictEqual(metadata.usage.outputTokens, 68);
+  assert.strictEqual(metadata.usage.cacheCreationInputTokens, 24457);
+  assert.strictEqual(metadata.usage.cacheReadInputTokens, 0);
+  assert.strictEqual(metadata.usage.cachedInputTokens, 24457);
+  assert.strictEqual(metadata.usage.totalTokens, 24535);
+  assert.strictEqual(metadata.usage.costUsd, 0.03092125);
+  assert.strictEqual(metadata.usage.model, 'claude-haiku-4-5');
+});
+
+test('Tracked-run usage parser reads Codex JSON cached input tokens', () => {
+  const metadata = extractUsageMetadataFromOutput(
+    'codex-cli',
+    '{"type":"turn.completed","usage":{"input_tokens":249532,"cached_input_tokens":181760,"output_tokens":3976,"reasoning_output_tokens":3046}}'
+  );
+
+  assert(metadata, 'usage metadata should be extracted from Codex turn JSON');
+  assert.strictEqual(metadata.usage.inputTokens, 249532);
+  assert.strictEqual(metadata.usage.outputTokens, 3976);
+  assert.strictEqual(metadata.usage.reasoningTokens, 3046);
+  assert.strictEqual(metadata.usage.cachedInputTokens, 181760);
+  assert.strictEqual(metadata.usage.totalTokens, 253508);
+});
+
+test('Session manager persists tracked one-shot usage for task assignments', () => {
+  const usageInputs = [];
+  const manager = new PersistentSessionManager({
+    tmuxClient: {
+      listSessions() {
+        return [];
+      }
+    },
+    db: {
+      listTerminals() {
+        return [];
+      },
+      updateStatus() {},
+      addUsageRecordFromMetadata(input) {
+        usageInputs.push(input);
+        return `usage-${usageInputs.length}`;
+      }
+    }
+  });
+  const terminal = {
+    terminalId: 'term-usage-1',
+    rootSessionId: 'root-usage-1',
+    parentSessionId: 'root-usage-1',
+    adapter: 'claude-code',
+    role: 'worker',
+    status: TerminalStatus.PROCESSING,
+    model: 'claude-haiku-4-5',
+    effectiveModel: 'claude-haiku-4-5',
+    activeRun: { runId: 'abc123def4567890', exitCode: 0 },
+    sessionMetadata: {
+      taskId: 'task-usage-1',
+      taskAssignmentId: 'assignment-usage-1',
+      taskRole: 'test'
+    }
+  };
+  const runOutput = '{"type":"result","total_cost_usd":0.03092125,"usage":{"input_tokens":10,"cache_creation_input_tokens":24457,"cache_read_input_tokens":0,"output_tokens":68},"modelUsage":{"claude-haiku-4-5":{"inputTokens":10,"outputTokens":68,"cacheReadInputTokens":0,"cacheCreationInputTokens":24457,"costUSD":0.03092125}}}';
+
+  manager._applyStatusUpdate(terminal, TerminalStatus.COMPLETED, {
+    runOutput,
+    exitCode: 0
+  });
+  manager._persistTrackedRunUsageFromOutput(terminal, runOutput);
+
+  assert.strictEqual(usageInputs.length, 1, 'usage should persist once');
+  assert.strictEqual(usageInputs[0].terminalId, 'term-usage-1');
+  assert.strictEqual(usageInputs[0].rootSessionId, 'root-usage-1');
+  assert.strictEqual(usageInputs[0].runId, 'abc123def4567890');
+  assert.strictEqual(usageInputs[0].taskId, 'task-usage-1');
+  assert.strictEqual(usageInputs[0].taskAssignmentId, 'assignment-usage-1');
+  assert.strictEqual(usageInputs[0].role, 'test');
+  assert.strictEqual(usageInputs[0].metadata.usage.totalTokens, 24535);
+  assert.strictEqual(usageInputs[0].metadata.usage.cachedInputTokens, 24457);
+
+  const alreadyCompletedTerminal = {
+    terminalId: 'term-usage-2',
+    rootSessionId: 'root-usage-1',
+    parentSessionId: 'root-usage-1',
+    adapter: 'claude-code',
+    role: 'worker',
+    status: TerminalStatus.COMPLETED,
+    model: 'claude-haiku-4-5',
+    effectiveModel: 'claude-haiku-4-5',
+    activeRun: { runId: 'def456abc1237890', exitCode: 0 },
+    sessionMetadata: {
+      taskId: 'task-usage-1',
+      taskAssignmentId: 'assignment-usage-2',
+      taskRole: 'test'
+    }
+  };
+
+  manager._applyStatusUpdate(alreadyCompletedTerminal, TerminalStatus.COMPLETED, {
+    runOutput,
+    exitCode: 0
+  });
+
+  assert.strictEqual(usageInputs.length, 2, 'same-status completed reconciliation should still persist usage');
+  assert.strictEqual(usageInputs[1].terminalId, 'term-usage-2');
+  assert.strictEqual(usageInputs[1].runId, 'def456abc1237890');
+  assert.strictEqual(usageInputs[1].taskAssignmentId, 'assignment-usage-2');
+
+  const wrappedHistoryOutput = runOutput.replace('"type":"result"', '"type":"res\nult"');
+  manager.readLogTail = () => runOutput;
+  const logFallbackTerminal = {
+    terminalId: 'term-usage-3',
+    rootSessionId: 'root-usage-1',
+    parentSessionId: 'root-usage-1',
+    adapter: 'claude-code',
+    role: 'worker',
+    status: TerminalStatus.COMPLETED,
+    model: 'claude-haiku-4-5',
+    effectiveModel: 'claude-haiku-4-5',
+    logPath: '/tmp/term-usage-3.log',
+    activeRun: { runId: 'fed456abc1237890', exitCode: 0 },
+    sessionMetadata: {
+      taskId: 'task-usage-1',
+      taskAssignmentId: 'assignment-usage-3',
+      taskRole: 'test'
+    }
+  };
+
+  manager._applyStatusUpdate(logFallbackTerminal, TerminalStatus.COMPLETED, {
+    runOutput: wrappedHistoryOutput,
+    exitCode: 0
+  });
+
+  assert.strictEqual(usageInputs.length, 3, 'usage should fall back to raw terminal logs when tmux history wraps JSON');
+  assert.strictEqual(usageInputs[2].terminalId, 'term-usage-3');
+  assert.strictEqual(usageInputs[2].runId, 'fed456abc1237890');
+  assert.strictEqual(usageInputs[2].taskAssignmentId, 'assignment-usage-3');
 });
 
 console.log('\n--- Launch Attach ---');

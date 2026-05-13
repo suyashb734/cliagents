@@ -34,6 +34,11 @@ const SessionWrapper = require('./utils/session-wrapper');
 
 // Server
 const AgentServer = require('./server');
+const {
+  createLocalConsoleLoginToken,
+  getConfiguredApiKey,
+  getLocalApiKeyFilePaths
+} = require('./server/auth');
 
 // Transcription Service
 const { transcribeAudio } = require('./services/transcriptionService');
@@ -102,11 +107,44 @@ function buildManagedRootAttachEnvironment(env = process.env) {
   return attachEnv;
 }
 
+function isLoopbackUrl(url) {
+  const hostname = String(url?.hostname || '').toLowerCase();
+  return hostname === 'localhost'
+    || hostname === '::1'
+    || hostname === '[::1]'
+    || hostname.startsWith('127.');
+}
+
+function buildCliagentsAuthFailureMessage(message, url, apiKey) {
+  if (apiKey) {
+    return [
+      message,
+      `The CLI sent an auth token but the broker at ${url.origin} rejected it.`,
+      'Check that CLIAGENTS_URL and CLIAGENTS_DATA_DIR point at the same broker you started, or restart the broker to refresh the local token.'
+    ].join(' ');
+  }
+
+  if (isLoopbackUrl(url)) {
+    const searchedPaths = getLocalApiKeyFilePaths().join(', ');
+    return [
+      message,
+      `No CLIAGENTS_API_KEY or local broker token was found for ${url.origin}.`,
+      `If this broker was already running before local-token auth was added, restart it so it creates a local token. Searched: ${searchedPaths}.`,
+      'For explicit unauthenticated local-only development, start the broker with CLIAGENTS_ALLOW_UNAUTHENTICATED_LOCALHOST=1.'
+    ].join(' ');
+  }
+
+  return [
+    message,
+    'Set CLIAGENTS_API_KEY for this remote broker, or point CLIAGENTS_URL at a local broker with a local token.'
+  ].join(' ');
+}
+
 async function callCliagentsJson(route, options = {}) {
   const baseUrl = getCliagentsBaseUrl();
   const url = new URL(route, baseUrl);
   const headers = { 'content-type': 'application/json' };
-  const apiKey = process.env.CLIAGENTS_API_KEY || process.env.CLI_AGENTS_API_KEY;
+  const apiKey = getConfiguredApiKey();
   if (apiKey) {
     headers.authorization = `Bearer ${apiKey}`;
     headers['x-api-key'] = apiKey;
@@ -126,7 +164,10 @@ async function callCliagentsJson(route, options = {}) {
   }
 
   if (!response.ok) {
-    const message = data?.error?.message || rawText || `${response.status} ${response.statusText}`;
+    let message = data?.error?.message || rawText || `${response.status} ${response.statusText}`;
+    if (response.status === 401) {
+      message = buildCliagentsAuthFailureMessage(message, url, apiKey);
+    }
     const error = new Error(message);
     error.status = response.status;
     error.data = data;
@@ -513,6 +554,195 @@ function printAttachRootUsage() {
   console.log('  --workdir <path>              Limit --latest to a specific working directory');
   console.log('  --archived                    Include archived legacy roots when searching');
   console.log('  --print-only                  Print the attach command without attaching');
+}
+
+function parseTrimHistoryArgs(rawArgs = [], defaultScope = 'terminal') {
+  const args = [...rawArgs];
+  const parsed = {
+    scope: defaultScope,
+    rootSessionId: null,
+    terminalId: null,
+    historyLimit: null,
+    json: false
+  };
+
+  if (args[0] && !args[0].startsWith('-')) {
+    if (parsed.scope === 'root') {
+      parsed.rootSessionId = args.shift();
+    } else {
+      parsed.terminalId = args.shift();
+    }
+  }
+
+  while (args.length > 0) {
+    const token = args.shift();
+    switch (token) {
+      case '--root':
+      case '--root-session':
+        parsed.scope = 'root';
+        parsed.rootSessionId = args.shift() || null;
+        break;
+      case '--terminal':
+        parsed.scope = 'terminal';
+        parsed.terminalId = args.shift() || null;
+        break;
+      case '--history-limit': {
+        const value = Number.parseInt(String(args.shift() || '').trim(), 10);
+        if (!Number.isInteger(value) || value <= 0) {
+          throw new Error('Invalid --history-limit value; expected a positive integer');
+        }
+        parsed.historyLimit = value;
+        break;
+      }
+      case '--json':
+        parsed.json = true;
+        break;
+      case '--help':
+      case '-h':
+        parsed.help = true;
+        break;
+      default:
+        throw new Error(`Unknown trim-history argument: ${token}`);
+    }
+  }
+
+  if (!parsed.help && parsed.scope === 'root' && !parsed.rootSessionId) {
+    throw new Error('root trim-history requires a <rootSessionId>');
+  }
+  if (!parsed.help && parsed.scope === 'terminal' && !parsed.terminalId) {
+    throw new Error('trim-history requires a <terminalId> or --root <rootSessionId>');
+  }
+
+  return parsed;
+}
+
+function printTrimHistoryUsage() {
+  console.log('Usage: cliagents trim-history <terminalId> [options]');
+  console.log('   or: cliagents root trim-history <rootSessionId> [options]');
+  console.log('');
+  console.log('Options:');
+  console.log('  --root <id>                   Trim live managed root terminal history for a root session');
+  console.log('  --terminal <id>               Trim one terminal by terminal id');
+  console.log('  --history-limit <n>           Override the configured tmux history limit for this trim');
+  console.log('  --json                        Emit JSON instead of text');
+}
+
+function parseConsoleArgs(rawArgs = []) {
+  const args = [...rawArgs];
+  const parsed = {
+    rootSessionId: null,
+    terminalId: null,
+    open: true,
+    printUrl: false,
+    loginTtlMs: 60 * 1000
+  };
+
+  while (args.length > 0) {
+    const token = args.shift();
+    switch (token) {
+      case '--root':
+      case '--root-session':
+        parsed.rootSessionId = args.shift() || null;
+        break;
+      case '--terminal':
+        parsed.terminalId = args.shift() || null;
+        break;
+      case '--no-open':
+        parsed.open = false;
+        break;
+      case '--print-url':
+        parsed.printUrl = true;
+        break;
+      case '--ttl-ms': {
+        const value = Number.parseInt(String(args.shift() || '').trim(), 10);
+        if (!Number.isInteger(value) || value < 1000) {
+          throw new Error('Invalid --ttl-ms value; expected at least 1000');
+        }
+        parsed.loginTtlMs = value;
+        break;
+      }
+      case '--help':
+      case '-h':
+        parsed.help = true;
+        break;
+      default:
+        throw new Error(`Unknown console argument: ${token}`);
+    }
+  }
+
+  return parsed;
+}
+
+function printConsoleUsage() {
+  console.log('Usage: cliagents console [options]');
+  console.log('');
+  console.log('Options:');
+  console.log('  --root <id>                   Focus a root session in the console');
+  console.log('  --terminal <id>               Focus a terminal in the console');
+  console.log('  --no-open                     Print the URL without opening a browser');
+  console.log('  --print-url                   Print the URL even when opening a browser');
+  console.log('  --ttl-ms <ms>                 Local login token TTL (default: 60000)');
+}
+
+function buildConsoleLaunchUrl(options = {}) {
+  const url = new URL('/console', options.baseUrl || getCliagentsBaseUrl());
+  if (options.rootSessionId) {
+    url.searchParams.set('root', options.rootSessionId);
+  }
+  if (options.terminalId) {
+    url.searchParams.set('terminal', options.terminalId);
+  }
+  if (options.localLoginToken) {
+    url.searchParams.set('login', options.localLoginToken);
+  }
+  return url.toString();
+}
+
+function openUrlInBrowser(url, dependencies = {}) {
+  const spawn = dependencies.spawnSync || spawnSync;
+  const platform = dependencies.platform || process.platform;
+  const command = platform === 'darwin'
+    ? 'open'
+    : (platform === 'win32' ? 'cmd' : 'xdg-open');
+  const args = platform === 'win32'
+    ? ['/c', 'start', '', url]
+    : [url];
+  return spawn(command, args, {
+    stdio: 'ignore',
+    detached: true
+  });
+}
+
+async function handleConsoleCommand(rawArgs = [], dependencies = {}) {
+  const options = parseConsoleArgs(rawArgs);
+  if (options.help) {
+    printConsoleUsage();
+    return;
+  }
+
+  const loginToken = createLocalConsoleLoginToken({ ttlMs: options.loginTtlMs });
+  const consoleUrl = buildConsoleLaunchUrl({
+    rootSessionId: options.rootSessionId,
+    terminalId: options.terminalId,
+    localLoginToken: loginToken
+  });
+
+  if (options.printUrl || !options.open) {
+    console.log(consoleUrl);
+  }
+
+  if (options.open) {
+    const result = openUrlInBrowser(consoleUrl, dependencies);
+    if (result.error) {
+      throw result.error;
+    }
+    if (typeof result.status === 'number' && result.status !== 0) {
+      throw new Error(`Browser open command exited with status ${result.status}`);
+    }
+    if (!options.printUrl) {
+      console.log(`Opened cliagents console: ${consoleUrl.replace(/([?&]login=)[^&]+/, '$1[redacted]')}`);
+    }
+  }
 }
 
 function parseServePort(value, fallback = 4001) {
@@ -1485,6 +1715,42 @@ async function handleAttachRootCommand(rawArgs = [], dependencies = {}) {
       spawnSync: dependencies.spawnSync
     });
   }
+}
+
+async function handleTrimHistoryCommand(rawArgs = [], dependencies = {}, defaultScope = 'terminal') {
+  const options = parseTrimHistoryArgs(rawArgs, defaultScope);
+  if (options.help) {
+    printTrimHistoryUsage();
+    return;
+  }
+
+  const callJson = dependencies.callCliagentsJson || callCliagentsJson;
+  const route = options.scope === 'root'
+    ? `/orchestration/root-sessions/${encodeURIComponent(options.rootSessionId)}/trim-history`
+    : `/orchestration/terminals/${encodeURIComponent(options.terminalId)}/trim-history`;
+  const result = await callJson(route, {
+    method: 'POST',
+    body: {
+      historyLimit: options.historyLimit || undefined
+    }
+  });
+
+  if (options.json) {
+    console.log(JSON.stringify(result, null, 2));
+    return;
+  }
+
+  if (options.scope === 'root') {
+    console.log('Root Tmux History Trimmed');
+    console.log(`  root_session_id: ${result.rootSessionId}`);
+    console.log(`  trimmed_terminals: ${result.trimmedCount || 0}/${result.count || 0}`);
+  } else {
+    console.log('Terminal Tmux History Trimmed');
+    console.log(`  terminal_id: ${result.terminalId}`);
+    console.log(`  root_session_id: ${result.rootSessionId || 'n/a'}`);
+    console.log(`  history_limit: ${result.historyLimit || 'n/a'}`);
+  }
+  console.log('  preserved: broker logs, persisted messages, database records');
 }
 
 async function getManagedRootResumeCandidate(rootSessionId, options = {}, dependencies = {}) {
@@ -2487,15 +2753,22 @@ module.exports = {
   handleLaunchCommand,
   handleListRootsCommand,
   handleAttachRootCommand,
+  handleTrimHistoryCommand,
   handleAdoptCommand,
+  handleConsoleCommand,
   handleServeCommand,
+  callCliagentsJson,
   listAdapterModels,
   listOperatorRootSessions,
   getOperatorRootSession,
   parseAdoptArgs,
   parseAttachRootArgs,
+  parseTrimHistoryArgs,
+  parseConsoleArgs,
   parseListRootsArgs,
   parseServeArgs,
+  buildConsoleLaunchUrl,
+  openUrlInBrowser,
   adoptManagedRootSession,
 
   // Quick-start factory
@@ -2546,8 +2819,23 @@ if (require.main === module) {
     return;
   }
 
+  if (command === 'trim-history') {
+    runCliCommand(handleTrimHistoryCommand(args.slice(1), {}, 'terminal'), 'trim-history');
+    return;
+  }
+
+  if (command === 'console') {
+    runCliCommand(handleConsoleCommand(args.slice(1)), 'console');
+    return;
+  }
+
   if (command === 'root' && args[1] === 'attach') {
     runCliCommand(handleAttachRootCommand(args.slice(2)), 'root attach');
+    return;
+  }
+
+  if (command === 'root' && args[1] === 'trim-history') {
+    runCliCommand(handleTrimHistoryCommand(args.slice(2), {}, 'root'), 'root trim-history');
     return;
   }
 

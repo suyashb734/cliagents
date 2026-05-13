@@ -379,6 +379,154 @@
       gap: 8px;
     }
 
+    .agent-wall {
+      margin-bottom: 24px;
+      background:
+        radial-gradient(circle at top left, rgba(88, 166, 255, 0.14), transparent 36%),
+        radial-gradient(circle at top right, rgba(63, 185, 80, 0.10), transparent 32%),
+        var(--bg-secondary);
+    }
+
+    .agent-wall-grid {
+      display: grid;
+      grid-template-columns: repeat(auto-fit, minmax(280px, 1fr));
+      gap: 14px;
+      padding: 14px;
+    }
+
+    .agent-wall-card {
+      display: grid;
+      gap: 12px;
+      border: 1px solid var(--border-color);
+      border-radius: 14px;
+      padding: 14px;
+      background: rgba(13, 17, 23, 0.88);
+      cursor: pointer;
+      transition: border-color 120ms ease, background 120ms ease, transform 120ms ease;
+    }
+
+    .agent-wall-card:hover,
+    .agent-wall-card.active {
+      border-color: rgba(88, 166, 255, 0.58);
+      background: rgba(88, 166, 255, 0.09);
+      transform: translateY(-1px);
+    }
+
+    .agent-wall-working {
+      border-color: rgba(88, 166, 255, 0.42);
+    }
+
+    .agent-wall-ready {
+      border-color: rgba(63, 185, 80, 0.34);
+    }
+
+    .agent-wall-waiting,
+    .agent-wall-attention,
+    .agent-wall-stale {
+      border-color: rgba(210, 153, 34, 0.48);
+      background: rgba(210, 153, 34, 0.08);
+    }
+
+    .agent-wall-head {
+      display: flex;
+      justify-content: space-between;
+      align-items: flex-start;
+      gap: 12px;
+    }
+
+    .agent-wall-title-wrap {
+      min-width: 0;
+      display: grid;
+      gap: 4px;
+    }
+
+    .agent-wall-title {
+      font-size: 14px;
+      font-weight: 700;
+      word-break: break-word;
+    }
+
+    .agent-wall-subtitle {
+      color: var(--text-secondary);
+      font-size: 12px;
+      word-break: break-all;
+    }
+
+    .agent-wall-metrics {
+      display: grid;
+      grid-template-columns: repeat(4, minmax(0, 1fr));
+      gap: 8px;
+    }
+
+    .agent-wall-metric {
+      border: 1px solid rgba(48, 54, 61, 0.78);
+      border-radius: 10px;
+      padding: 9px 10px;
+      background: rgba(22, 27, 34, 0.72);
+    }
+
+    .agent-wall-metric-value {
+      font-size: 18px;
+      font-weight: 700;
+      line-height: 1;
+    }
+
+    .agent-wall-metric-label {
+      margin-top: 6px;
+      color: var(--text-secondary);
+      font-size: 11px;
+      text-transform: uppercase;
+      letter-spacing: 0.45px;
+    }
+
+    .agent-wall-meta {
+      display: grid;
+      grid-template-columns: repeat(2, minmax(0, 1fr));
+      gap: 6px 12px;
+      color: var(--text-secondary);
+      font-size: 12px;
+    }
+
+    .agent-wall-meta strong {
+      color: var(--text-primary);
+      font-weight: 600;
+    }
+
+    .agent-wall-children {
+      display: flex;
+      flex-wrap: wrap;
+      gap: 6px;
+    }
+
+    .agent-child-pill {
+      display: inline-flex;
+      align-items: center;
+      gap: 6px;
+      max-width: 100%;
+      padding: 5px 8px;
+      border: 1px solid rgba(48, 54, 61, 0.9);
+      border-radius: 999px;
+      background: rgba(22, 27, 34, 0.82);
+      color: var(--text-secondary);
+      font-size: 12px;
+    }
+
+    .agent-child-pill strong {
+      color: var(--text-primary);
+      font-weight: 600;
+      overflow: hidden;
+      text-overflow: ellipsis;
+      white-space: nowrap;
+      max-width: 140px;
+    }
+
+    .agent-wall-summary {
+      color: var(--text-secondary);
+      font-size: 12px;
+      line-height: 1.5;
+      word-break: break-word;
+    }
+
     .hierarchy-flow {
       display: grid;
       gap: 10px;
@@ -672,6 +820,41 @@
     }
 
     .operator-state-unknown {
+      color: var(--text-secondary);
+      border-color: rgba(139, 148, 158, 0.28);
+      background: rgba(139, 148, 158, 0.08);
+    }
+
+    .live-state-pill {
+      display: inline-flex;
+      align-items: center;
+      gap: 6px;
+      padding: 4px 10px;
+      border-radius: 999px;
+      border: 1px solid var(--border-color);
+      font-size: 11px;
+      font-weight: 800;
+      letter-spacing: 0.04em;
+      text-transform: uppercase;
+      white-space: nowrap;
+    }
+
+    .live-state-pill::before {
+      content: '';
+      width: 7px;
+      height: 7px;
+      border-radius: 50%;
+      background: currentColor;
+      box-shadow: 0 0 0 3px rgba(139, 148, 158, 0.1);
+    }
+
+    .live-state-live {
+      color: var(--accent-green);
+      border-color: rgba(63, 185, 80, 0.35);
+      background: rgba(63, 185, 80, 0.08);
+    }
+
+    .live-state-offline {
       color: var(--text-secondary);
       border-color: rgba(139, 148, 158, 0.28);
       background: rgba(139, 148, 158, 0.08);
@@ -1110,6 +1293,19 @@
       </div>
     </div>
 
+    <section class="card agent-wall">
+      <div class="panel-header">
+        <div>
+          <div class="panel-title">Agent Wall</div>
+          <div class="panel-subtitle">All visible root agents at once, with current status and child-session rollups.</div>
+        </div>
+        <div class="panel-actions">
+          <span class="panel-subtitle" id="agent-wall-summary">Loading...</span>
+        </div>
+      </div>
+      <div id="agent-wall-list"></div>
+    </section>
+
     <section class="card mobile-root-shell">
       <div class="panel-header">
         <div>
@@ -1306,6 +1502,8 @@
       rootOutputFormat: coerceOutputFormat(urlState.get('rootFormat'), 'ansi'),
       mobileRootView: new Set(['terminal', 'overview', 'history']).has(urlState.get('mobileView')) ? urlState.get('mobileView') : 'terminal',
       mobileFocusedTerminalId: urlState.get('mobileTerminal') || null,
+      localLoginToken: urlState.get('login') || null,
+      authError: null,
       selectedRootSessionId: urlState.get('root') || null,
       selectedTerminalId: urlState.get('terminal') || null,
       selectedDiscussionId: urlState.get('discussion') || null,
@@ -1330,6 +1528,8 @@
       statDiscussions: document.getElementById('stat-discussions'),
       statWs: document.getElementById('stat-ws'),
       statSelection: document.getElementById('stat-selection'),
+      agentWallSummary: document.getElementById('agent-wall-summary'),
+      agentWallList: document.getElementById('agent-wall-list'),
       terminalsSummary: document.getElementById('terminals-summary'),
       terminalsList: document.getElementById('terminals-list'),
       includeArchivedRoots: document.getElementById('include-archived-roots'),
@@ -1381,10 +1581,43 @@
 
       if (!response.ok) {
         const message = data?.error?.message || data?.message || text || `${response.status} ${response.statusText}`;
-        throw new Error(message);
+        const error = new Error(message);
+        error.status = response.status;
+        error.payload = data;
+        if (response.status === 401) {
+          state.authError = message || 'Authentication required.';
+        }
+        throw error;
+      }
+
+      if (path.startsWith('/orchestration/') && state.authError) {
+        state.authError = null;
       }
 
       return data;
+    }
+
+    function isAuthError(error) {
+      return error?.status === 401;
+    }
+
+    function renderAuthRequiredState() {
+      const detail = state.authError || 'The broker rejected this browser request.';
+      const keyHint = state.apiKey
+        ? 'The saved API key was rejected. Paste the current broker token and press Save Key.'
+        : 'Paste the broker token into the API key box and press Save Key.';
+      return `
+        <div class="warning-banner">
+          <strong>Authentication required.</strong>
+          <div>${escapeHtml(detail)}</div>
+          <div>${escapeHtml(keyHint)} Local development token: <code>data/local-api-key</code>.</div>
+        </div>
+      `;
+    }
+
+    function isLoopbackConsoleHost() {
+      const hostname = String(window.location.hostname || '').trim().toLowerCase();
+      return hostname === 'localhost' || hostname === '::1' || hostname.startsWith('127.');
     }
 
     async function fetchRunUsageSafe(runId) {
@@ -1449,6 +1682,14 @@
       return ['completed', 'idle', 'error', 'failed', 'cancelled', 'abandoned'].includes(String(status || '').toLowerCase());
     }
 
+    function getDerivedTaskState(subject = {}) {
+      return String(subject?.sessionState?.task || subject?.session_state?.task || '').trim().toLowerCase();
+    }
+
+    function getDerivedLiveness(subject = {}) {
+      return String(subject?.sessionState?.liveness || subject?.session_state?.liveness || '').trim().toLowerCase();
+    }
+
     function isTerminalStale(terminal) {
       return !!terminal && !isTerminalSettled(terminal.status) && timestampAgeMs(terminal.lastActive || terminal.createdAt) > STALE_TERMINAL_MS;
     }
@@ -1460,12 +1701,14 @@
     function getOperatorStateDescriptor(subject = {}, options = {}) {
       const status = String(subject?.status || subject?.latestEventType || 'unknown').trim().toLowerCase();
       const processState = String(subject?.processState || subject?.process_state || '').trim().toLowerCase();
+      const derivedTask = getDerivedTaskState(subject);
+      const derivedLiveness = getDerivedLiveness(subject);
       const stale = options.stale === true;
       const live = typeof options.live === 'boolean'
         ? options.live
         : (typeof subject?.live === 'boolean' ? subject.live : null);
 
-      if (stale || status === 'stale') {
+      if (stale || status === 'stale' || derivedLiveness === 'orphaned') {
         return {
           label: 'Stale',
           tone: 'stale',
@@ -1473,7 +1716,7 @@
         };
       }
 
-      if (WAITING_TERMINAL_STATUSES.has(status)) {
+      if (derivedTask === 'needs_input' || WAITING_TERMINAL_STATUSES.has(status)) {
         return {
           label: 'Waiting for input',
           tone: 'waiting',
@@ -1482,7 +1725,7 @@
         };
       }
 
-      if (WORKING_TERMINAL_STATUSES.has(status)) {
+      if (derivedTask === 'working' || WORKING_TERMINAL_STATUSES.has(status)) {
         return {
           label: 'Working',
           tone: 'working',
@@ -1490,7 +1733,7 @@
         };
       }
 
-      if (status === 'idle' && processState !== 'exited' && (live !== false || subject?.terminalId)) {
+      if ((derivedTask === 'idle' || status === 'idle') && processState !== 'exited' && (live !== false || subject?.terminalId)) {
         return {
           label: 'At prompt',
           tone: 'ready',
@@ -1498,7 +1741,7 @@
         };
       }
 
-      if (status === 'completed') {
+      if (derivedTask === 'completed' || status === 'completed') {
         return {
           label: 'Finished',
           tone: 'ready',
@@ -1506,7 +1749,7 @@
         };
       }
 
-      if (ATTENTION_TERMINAL_STATUSES.has(status)) {
+      if (derivedTask === 'failed' || ATTENTION_TERMINAL_STATUSES.has(status)) {
         return {
           label: 'Needs attention',
           tone: 'attention',
@@ -1532,6 +1775,19 @@
     function renderOperatorStatePill(descriptor) {
       const safeDescriptor = descriptor || getOperatorStateDescriptor();
       return `<span class="operator-state-pill operator-state-${escapeHtml(safeDescriptor.tone || 'unknown')}">${escapeHtml(safeDescriptor.label || 'Unknown')}</span>`;
+    }
+
+    function isTerminalLive(terminal = {}) {
+      if (typeof terminal?.live === 'boolean') {
+        return terminal.live;
+      }
+      const processState = String(terminal?.processState || terminal?.process_state || '').trim().toLowerCase();
+      const status = String(terminal?.status || '').trim().toLowerCase();
+      return processState === 'alive' && status !== 'orphaned';
+    }
+
+    function renderLiveStatePill(live) {
+      return `<span class="live-state-pill live-state-${live ? 'live' : 'offline'}">${live ? 'Live' : 'Not live'}</span>`;
     }
 
     function escapeHtml(value) {
@@ -1938,6 +2194,224 @@
       return filtered.sort(compareSessionRoots);
     }
 
+    function getRootAgentAdapter(root, snapshot) {
+      return root?.adapter
+        || snapshot?.rootSession?.adapter
+        || getRootControllerSession(snapshot)?.adapter
+        || 'n/a';
+    }
+
+    function getChildStatusDescriptor(session) {
+      const trackedTerminal = getTrackedTerminal(session?.terminalId);
+      const subject = trackedTerminal || session || {};
+      const status = trackedTerminal?.status
+        || session?.terminalStatus
+        || session?.status
+        || session?.lastEventType
+        || 'unknown';
+      return {
+        status,
+        descriptor: getOperatorStateDescriptor({ ...subject, status }, {
+          stale: trackedTerminal ? isTerminalStale(trackedTerminal) : false,
+          live: subject?.live
+        })
+      };
+    }
+
+    function getRootChildRollup(root, snapshot) {
+      const childSessions = getRootChildSessions(snapshot);
+      const counts = root?.counts || {};
+      const rootStatus = getRootStatus(root);
+      const rootIsWorking = WORKING_TERMINAL_STATUSES.has(rootStatus) || ACTIVE_ROOT_STATUSES.has(rootStatus);
+      const rootIsIdle = rootStatus === 'idle';
+      const rootIsLive = root?.live === true;
+      const fallbackSessions = Math.max(0, Number(counts.sessions || 0) - 1);
+      const fallbackTerminals = Math.max(0, Number(counts.terminals || 0) - (root?.interactiveTerminalId ? 1 : 0));
+
+      const rollup = {
+        total: Math.max(childSessions.length, fallbackSessions, fallbackTerminals),
+        terminalChildren: fallbackTerminals,
+        running: 0,
+        waiting: 0,
+        idle: 0,
+        attention: 0,
+        live: 0,
+        completed: 0
+      };
+
+      if (childSessions.length > 0) {
+        rollup.terminalChildren = childSessions.filter((session) => session?.terminalId).length;
+        for (const session of childSessions) {
+          const { status, descriptor } = getChildStatusDescriptor(session);
+          const normalizedStatus = String(status || '').toLowerCase();
+          if (descriptor.tone === 'working' || WORKING_TERMINAL_STATUSES.has(normalizedStatus)) {
+            rollup.running += 1;
+          } else if (descriptor.waiting || WAITING_TERMINAL_STATUSES.has(normalizedStatus)) {
+            rollup.waiting += 1;
+          } else if (descriptor.tone === 'attention' || ATTENTION_TERMINAL_STATUSES.has(normalizedStatus)) {
+            rollup.attention += 1;
+          } else if (normalizedStatus === 'idle') {
+            rollup.idle += 1;
+          } else if (normalizedStatus === 'completed') {
+            rollup.completed += 1;
+          }
+          if (session?.terminalStatus && !['completed', 'orphaned', 'destroyed'].includes(normalizedStatus)) {
+            rollup.live += 1;
+          }
+        }
+        return rollup;
+      }
+
+      rollup.running = Math.max(0, Number(counts.running || 0) - (rootIsWorking ? 1 : 0));
+      rollup.waiting = Math.max(0, Number(counts.blocked || 0));
+      rollup.idle = Math.max(0, Number(counts.idle || 0) - (rootIsIdle ? 1 : 0));
+      rollup.attention = Math.max(0, Number(counts.failed || 0) + Number(counts.stale || 0));
+      rollup.live = Math.max(0, Number(counts.live || 0) - (rootIsLive ? 1 : 0));
+      rollup.completed = Math.max(0, Number(counts.completed || 0));
+      return rollup;
+    }
+
+    function getRootProviderJobCount(root) {
+      const text = [
+        root?.latestSummary,
+        root?.activityExcerpt
+      ].filter(Boolean).join(' ');
+      const countMatch = text.match(/(\d+)\s+background terminal(?:s)?\s+(?:running|runs?)/i);
+      if (countMatch) {
+        return Number(countMatch[1] || 0) || 0;
+      }
+      return /background terminal\s+(?:running|runs?)/i.test(text) ? 1 : 0;
+    }
+
+    function renderAgentWallChildPills(snapshot, rollup) {
+      const childSessions = getRootChildSessions(snapshot);
+      if (!childSessions.length) {
+        return rollup.total > 0
+          ? `<span class="agent-child-pill"><strong>${escapeHtml(String(rollup.total))}</strong> recorded child${rollup.total === 1 ? '' : 'ren'}</span>`
+          : '<span class="agent-child-pill"><strong>0</strong> no children</span>';
+      }
+
+      const pills = childSessions.slice(0, 4).map((session) => {
+        const { status, descriptor } = getChildStatusDescriptor(session);
+        const title = session?.name || session?.terminalId || session?.sessionId || 'child';
+        return `
+          <span class="agent-child-pill">
+            <strong>${escapeHtml(title)}</strong>
+            ${renderOperatorStatePill(descriptor)}
+            <span class="${statusClass(status)}">${escapeHtml(status)}</span>
+          </span>
+        `;
+      });
+
+      if (childSessions.length > 4) {
+        pills.push(`<span class="agent-child-pill"><strong>+${escapeHtml(String(childSessions.length - 4))}</strong> more</span>`);
+      }
+      return pills.join('');
+    }
+
+    function renderAgentWall() {
+      if (!elements.agentWallList || !elements.agentWallSummary) {
+        return;
+      }
+
+      if (state.authError) {
+        elements.agentWallSummary.textContent = 'Authentication required';
+        elements.agentWallList.innerHTML = renderAuthRequiredState();
+        return;
+      }
+
+      const roots = getVisibleSessionRoots();
+      const rootModels = roots.map((root) => {
+        const snapshot = getRootSnapshot(root.rootSessionId);
+        const operatorState = getOperatorStateDescriptor(root, { live: root.live });
+        return {
+          root,
+          snapshot,
+          operatorState,
+          rollup: getRootChildRollup(root, snapshot)
+        };
+      });
+      const workingCount = rootModels.filter((entry) => entry.operatorState.tone === 'working').length;
+      const waitingCount = rootModels.filter((entry) => entry.operatorState.waiting || entry.root?.attention?.requiresAttention).length;
+      const childTotal = rootModels.reduce((sum, entry) => sum + entry.rollup.total, 0);
+      const providerJobs = rootModels.reduce((sum, entry) => sum + getRootProviderJobCount(entry.root), 0);
+
+      elements.agentWallSummary.textContent = `${rootModels.length} agents • ${workingCount} working • ${waitingCount} waiting/attention • ${childTotal} broker children • ${providerJobs} provider jobs`;
+
+      if (!rootModels.length) {
+        elements.agentWallList.innerHTML = '<div class="empty-state">No agents match the current root filters.</div>';
+        return;
+      }
+
+      elements.agentWallList.innerHTML = `
+        <div class="agent-wall-grid">
+          ${rootModels.map(({ root, snapshot, operatorState, rollup }) => {
+            const rootTitle = buildRootCardTitle(root);
+            const rootStatus = getRootStatus(root) || 'unknown';
+            const tone = operatorState.tone || 'unknown';
+            const summary = summarizeRootCard(root);
+            const providerJobCount = getRootProviderJobCount(root);
+            return `
+              <div class="agent-wall-card agent-wall-${escapeHtml(tone)} ${root.rootSessionId === state.selectedRootSessionId ? 'active' : ''}" data-agent-wall-root="${escapeHtml(root.rootSessionId)}">
+                <div class="agent-wall-head">
+                  <div class="agent-wall-title-wrap">
+                    <div class="agent-wall-title">${escapeHtml(rootTitle)}</div>
+                    <div class="agent-wall-subtitle">${escapeHtml(root.rootSessionId)}</div>
+                  </div>
+                  <div class="row-badges">
+                    ${renderLiveStatePill(root.live === true)}
+                    ${renderOperatorStatePill(operatorState)}
+                    <span class="${statusClass(rootStatus)}">${escapeHtml(rootStatus)}</span>
+                  </div>
+                </div>
+                <div class="agent-wall-metrics">
+                  <div class="agent-wall-metric">
+                    <div class="agent-wall-metric-value">${escapeHtml(String(rollup.total))}</div>
+                    <div class="agent-wall-metric-label">Broker Children</div>
+                  </div>
+                  <div class="agent-wall-metric">
+                    <div class="agent-wall-metric-value">${escapeHtml(String(rollup.running))}</div>
+                    <div class="agent-wall-metric-label">Running</div>
+                  </div>
+                  <div class="agent-wall-metric">
+                    <div class="agent-wall-metric-value">${escapeHtml(String(rollup.waiting + rollup.attention))}</div>
+                    <div class="agent-wall-metric-label">Attention</div>
+                  </div>
+                  <div class="agent-wall-metric">
+                    <div class="agent-wall-metric-value">${escapeHtml(String(providerJobCount))}</div>
+                    <div class="agent-wall-metric-label">Provider Jobs</div>
+                  </div>
+                </div>
+                <div class="agent-wall-meta">
+                  <div><strong>Adapter:</strong> ${escapeHtml(getRootAgentAdapter(root, snapshot))}</div>
+                  <div><strong>Model:</strong> ${escapeHtml(root.model || snapshot?.rootSession?.model || 'n/a')}</div>
+                  <div><strong>Mode:</strong> ${escapeHtml(root.rootMode || 'n/a')}</div>
+                  <div><strong>Runtime:</strong> ${escapeHtml(root.runtimeHost || snapshot?.runtimeHost || 'n/a')}</div>
+                  <div><strong>Child terminals:</strong> ${escapeHtml(String(rollup.terminalChildren))}</div>
+                  <div><strong>Last:</strong> ${escapeHtml(formatTimestamp(root.lastOccurredAt))}</div>
+                  <div><strong>Live:</strong> ${escapeHtml(root.live ? 'yes' : 'no')}</div>
+                </div>
+                <div class="agent-wall-children">${renderAgentWallChildPills(snapshot, rollup)}</div>
+                <div class="agent-wall-summary">${escapeHtml(summary)}</div>
+              </div>
+            `;
+          }).join('')}
+        </div>
+      `;
+
+      elements.agentWallList.querySelectorAll('[data-agent-wall-root]').forEach((node) => {
+        node.addEventListener('click', () => {
+          state.selectedRootSessionId = node.dataset.agentWallRoot;
+          state.mobileFocusedTerminalId = null;
+          syncUrlState();
+          renderAgentWall();
+          renderSessionRoots();
+          refreshSelectedSessionRoot();
+          updateStats();
+        });
+      });
+    }
+
     function updateStats() {
       const activeTerminals = state.terminals.filter((terminal) => !isTerminalSettled(terminal.status)).length;
       const waitingTerminals = state.terminals.filter((terminal) => getOperatorStateDescriptor(terminal, {
@@ -1957,6 +2431,7 @@
 
     function saveApiKey() {
       state.apiKey = elements.apiKeyInput.value.trim();
+      state.authError = null;
       if (state.apiKey) {
         localStorage.setItem('cliagents.console.apiKey', state.apiKey);
       } else {
@@ -1964,6 +2439,57 @@
       }
       reconnectSocket();
       refreshAll();
+    }
+
+    async function exchangeLocalConsoleLogin() {
+      if (!state.localLoginToken && (state.apiKey || !isLoopbackConsoleHost())) {
+        return;
+      }
+
+      try {
+        const response = await fetch(
+          state.localLoginToken ? '/auth/local-console/exchange' : '/auth/local-console/bootstrap',
+          {
+            method: 'POST',
+            headers: {
+              'Content-Type': 'application/json'
+            },
+            body: JSON.stringify({
+              token: state.localLoginToken
+            })
+          }
+        );
+        const text = await response.text();
+        let data = null;
+        try {
+          data = text ? JSON.parse(text) : null;
+        } catch {
+          data = text;
+        }
+
+        if (!response.ok) {
+          const message = data?.error?.message || data?.message || text || `${response.status} ${response.statusText}`;
+          throw new Error(message);
+        }
+
+        if (data?.apiKey) {
+          state.apiKey = data.apiKey;
+          localStorage.setItem('cliagents.console.apiKey', state.apiKey);
+          elements.apiKeyInput.value = state.apiKey;
+        } else if (data?.unauthenticatedLocalhost) {
+          state.apiKey = '';
+          localStorage.removeItem('cliagents.console.apiKey');
+          elements.apiKeyInput.value = '';
+        }
+        state.authError = null;
+      } catch (error) {
+        state.authError = state.localLoginToken
+          ? `Local console login failed: ${error.message}`
+          : `Local console bootstrap failed: ${error.message}`;
+      } finally {
+        state.localLoginToken = null;
+        syncUrlState();
+      }
     }
 
     async function reconcileStaleRuns() {
@@ -2002,6 +2528,15 @@
     }
 
     function renderTerminals() {
+      if (state.authError) {
+        elements.terminalsSummary.textContent = 'Authentication required';
+        elements.terminalsList.innerHTML = renderAuthRequiredState();
+        updateStats();
+        renderAgentWall();
+        return;
+      }
+
+      const liveCount = state.terminals.filter(isTerminalLive).length;
       const staleCount = state.terminals.filter(isTerminalStale).length;
       const waitingCount = state.terminals.filter((terminal) => getOperatorStateDescriptor(terminal, {
         stale: isTerminalStale(terminal)
@@ -2011,7 +2546,7 @@
           stale: isTerminalStale(terminal)
         }).tone === 'working'
       )).length;
-      const summaryParts = [`${state.terminals.length} loaded`];
+      const summaryParts = [`${state.terminals.length} loaded`, `${liveCount} live`];
       if (workingCount > 0) {
         summaryParts.push(`${workingCount} working`);
       }
@@ -2028,25 +2563,36 @@
         return;
       }
 
-      elements.terminalsList.innerHTML = state.terminals.map((terminal) => `
-        <div class="row ${terminal.terminalId === state.selectedTerminalId ? 'active' : ''} ${isTerminalStale(terminal) ? 'stale' : ''}" data-terminal-id="${terminal.terminalId}">
-          <div class="row-top">
-            <div class="row-title">${escapeHtml(terminal.agentProfile || terminal.terminalId)}</div>
-            <div class="row-badges">
-              ${renderOperatorStatePill(getOperatorStateDescriptor(terminal, { stale: isTerminalStale(terminal) }))}
-              <span class="${statusClass(terminal.status)}">${escapeHtml(terminal.status)}</span>
+      elements.terminalsList.innerHTML = state.terminals.map((terminal) => {
+        const live = isTerminalLive(terminal);
+        const stale = isTerminalStale(terminal);
+        const operatorState = getOperatorStateDescriptor(terminal, { stale });
+        return `
+          <div class="row ${terminal.terminalId === state.selectedTerminalId ? 'active' : ''} ${stale ? 'stale' : ''}" data-terminal-id="${terminal.terminalId}">
+            <div class="row-top">
+              <div class="row-title">${escapeHtml(terminal.agentProfile || terminal.terminalId)}</div>
+              <div class="row-badges">
+                ${renderLiveStatePill(live)}
+                ${renderOperatorStatePill(operatorState)}
+                <span class="${statusClass(terminal.status)}">${escapeHtml(terminal.status)}</span>
+              </div>
+            </div>
+            <div class="row-meta">
+              <div><strong>Operator:</strong> ${escapeHtml(operatorState.label)}</div>
+              <div><strong>Live process:</strong> ${escapeHtml(live ? 'yes' : 'no')}</div>
+              <div><strong>Process:</strong> ${escapeHtml(terminal.processState || 'unknown')}</div>
+              <div><strong>Adapter:</strong> ${escapeHtml(terminal.adapter)}</div>
+              <div><strong>Role:</strong> ${escapeHtml(terminal.role || 'n/a')}</div>
+              <div><strong>Kind:</strong> ${escapeHtml(terminal.sessionKind || 'n/a')}</div>
+              <div><strong>Root:</strong> ${escapeHtml(terminal.rootSessionId || 'n/a')}</div>
+              <div><strong>Runtime:</strong> ${escapeHtml(terminal.runtimeHost || terminal.runtime || 'n/a')}</div>
+              <div><strong>Created:</strong> ${escapeHtml(formatTimestamp(terminal.createdAt))}</div>
+              <div><strong>Last Active:</strong> ${escapeHtml(formatTimestamp(terminal.lastActive))}</div>
+              <div><strong>Health:</strong> ${escapeHtml(stale ? 'stale' : 'current')}</div>
             </div>
           </div>
-          <div class="row-meta">
-            <div><strong>Operator:</strong> ${escapeHtml(getOperatorStateDescriptor(terminal, { stale: isTerminalStale(terminal) }).label)}</div>
-            <div><strong>Adapter:</strong> ${escapeHtml(terminal.adapter)}</div>
-            <div><strong>Role:</strong> ${escapeHtml(terminal.role || 'n/a')}</div>
-            <div><strong>Created:</strong> ${escapeHtml(formatTimestamp(terminal.createdAt))}</div>
-            <div><strong>Last Active:</strong> ${escapeHtml(formatTimestamp(terminal.lastActive))}</div>
-            <div><strong>Health:</strong> ${escapeHtml(isTerminalStale(terminal) ? 'stale' : 'active')}</div>
-          </div>
-        </div>
-      `).join('');
+        `;
+      }).join('');
 
       elements.terminalsList.querySelectorAll('[data-terminal-id]').forEach((node) => {
         node.addEventListener('click', () => {
@@ -2059,9 +2605,17 @@
       });
 
       updateStats();
+      renderAgentWall();
     }
 
     function renderDiscussions() {
+      if (state.authError) {
+        elements.discussionsSummary.textContent = 'Authentication required';
+        elements.discussionsList.innerHTML = renderAuthRequiredState();
+        updateStats();
+        return;
+      }
+
       elements.discussionsSummary.textContent = `${state.discussionRuns.length} loaded`;
       if (!state.discussionRuns.length) {
         elements.discussionsList.innerHTML = '<div class="empty-state">No discussion runs found. This pane depends on <code>/orchestration/runs?kind=discussion</code>.</div>';
@@ -2099,6 +2653,13 @@
     }
 
     function renderRooms() {
+      if (state.authError) {
+        elements.roomsSummary.textContent = 'Authentication required';
+        elements.roomsList.innerHTML = renderAuthRequiredState();
+        updateStats();
+        return;
+      }
+
       elements.roomsSummary.textContent = `${state.rooms.length} loaded`;
       if (!state.rooms.length) {
         elements.roomsList.innerHTML = '<div class="empty-state">No persisted rooms found yet. This pane depends on <code>/orchestration/rooms</code>.</div>';
@@ -2211,6 +2772,9 @@
         discussionId: root.discussionId || null,
         reuseEvents: counts.reuseEvents || 0,
         reusedSessions: counts.reusedSessions || 0,
+        counts,
+        model: root.model || null,
+        runtimeHost: root.runtimeHost || root.runtime?.host || null,
         status: root.status || 'unknown',
         attention,
         latestConclusion: root.latestConclusion || null,
@@ -2644,6 +3208,16 @@
     }
 
     function renderSessionRoots() {
+      if (state.authError) {
+        elements.sessionRootsSummary.textContent = 'Authentication required';
+        elements.sessionRootsList.innerHTML = renderAuthRequiredState();
+        updateStats();
+        renderAgentWall();
+        renderMobileRootSelector([]);
+        bindMobileRootControls();
+        return;
+      }
+
       const visibleRoots = getVisibleSessionRoots();
       const archivedSuffix = state.sessionRootsArchivedCount > 0
         ? state.includeArchivedRoots
@@ -2663,11 +3237,13 @@
       if (!state.sessionRoots.length) {
         elements.sessionRootsList.innerHTML = '<div class="empty-state">No control-plane roots recorded yet.</div>';
         updateStats();
+        renderAgentWall();
         return;
       }
       if (!visibleRoots.length) {
         elements.sessionRootsList.innerHTML = '<div class="empty-state">No cliagents root sessions match the current filters.</div>';
         updateStats();
+        renderAgentWall();
         return;
       }
 
@@ -2685,6 +3261,7 @@
                     <div class="root-card-subtitle">${escapeHtml(root.rootSessionId)}</div>
                   </div>
                   <div class="card-badges">
+                    ${renderLiveStatePill(root.live === true)}
                     ${renderOperatorStatePill(operatorState)}
                     <span class="${statusClass(root.status || root.latestEventType || 'unknown')}">${escapeHtml(root.status || root.latestEventType || 'unknown')}</span>
                   </div>
@@ -2727,13 +3304,21 @@
       });
 
       updateStats();
+      renderAgentWall();
       renderMobileRootSelector(visibleRoots);
       bindMobileRootControls();
     }
 
     async function refreshTerminals() {
-      const data = await fetchJson('/orchestration/terminals');
-      state.terminals = (data.terminals || []).slice().sort((a, b) => (b.lastActive || 0) - (a.lastActive || 0));
+      try {
+        const data = await fetchJson('/orchestration/terminals');
+        state.terminals = (data.terminals || []).slice().sort((a, b) => (b.lastActive || 0) - (a.lastActive || 0));
+      } catch (error) {
+        state.terminals = [];
+        if (!isAuthError(error)) {
+          elements.terminalsSummary.textContent = error.message;
+        }
+      }
       renderTerminals();
     }
 
@@ -2785,6 +3370,14 @@
         state.sessionRootsHiddenDetachedCount = Number(data.hiddenDetachedCount || 0);
         state.sessionRootsHiddenNonUserCount = Number(data.hiddenNonUserCount || 0);
       } catch (error) {
+        if (isAuthError(error)) {
+          state.sessionRoots = [];
+          state.sessionRootsArchivedCount = 0;
+          state.sessionRootsHiddenDetachedCount = 0;
+          state.sessionRootsHiddenNonUserCount = 0;
+          renderSessionRoots();
+          return;
+        }
         try {
           const data = await fetchJson('/orchestration/session-events?limit=400');
           state.sessionRoots = deriveSessionRoots(data.events || []);
@@ -2864,6 +3457,10 @@
             </div>
           </div>
           <div>
+            <div class="detail-label">Derived Session</div>
+            <div>${escapeHtml(terminal.sessionState ? `${terminal.sessionState.task}/${terminal.sessionState.liveness}` : 'n/a')}</div>
+          </div>
+          <div>
             <div class="detail-label">Raw Status</div>
             <div><span class="${statusClass(status)}">${escapeHtml(status)}</span></div>
           </div>
@@ -2930,6 +3527,7 @@
         </div>
 
         <div class="detail-actions">
+          <button class="btn" id="${prefix}-trim-history" type="button">Trim Tmux History</button>
           <button class="btn" id="${prefix}-destroy" type="button">Destroy Terminal</button>
           <button class="btn" id="${prefix}-reconcile-runs" type="button">Reconcile Stale Runs</button>
           <div class="hint">Attach command: <code>${escapeHtml(terminal.attachCommand || 'n/a')}</code></div>
@@ -2942,22 +3540,28 @@
         mode: coerceOutputMode(preferences.mode, 'history'),
         format: coerceOutputFormat(preferences.format, 'plain')
       };
-      const outputParams = new URLSearchParams({
-        lines: '250',
+      const peekParams = new URLSearchParams({
+        lines: '120',
         mode: outputPreferences.mode,
         format: outputPreferences.format
       });
-      const [terminal, output, messages] = await Promise.all([
+      const [terminal, peek, messages] = await Promise.all([
         fetchJson(`/orchestration/terminals/${encodeURIComponent(terminalId)}`),
-        fetchJson(`/orchestration/terminals/${encodeURIComponent(terminalId)}/output?${outputParams.toString()}`),
+        fetchJson(`/sessions/${encodeURIComponent(terminalId)}/peek?${peekParams.toString()}`),
         fetchJson(`/orchestration/terminals/${encodeURIComponent(terminalId)}/messages?limit=200`)
       ]);
 
       return {
-        terminal,
-        outputText: output.output || '',
-        outputMode: output.mode || outputPreferences.mode,
-        outputFormat: output.format || outputPreferences.format,
+        terminal: {
+          ...terminal,
+          sessionState: peek.sessionState || terminal.sessionState || null,
+          inputLease: peek.inputLease || null,
+          pendingInput: peek.pendingInput || []
+        },
+        peek,
+        outputText: peek.tail?.output || '',
+        outputMode: peek.tail?.mode || outputPreferences.mode,
+        outputFormat: peek.tail?.format || outputPreferences.format,
         messages: messages.messages || []
       };
     }
@@ -3054,6 +3658,20 @@
       }
 
       bindOutputPreferenceControls(prefix, refreshFn);
+      document.getElementById(`${prefix}-trim-history`)?.addEventListener('click', async () => {
+        if (!window.confirm('Trim tmux scrollback for this terminal? Broker logs and persisted messages are preserved.')) {
+          return;
+        }
+        try {
+          await fetchJson(`/orchestration/terminals/${encodeURIComponent(terminal.terminalId)}/trim-history`, {
+            method: 'POST',
+            body: JSON.stringify({})
+          });
+          await refreshFn();
+        } catch (error) {
+          window.alert(`Trim failed: ${error.message}`);
+        }
+      });
       document.getElementById(`${prefix}-destroy`)?.addEventListener('click', () => destroySelectedTerminal(terminal.terminalId));
       document.getElementById(`${prefix}-reconcile-runs`)?.addEventListener('click', reconcileStaleRuns);
     }
@@ -3246,7 +3864,10 @@
                 <div class="mobile-root-summary-title">${escapeHtml(rootTitle)}</div>
                 <div class="mobile-root-summary-subtitle">${escapeHtml(root.rootSessionId || 'unknown')}</div>
               </div>
-              ${renderOperatorStatePill(operatorState)}
+              <div class="row-badges">
+                ${renderLiveStatePill(root.live === true)}
+                ${renderOperatorStatePill(operatorState)}
+              </div>
             </div>
             <div class="detail-grid">
               <div>
@@ -3260,6 +3881,10 @@
               <div>
                 <div class="detail-label">Mode</div>
                 <div>${escapeHtml(root.rootMode || 'n/a')}</div>
+              </div>
+              <div>
+                <div class="detail-label">Live</div>
+                <div>${escapeHtml(root.live === true ? 'yes' : 'no')}</div>
               </div>
               <div>
                 <div class="detail-label">Last Event</div>
@@ -3286,7 +3911,10 @@
                 <div class="mobile-root-summary-title">${escapeHtml(rootTitle)}</div>
                 <div class="mobile-root-summary-subtitle">Latest activity stays at the bottom. Scroll up for older history.</div>
               </div>
-              ${renderOperatorStatePill(operatorState)}
+              <div class="row-badges">
+                ${renderLiveStatePill(root.live === true)}
+                ${renderOperatorStatePill(operatorState)}
+              </div>
             </div>
             <div class="timeline-list">
               ${events.length ? events.map((event) => `
@@ -3977,10 +4605,15 @@
       await refreshSelectedRoom();
     });
 
-    reconnectSocket();
-    syncUrlState();
-    refreshAll();
-    startPolling();
+    async function bootConsole() {
+      await exchangeLocalConsoleLogin();
+      reconnectSocket();
+      syncUrlState();
+      refreshAll();
+      startPolling();
+    }
+
+    bootConsole();
   </script>
 </body>
 </html>

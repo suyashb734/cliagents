@@ -1,72 +1,41 @@
 # cliagents Changelog
 
-All notable changes to this project will be documented in this file.
+All notable release-facing changes are documented here. `cliagents` is currently
+pre-stable; public APIs and storage shapes may change between alpha releases.
 
-The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
-and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
-
-## [1.0.0] - 2024-12-19
+## [0.1.0-alpha.0] - 2026-05-11
 
 ### Added
 
-- **12 AI CLI Adapters**
-  - Claude Code (`claude-code`)
-  - Gemini CLI (`gemini-cli`)
-  - OpenAI Codex CLI (`codex-cli`)
-  - Aider (`aider`)
-  - Goose (`goose`)
-  - Amazon Q (`amazon-q`)
-  - Plandex (`plandex`)
-  - Continue CLI (`continue-cli`)
-  - Mistral Vibe (`mistral-vibe`)
-  - Shell-GPT (`shell-gpt`)
-  - AIChat (`aichat`)
-  - GitHub Copilot CLI (`github-copilot`)
+- Local broker/control-plane surface for Claude Code, Codex CLI, Gemini CLI,
+  Qwen CLI, and OpenCode.
+- HTTP, WebSocket, OpenAI-compatible, and MCP entrypoints for local agent work.
+- Broker-managed roots, child sessions, rooms, runs, tasks, assignments, memory
+  bundles, usage summaries, and runtime-neutral remote snapshots.
+- SQLite-backed run ledger, task assignment state, terminal/session events,
+  root IO events, dispatch requests, run context snapshots, and task/session
+  bindings.
+- Local-token authentication by default when no explicit API key is configured.
+- Release-hardening checks for canonical docs, package contents, tracked local
+  artifacts, focused tests, runtime consistency, and auth fail-closed behavior.
 
-- **REST API Endpoints**
-  - `GET /health` - Health check
-  - `GET /openapi.json` - OpenAPI 3.0 specification
-  - `GET /adapters` - List available adapters with models
-  - `POST /sessions` - Create new session
-  - `GET /sessions` - List all sessions
-  - `GET /sessions/:id` - Get session info
-  - `GET /sessions/:id/status` - Get session status (running/stable/error)
-  - `POST /sessions/:id/interrupt` - Interrupt active process
-  - `POST /sessions/:id/messages` - Send message (with SSE streaming)
-  - `POST /sessions/:id/files` - Upload files to session
-  - `GET /sessions/:id/files` - List files in session
-  - `DELETE /sessions/:id` - Terminate session
-  - `POST /ask` - One-shot ask (auto session management)
+### Changed
 
-- **Core Features**
-  - Real-time streaming via Server-Sent Events (SSE)
-  - WebSocket support for bidirectional communication
-  - Session management with automatic cleanup
-  - Model selection per session/adapter
-  - JSON Schema for structured output (Claude)
-  - Generation parameters (temperature, top_p, top_k)
-  - Tool restrictions (`allowedTools`)
-  - File upload to session working directory
-  - Cost and token usage tracking
-  - Standardized error responses
+- Release posture is GitHub-only alpha. The package is marked private and is not
+  intended for npm publication in this release.
+- Adapter documentation now distinguishes alpha support from experimental or
+  degraded provider paths.
+- Public docs now point to the canonical documentation map and describe active
+  alpha caveats rather than older planning claims.
 
-- **Developer Tools**
-  - OpenAPI 3.0 specification
-  - Web dashboard for adapter status
-  - Comprehensive test suite (23 tests)
-  - Setup script for CLI authentication
+### Known Alpha Caveats
 
-### Technical Details
-
-- Spawn-per-message architecture with native CLI resume
-- JSON streaming output (no terminal scraping)
-- Process isolation per message
-- Automatic orphan process cleanup
-
-## [Unreleased]
-
-### Planned
-- MCP (Model Context Protocol) server support
-- Grok CLI adapter
-- SSE event IDs for reconnection
-- Docker support
+- Native provider TUIs inside tmux do not always match direct CLI UI fidelity.
+- Live provider tests depend on local auth, quota, capacity, and upstream CLI
+  behavior.
+- Qwen CLI is experimental/degraded until the live reliability matrix proves the
+  current auth and continuity path.
+- MCP stdio clients may need restart after broker restarts so they pick up the
+  current broker/token state.
+- Usage metadata is limited to what provider CLIs expose or what the broker can
+  observe.

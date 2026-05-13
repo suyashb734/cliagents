@@ -4,6 +4,7 @@
 
 const assert = require('assert');
 const { EventEmitter } = require('events');
+const { Readable } = require('stream');
 
 const QwenCliAdapter = require('../src/adapters/qwen-cli');
 
@@ -23,6 +24,15 @@ async function collect(generator) {
     output.push(item);
   }
   return output;
+}
+
+async function withTimeout(promise, timeoutMs, label) {
+  return Promise.race([
+    promise,
+    new Promise((_, reject) => {
+      setTimeout(() => reject(new Error(label)), timeoutMs);
+    })
+  ]);
 }
 
 (async () => {
@@ -113,6 +123,158 @@ async function collect(generator) {
     assert.strictEqual(first, null);
     assert.strictEqual(second, null);
     assert.strictEqual(spawnCount, 1);
+  });
+
+  await runTest('_runQwenCommandStreaming escalates to SIGKILL when timeout ignores SIGTERM', async () => {
+    const adapter = new QwenCliAdapter({ timeout: 20, terminationGraceMs: 10, skipAuthPreflight: true });
+    const killSignals = [];
+
+    adapter._getQwenPath = async () => '/usr/local/bin/qwen';
+    adapter._spawnProcess = () => {
+      const proc = new EventEmitter();
+      proc.stdout = Readable.from([]);
+      proc.stderr = new EventEmitter();
+      proc.stdin = { end() {} };
+      proc.exitCode = null;
+      proc.signalCode = null;
+      proc.killed = false;
+      proc.kill = (signal) => {
+        killSignals.push(signal);
+        proc.killed = true;
+        if (signal === 'SIGKILL') {
+          proc.signalCode = 'SIGKILL';
+          process.nextTick(() => proc.emit('close', 137));
+        }
+        return true;
+      };
+      return proc;
+    };
+
+    const chunks = await withTimeout(collect(adapter._runQwenCommandStreaming(['-p', 'timeout-test'], {
+      timeout: 20,
+      sessionId: 'qwen-timeout-escalation',
+      workDir: process.cwd()
+    })), 1000, 'timeout path did not settle');
+
+    const errorChunk = chunks.find((chunk) => chunk.type === 'error');
+    assert(errorChunk, 'Expected an error chunk after timeout');
+    assert.strictEqual(errorChunk.timedOut, true, 'Timeout error should be marked timedOut=true');
+    assert.deepStrictEqual(
+      killSignals.slice(0, 2),
+      ['SIGTERM', 'SIGKILL'],
+      `Expected SIGTERM then SIGKILL escalation, got ${killSignals.join(', ')}`
+    );
+  });
+
+  await runTest('_runQwenCommandStreaming settles when the child never emits close/error', async () => {
+    const adapter = new QwenCliAdapter({ timeout: 20, terminationGraceMs: 10, timeoutSettleMs: 20, skipAuthPreflight: true });
+    const killSignals = [];
+
+    adapter._getQwenPath = async () => '/usr/local/bin/qwen';
+    adapter._spawnProcess = () => {
+      const proc = new EventEmitter();
+      proc.stdout = Readable.from([]);
+      proc.stderr = new EventEmitter();
+      proc.stdin = { end() {} };
+      proc.exitCode = null;
+      proc.signalCode = null;
+      proc.killed = false;
+      proc.kill = (signal) => {
+        killSignals.push(signal);
+        proc.killed = true;
+        if (signal === 'SIGKILL') {
+          proc.signalCode = 'SIGKILL';
+        }
+        return true;
+      };
+      return proc;
+    };
+
+    const chunks = await withTimeout(collect(adapter._runQwenCommandStreaming(['-p', 'timeout-test'], {
+      timeout: 20,
+      sessionId: 'qwen-timeout-never-closes',
+      workDir: process.cwd()
+    })), 1000, 'never-close timeout path did not settle');
+
+    const errorChunk = chunks.find((chunk) => chunk.type === 'error');
+    assert(errorChunk, 'Expected an error chunk after forced settle timeout');
+    assert.strictEqual(errorChunk.timedOut, true, 'Timeout error should be marked timedOut=true');
+    assert(killSignals.includes('SIGTERM'), `Expected SIGTERM during timeout handling, got ${killSignals.join(', ')}`);
+    assert(killSignals.includes('SIGKILL'), `Expected SIGKILL during timeout handling, got ${killSignals.join(', ')}`);
+  });
+
+  await runTest('_runQwenCommandStreaming settles when stdout iterator never resolves after timeout', async () => {
+    const adapter = new QwenCliAdapter({ timeout: 20, terminationGraceMs: 10, timeoutSettleMs: 20, skipAuthPreflight: true });
+    const killSignals = [];
+
+    adapter._getQwenPath = async () => '/usr/local/bin/qwen';
+    adapter._spawnProcess = () => {
+      const proc = new EventEmitter();
+      const iterator = {
+        next: () => new Promise(() => {}),
+        return: async () => ({ done: true })
+      };
+      proc.stdout = {
+        destroy() {},
+        [Symbol.asyncIterator]() {
+          return iterator;
+        }
+      };
+      proc.stderr = { destroy() {} };
+      proc.stdin = { end() {} };
+      proc.exitCode = null;
+      proc.signalCode = null;
+      proc.killed = false;
+      proc.kill = (signal) => {
+        killSignals.push(signal);
+        proc.killed = true;
+        if (signal === 'SIGKILL') {
+          proc.signalCode = 'SIGKILL';
+        }
+        return true;
+      };
+      return proc;
+    };
+
+    const chunks = await withTimeout(collect(adapter._runQwenCommandStreaming(['-p', 'timeout-test'], {
+      timeout: 20,
+      sessionId: 'qwen-timeout-stuck-stdout-iterator',
+      workDir: process.cwd()
+    })), 1000, 'stuck stdout iterator timeout path did not settle');
+
+    const errorChunk = chunks.find((chunk) => chunk.type === 'error');
+    assert(errorChunk, 'Expected an error chunk after timeout + forced settle');
+    assert.strictEqual(errorChunk.timedOut, true, 'Timeout error should be marked timedOut=true');
+    assert(killSignals.includes('SIGTERM'), `Expected SIGTERM during timeout handling, got ${killSignals.join(', ')}`);
+    assert(killSignals.includes('SIGKILL'), `Expected SIGKILL during timeout handling, got ${killSignals.join(', ')}`);
+  });
+
+  await runTest('_runQwenCommandStreaming fails auth preflight before spawning qwen', async () => {
+    const adapter = new QwenCliAdapter({
+      timeout: 1000,
+      authInspector: () => ({
+        authenticated: false,
+        reason: 'test qwen auth missing'
+      })
+    });
+    let spawnCount = 0;
+    adapter._getQwenPath = async () => '/usr/local/bin/qwen';
+    adapter._spawnProcess = () => {
+      spawnCount += 1;
+      throw new Error('qwen should not be spawned when auth preflight fails');
+    };
+
+    const chunks = await collect(adapter._runQwenCommandStreaming(['-p', 'auth-test'], {
+      timeout: 1000,
+      sessionId: 'qwen-auth-preflight',
+      workDir: process.cwd()
+    }));
+
+    const errorChunk = chunks.find((chunk) => chunk.type === 'error');
+    assert(errorChunk, 'Expected auth preflight error chunk');
+    assert.strictEqual(errorChunk.failureClass, 'auth');
+    assert(errorChunk.content.includes('test qwen auth missing'));
+    assert.strictEqual(spawnCount, 0, 'Qwen process must not be spawned when auth preflight fails');
   });
 
   await runTest('send rejects invalid allowedTools entries', async () => {

@@ -387,6 +387,11 @@ function runProjectAnchorRepairAndDiagnosticsTest() {
       brief: 'Recoverable run snapshot',
       generationTrigger: 'repair'
     });
+    db.db.prepare(`
+      UPDATE memory_snapshots
+      SET project_id = NULL
+      WHERE scope = 'run' AND scope_id = 'run-root-recoverable'
+    `).run();
 
     db.db.prepare(`
       INSERT INTO messages (terminal_id, trace_id, root_session_id, role, content, metadata, created_at)
@@ -539,6 +544,116 @@ function runProjectAnchorRepairAndDiagnosticsTest() {
   }
 }
 
+function runTerminalModelStateMigrationRegressionTest() {
+  const rootDir = makeTempDir('cliagents-db-terminal-model-state-');
+  const dbPath = path.join(rootDir, 'cliagents.db');
+  const limitedMigrationsDir = path.join(rootDir, 'migrations-pre-0017');
+  const fullMigrationsDir = path.join(__dirname, '../src/database/migrations');
+  fs.mkdirSync(limitedMigrationsDir, { recursive: true });
+
+  try {
+    for (const fileName of fs.readdirSync(fullMigrationsDir).filter((file) => (
+      file.endsWith('.sql') && file < '0017_terminal_requested_effective_models.sql'
+    )).sort()) {
+      copyMigration(fullMigrationsDir, limitedMigrationsDir, fileName);
+    }
+
+    const legacyDb = new OrchestrationDB({
+      dbPath,
+      dataDir: rootDir,
+      migrationsDir: limitedMigrationsDir
+    });
+
+    try {
+      legacyDb.registerTerminal(
+        'term-legacy-model-state',
+        'legacy-model-session',
+        'legacy-model-window',
+        'codex-cli',
+        null,
+        'worker',
+        rootDir,
+        null,
+        {
+          rootSessionId: 'root-legacy-model-state',
+          model: 'gpt-5.4'
+        }
+      );
+    } finally {
+      legacyDb.close();
+    }
+
+    const migratedDb = new OrchestrationDB({
+      dbPath,
+      dataDir: rootDir,
+      migrationsDir: fullMigrationsDir
+    });
+
+    try {
+      const terminalColumns = migratedDb.db.prepare('PRAGMA table_info(terminals)').all().map((column) => column.name);
+      assert(terminalColumns.includes('requested_model'), 'terminals should include requested_model');
+      assert(terminalColumns.includes('effective_model'), 'terminals should include effective_model');
+      assert(terminalColumns.includes('requested_effort'), 'terminals should include requested_effort');
+      assert(terminalColumns.includes('effective_effort'), 'terminals should include effective_effort');
+      const assignmentColumns = migratedDb.db.prepare('PRAGMA table_info(task_assignments)').all().map((column) => column.name);
+      assert(assignmentColumns.includes('reasoning_effort'), 'task_assignments should include reasoning_effort');
+
+      const legacyTerminal = migratedDb.getTerminal('term-legacy-model-state');
+      assert.strictEqual(legacyTerminal.model, 'gpt-5.4');
+      assert.strictEqual(legacyTerminal.requested_model, 'gpt-5.4');
+      assert.strictEqual(legacyTerminal.effective_model, 'gpt-5.4');
+
+      migratedDb.registerTerminal(
+        'term-new-model-state',
+        'new-model-session',
+        'new-model-window',
+        'claude-code',
+        null,
+        'worker',
+        rootDir,
+        null,
+        {
+          rootSessionId: 'root-new-model-state',
+          model: 'claude-opus-4-6',
+          requestedModel: 'claude-opus-4-7',
+          effectiveModel: 'claude-opus-4-6',
+          requestedEffort: 'high',
+          effectiveEffort: 'high'
+        }
+      );
+
+      let newTerminal = migratedDb.getTerminal('term-new-model-state');
+      assert.strictEqual(newTerminal.model, 'claude-opus-4-6');
+      assert.strictEqual(newTerminal.requested_model, 'claude-opus-4-7');
+      assert.strictEqual(newTerminal.effective_model, 'claude-opus-4-6');
+      assert.strictEqual(newTerminal.requested_effort, 'high');
+      assert.strictEqual(newTerminal.effective_effort, 'high');
+
+      migratedDb.touchTerminalMessage('term-new-model-state', {
+        model: 'claude-opus-4-7',
+        requestedModel: 'claude-opus-4-7',
+        effectiveModel: 'claude-opus-4-7',
+        requestedEffort: 'xhigh',
+        effectiveEffort: 'xhigh',
+        timestamp: Date.now()
+      });
+
+      newTerminal = migratedDb.getTerminal('term-new-model-state');
+      assert.strictEqual(newTerminal.model, 'claude-opus-4-7');
+      assert.strictEqual(newTerminal.requested_model, 'claude-opus-4-7');
+      assert.strictEqual(newTerminal.effective_model, 'claude-opus-4-7');
+      assert.strictEqual(newTerminal.requested_effort, 'xhigh');
+      assert.strictEqual(newTerminal.effective_effort, 'xhigh');
+    } finally {
+      migratedDb.close();
+    }
+
+    console.log('✅ Terminal model-state migration backfills and persists requested/effective models');
+  } finally {
+    fs.rmSync(rootDir, { recursive: true, force: true });
+  }
+}
+
 function run() {
   const rootDir = makeTempDir('cliagents-db-migrations-');
   const dbPath = path.join(rootDir, 'cliagents.db');
@@ -626,6 +741,7 @@ function run() {
   runLegacyMessagesMigrationRegressionTest();
   runProjectAnchorMigrationRegressionTest();
   runProjectAnchorRepairAndDiagnosticsTest();
+  runTerminalModelStateMigrationRegressionTest();
 }
 
 try {

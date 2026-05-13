@@ -417,6 +417,58 @@ function getAssignmentStatus(assignment = {}) {
   return normalizeAssignmentStatus(assignment.status || assignment.effectiveStatus || assignment.storedStatus || 'queued');
 }
 
+function getDispatchRequests(assignment = {}) {
+  if (Array.isArray(assignment.dispatchRequests)) {
+    return assignment.dispatchRequests;
+  }
+  if (Array.isArray(assignment.dispatch_requests)) {
+    return assignment.dispatch_requests;
+  }
+  return [];
+}
+
+function getActiveAssignmentStartDispatch(assignment = {}) {
+  const dispatches = getDispatchRequests(assignment)
+    .filter((dispatch) => {
+      const kind = normalizeKey(dispatch?.requestKind || dispatch?.request_kind || 'assignment_start');
+      return !kind || kind === 'assignment_start';
+    })
+    .filter((dispatch) => !dispatch?.terminalId && !dispatch?.terminal_id);
+
+  for (const dispatch of dispatches) {
+    const status = normalizeKey(dispatch?.status);
+    const livenessState = normalizeKey(dispatch?.liveness?.state);
+    if (status === 'queued' || status === 'claimed') {
+      return dispatch;
+    }
+    if (status === 'deferred') {
+      return dispatch;
+    }
+    if (livenessState === 'stale' || livenessState === 'terminal_missing') {
+      return dispatch;
+    }
+  }
+
+  return null;
+}
+
+function getDispatchEligibilityBlockReason(assignment = {}) {
+  const dispatch = getActiveAssignmentStartDispatch(assignment);
+  if (!dispatch) {
+    return null;
+  }
+
+  const status = normalizeKey(dispatch.status);
+  const livenessState = normalizeKey(dispatch?.liveness?.state);
+  if (status === 'deferred' && livenessState === 'ready') {
+    return null;
+  }
+  if (livenessState) {
+    return `dispatch:${livenessState}`;
+  }
+  return status ? `dispatch:${status}` : 'dispatch:active';
+}
+
 function isTerminalStatus(status) {
   return status === 'completed' || status === 'failed' || status === 'cancelled' || status === 'superseded' || status === 'abandoned';
 }
@@ -515,6 +567,10 @@ function isAssignmentEligible(assignment, assignments, options) {
 
   if (status !== 'queued' || assignment.terminalId) {
     return { eligible: false, reason: `status:${status}`, startPolicy, phase };
+  }
+  const dispatchBlockReason = getDispatchEligibilityBlockReason(assignment);
+  if (dispatchBlockReason) {
+    return { eligible: false, reason: dispatchBlockReason, startPolicy, phase };
   }
   if (!options.ignoreManualHold) {
     const manualHold = Boolean(

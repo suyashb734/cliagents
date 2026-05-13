@@ -3,7 +3,7 @@
 Base URL: `http://localhost:4001`
 
 Authentication:
-`CLI_AGENTS_API_KEY` enables API-key auth. Provide `Authorization: Bearer <key>` or `X-API-Key: <key>`. When no key is set, auth is disabled (dev mode). WebSocket auth uses `?apiKey=...` or the `Sec-WebSocket-Protocol` header.
+`CLIAGENTS_API_KEY` (or legacy alias `CLI_AGENTS_API_KEY`) enables API-key auth. Provide `Authorization: Bearer <key>` or `X-API-Key: <key>`. Auth is fail-closed by default. When no env API key is configured, the broker creates a same-machine local token in its data directory for local CLI clients. Set `CLIAGENTS_DATA_DIR` when running multiple brokers or non-default broker locations. To opt into fully unauthenticated local-only mode, set `CLIAGENTS_ALLOW_UNAUTHENTICATED_LOCALHOST=1` and bind to a loopback host. WebSocket auth uses `?apiKey=...` or the `Sec-WebSocket-Protocol` header.
 
 ## Core Endpoints
 
@@ -34,7 +34,7 @@ List available adapters and their availability.
   "adapters": [
     {
       "name": "claude-code",
-      "version": "1.0.0",
+      "version": "0.1.0-alpha.0",
       "config": { "timeout": 60000, "workDir": "/tmp/agent" },
       "available": true,
       "models": ["claude-3-5-sonnet-20241022"]
@@ -937,13 +937,19 @@ curl -X POST -H "Authorization: Bearer $CLI_AGENTS_API_KEY" http://localhost:400
 
 ### POST /dashboard/adapters/:name/env
 Set environment variables for adapter.
+
+Security behavior:
+- Endpoint can be disabled with `CLIAGENTS_DISABLE_DASHBOARD_ENV_MUTATION=1` (returns `403`).
+- Only adapter allowlisted keys are accepted (`ADAPTER_AUTH_CONFIG[adapter].envVars`), plus optional extras from `CLIAGENTS_DASHBOARD_ENV_MUTATION_EXTRA_KEYS`.
+- Unknown keys are rejected with `400` and `rejectedKeys`.
+
 **Request:**
 ```json
 { "envVars": { "ANTHROPIC_API_KEY": "..." } }
 ```
 **Response:**
 ```json
-{ "success": true, "message": "Environment variables set" }
+{ "success": true, "message": "Environment variables set", "acceptedKeys": ["ANTHROPIC_API_KEY"] }
 ```
 **Example:**
 ```bash

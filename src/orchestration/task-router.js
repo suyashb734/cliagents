@@ -16,6 +16,43 @@ const { isAdapterAuthenticated } = require('../utils/adapter-auth');
 const { getChildSessionSupport } = require('./child-session-support');
 const { AdapterReadinessService } = require('./adapter-readiness');
 
+const ROUTE_TASK_RETRY_MAX_ATTEMPTS = 2;
+const DEFAULT_ROUTE_RETRY_DELAY_MS = 500;
+const MAX_ROUTE_RETRY_DELAY_MS = (() => {
+  const parsed = Number.parseInt(process.env.CLIAGENTS_ROUTE_RETRY_DELAY_MAX_MS || '5000', 10);
+  if (!Number.isFinite(parsed) || parsed < 0) {
+    return 5000;
+  }
+  return parsed;
+})();
+
+function isExplicitTerminalBusySignal(errorCode, normalizedMessage) {
+  const code = String(errorCode || '').trim().toLowerCase();
+  if (code === 'terminal_busy') {
+    return true;
+  }
+
+  const message = String(normalizedMessage || '').trim().toLowerCase();
+  if (!message) {
+    return false;
+  }
+
+  if (message.includes('terminal_busy')) {
+    return true;
+  }
+
+  const hasTerminalBusy = message.includes('terminal') && message.includes('busy');
+  const hasSessionBusy = message.includes('session') && message.includes('busy');
+  const hasTerminalProcessing = message.includes('terminal') && message.includes('processing');
+  return hasTerminalBusy || hasSessionBusy || hasTerminalProcessing;
+}
+
+function normalizeRouteRetryDelayMs(delayMs, fallbackMs) {
+  const fallback = Number.isFinite(fallbackMs) ? Math.max(0, Number(fallbackMs)) : 0;
+  const normalized = Number.isFinite(delayMs) ? Math.max(0, Number(delayMs)) : fallback;
+  return Math.min(normalized, MAX_ROUTE_RETRY_DELAY_MS);
+}
+
 // Task types and their default agent mappings
 const TASK_TYPES = {
   PLAN: 'plan',
@@ -570,6 +607,38 @@ class TaskRouter extends EventEmitter {
     };
   }
 
+  _classifyRouteRetry(error) {
+    if (!error) {
+      return null;
+    }
+
+    const code = String(error.code || '').trim().toLowerCase();
+    const message = String(error.message || '').trim();
+    const normalizedMessage = message.toLowerCase();
+    const retryAfterMs = Number.isFinite(error.retryAfterMs) ? Number(error.retryAfterMs) : null;
+
+    if (isExplicitTerminalBusySignal(code, normalizedMessage)) {
+      return {
+        reason: 'terminal_busy',
+        delayMs: normalizeRouteRetryDelayMs(retryAfterMs, DEFAULT_ROUTE_RETRY_DELAY_MS)
+      };
+    }
+
+    if (
+      code === 'terminal_not_found'
+      || normalizedMessage.includes('terminal not found')
+      || normalizedMessage.includes('tmux session not found')
+      || normalizedMessage.includes('tmux window not found')
+    ) {
+      return {
+        reason: 'terminal_missing',
+        delayMs: normalizeRouteRetryDelayMs(retryAfterMs, 0)
+      };
+    }
+
+    return null;
+  }
+
   /**
    * Route a single task to the appropriate agent
    *
@@ -586,6 +655,7 @@ class TaskRouter extends EventEmitter {
       systemPrompt,
       workDir,
       model,
+      reasoningEffort,
       sessionLabel,
       rootSessionId,
       parentSessionId,
@@ -612,6 +682,9 @@ class TaskRouter extends EventEmitter {
     const detectedRole = TASK_TO_ROLE[detection.type];
     const resolvedSessionKind = this._deriveSessionKind({ sessionKind, forceRole }, detection.type);
     const requireCollaboratorReady = resolvedSessionKind === 'collaborator';
+    if (resolvedSessionKind === 'collaborator' && !String(sessionLabel || '').trim()) {
+      throw new Error('sessionLabel is required when sessionKind=collaborator');
+    }
 
     if (forceRole || (!forceProfile && detectedRole)) {
       const effectiveRole = forceRole || detectedRole;
@@ -671,12 +744,12 @@ class TaskRouter extends EventEmitter {
       };
     }
 
-    // Create terminal and send task
-    const terminal = await this.sessionManager.createTerminal({
+    const baseTerminalOptions = {
       adapter: profile.adapter,
       agentProfile: profileName,
       systemPrompt: systemPrompt || profile.systemPrompt,
       model: modelSelection.model,
+      reasoningEffort,
       sessionLabel: sessionLabel || null,
       allowedTools: profile.allowedTools,
       permissionMode: profile.permissionMode,
@@ -687,33 +760,92 @@ class TaskRouter extends EventEmitter {
       originClient,
       externalSessionRef,
       lineageDepth,
-      sessionMetadata,
-      preferReuse,
-      forceFreshSession
-    });
-
-    // Send the message
-    await this.sessionManager.sendInput(terminal.terminalId, message);
-
-    return {
-      terminalId: terminal.terminalId,
-      reused: terminal.reused === true,
-      reuseReason: terminal.reuseReason || null,
-      profile: profileName,
-      adapter: profile.adapter,
-      model: modelSelection.model,
-      modelRecommendation: modelSelection.recommendation,
-      taskType: detection.type,
-      confidence: detection.confidence,
-      runtimeAvailable: runtimeAdapter.available,
-      runtimeAuthenticated: runtimeAdapter.authenticated,
-      authenticationReason: runtimeAdapter.authenticationReason,
-      runtimeCapabilities: runtimeAdapter.capabilities,
-      runtimeChildSessionSupport: runtimeAdapter.childSessionSupport || null,
-      adapterReadiness: runtimeAdapter.adapterReadiness || null,
-      runtimeContract: runtimeAdapter.contract,
-      routingDecision
+      sessionMetadata
     };
+
+    let lastError = null;
+    let retryReason = null;
+
+    for (let attempt = 1; attempt <= ROUTE_TASK_RETRY_MAX_ATTEMPTS; attempt++) {
+      const isRetryAttempt = attempt > 1;
+      const attemptForceFreshSession = isRetryAttempt ? true : forceFreshSession;
+      const attemptPreferReuse = isRetryAttempt ? false : preferReuse;
+      let terminal = null;
+
+      try {
+        terminal = await this.sessionManager.createTerminal({
+          ...baseTerminalOptions,
+          preferReuse: attemptPreferReuse,
+          forceFreshSession: attemptForceFreshSession
+        });
+
+        await this.sessionManager.sendInput(terminal.terminalId, message);
+
+        return {
+          terminalId: terminal.terminalId,
+          reused: terminal.reused === true,
+          reuseReason: terminal.reuseReason || null,
+          reuse: terminal.reuseDecision || null,
+          profile: profileName,
+          adapter: profile.adapter,
+          model: modelSelection.model,
+          reasoningEffort: reasoningEffort || null,
+          modelRecommendation: modelSelection.recommendation,
+          taskType: detection.type,
+          confidence: detection.confidence,
+          runtimeAvailable: runtimeAdapter.available,
+          runtimeAuthenticated: runtimeAdapter.authenticated,
+          authenticationReason: runtimeAdapter.authenticationReason,
+          runtimeCapabilities: runtimeAdapter.capabilities,
+          runtimeChildSessionSupport: runtimeAdapter.childSessionSupport || null,
+          adapterReadiness: runtimeAdapter.adapterReadiness || null,
+          runtimeContract: runtimeAdapter.contract,
+          routingDecision,
+          routeAttempts: attempt,
+          routeRetried: isRetryAttempt,
+          routeRetryReason: retryReason
+        };
+      } catch (error) {
+        lastError = error;
+        const retryPlan = attempt < ROUTE_TASK_RETRY_MAX_ATTEMPTS
+          ? this._classifyRouteRetry(error)
+          : null;
+        if (!retryPlan) {
+          throw error;
+        }
+
+        retryReason = retryPlan.reason || 'transient';
+
+        if (
+          terminal
+          && terminal.reused !== true
+          && typeof this.sessionManager.destroyTerminal === 'function'
+        ) {
+          try {
+            await this.sessionManager.destroyTerminal(terminal.terminalId);
+          } catch (cleanupError) {
+            this.emit('task-route-retry-cleanup-failed', {
+              terminalId: terminal.terminalId,
+              reason: cleanupError.message
+            });
+          }
+        }
+
+        this.emit('task-route-retry', {
+          profile: profileName,
+          adapter: profile.adapter,
+          reason: retryReason,
+          attempt,
+          nextAttempt: attempt + 1
+        });
+
+        if ((retryPlan.delayMs || 0) > 0) {
+          await new Promise((resolve) => setTimeout(resolve, retryPlan.delayMs));
+        }
+      }
+    }
+
+    throw lastError || new Error('Failed to route task');
   }
 
   /**
@@ -885,6 +1017,7 @@ class TaskRouter extends EventEmitter {
       modelRecommendation: stepModelSelection.recommendation,
       reused: terminal.reused === true,
       reuseReason: terminal.reuseReason || null,
+      reuse: terminal.reuseDecision || null,
       output
     };
   }

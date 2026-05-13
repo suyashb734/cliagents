@@ -62,6 +62,8 @@ class MemoryMaintenanceService {
         terminalsRefreshed: 0,
         repairedRuns: 0,
         repairedRoots: 0,
+        repairedTasks: 0,
+        repairedProjects: 0,
         skippedRunsWithoutRootSessionId: 0,
         error: 'snapshot_service_unavailable'
       };
@@ -89,6 +91,8 @@ class MemoryMaintenanceService {
 
     let repairedRuns = 0;
     let repairedRoots = 0;
+    let repairedTasks = 0;
+    let repairedProjects = 0;
     let skippedRunsWithoutRootSessionId = 0;
 
     for (const row of finishedRuns) {
@@ -97,11 +101,14 @@ class MemoryMaintenanceService {
         const snapshot = this._snapshotService.writeRunSnapshot(row.id, {
           rootSessionId: row.rootSessionId || null,
           taskId: row.taskId || null,
-          generationTrigger: 'repair'
+          generationTrigger: 'repair',
+          refreshTask: false
         });
         if (snapshot) {
           repairedRuns += 1;
         }
+      } else {
+        this._snapshotService.linkRunSnapshotSources(row.id);
       }
 
       if (!row.rootSessionId) {
@@ -112,11 +119,58 @@ class MemoryMaintenanceService {
     const rootSessionIds = [...new Set(finishedRuns.map((row) => row.rootSessionId).filter(Boolean))];
     for (const rootSessionId of rootSessionIds) {
       if (!this._snapshotService.isRootSnapshotStale(rootSessionId)) {
+        this._snapshotService.linkRootSnapshotSources(rootSessionId);
         continue;
       }
       const result = await this._snapshotService.refreshRootSnapshot(rootSessionId);
       if (result.success) {
         repairedRoots += 1;
+      }
+    }
+
+    const taskIds = new Set(finishedRuns.map((row) => row.taskId).filter(Boolean));
+    if (typeof db.listTasks === 'function') {
+      for (const task of db.listTasks({ limit: 200 })) {
+        taskIds.add(task.id);
+      }
+    }
+    for (const taskId of taskIds) {
+      if (!this._snapshotService.isTaskSnapshotStale(taskId)) {
+        this._snapshotService.linkTaskSnapshotSources(taskId);
+        continue;
+      }
+      const result = this._snapshotService.refreshTaskSnapshot(taskId, {
+        generationTrigger: 'repair',
+        refreshProject: false
+      });
+      if (result.success) {
+        repairedTasks += 1;
+      }
+    }
+
+    const projectIds = new Set();
+    if (typeof db.listTasks === 'function') {
+      for (const task of db.listTasks({ limit: 200 })) {
+        if (task.projectId) {
+          projectIds.add(task.projectId);
+        }
+      }
+    }
+    if (typeof db.listProjects === 'function') {
+      for (const project of db.listProjects({ limit: 200 })) {
+        projectIds.add(project.id);
+      }
+    }
+    for (const projectId of projectIds) {
+      if (!this._snapshotService.isProjectSnapshotStale(projectId)) {
+        this._snapshotService.linkProjectSnapshotSources(projectId);
+        continue;
+      }
+      const result = this._snapshotService.refreshProjectSnapshot(projectId, {
+        generationTrigger: 'repair'
+      });
+      if (result.success) {
+        repairedProjects += 1;
       }
     }
 
@@ -127,6 +181,8 @@ class MemoryMaintenanceService {
       terminalsRefreshed,
       repairedRuns,
       repairedRoots,
+      repairedTasks,
+      repairedProjects,
       skippedRunsWithoutRootSessionId
     };
   }

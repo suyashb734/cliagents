@@ -4,8 +4,13 @@ A Node.js server that brokers Codex CLI, Gemini CLI, Qwen CLI, OpenCode CLI, and
 
 [![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](https://opensource.org/licenses/MIT)
 
+> Alpha status: `cliagents` is a GitHub-only alpha. The current package is not
+> intended for npm publication and public APIs/storage shapes may change.
+
 ## Table of Contents
 
+- [Alpha Caveats](#alpha-caveats)
+- [How this differs](#how-this-differs)
 - [Why cliagents?](#why-cliagents)
 - [Key Features](#key-features)
 - [Quick Start](#quick-start)
@@ -20,6 +25,30 @@ A Node.js server that brokers Codex CLI, Gemini CLI, Qwen CLI, OpenCode CLI, and
 - [Development](#development)
 - [Documentation](#documentation)
 - [License](#license)
+
+## Alpha Caveats
+
+- `cliagents` controls local CLI and tmux processes. A valid broker token should be treated as local shell access for the current user.
+- The server binds to `127.0.0.1` by default. Exposing it on a LAN or through a tunnel is an explicit operator decision and requires authentication.
+- Native provider TUIs inside broker-managed tmux roots may not perfectly match direct Codex, Claude, Gemini, Qwen, or OpenCode UI fidelity.
+- MCP stdio clients may need restart after broker restarts so they pick up the current broker and local-token state.
+- Live provider tests depend on local auth, quotas, provider capacity, and upstream CLI behavior. Deterministic tests are the release gate; live tests are adapter-readiness evidence.
+- Qwen CLI is experimental/degraded unless the child adapter reliability matrix proves current auth, follow-up, and resume behavior.
+- Usage and cost fields are limited to provider-reported or broker-observable metadata. `unknown` models, zero costs, or missing durations can be valid alpha outputs.
+
+## How this differs
+
+`cliagents` is a local broker/control plane, not a hosted product, terminal
+replacement, or chat UI. It exposes installed coding CLIs over HTTP, WebSocket,
+OpenAI-compatible APIs, and MCP so other programs can drive durable roots,
+children, rooms, tasks, memory, usage, and replay.
+
+Compared with Chorus, `cliagents` is broader than multi-LLM review templates and
+focuses on persistent broker state. Compared with CAO, it emphasizes memory,
+usage attribution, root/session lineage, and remote-supervision-ready broker
+objects. Compared with Warp, it is not trying to replace the terminal UI.
+Compared with Multica, it is local broker infrastructure rather than a team task
+board or hosted agent platform.
 
 ## Why cliagents?
 
@@ -86,6 +115,7 @@ By orchestrating multiple CLI agents, you can:
 - **OpenAI-Compatible API** - Drop-in replacement using existing SDKs
 - **Multi-Agent Orchestration** - Coordinate tasks across local CLI agents including Claude Code, Gemini, Codex, Qwen, and OpenCode
 - **Persistent Sessions** - Maintain context across multiple interactions
+- **Managed-Root Notifications** - macOS, webhook, and Telegram completion/attention alerts for broker-managed roots
 - **Skills System** - Reusable workflows for TDD, debugging, code review
 - **MCP Integration** - Use from Claude Code or other MCP-enabled tools
 
@@ -93,8 +123,9 @@ By orchestrating multiple CLI agents, you can:
 
 ### Prerequisites
 
-- **Node.js** 20+ (v20-v24 supported)
+- **Node.js** 22.12.0 (the supported alpha runtime; see [`.nvmrc`](./.nvmrc))
 - **pnpm** for package management
+- **tmux** for managed roots and child sessions
 - **At least one supported CLI agent installed**:
   - Claude Code: `npm i -g @anthropic-ai/claude-code`
   - Gemini CLI: `npm i -g @google/gemini-cli`
@@ -162,17 +193,17 @@ Agents monitor code changes and automatically update READMEs, API docs, and inli
 
 ## Core Adapters
 
-### Primary (Fully Tested)
+### Alpha Adapter Status
 
-| Adapter | CLI Command | Cost | Install |
-|---------|-------------|------|---------|
-| `claude-code` | `claude` | $20/mo (Pro) | `npm i -g @anthropic-ai/claude-code` |
-| `gemini-cli` | `gemini` | FREE | `npm i -g @google/gemini-cli` |
-| `codex-cli` | `codex` | $20/mo (Plus) | `npm i -g @openai/codex` |
-| `qwen-cli` | `qwen` | Subscription/OAuth | install `qwen` and authenticate |
-| `opencode-cli` | `opencode` | Subscription/OAuth | install `opencode` and authenticate |
+| Adapter | CLI Command | Alpha status | Install |
+|---------|-------------|--------------|---------|
+| `claude-code` | `claude` | Experimental until 3-run child reliability evidence is recorded | `npm i -g @anthropic-ai/claude-code` |
+| `gemini-cli` | `gemini` | Experimental until 3-run child reliability evidence is recorded | `npm i -g @google/gemini-cli` |
+| `codex-cli` | `codex` | Experimental until 3-run child reliability evidence is recorded | `npm i -g @openai/codex` |
+| `qwen-cli` | `qwen` | Experimental/degraded by default | install `qwen` and authenticate |
+| `opencode-cli` | `opencode` | Experimental until 3-run child reliability evidence is recorded | install `opencode` and authenticate |
 
-See [docs/adapters.md](docs/adapters.md) for broader historical adapter notes and [docs/ADAPTER-CONFORMANCE.md](docs/ADAPTER-CONFORMANCE.md) for the active broker contract. The active supported broker surface is `claude-code`, `gemini-cli`, `codex-cli`, `qwen-cli`, and `opencode-cli`.
+See [docs/adapters.md](docs/adapters.md) for the timestamped adapter status table and [docs/reference/ADAPTER-CONTRACT.md](docs/reference/ADAPTER-CONTRACT.md) for the active broker contract. The active alpha surface is `claude-code`, `gemini-cli`, `codex-cli`, `qwen-cli`, and `opencode-cli`, but each adapter's public status depends on the child reliability matrix.
 
 ## OpenAI-Compatible API
 
@@ -183,7 +214,7 @@ import OpenAI from 'openai';
 
 const client = new OpenAI({
   baseURL: 'http://localhost:4001/v1',
-  apiKey: 'unused'  // Not needed in dev mode
+  apiKey: process.env.CLIAGENTS_API_KEY
 });
 
 const response = await client.chat.completions.create({
@@ -213,7 +244,7 @@ When ready for production, change two lines:
 // Development
 const client = new OpenAI({
   baseURL: 'http://localhost:4001/v1',
-  apiKey: 'unused'
+  apiKey: process.env.CLIAGENTS_API_KEY
 });
 
 // Production - just change baseURL and apiKey
@@ -276,12 +307,20 @@ Built-in skills: `test-driven-development`, `debugging`, `code-review`, `multi-a
 
 ## Authentication
 
-Authentication is **optional** and disabled by default (dev mode).
+Authentication is **required by default** (fail-closed).
 
-To enable:
+If no API key is configured, `cliagents serve` creates a local broker token at
+`$CLIAGENTS_DATA_DIR/local-api-key` (default `./data/local-api-key`). Local
+`cliagents` CLI commands read that token automatically, so commands like
+`cliagents launch codex` work on the same machine while unauthenticated HTTP
+requests still receive `401`.
+
+For explicit shared or remote clients, set either API-key environment variable:
 
 ```bash
-export CLI_AGENTS_API_KEY="your-secret-key"
+export CLIAGENTS_API_KEY="your-secret-key"
+# or legacy alias:
+# export CLI_AGENTS_API_KEY="your-secret-key"
 pnpm start
 ```
 
@@ -292,7 +331,32 @@ curl -H "Authorization: Bearer your-secret-key" ...
 curl -H "X-API-Key: your-secret-key" ...
 ```
 
-> **Note**: For production deployment, always set `CLI_AGENTS_API_KEY` or use a reverse proxy with authentication.
+### Local Development Override (Explicit Opt-In)
+
+For localhost-only development, you can disable auth explicitly:
+
+```bash
+export CLIAGENTS_ALLOW_UNAUTHENTICATED_LOCALHOST=1
+cliagents serve --host 127.0.0.1
+```
+
+When `CLIAGENTS_ALLOW_UNAUTHENTICATED_LOCALHOST=1` is set without an API key, `cliagents` enforces loopback-only bind hosts (`127.0.0.1`, `::1`, or `localhost`) and refuses non-loopback binds.
+
+### API CORS + Localhost Threat Model
+
+API routes use an explicit origin policy to reduce localhost browser abuse:
+
+- By default, only loopback origins (`localhost`, `127.0.0.1`, `::1`) are accepted for API CORS.
+- Add non-loopback origins explicitly with `CLIAGENTS_API_CORS_ALLOWED_ORIGINS` (comma-separated exact origins).
+- Set `CLIAGENTS_API_CORS_ALLOW_LOOPBACK=0` to disable implicit loopback-origin allowlisting and require explicit origins only.
+
+This is browser-layer defense in depth, not an authentication replacement. Keep API-key auth enabled for non-local use.
+
+### Dashboard Env Mutation Security
+
+`POST /dashboard/adapters/:name/env` is restricted to adapter-approved auth keys (`ADAPTER_AUTH_CONFIG[adapter].envVars`) plus optional operator-reviewed extras in `CLIAGENTS_DASHBOARD_ENV_MUTATION_EXTRA_KEYS`.
+
+To disable this endpoint entirely, set `CLIAGENTS_DISABLE_DASHBOARD_ENV_MUTATION=1`.
 
 ## API Reference
 
@@ -363,14 +427,27 @@ Use that index to distinguish current source-of-truth docs from research notes.
 
 | Variable | Description | Default |
 |----------|-------------|---------|
-| `CLI_AGENTS_API_KEY` | API key for authentication | None (dev mode) |
+| `CLIAGENTS_API_KEY` | API key for authentication (preferred) | None |
+| `CLI_AGENTS_API_KEY` | API key for authentication (legacy alias) | None |
+| `CLIAGENTS_LOCAL_API_KEY_FILE` | Local broker token file used when no env API key is configured | `$CLIAGENTS_DATA_DIR/local-api-key` |
+| `CLIAGENTS_ALLOW_UNAUTHENTICATED_LOCALHOST` | Allow unauthenticated access only on loopback host when set to `1` | `0` |
+| `CLIAGENTS_API_CORS_ALLOWED_ORIGINS` | Comma-separated explicit API CORS origins | None |
+| `CLIAGENTS_API_CORS_ALLOW_LOOPBACK` | Allow loopback API CORS origins when set to `1` | `1` |
+| `CLIAGENTS_DISABLE_DASHBOARD_ENV_MUTATION` | Disable `POST /dashboard/adapters/:name/env` when set to `1` | `0` |
+| `CLIAGENTS_DASHBOARD_ENV_MUTATION_EXTRA_KEYS` | Optional comma-separated extra env keys allowed by dashboard env mutation route | None |
 | `PORT` | Server port | 4001 |
-| `CLIAGENTS_HOST` | Server bind host | `0.0.0.0` |
+| `CLIAGENTS_HOST` | Server bind host | `127.0.0.1` |
 | `CLIAGENTS_DATA_DIR` | Broker data directory | `./data` |
 | `CLIAGENTS_LOG_DIR` | Broker terminal log directory | `./logs` |
 | `CLIAGENTS_TMUX_SOCKET` | Broker-specific tmux socket path | shared default tmux server |
 | `CLIAGENTS_WORK_DIR` | Default orchestration working directory | current working directory |
 | `CLIAGENTS_DESTROY_TERMINALS_ON_STOP` | Destroy broker terminals on shutdown when set to `1` | `0` |
+| `CLIAGENTS_NOTIFICATIONS` | Managed-root notification channels: `off`, `macos`, `webhook`, `telegram`, `all` | `macos` on macOS |
+| `CLIAGENTS_NOTIFY_ON` | Notification status aliases or statuses: `done`, `blocked`, `error`, `idle`, `completed`, `waiting_permission`, `waiting_user_answer` | `idle,completed,waiting_permission,waiting_user_answer,error` |
+| `CLIAGENTS_NOTIFY_WEBHOOK_URL` | Optional webhook URL for managed-root notification JSON payloads | None |
+| `CLIAGENTS_TELEGRAM_BOT_TOKEN` | Optional Telegram bot token for direct Telegram notifications | None |
+| `CLIAGENTS_TELEGRAM_CHAT_ID` | Optional Telegram chat id for direct Telegram notifications | None |
+| `CLIAGENTS_NOTIFY_POLL_MS` | Managed-root status polling interval for notification detection | `3000` |
 
 ### Programmatic Configuration
 
@@ -411,11 +488,15 @@ cliagents --port 4011 --data-dir /tmp/cliagents-a/data --log-dir /tmp/cliagents-
 pnpm test
 pnpm run test:runtime
 pnpm run test:broad
+pnpm run smoke:deterministic
+pnpm run release:check
 ```
 
 `pnpm test` runs the focused supported broker suite for `claude-code`, `gemini-cli`, `codex-cli`, `qwen-cli`, and `opencode-cli`.
 Use the package scripts instead of ad-hoc `node` invocations when possible; they route through the supported Node `22.12.0` wrapper from [`.nvmrc`](./.nvmrc).
 `pnpm run test:runtime` and `pnpm run test:broad` may report provider-auth, token-expiry, provider-discontinuation, quota, capacity, or timeout conditions as skips when the broker contract itself is still correct.
+`pnpm run smoke:deterministic` runs a deterministic smoke suite for delegated lifecycle success/failure/timeout/retry plus core route health checks, and writes machine-readable + markdown evidence to `artifacts/deterministic-smoke/latest.json` and `artifacts/deterministic-smoke/latest.md`.
+`pnpm run release:check` is the deterministic public-alpha gate. It does not replace the full-history secret scan or opt-in live adapter matrix.
 
 ### Development Mode
 
@@ -434,6 +515,7 @@ See [CONTRIBUTING.md](CONTRIBUTING.md) for guidelines.
 ## Documentation
 
 - [docs/INDEX.md](docs/INDEX.md) is the canonical documentation entrypoint.
+- [docs/reference/ALPHA-RELEASE.md](docs/reference/ALPHA-RELEASE.md) is the public-alpha release checklist.
 - [docs/CANONICAL-MAP.json](docs/CANONICAL-MAP.json) classifies docs for agents and humans.
 - Files in `docs/research/` are context unless the canonical map marks them as canonical or active.
 

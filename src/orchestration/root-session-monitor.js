@@ -1,6 +1,10 @@
 'use strict';
 
-const { resolveRuntimeHostMetadata } = require('../runtime/host-model');
+const {
+  SESSION_CONTROL_MODES,
+  normalizeSessionControlMode,
+  resolveRuntimeHostMetadata
+} = require('../runtime/host-model');
 const { normalizeSessionEvents } = require('./event-normalizer');
 
 const BUSY_TERMINAL_STATUSES = new Set(['processing', 'queued', 'running']);
@@ -317,6 +321,10 @@ function buildSessionMap(events, terminals, rootSessionId) {
     node.attentionMessage = terminal.attention_message || node.attentionMessage;
     node.resumeCommand = terminal.resume_command || node.resumeCommand;
     node.providerThreadRef = terminal.provider_thread_ref || terminal.providerThreadRef || node.providerThreadRef;
+    node.sessionControlMode = normalizeSessionControlMode(
+      terminal.session_control_mode || terminal.sessionControlMode,
+      SESSION_CONTROL_MODES.OPERATOR
+    );
     node.runtimeHost = runtimeMetadata.runtimeHost;
     node.runtimeId = runtimeMetadata.runtimeId;
     node.runtimeCapabilities = runtimeMetadata.runtimeCapabilities;

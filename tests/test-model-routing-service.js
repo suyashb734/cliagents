@@ -49,11 +49,20 @@ function run() {
   const codexRecommendation = service.recommendModel({
     adapter: 'codex-cli',
     role: 'implement',
+    availableModels: [{ id: 'gpt-5.5' }, { id: 'gpt-5.4' }, { id: 'o4-mini' }]
+  });
+
+  assert.strictEqual(codexRecommendation.selectedModel, 'gpt-5.5');
+  assert.strictEqual(codexRecommendation.selectedFamily, 'gpt5');
+
+  const codexFallbackRecommendation = service.recommendModel({
+    adapter: 'codex-cli',
+    role: 'implement',
     availableModels: [{ id: 'gpt-5.4' }, { id: 'o4-mini' }]
   });
 
-  assert.strictEqual(codexRecommendation.selectedModel, 'gpt-5.4');
-  assert.strictEqual(codexRecommendation.selectedFamily, 'gpt5');
+  assert.strictEqual(codexFallbackRecommendation.selectedModel, 'gpt-5.4');
+  assert.strictEqual(codexFallbackRecommendation.selectedFamily, 'gpt5');
 
   // 1) implement role still preferring minimax when available
   const implMinimax = service.recommendModel({

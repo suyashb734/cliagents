@@ -241,6 +241,15 @@ async function run() {
     assert.strictEqual(rootRecords.length, 2, 'Only assistant messages with usage metadata should emit usage records');
     assert(rootRecords.some((record) => record.effectiveRole === 'main'));
     assert(rootRecords.some((record) => record.effectiveRole === 'worker'));
+    const rootUsageEvents = db.listRootIoEvents({
+      rootSessionId: 'root-usage-1',
+      eventKind: 'usage',
+      limit: 10
+    });
+    assert.strictEqual(rootUsageEvents.length, 2, 'Usage records should also appear as root IO usage events');
+    assert(rootUsageEvents.every((event) => event.metadata.sourceTable === 'usage_records'));
+    assert(rootUsageEvents.some((event) => event.metadata.totalTokens === 170));
+    assert(rootUsageEvents.some((event) => event.metadata.totalTokens === 140));
     const rootSummary = db.summarizeUsage({ rootSessionId: 'root-usage-1' });
     assert.strictEqual(rootSummary.inputTokens, 200);
     assert.strictEqual(rootSummary.outputTokens, 105);
@@ -265,6 +274,13 @@ async function run() {
     assert(directRunRecords.every((record) => record.task_id === task.id));
     assert(directRunRecords.some((record) => record.model === 'o4-mini'));
     assert(directRunRecords.some((record) => record.model === 'claude-sonnet-4'));
+    const directRunUsageEvents = db.listRootIoEvents({
+      rootSessionId: 'root-usage-2',
+      eventKind: 'usage',
+      limit: 10
+    });
+    assert.strictEqual(directRunUsageEvents.length, 2);
+    assert(directRunUsageEvents.every((event) => event.runId === directRunId));
     const directRunRoleBreakdown = db.listUsageBreakdown({ runId: directRunId, groupBy: 'role' });
     assert(directRunRoleBreakdown.some((entry) => entry.key === 'participant' && entry.totalTokens === 45));
     assert(directRunRoleBreakdown.some((entry) => entry.key === 'judge' && entry.totalTokens === 20));

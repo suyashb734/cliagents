@@ -423,6 +423,8 @@ async function testDiscussionContinuityAndIdempotency() {
     assert.strictEqual(firstDiscussion.turn.status, 'completed');
     assert.strictEqual(firstDiscussion.runId, 'run-1');
     assert.strictEqual(firstDiscussion.discussionId, 'discussion-result-1');
+    assert.strictEqual(firstDiscussion.moderator.kind, 'room_moderator_readout');
+    assert(firstDiscussion.moderator.summary.includes('Room discussion completed'));
 
     const firstTurnId = firstDiscussion.turn.id;
     const firstMessageCount = appA.db.countRoomMessages(roomId);
@@ -443,11 +445,11 @@ async function testDiscussionContinuityAndIdempotency() {
       sessionManager: createDirectSessionManager(),
       roomDiscussionRunner: runnerB.runDiscussion
     });
-    const persistedBundle = appB.db.getMemoryBundle(rootSessionId, 'root', {
+    const persistedBundle = appB.db.getMemoryBundle(roomId, 'room', {
       recentRunsLimit: 3,
       includeRawPointers: true
     });
-    assert(persistedBundle?.brief, 'expected persisted room root bundle after restart');
+    assert(persistedBundle?.brief, 'expected persisted room bundle after restart');
     assert(persistedBundle.brief.includes('Discussion continuity room'));
 
     const duplicateDiscussion = await discussRoom(appB.baseUrl, roomId, {
@@ -481,6 +483,7 @@ async function testDiscussionContinuityAndIdempotency() {
       judge: null
     });
     assert.strictEqual(secondDiscussion.turn.status, 'completed');
+    assert.strictEqual(secondDiscussion.moderator.kind, 'room_moderator_readout');
     assert.strictEqual(runnerB.invocations.length, 1);
 
     const invocation = runnerB.invocations[0];
@@ -499,6 +502,7 @@ async function testDiscussionContinuityAndIdempotency() {
     const roomAfterRestart = await request(appB.baseUrl, 'GET', `/orchestration/rooms/${encodeURIComponent(roomId)}`);
     assert.strictEqual(roomAfterRestart.status, 200);
     assert.strictEqual(roomAfterRestart.data.latestTurn.id, secondDiscussion.turn.id);
+    assert.strictEqual(roomAfterRestart.data.moderator.kind, 'room_moderator_readout');
 
     const finalMessages = await request(appB.baseUrl, 'GET', `/orchestration/rooms/${encodeURIComponent(roomId)}/messages?limit=50`);
     assert.strictEqual(finalMessages.status, 200);

@@ -8,13 +8,35 @@
  * Docs: https://github.com/openai/codex
  */
 
-const { spawn } = require('child_process');
+const { spawn, spawnSync } = require('child_process');
 const fs = require('fs');
 const BaseLLMAdapter = require('../core/base-llm-adapter');
 const { createAdapterContract, defineAdapterCapabilities, EXECUTION_MODES } = require('./contract');
 const { logConversation, logSessionStart } = require('../utils/conversation-logger');
 
 const DEFAULT_CODEX_EXEC_MODEL = process.env.CLIAGENTS_CODEX_EXEC_MODEL || 'gpt-5.4';
+const CODEX_MODEL_DISCOVERY_TIMEOUT_MS = 2500;
+const CODEX_MODEL_ALIASES = Object.freeze({
+  gpt5: 'gpt-5.5',
+  gpt5mini: 'gpt-5.4-mini',
+  codex: 'gpt-5.5',
+  codexmini: 'gpt-5.4-mini'
+});
+
+function normalizeCodexModelAlias(model) {
+  const normalized = String(model || '').trim();
+  if (!normalized) {
+    return null;
+  }
+  return CODEX_MODEL_ALIASES[normalized.toLowerCase()] || normalized;
+}
+
+function normalizeReasoningEffort(effort) {
+  const normalized = String(effort || '').trim().toLowerCase();
+  return ['none', 'minimal', 'low', 'medium', 'high', 'xhigh'].includes(normalized)
+    ? normalized
+    : null;
+}
 
 class CodexCliAdapter extends BaseLLMAdapter {
   constructor(config = {}) {
@@ -68,21 +90,76 @@ class CodexCliAdapter extends BaseLLMAdapter {
       ]
     });
 
-    // Available models for Codex CLI
+    // Fallback models for Codex CLI. getAvailableModels() prefers the live
+    // `codex debug models` catalog when supported by the installed CLI.
     this.availableModels = [
       { id: 'default', name: 'Default', description: 'Uses the broker-safe Codex execution default' },
+      { id: 'gpt-5.5', name: 'GPT-5.5', description: 'Frontier Codex model for complex coding work' },
       { id: 'gpt-5.4', name: 'GPT-5.4', description: 'Supported high-capability Codex model' },
+      { id: 'gpt-5.4-mini', name: 'GPT-5.4 Mini', description: 'Efficient GPT-5.4 model' },
+      { id: 'gpt-5.3-codex', name: 'GPT-5.3 Codex', description: 'Codex-optimized GPT-5.3 model' },
+      { id: 'gpt-5.3-codex-spark', name: 'GPT-5.3 Codex Spark', description: 'Fast Codex-optimized GPT-5.3 model' },
       { id: 'o3-mini', name: 'o3-mini', description: 'Fast and efficient reasoning model' },
       { id: 'o4-mini', name: 'o4-mini', description: 'Latest efficient model' },
       { id: 'gpt-4o', name: 'GPT-4o', description: 'Most capable GPT-4 model' },
       { id: 'gpt-4o-mini', name: 'GPT-4o Mini', description: 'Fast and affordable GPT-4' }
     ];
+    this._modelsCache = null;
+    this._modelsCacheAt = 0;
   }
 
   /**
    * Get available models
    */
   getAvailableModels() {
+    const now = Date.now();
+    if (this._modelsCache && now - this._modelsCacheAt < 5 * 60 * 1000) {
+      return this._modelsCache;
+    }
+
+    try {
+      const result = spawnSync('codex', ['debug', 'models'], {
+        encoding: 'utf8',
+        timeout: CODEX_MODEL_DISCOVERY_TIMEOUT_MS,
+        env: {
+          ...process.env,
+          NO_COLOR: '1'
+        }
+      });
+      if (result.status === 0 && result.stdout) {
+        const parsed = JSON.parse(result.stdout);
+        const models = Array.isArray(parsed.models)
+          ? parsed.models
+              .map((model) => {
+                const id = String(model?.slug || model?.id || '').trim();
+                if (!id) {
+                  return null;
+                }
+                return {
+                  id,
+                  name: model.display_name || id,
+                  description: model.description || '',
+                  defaultReasoningLevel: model.default_reasoning_level || null,
+                  supportedReasoningLevels: Array.isArray(model.supported_reasoning_levels)
+                    ? model.supported_reasoning_levels
+                    : []
+                };
+              })
+              .filter(Boolean)
+          : [];
+        if (models.length > 0) {
+          this._modelsCache = [
+            { id: 'default', name: 'Default', description: 'Uses the broker-safe Codex execution default' },
+            ...models
+          ];
+          this._modelsCacheAt = now;
+          return this._modelsCache;
+        }
+      }
+    } catch {
+      // Fall back to the bundled list below.
+    }
+
     return this.availableModels;
   }
 
@@ -115,7 +192,8 @@ class CodexCliAdapter extends BaseLLMAdapter {
     }
 
     const workDir = options.workDir || this.config.workDir;
-    const model = options.model || this.config.model;
+    const model = normalizeCodexModelAlias(options.model || this.config.model);
+    const reasoningEffort = normalizeReasoningEffort(options.reasoningEffort || options.effort || this.config.reasoningEffort);
     const providerSessionId = String(options.providerSessionId || '').trim() || null;
 
     // Ensure work directory exists
@@ -131,6 +209,7 @@ class CodexCliAdapter extends BaseLLMAdapter {
       systemPrompt: options.systemPrompt,
       workDir,
       model,
+      reasoningEffort,
       allowedTools: options.allowedTools,
       jsonMode: options.jsonMode || false
     };
@@ -388,6 +467,9 @@ class CodexCliAdapter extends BaseLLMAdapter {
     // Add model flag if specified
     if (session.model && session.model !== 'default') {
       args.push('-m', session.model);
+    }
+    if (session.reasoningEffort) {
+      args.push('-c', `model_reasoning_effort="${session.reasoningEffort}"`);
     }
 
     // JSON mode: read-only sandbox (no tool use, pure LLM response)

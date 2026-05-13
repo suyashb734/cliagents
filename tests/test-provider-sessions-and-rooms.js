@@ -327,8 +327,24 @@ async function runRouteAssertions(homeDir, fixture) {
       { message: 'This should not be delivered remotely.' }
     );
     assert.strictEqual(importedInputRes.status, 403);
-    assert.strictEqual(importedInputRes.data.error.code, 'runtime_capability_unsupported');
-    assert.strictEqual(importedInputRes.data.error.runtimeHost, 'adopted');
+    assert.strictEqual(importedInputRes.data.error.code, 'terminal_input_forbidden');
+
+    const importedInputWithOwnerContextRes = await request(
+      serverHandle.baseUrl,
+      'POST',
+      `/orchestration/terminals/${encodeURIComponent(importRes.data.rootSessionId)}/input`,
+      { message: 'pwd' },
+      {
+        'x-cliagents-origin-client': 'codex',
+        'x-cliagents-client-name': 'codex',
+        'x-cliagents-session-ref': importRes.data.externalSessionRef,
+        'x-cliagents-root-session-id': importRes.data.rootSessionId,
+        'x-cliagents-parent-session-id': importRes.data.rootSessionId
+      }
+    );
+    assert.strictEqual(importedInputWithOwnerContextRes.status, 403);
+    assert.strictEqual(importedInputWithOwnerContextRes.data.error.code, 'runtime_capability_unsupported');
+    assert.strictEqual(importedInputWithOwnerContextRes.data.error.runtimeHost, 'adopted');
 
     const reimportRes = await request(
       serverHandle.baseUrl,
@@ -416,6 +432,31 @@ async function runRouteAssertions(homeDir, fixture) {
     assert.strictEqual(firstTurnRes.data.turn.status, 'completed');
     assert.strictEqual(firstTurnRes.data.participantResults.length, 2);
     assert(firstTurnRes.data.participantResults.every((entry) => entry.success === true));
+    const roomSnapshot = db.getMemorySnapshot('room', roomId);
+    assert(roomSnapshot, 'room refresh should write a room-scoped memory snapshot');
+    assert.strictEqual(roomSnapshot.rootSessionId, roomRootSessionId);
+    assert(!db.getMemorySnapshot('root', roomRootSessionId), 'room refresh should not overwrite root-scoped snapshots');
+    const roomSnapshotEdges = db.queryMemoryEdges({
+      sourceTable: 'memory_snapshots',
+      sourceId: roomSnapshot.id,
+      edgeTypes: ['summarizes'],
+      targetScopeType: 'room',
+      targetId: roomId,
+      limit: 10
+    });
+    assert(roomSnapshotEdges.length >= 1, 'room snapshots should link back to the room they summarize');
+
+    const roomBundleRes = await request(
+      serverHandle.baseUrl,
+      'GET',
+      `/orchestration/memory/bundle/${encodeURIComponent(roomId)}?scope_type=room`
+    );
+    assert.strictEqual(roomBundleRes.status, 200);
+    assert.strictEqual(roomBundleRes.data.scopeType, 'room');
+    assert.strictEqual(roomBundleRes.data.scopeId, roomId);
+    assert(roomBundleRes.data.brief.includes('Planner room'));
+    assert(roomBundleRes.data.participants.length === 2);
+    assert(roomBundleRes.data.recentMessages.length >= 1);
     assert.strictEqual(
       apiSessionManager.createCalls.find((call) => call.adapter === 'codex-cli')?.providerSessionId,
       fixture.activeId,
@@ -549,7 +590,11 @@ async function runRouteAssertions(homeDir, fixture) {
     assert(discussRes.data.discussionId, 'expected room discussion to return a discussion id');
     assert(['completed', 'partial'].includes(discussRes.data.turn.status));
     assert.strictEqual(discussRes.data.turn.metadata.writebackMode, 'summary');
+    assert.strictEqual(discussRes.data.moderator.kind, 'room_moderator_readout');
+    assert.strictEqual(discussRes.data.turn.metadata.moderator.kind, 'room_moderator_readout');
+    assert(discussRes.data.moderator.summary.includes('Room discussion completed'));
     assert(discussRes.data.messages.some((message) => message.role === 'system' && message.content.includes('Room discussion completed')));
+    assert(discussRes.data.messages.some((message) => message.metadata?.roomModerator === true), 'summary writeback should mark the broker-native moderator row');
 
     const roomAfterDiscussionRes = await request(
       serverHandle.baseUrl,
@@ -558,6 +603,7 @@ async function runRouteAssertions(homeDir, fixture) {
     );
     assert.strictEqual(roomAfterDiscussionRes.status, 200);
     assert(['completed', 'partial'].includes(roomAfterDiscussionRes.data.latestTurn.status));
+    assert.strictEqual(roomAfterDiscussionRes.data.moderator.kind, 'room_moderator_readout');
 
     const finalMessagesRes = await request(
       serverHandle.baseUrl,
@@ -616,7 +662,7 @@ async function runRouteAssertions(homeDir, fixture) {
     assert(onlyArtifactMessagesRes.data.messages.length > 0);
     assert(onlyArtifactMessagesRes.data.messages.every((message) => message.metadata?.discussionArtifact === true), 'artifact-only mode should return only discussion artifacts');
 
-    const roomBundle = db.getMemoryBundle(roomRootSessionId, 'root', {
+    const roomBundle = db.getMemoryBundle(roomId, 'room', {
       recentRunsLimit: 3,
       includeRawPointers: true
     });

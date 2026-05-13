@@ -12,6 +12,7 @@ const fs = require('fs');
 const BaseLLMAdapter = require('../core/base-llm-adapter');
 const { createAdapterContract, defineAdapterCapabilities, EXECUTION_MODES } = require('./contract');
 const { logConversation, logSessionStart } = require('../utils/conversation-logger');
+const { isAdapterAuthenticated } = require('../utils/adapter-auth');
 
 const SAFE_ALLOWED_TOOL_PATTERN = /^[a-zA-Z0-9_-]+$/;
 const QWEN_PATH_NOT_FOUND = Symbol('qwen_path_not_found');
@@ -81,6 +82,8 @@ class QwenCliAdapter extends BaseLLMAdapter {
       workDir: '/tmp/agent',
       maxResponseSize: 10 * 1024 * 1024,
       model: null,
+      terminationGraceMs: 2000,
+      timeoutSettleMs: 5000,
       ...config
     });
 
@@ -90,6 +93,9 @@ class QwenCliAdapter extends BaseLLMAdapter {
     this.activeProcesses = new Map();
     this._qwenPathCache = undefined;
     this._qwenPathResolvePromise = null;
+    this.authInspector = typeof config.authInspector === 'function'
+      ? config.authInspector
+      : isAdapterAuthenticated;
     this.capabilities = defineAdapterCapabilities({
       usesOfficialCli: true,
       executionMode: EXECUTION_MODES.DIRECT_SESSION,
@@ -134,6 +140,41 @@ class QwenCliAdapter extends BaseLLMAdapter {
     return this.contract;
   }
 
+  _isProcessRunning(proc) {
+    return Boolean(proc) && proc.exitCode === null && proc.signalCode === null;
+  }
+
+  _signalProcess(proc, signal) {
+    if (!proc) {
+      return false;
+    }
+
+    // Qwen can spawn child node processes; detached mode lets us signal the full group.
+    if (process.platform !== 'win32' && proc.pid && proc.__cliagentsUseProcessGroupSignals) {
+      try {
+        process.kill(-proc.pid, signal);
+        return true;
+      } catch {}
+    }
+
+    try {
+      return proc.kill(signal);
+    } catch {
+      return false;
+    }
+  }
+
+  _spawnQwenProcess(command, args, options = {}) {
+    const useProcessGroupSignals = process.platform !== 'win32';
+    const proc = this._spawnProcess(command, args, {
+      ...options,
+      detached: useProcessGroupSignals
+    });
+
+    proc.__cliagentsUseProcessGroupSignals = useProcessGroupSignals;
+    return proc;
+  }
+
   async isAvailable() {
     return new Promise((resolve) => {
       let check = null;
@@ -150,6 +191,32 @@ class QwenCliAdapter extends BaseLLMAdapter {
 
   _spawnProcess(command, args, options = {}) {
     return spawn(command, args, options);
+  }
+
+  _shouldSkipAuthPreflight() {
+    return this.config.skipAuthPreflight === true || process.env.CLIAGENTS_QWEN_SKIP_AUTH_PREFLIGHT === '1';
+  }
+
+  _getAuthPreflightResult() {
+    if (this._shouldSkipAuthPreflight()) {
+      return { authenticated: true, reason: 'Qwen auth preflight disabled' };
+    }
+
+    try {
+      const result = this.authInspector(this.name);
+      if (result && result.authenticated === true) {
+        return result;
+      }
+      return {
+        authenticated: false,
+        reason: result?.reason || 'Qwen Code is not configured for non-interactive use.'
+      };
+    } catch (error) {
+      return {
+        authenticated: false,
+        reason: error?.message || 'Qwen auth preflight failed.'
+      };
+    }
   }
 
   async _getQwenPath() {
@@ -237,6 +304,12 @@ class QwenCliAdapter extends BaseLLMAdapter {
 
   async *_runQwenCommandStreaming(args, options = {}) {
     const timeout = options.timeout || this.config.timeout;
+    const terminationGraceMs = Number.isFinite(this.config.terminationGraceMs)
+      ? Math.max(0, Number(this.config.terminationGraceMs))
+      : 2000;
+    const timeoutSettleMs = Number.isFinite(this.config.timeoutSettleMs)
+      ? Math.max(0, Number(this.config.timeoutSettleMs))
+      : 5000;
     const workDir = options.workDir || process.cwd();
     const qwenPath = await this._getQwenPath();
 
@@ -245,11 +318,22 @@ class QwenCliAdapter extends BaseLLMAdapter {
       return;
     }
 
+    const authPreflight = this._getAuthPreflightResult();
+    if (!authPreflight.authenticated) {
+      yield {
+        type: 'error',
+        content: `Qwen provider authentication failed: ${authPreflight.reason}`,
+        timedOut: false,
+        failureClass: 'auth'
+      };
+      return;
+    }
+
     if (!fs.existsSync(workDir)) {
       fs.mkdirSync(workDir, { recursive: true });
     }
 
-    const proc = spawn(qwenPath, args, {
+    const proc = this._spawnQwenProcess(qwenPath, args, {
       cwd: workDir,
       env: {
         ...process.env,
@@ -268,41 +352,98 @@ class QwenCliAdapter extends BaseLLMAdapter {
     let timedOut = false;
     let exitCode = null;
     let processError = null;
+    let processSettled = false;
+    let processCompleteResolve = null;
+    let hardKillTimeoutId = null;
+    let settleWatchdogId = null;
+    const clearHardKillTimeout = () => {
+      if (hardKillTimeoutId) {
+        clearTimeout(hardKillTimeoutId);
+        hardKillTimeoutId = null;
+      }
+    };
+    const clearSettleWatchdog = () => {
+      if (settleWatchdogId) {
+        clearTimeout(settleWatchdogId);
+        settleWatchdogId = null;
+      }
+    };
+    const forceKillIfStillRunning = () => {
+      if (!this._isProcessRunning(proc)) {
+        return;
+      }
+      this._signalProcess(proc, 'SIGKILL');
+    };
+    const finishProcess = () => {
+      if (processSettled) {
+        return;
+      }
+      processSettled = true;
+      clearTimeout(timeoutId);
+      clearHardKillTimeout();
+      clearSettleWatchdog();
+      if (sessionId) {
+        this.activeProcesses.delete(sessionId);
+      }
+      if (processCompleteResolve) {
+        processCompleteResolve();
+        processCompleteResolve = null;
+      }
+    };
 
     const timeoutId = setTimeout(() => {
       timedOut = true;
-      proc.kill('SIGTERM');
-      setTimeout(() => {
-        if (!proc.killed) {
-          proc.kill('SIGKILL');
-        }
-      }, 2000);
+      this._signalProcess(proc, 'SIGTERM');
+      hardKillTimeoutId = setTimeout(forceKillIfStillRunning, terminationGraceMs);
+      if (proc.stdout && typeof proc.stdout.destroy === 'function') {
+        proc.stdout.destroy(new Error('Request timed out'));
+      }
+      if (proc.stderr && typeof proc.stderr.destroy === 'function') {
+        proc.stderr.destroy();
+      }
     }, timeout);
 
     const processComplete = new Promise((resolve) => {
+      processCompleteResolve = resolve;
       proc.on('close', (code) => {
-        clearTimeout(timeoutId);
         exitCode = code;
-        if (sessionId) {
-          this.activeProcesses.delete(sessionId);
-        }
-        resolve();
+        finishProcess();
       });
       proc.on('error', (error) => {
-        clearTimeout(timeoutId);
         processError = error;
-        if (sessionId) {
-          this.activeProcesses.delete(sessionId);
-        }
-        resolve();
+        finishProcess();
       });
     });
+    settleWatchdogId = setTimeout(() => {
+      if (processSettled) {
+        return;
+      }
+      timedOut = true;
+      processError = processError || new Error('Request timed out');
+      this._signalProcess(proc, 'SIGTERM');
+      forceKillIfStillRunning();
+      if (proc.stdout && typeof proc.stdout.destroy === 'function') {
+        proc.stdout.destroy(processError);
+      }
+      if (proc.stderr && typeof proc.stderr.destroy === 'function') {
+        proc.stderr.destroy();
+      }
+      finishProcess();
+    }, Math.max(0, timeout + terminationGraceMs + timeoutSettleMs));
 
     let buffer = '';
     let qwenSessionId = null;
     let assistantMessages = [];
     let usageStats = null;
     let finalResult = null;
+    const parseEventForProgress = (event) => {
+      const beforeCount = assistantMessages.length;
+      handleEvent(event);
+      if (assistantMessages.length > beforeCount) {
+        return assistantMessages[assistantMessages.length - 1];
+      }
+      return null;
+    };
     const handleEvent = (event) => {
       if (!event) return;
 
@@ -357,8 +498,32 @@ class QwenCliAdapter extends BaseLLMAdapter {
     };
 
     try {
-      for await (const chunk of proc.stdout) {
-        buffer += chunk.toString();
+      const stream = proc.stdout;
+      const processSettledSentinel = processComplete.then(() => ({ __processSettled: true }));
+      const streamIterator = stream && typeof stream[Symbol.asyncIterator] === 'function'
+        ? stream[Symbol.asyncIterator]()
+        : null;
+
+      while (streamIterator) {
+        const next = await Promise.race([
+          streamIterator.next(),
+          processSettledSentinel
+        ]);
+
+        if (next && next.__processSettled) {
+          if (typeof streamIterator.return === 'function') {
+            try {
+              await streamIterator.return();
+            } catch {}
+          }
+          break;
+        }
+
+        if (!next || next.done) {
+          break;
+        }
+
+        buffer += next.value.toString();
         const lines = buffer.split('\n');
         buffer = lines.pop() || '';
 
@@ -373,14 +538,13 @@ class QwenCliAdapter extends BaseLLMAdapter {
           } catch {
             continue;
           }
-          const beforeCount = assistantMessages.length;
-          handleEvent(event);
-          if (assistantMessages.length > beforeCount) {
-            const text = assistantMessages[assistantMessages.length - 1];
+
+          const progressText = parseEventForProgress(event);
+          if (progressText) {
             yield {
               type: 'progress',
               progressType: 'assistant',
-              content: text
+              content: progressText
             };
           }
         }
@@ -389,14 +553,12 @@ class QwenCliAdapter extends BaseLLMAdapter {
       if (buffer.trim()) {
         try {
           const event = JSON.parse(buffer);
-          const beforeCount = assistantMessages.length;
-          handleEvent(event);
-          if (assistantMessages.length > beforeCount) {
-            const text = assistantMessages[assistantMessages.length - 1];
+          const progressText = parseEventForProgress(event);
+          if (progressText) {
             yield {
               type: 'progress',
               progressType: 'assistant',
-              content: text
+              content: progressText
             };
           }
         } catch {}
@@ -440,8 +602,17 @@ class QwenCliAdapter extends BaseLLMAdapter {
         }
       };
     } catch (error) {
-      clearTimeout(timeoutId);
-      yield { type: 'error', content: error.message, timedOut: false };
+      if (!timedOut) {
+        processError = processError || error;
+        this._signalProcess(proc, 'SIGTERM');
+        forceKillIfStillRunning();
+      }
+      await processComplete;
+      if (timedOut) {
+        yield { type: 'error', content: 'Request timed out', timedOut: true };
+        return;
+      }
+      yield { type: 'error', content: processError?.message || error.message, timedOut: false };
     }
   }
 
@@ -556,13 +727,16 @@ class QwenCliAdapter extends BaseLLMAdapter {
     if (!session) return;
 
     const proc = this.activeProcesses.get(sessionId);
-    if (proc && !proc.killed) {
-      proc.kill('SIGTERM');
+    if (proc && this._isProcessRunning(proc)) {
+      const terminationGraceMs = Number.isFinite(this.config.terminationGraceMs)
+        ? Math.max(0, Number(this.config.terminationGraceMs))
+        : 2000;
+      this._signalProcess(proc, 'SIGTERM');
       setTimeout(() => {
-        if (!proc.killed) {
-          proc.kill('SIGKILL');
+        if (this._isProcessRunning(proc)) {
+          this._signalProcess(proc, 'SIGKILL');
         }
-      }, 2000);
+      }, terminationGraceMs);
     }
     this.activeProcesses.delete(sessionId);
 
@@ -573,8 +747,8 @@ class QwenCliAdapter extends BaseLLMAdapter {
 
   killAllProcesses() {
     for (const proc of this.activeProcesses.values()) {
-      if (proc && !proc.killed) {
-        proc.kill('SIGKILL');
+      if (this._isProcessRunning(proc)) {
+        this._signalProcess(proc, 'SIGKILL');
       }
     }
     this.activeProcesses.clear();

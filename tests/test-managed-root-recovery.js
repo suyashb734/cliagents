@@ -9,9 +9,32 @@ const path = require('path');
 const { execSync } = require('child_process');
 
 const AgentServer = require('../src/server');
+const UNAUTH_LOCALHOST_ENV = 'CLIAGENTS_ALLOW_UNAUTHENTICATED_LOCALHOST';
 
 function makeTempDir(prefix) {
   return fs.mkdtempSync(path.join(os.tmpdir(), prefix));
+}
+
+function withLocalhostAuthOverride() {
+  const previousValue = process.env[UNAUTH_LOCALHOST_ENV];
+  const hasApiKey = Boolean(
+    (process.env.CLIAGENTS_API_KEY && process.env.CLIAGENTS_API_KEY.trim()) ||
+    (process.env.CLI_AGENTS_API_KEY && process.env.CLI_AGENTS_API_KEY.trim())
+  );
+
+  if (!hasApiKey && previousValue !== '1') {
+    process.env[UNAUTH_LOCALHOST_ENV] = '1';
+  }
+
+  return () => {
+    if (!hasApiKey && previousValue !== '1') {
+      if (typeof previousValue === 'string') {
+        process.env[UNAUTH_LOCALHOST_ENV] = previousValue;
+      } else {
+        delete process.env[UNAUTH_LOCALHOST_ENV];
+      }
+    }
+  };
 }
 
 async function request(baseUrl, method, route, body) {
@@ -77,6 +100,7 @@ async function startServer({ dataDir, logDir, tmuxSocketPath, destroyTerminalsOn
 
 async function run() {
   const previousGraphWrites = process.env.SESSION_GRAPH_WRITES_ENABLED;
+  const restoreAuthEnv = withLocalhostAuthOverride();
   process.env.SESSION_GRAPH_WRITES_ENABLED = '1';
 
   const dataDir = makeTempDir('cliagents-managed-root-data-');
@@ -170,6 +194,7 @@ async function run() {
     } else {
       process.env.SESSION_GRAPH_WRITES_ENABLED = previousGraphWrites;
     }
+    restoreAuthEnv();
   }
 
   console.log('✅ Managed root terminals survive broker restart and recover into the live control plane');

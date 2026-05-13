@@ -276,6 +276,56 @@
         }
       }
     },
+    "/sessions/{sessionId}/peek": {
+      "get": {
+        "summary": "Peek at session input/output",
+        "description": "Return a bounded read-only operational snapshot. Status remains the lifecycle surface; peek exposes derived sessionState, pending input, active input lease, and a small output tail.",
+        "operationId": "peekSession",
+        "tags": ["Sessions"],
+        "parameters": [
+          {
+            "name": "sessionId",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "name": "lines",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "type": "integer",
+              "minimum": 1,
+              "maximum": 250
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Session peek snapshot",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/SessionPeek"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "Session not found",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
     "/sessions/{sessionId}/interrupt": {
       "post": {
         "summary": "Interrupt session",
@@ -811,6 +861,70 @@
           "idleMs": {
             "type": "integer",
             "description": "Milliseconds since last activity"
+          }
+        }
+      },
+      "SessionState": {
+        "type": "object",
+        "properties": {
+          "task": {
+            "type": "string",
+            "enum": ["working", "needs_input", "idle", "completed", "failed", "stopped"]
+          },
+          "liveness": {
+            "type": "string",
+            "enum": ["alive", "exited", "orphaned", "evicted", "unknown"]
+          },
+          "attention": {
+            "type": "boolean"
+          },
+          "status": {
+            "type": "string"
+          },
+          "live": {
+            "type": "boolean"
+          }
+        }
+      },
+      "SessionPeek": {
+        "type": "object",
+        "properties": {
+          "sessionId": {
+            "type": "string"
+          },
+          "sessionKind": {
+            "type": "string"
+          },
+          "source": {
+            "type": "string",
+            "enum": ["api-session-manager", "orchestration-terminal"]
+          },
+          "status": {
+            "type": "string"
+          },
+          "sessionState": {
+            "$ref": "#/components/schemas/SessionState"
+          },
+          "adapter": {
+            "type": "string"
+          },
+          "rootSessionId": {
+            "type": "string",
+            "nullable": true
+          },
+          "pendingInput": {
+            "type": "array",
+            "items": {
+              "type": "object"
+            }
+          },
+          "inputLease": {
+            "type": "object",
+            "nullable": true
+          },
+          "tail": {
+            "type": "object",
+            "nullable": true
           }
         }
       },

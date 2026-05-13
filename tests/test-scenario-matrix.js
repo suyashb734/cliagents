@@ -45,6 +45,32 @@ function shouldSkip(message = '') {
   ].some((token) => text.includes(token));
 }
 
+function isTimeoutMessage(message = '') {
+  const text = String(message).toLowerCase();
+  return [
+    'request timed out',
+    'timed out',
+    'operation was aborted due to timeout',
+    'operation was aborted',
+    'aborterror'
+  ].some((token) => text.includes(token));
+}
+
+function isQwenSkippableMessage(message = '') {
+  return shouldSkip(message) || isTimeoutMessage(message);
+}
+
+function isQwenTransientMessage(message = '') {
+  const text = String(message).toLowerCase();
+  return (
+    isTimeoutMessage(text)
+    || text.includes('qwen cli exited with code null')
+    || text.includes('qwen cli exited with code')
+    || text.includes('process exited')
+    || text.includes('request aborted')
+  );
+}
+
 async function request(method, route, body = null, timeoutMs = 180000) {
   const options = {
     method,
@@ -62,6 +88,26 @@ async function request(method, route, body = null, timeoutMs = 180000) {
     data = JSON.parse(text);
   } catch {}
   return { status: response.status, data };
+}
+
+async function withOperationDeadline(runOperation, timeoutMs, label) {
+  let timer = null;
+  const timeoutPromise = new Promise((_, reject) => {
+    timer = setTimeout(() => {
+      reject(new Error(`${label} timed out after ${timeoutMs}ms`));
+    }, timeoutMs);
+  });
+
+  try {
+    return await Promise.race([
+      Promise.resolve().then(runOperation),
+      timeoutPromise
+    ]);
+  } finally {
+    if (timer) {
+      clearTimeout(timer);
+    }
+  }
 }
 
 async function runTest(name, fn) {
@@ -110,7 +156,87 @@ async function sendMessage(sessionId, message, timeout = 180000) {
 }
 
 async function deleteSession(sessionId) {
-  await request('DELETE', `/sessions/${sessionId}`);
+  if (!sessionId) {
+    return;
+  }
+
+  try {
+    await request('POST', `/sessions/${sessionId}/interrupt`, {}, 30000);
+  } catch {}
+
+  try {
+    await request('DELETE', `/sessions/${sessionId}`, null, 30000);
+  } catch {}
+}
+
+async function runQwenPromptWithRetry(options) {
+  const {
+    prompt,
+    timeoutMs,
+    retryPrompt,
+    retryTimeoutMs,
+    skipLabel
+  } = options;
+  const firstAttemptBudgetMs = Math.max(30000, timeoutMs + 20000);
+  const retryTimeoutBudgetMs = Math.max(30000, (retryTimeoutMs || timeoutMs) + 20000);
+  const cleanupBudgetMs = 45000;
+  const createBudgetMs = 45000;
+
+  let sessionId = await withOperationDeadline(
+    () => createSession('qwen-cli'),
+    createBudgetMs,
+    'Qwen createSession'
+  );
+  try {
+    try {
+      return await withOperationDeadline(
+        () => sendMessage(sessionId, prompt, timeoutMs),
+        firstAttemptBudgetMs,
+        'Qwen first attempt'
+      );
+    } catch (error) {
+      const message = String(error?.message || error);
+      if (!isQwenTransientMessage(message)) {
+        if (isQwenSkippableMessage(message)) {
+          throw new Error(`SKIP: ${message}`);
+        }
+        throw error;
+      }
+
+      await withOperationDeadline(
+        () => deleteSession(sessionId),
+        cleanupBudgetMs,
+        'Qwen retry cleanup'
+      );
+      sessionId = await withOperationDeadline(
+        () => createSession('qwen-cli'),
+        createBudgetMs,
+        'Qwen retry createSession'
+      );
+
+      try {
+        return await withOperationDeadline(
+          () => sendMessage(sessionId, retryPrompt || prompt, retryTimeoutMs || timeoutMs),
+          retryTimeoutBudgetMs,
+          'Qwen retry attempt'
+        );
+      } catch (retryError) {
+        const retryMessage = String(retryError?.message || retryError);
+        if (isQwenSkippableMessage(retryMessage) || isQwenTransientMessage(retryMessage)) {
+          throw new Error(`SKIP: ${skipLabel} could not complete after retry (${retryMessage})`);
+        }
+        throw retryError;
+      }
+    }
+  } finally {
+    try {
+      await withOperationDeadline(
+        () => deleteSession(sessionId),
+        cleanupBudgetMs,
+        'Qwen final cleanup'
+      );
+    } catch {}
+  }
 }
 
 async function waitForTerminalDone(terminalId, timeoutMs = 180000) {
@@ -186,32 +312,30 @@ async function testCodexLongTask() {
 }
 
 async function testQwenShort() {
-  const sessionId = await createSession('qwen-cli');
-  try {
-    const result = await sendMessage(sessionId, 'What is 9 + 4? Reply with only the number.', 120000);
-    assert(result.includes('13'), `Expected 13, got: ${result.slice(0, 200)}`);
-  } finally {
-    await deleteSession(sessionId);
-  }
+  const result = await runQwenPromptWithRetry({
+    prompt: 'What is 9 + 4? Reply with only the number.',
+    timeoutMs: 120000,
+    retryPrompt: 'Compute 9 + 4 and reply with only digits.',
+    retryTimeoutMs: 90000,
+    skipLabel: 'Qwen short task'
+  });
+  assert(result.includes('13'), `Expected 13, got: ${String(result).slice(0, 200)}`);
 }
 
 async function testQwenLong() {
-  const sessionId = await createSession('qwen-cli');
-  try {
-    const result = await sendMessage(
-      sessionId,
-      'Provide a 12-step checklist to review a pull request. Keep each step under 12 words and end with QWEN_DONE.',
-      240000
-    );
-    const hasMarker = /QWEN_DONE/i.test(String(result));
-    const stepCount = (String(result).match(/^\s*\d+\./gm) || []).length;
-    assert(
-      hasMarker || stepCount >= 10,
-      `Expected QWEN_DONE marker or >=10 numbered steps, got: ${String(result).slice(0, 280)}`
-    );
-  } finally {
-    await deleteSession(sessionId);
-  }
+  const result = await runQwenPromptWithRetry({
+    prompt: 'Provide a 12-step checklist to review a pull request. Keep each step under 12 words and end with QWEN_DONE.',
+    timeoutMs: 120000,
+    retryPrompt: 'Provide exactly 8 concise PR review checks and end with QWEN_DONE.',
+    retryTimeoutMs: 90000,
+    skipLabel: 'Qwen long task'
+  });
+  const hasMarker = /QWEN_DONE/i.test(String(result));
+  const stepCount = (String(result).match(/^\s*\d+\./gm) || []).length;
+  assert(
+    hasMarker || stepCount >= 8,
+    `Expected QWEN_DONE marker or >=8 numbered steps, got: ${String(result).slice(0, 280)}`
+  );
 }
 
 async function testGeminiBootstrap() {

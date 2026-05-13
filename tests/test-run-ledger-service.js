@@ -69,6 +69,10 @@ function run() {
     assert.strictEqual(inlineInputPayload.originalBytes, Buffer.byteLength('participant prompt', 'utf8'));
     assert.strictEqual(INPUT_POLICY.previewBytes, 16 * 1024);
 
+    const redactedPayload = ledger.prepareOutput('Authorization: Bearer sk-test-KD38-REDACTME-12345678901234567890');
+    assert(redactedPayload.previewText.includes('[REDACTED_SECRET]'));
+    assert(!redactedPayload.previewText.includes('KD38-REDACTME'));
+
     const compressedPayload = ledger.prepareOutput('A'.repeat(80 * 1024));
     assert.strictEqual(compressedPayload.storageMode, 'compressed');
     assert.strictEqual(compressedPayload.compression, 'gzip');
@@ -96,6 +100,7 @@ function run() {
       inputSummary: 'What is 2 + 2?',
       workingDirectory: '/tmp/project',
       initiator: 'test-suite',
+      rootSessionId: 'root-run-ledger-service',
       metadata: { source: 'unit-test' }
     });
 
@@ -133,8 +138,11 @@ function run() {
       runId,
       participantId,
       inputKind: 'participant_prompt',
-      content: 'What is 2 + 2? Reply with just the number.',
-      metadata: { systemPrompt: 'Return concise answers.' },
+      content: 'What is 2 + 2? Reply with just the number. paperclip_api_key=sk-test-KD38-INPUT-SECRET-123456789',
+      metadata: {
+        systemPrompt: 'Return concise answers.',
+        apiKey: 'sk-test-KD38-META-INPUT-SECRET-123456789'
+      },
       createdAt: inputBaseTime + 1
     });
 
@@ -142,11 +150,14 @@ function run() {
       runId,
       participantId,
       outputKind: 'participant_final',
-      content: '4',
-      metadata: { adapter: 'codex-cli' }
+      content: '4\nopenai_api_key=sk-test-KD38-OUTPUT-SECRET-123456789',
+      metadata: {
+        adapter: 'codex-cli',
+        accessToken: 'token-should-not-persist'
+      }
     });
 
-    ledger.appendToolEvent({
+    const toolEventId = ledger.appendToolEvent({
       runId,
       participantId,
       stepId,
@@ -187,11 +198,26 @@ function run() {
     assert.strictEqual(detail.inputs[0].inputKind, 'run_message');
     assert.strictEqual(detail.inputs[1].inputKind, 'participant_prompt');
     assert.strictEqual(detail.inputs[1].metadata.systemPrompt, 'Return concise answers.');
+    assert.strictEqual(detail.inputs[1].metadata.apiKey, '[REDACTED_SECRET]');
+    assert(detail.inputs[1].previewText.includes('[REDACTED_SECRET]'));
+    assert(!detail.inputs[1].previewText.includes('KD38-INPUT-SECRET'));
     assert.strictEqual(detail.outputs.length, 1);
     assert.strictEqual(detail.outputs[0].storageMode, 'inline_text');
+    assert.strictEqual(detail.outputs[0].metadata.accessToken, '[REDACTED_SECRET]');
+    assert(detail.outputs[0].previewText.includes('[REDACTED_SECRET]'));
+    assert(!detail.outputs[0].previewText.includes('KD38-OUTPUT-SECRET'));
     assert.strictEqual(detail.toolEvents.length, 1);
     assert.strictEqual(detail.toolEvents[0].storageMode, 'preview_only');
     assert.strictEqual(detail.toolEvents[0].toolClass, 'cli');
+    const rootToolEvents = db.listRootIoEvents({
+      rootSessionId: 'root-run-ledger-service',
+      eventKind: 'tool_event',
+      limit: 10
+    });
+    assert.strictEqual(rootToolEvents.length, 1);
+    assert.strictEqual(rootToolEvents[0].metadata.sourceTable, 'run_tool_events');
+    assert.strictEqual(rootToolEvents[0].metadata.toolEventId, toolEventId);
+    assert.strictEqual(rootToolEvents[0].metadata.toolName, 'codex exec');
 
     const staleNow = Date.now();
 

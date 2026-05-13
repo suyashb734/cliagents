@@ -14,8 +14,15 @@ const RUNTIME_FIDELITY = Object.freeze({
   NATIVE_VISIBLE: 'native-visible'
 });
 
+const SESSION_CONTROL_MODES = Object.freeze({
+  OBSERVER: 'observer',
+  OPERATOR: 'operator',
+  EXCLUSIVE: 'exclusive'
+});
+
 const HOST_CAPABILITIES = Object.freeze({
   [RUNTIME_HOSTS.TMUX]: Object.freeze([
+    'approve_permission',
     'read_output',
     'send_input',
     'resize',
@@ -29,12 +36,14 @@ const HOST_CAPABILITIES = Object.freeze({
     'stream_events'
   ]),
   [RUNTIME_HOSTS.DIRECT_PTY]: Object.freeze([
+    'approve_permission',
     'read_output',
     'send_input',
     'resize',
     'stream_events'
   ]),
   [RUNTIME_HOSTS.SSH]: Object.freeze([
+    'approve_permission',
     'read_output',
     'send_input',
     'resize',
@@ -42,6 +51,7 @@ const HOST_CAPABILITIES = Object.freeze({
     'stream_events'
   ]),
   [RUNTIME_HOSTS.CONTAINER]: Object.freeze([
+    'approve_permission',
     'read_output',
     'send_input',
     'stream_events',
@@ -51,6 +61,7 @@ const HOST_CAPABILITIES = Object.freeze({
 
 const VALID_RUNTIME_HOSTS = new Set(Object.values(RUNTIME_HOSTS));
 const VALID_RUNTIME_FIDELITY = new Set(Object.values(RUNTIME_FIDELITY));
+const VALID_SESSION_CONTROL_MODES = new Set(Object.values(SESSION_CONTROL_MODES));
 
 function parseJsonArray(value) {
   if (Array.isArray(value)) {
@@ -90,6 +101,11 @@ function normalizeRuntimeHost(value, fallback = RUNTIME_HOSTS.TMUX) {
 function normalizeRuntimeFidelity(value, fallback = RUNTIME_FIDELITY.MANAGED) {
   const normalized = String(value || '').trim().toLowerCase();
   return VALID_RUNTIME_FIDELITY.has(normalized) ? normalized : fallback;
+}
+
+function normalizeSessionControlMode(value, fallback = SESSION_CONTROL_MODES.OPERATOR) {
+  const normalized = String(value || '').trim().toLowerCase();
+  return VALID_SESSION_CONTROL_MODES.has(normalized) ? normalized : fallback;
 }
 
 function normalizeRuntimeCapabilities(value, runtimeHost = RUNTIME_HOSTS.TMUX) {
@@ -172,9 +188,11 @@ function serializeRuntimeCapabilities(value, runtimeHost = RUNTIME_HOSTS.TMUX) {
 module.exports = {
   RUNTIME_HOSTS,
   RUNTIME_FIDELITY,
+  SESSION_CONTROL_MODES,
   HOST_CAPABILITIES,
   normalizeRuntimeHost,
   normalizeRuntimeFidelity,
+  normalizeSessionControlMode,
   normalizeRuntimeCapabilities,
   resolveRuntimeHostMetadata,
   serializeRuntimeCapabilities

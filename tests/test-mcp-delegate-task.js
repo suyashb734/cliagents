@@ -36,8 +36,10 @@ function loadMcpModule(envOverrides = {}) {
 async function startFakeCliagentsServer() {
   const state = {
     scenario: null,
+    routeCallCount: 0,
     statusPolls: new Map(),
     lastRouteBody: null,
+    lastRouteHeaders: null,
     routeBodies: [],
     lastTerminalInput: null
   };
@@ -57,12 +59,27 @@ async function startFakeCliagentsServer() {
     };
 
     if (req.method === 'POST' && req.url === '/orchestration/route') {
+      state.lastRouteHeaders = req.headers;
       state.lastRouteBody = await readBody();
       state.routeBodies.push(state.lastRouteBody);
-      const routeStatus = state.scenario.routeStatus || 200;
-      const routeBody = routeStatus === 200
-        ? state.scenario.routeResponse
-        : (state.scenario.routeError || { error: { code: 'route_error', message: 'route failed' } });
+      let routeStatus;
+      let routeBody;
+      const routeSequence = Array.isArray(state.scenario.routeSequence) ? state.scenario.routeSequence : null;
+      if (routeSequence && routeSequence.length > 0) {
+        const step = routeSequence[Math.min(state.routeCallCount, routeSequence.length - 1)] || {};
+        state.routeCallCount += 1;
+        routeStatus = Number.isInteger(step.status) ? step.status : 200;
+        routeBody = step.body || (
+          routeStatus === 200
+            ? state.scenario.routeResponse
+            : (state.scenario.routeError || { error: { code: 'route_error', message: 'route failed' } })
+        );
+      } else {
+        routeStatus = state.scenario.routeStatus || 200;
+        routeBody = routeStatus === 200
+          ? state.scenario.routeResponse
+          : (state.scenario.routeError || { error: { code: 'route_error', message: 'route failed' } });
+      }
       return writeJson(routeStatus, routeBody);
     }
 
@@ -119,10 +136,16 @@ async function startFakeCliagentsServer() {
 
 async function run() {
   const fakeServer = await startFakeCliagentsServer();
+  const localTokenPath = path.join(os.tmpdir(), `cliagents-mcp-local-token-${process.pid}`);
+  fs.writeFileSync(localTokenPath, 'local-token-for-mcp-tests\n', 'utf8');
   const { mod, restore } = loadMcpModule({
     CLIAGENTS_URL: fakeServer.baseUrl,
+    CLIAGENTS_API_KEY: '',
+    CLI_AGENTS_API_KEY: '',
+    CLIAGENTS_LOCAL_API_KEY_FILE: localTokenPath,
     CLIAGENTS_MCP_POLL_MS: '10',
     CLIAGENTS_MCP_SYNC_WAIT_MS: '80',
+    CLIAGENTS_MCP_ROUTE_RETRY_DELAY_MAX_MS: '25',
     SESSION_GRAPH_WRITES_ENABLED: '1',
     CLIAGENTS_CLIENT_NAME: 'opencode',
     CLIAGENTS_ROOT_SESSION_ID: 'aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa',
@@ -154,8 +177,11 @@ async function run() {
     assert(completedText.includes('Response'));
     assert(completedText.includes('Completed delegated review'));
     assert(completedText.includes('term-complete'));
+    assert.strictEqual(fakeServer.state.lastRouteHeaders.authorization, 'Bearer local-token-for-mcp-tests');
+    assert.strictEqual(fakeServer.state.lastRouteHeaders['x-api-key'], 'local-token-for-mcp-tests');
 
     fakeServer.state.statusPolls.clear();
+    fakeServer.state.routeCallCount = 0;
     fakeServer.state.scenario = {
       routeResponse: {
         terminalId: 'term-running',
@@ -182,6 +208,7 @@ async function run() {
     assert(longElapsed < 1500, `Expected async fallback quickly, took ${longElapsed}ms`);
 
     fakeServer.state.statusPolls.clear();
+    fakeServer.state.routeCallCount = 0;
     fakeServer.state.scenario = {
       routeResponse: {
         terminalId: 'term-blocked',
@@ -204,6 +231,7 @@ async function run() {
     assert(blockedText.includes('blocked on an interactive prompt'));
 
     fakeServer.state.statusPolls.clear();
+    fakeServer.state.routeCallCount = 0;
     fakeServer.state.scenario = {
       routeResponse: {
         terminalId: 'term-custom-prompt',
@@ -224,6 +252,7 @@ async function run() {
     assert.strictEqual(fakeServer.state.lastRouteBody.systemPrompt, 'You are a custom reviewer.');
 
     fakeServer.state.statusPolls.clear();
+    fakeServer.state.routeCallCount = 0;
     fakeServer.state.scenario = {
       routeResponse: {
         terminalId: 'term-model-override',
@@ -257,7 +286,106 @@ async function run() {
     assert.strictEqual(fakeServer.state.lastRouteBody.sessionMetadata.clientName, 'opencode');
     assert.strictEqual(fakeServer.state.lastRouteBody.sessionMetadata.toolName, 'delegate_task');
 
+    fakeServer.state.routeBodies = [];
     fakeServer.state.statusPolls.clear();
+    fakeServer.state.routeCallCount = 0;
+    fakeServer.state.scenario = {
+      routeResponse: {
+        terminalId: 'term-retried',
+        adapter: 'codex-cli',
+        taskType: 'review',
+        profile: 'review_codex-cli'
+      },
+      routeSequence: [
+        {
+          status: 409,
+          body: {
+            error: {
+              code: 'terminal_busy',
+              message: 'Terminal reuse candidate is currently processing.',
+              retryAfterMs: 2000
+            }
+          }
+        },
+        {
+          status: 200,
+          body: {
+            terminalId: 'term-retried',
+            adapter: 'codex-cli',
+            taskType: 'review',
+            profile: 'review_codex-cli'
+          }
+        }
+      ],
+      statuses: ['completed'],
+      output: 'Recovered after force-fresh retry'
+    };
+
+    const recoveredStart = Date.now();
+    const recovered = await mod.handleDelegateTask({
+      role: 'review',
+      adapter: 'codex-cli',
+      sessionLabel: 'retry-check',
+      preferReuse: true,
+      message: 'Retry delegation when reuse is busy'
+    });
+    const recoveredElapsed = Date.now() - recoveredStart;
+    const recoveredText = recovered.content[0].text;
+    assert(recoveredText.includes('Recovery:'));
+    assert.strictEqual(fakeServer.state.routeBodies.length, 2);
+    assert.strictEqual(fakeServer.state.routeBodies[0].preferReuse, true);
+    assert.strictEqual(fakeServer.state.routeBodies[1].preferReuse, false);
+    assert.strictEqual(fakeServer.state.routeBodies[1].forceFreshSession, true);
+    assert.strictEqual(fakeServer.state.routeBodies[1].sessionMetadata.routeRetry.reason, 'terminal_busy');
+    assert(recoveredElapsed < 500, `Route retry delay should be capped; observed ${recoveredElapsed}ms`);
+
+    fakeServer.state.routeBodies = [];
+    fakeServer.state.statusPolls.clear();
+    fakeServer.state.routeCallCount = 0;
+    fakeServer.state.scenario = {
+      routeSequence: [
+        {
+          status: 409,
+          body: {
+            error: {
+              code: 'root_binding_conflict',
+              message: 'Root session is already bound to another client.',
+              retryAfterMs: 1
+            }
+          }
+        },
+        {
+          status: 200,
+          body: {
+            terminalId: 'term-non-busy-should-not-retry',
+            adapter: 'codex-cli',
+            taskType: 'review',
+            profile: 'review_codex-cli'
+          }
+        }
+      ],
+      statuses: ['completed'],
+      output: 'Should never be reached'
+    };
+
+    await assert.rejects(
+      () => mod.handleDelegateTask({
+        role: 'review',
+        adapter: 'codex-cli',
+        sessionLabel: 'retry-check',
+        preferReuse: true,
+        message: 'Do not retry non-busy 409 conflicts'
+      }),
+      (error) => {
+        assert(error.message.includes('Routing failed'));
+        assert(error.message.includes('root_binding_conflict'));
+        return true;
+      }
+    );
+    assert.strictEqual(fakeServer.state.routeBodies.length, 1, 'non-busy 409 responses should not trigger retry');
+
+    fakeServer.state.statusPolls.clear();
+    fakeServer.state.routeCallCount = 0;
     fakeServer.state.scenario = {
       routeResponse: {
         terminalId: 'term-collaborator',
@@ -291,12 +419,20 @@ async function run() {
     );
 
     fakeServer.state.statusPolls.clear();
+    fakeServer.state.routeCallCount = 0;
     fakeServer.state.scenario = {
       routeResponse: {
         terminalId: 'term-default-async',
         adapter: 'qwen-cli',
         taskType: 'architect',
-        profile: 'architect_qwen-cli'
+        profile: 'architect_qwen-cli',
+        reuse: {
+          preferred: true,
+          selected: false,
+          reason: 'no_compatible_terminal',
+          candidateTerminalId: null,
+          requiredNewBinding: true
+        }
       },
       statuses: ['processing'],
       output: ''
@@ -310,6 +446,7 @@ async function run() {
     const defaultAsyncText = defaultAsync.content[0].text;
     assert(defaultAsyncText.includes('Task Delegated: ASYNC'));
     assert(defaultAsyncText.includes('term-default-async'));
+    assert(defaultAsyncText.includes('preferred=yes, selected=no, reason=no_compatible_terminal'));
 
     const replied = await mod.handleReplyToTerminal({
       terminalId: 'term-default-async',
@@ -324,6 +461,7 @@ async function run() {
     );
 
     fakeServer.state.statusPolls.clear();
+    fakeServer.state.routeCallCount = 0;
     fakeServer.state.scenario = {
       routeResponse: {
         terminalId: 'term-async',
@@ -346,6 +484,7 @@ async function run() {
 
     fakeServer.state.routeBodies = [];
     fakeServer.state.scenario = {
+      routeCallCount: 0,
       routeResponse: {
         terminalId: 'term-workflow',
         adapter: 'codex-cli',
@@ -387,6 +526,7 @@ async function run() {
 
     fakeServer.state.routeBodies = [];
     fakeServer.state.statusPolls.clear();
+    fakeServer.state.routeCallCount = 0;
     const detachedWorkflowStateDir = fs.mkdtempSync(path.join(os.tmpdir(), 'cliagents-mcp-detached-workflow-'));
     const detachedWorkflow = loadMcpModule({
       CLIAGENTS_URL: fakeServer.baseUrl,
@@ -431,6 +571,7 @@ async function run() {
     }
 
     fakeServer.state.statusPolls.clear();
+    fakeServer.state.routeCallCount = 0;
     fakeServer.state.scenario = {
       routeStatus: 428,
       routeError: {
@@ -486,6 +627,7 @@ async function run() {
     }
 
     fakeServer.state.statusPolls.clear();
+    fakeServer.state.routeCallCount = 0;
     fakeServer.state.scenario = {
       routeResponse: {
         terminalId: 'term-status-complete',
@@ -510,6 +652,7 @@ __CLIAGENTS_RUN_EXIT__abc123__0
     assert(!completedStatus.content[0].text.includes('printf'));
 
     fakeServer.state.statusPolls.clear();
+    fakeServer.state.routeCallCount = 0;
     fakeServer.state.scenario = {
       routeResponse: {
         terminalId: 'term-status-stale-processing',
@@ -529,6 +672,7 @@ __CLIAGENTS_RUN_EXIT__stale123__0
     assert(staleCompletedStatus.content[0].text.includes('Completed despite stale processing status'));
 
     fakeServer.state.statusPolls.clear();
+    fakeServer.state.routeCallCount = 0;
     fakeServer.state.scenario = {
       routeResponse: {
         terminalId: 'term-status-error',
@@ -545,6 +689,7 @@ __CLIAGENTS_RUN_EXIT__stale123__0
     assert(failedStatus.content[0].text.includes('Process exited with code 1'));
 
     fakeServer.state.statusPolls.clear();
+    fakeServer.state.routeCallCount = 0;
     fakeServer.state.scenario = {
       routeResponse: {
         terminalId: 'term-status-waiting',
@@ -564,6 +709,9 @@ __CLIAGENTS_RUN_EXIT__stale123__0
     console.log('\nMCP delegate_task tests passed');
   } finally {
     restore();
+    try {
+      fs.unlinkSync(localTokenPath);
+    } catch {}
     await fakeServer.close();
   }
 }

@@ -126,7 +126,59 @@ async function assertEligibilityRules() {
     { id: 'a1', status: 'completed' },
     { id: 'a2', status: 'queued', metadata: { dependsOn: ['a1'], startPolicy: 'start-now' } },
     { id: 'a3', status: 'queued', metadata: { dependsOn: ['missing'], startPolicy: 'start-now' } },
-    { id: 'a4', status: 'queued', metadata: { manualHold: true } }
+    { id: 'a4', status: 'queued', metadata: { manualHold: true } },
+    {
+      id: 'a5',
+      status: 'queued',
+      metadata: { startPolicy: 'start-now' },
+      dispatchRequests: [
+        {
+          id: 'dispatch-a5',
+          requestKind: 'assignment_start',
+          status: 'deferred',
+          liveness: { state: 'deferred' }
+        }
+      ]
+    },
+    {
+      id: 'a6',
+      status: 'queued',
+      metadata: { startPolicy: 'start-now' },
+      dispatchRequests: [
+        {
+          id: 'dispatch-a6',
+          requestKind: 'assignment_start',
+          status: 'deferred',
+          liveness: { state: 'ready' }
+        }
+      ]
+    },
+    {
+      id: 'a7',
+      status: 'queued',
+      metadata: { startPolicy: 'start-now' },
+      dispatchRequests: [
+        {
+          id: 'dispatch-a7',
+          requestKind: 'assignment_start',
+          status: 'claimed',
+          liveness: { state: 'claimed' }
+        }
+      ]
+    },
+    {
+      id: 'a8',
+      status: 'queued',
+      metadata: { startPolicy: 'start-now' },
+      dispatchRequests: [
+        {
+          id: 'dispatch-a8',
+          requestKind: 'assignment_start',
+          status: 'claimed',
+          liveness: { state: 'stale' }
+        }
+      ]
+    }
   ];
   const options = parseArgs(['task-1']);
 
@@ -135,8 +187,15 @@ async function assertEligibilityRules() {
   assert.strictEqual(isAssignmentEligible(assignments[2], assignments, options).reason, 'depends:missing');
   assert.strictEqual(isAssignmentEligible(assignments[3], assignments, options).eligible, false);
   assert.strictEqual(isAssignmentEligible(assignments[3], assignments, options).reason, 'manual-hold');
+  assert.strictEqual(isAssignmentEligible(assignments[4], assignments, options).eligible, false);
+  assert.strictEqual(isAssignmentEligible(assignments[4], assignments, options).reason, 'dispatch:deferred');
+  assert.strictEqual(isAssignmentEligible(assignments[5], assignments, options).eligible, true);
+  assert.strictEqual(isAssignmentEligible(assignments[6], assignments, options).eligible, false);
+  assert.strictEqual(isAssignmentEligible(assignments[6], assignments, options).reason, 'dispatch:claimed');
+  assert.strictEqual(isAssignmentEligible(assignments[7], assignments, options).eligible, false);
+  assert.strictEqual(isAssignmentEligible(assignments[7], assignments, options).reason, 'dispatch:stale');
 
-  console.log('✅ task supervisor respects dependency and manual-hold gates');
+  console.log('✅ task supervisor respects dependency, manual-hold, and dispatch gates');
 }
 
 async function assertDryRunDoesNotPostStart() {

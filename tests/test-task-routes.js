@@ -42,12 +42,20 @@ function createFakeSessionManager() {
         terminalId,
         adapter: options.adapter || 'codex-cli',
         model: options.model || null,
+        requestedModel: options.model || null,
+        effectiveModel: options.model || null,
+        requestedEffort: options.reasoningEffort || null,
+        effectiveEffort: options.reasoningEffort || null,
         role: options.agentProfile || null,
         status: 'processing',
         taskState: 'processing',
         rootSessionId: options.rootSessionId || null,
         parentSessionId: options.parentSessionId || null,
-        sessionKind: options.sessionKind || null
+        sessionKind: options.sessionKind || null,
+        providerThreadRef: `provider-${terminalId}`,
+        runtimeHost: 'tmux',
+        runtimeFidelity: 'managed',
+        activeRun: null
       };
       state.createCalls.push({
         ...options,
@@ -62,6 +70,12 @@ function createFakeSessionManager() {
     },
     async sendInput(terminalId, message) {
       state.sendCalls.push({ terminalId, message });
+      const terminal = state.terminals.get(terminalId);
+      if (terminal) {
+        terminal.activeRun = { runId: `run-${terminalId}` };
+        terminal.status = 'processing';
+        terminal.taskState = 'processing';
+      }
       return { terminalId, message };
     },
     getTerminal(terminalId) {
@@ -174,6 +188,11 @@ async function runMigrationAssertions() {
       assert(getColumnNames(migratedDb, 'rooms').includes('task_id'), 'rooms.task_id should exist after migration');
       assert(getColumnNames(migratedDb, 'tasks').includes('workspace_root'), 'tasks table should exist after migration');
       assert(getColumnNames(migratedDb, 'task_assignments').includes('instructions'), 'task_assignments table should exist after migration');
+      assert(getColumnNames(migratedDb, 'task_assignments').includes('branch_name'), 'task_assignments should include branch orchestration columns');
+      assert(
+        migratedDb.db.prepare("SELECT name FROM sqlite_master WHERE type='table' AND name='task_assignment_path_leases'").get(),
+        'task_assignment_path_leases table should exist after migration'
+      );
 
       const runBackfilled = migratedDb.getTask('task-legacy-run');
       assert(runBackfilled, 'run-backed task should be materialized');
@@ -269,16 +288,45 @@ async function runRouteAssertions() {
     assert.strictEqual(missingRole.status, 400);
     assert.strictEqual(missingRole.data.error.param, 'role');
 
+    const invalidEffort = await request(serverHandle.baseUrl, 'POST', `/orchestration/tasks/${taskId}/assignments`, {
+      role: 'executor',
+      instructions: 'Implement the feature.',
+      reasoningEffort: 'maximum'
+    });
+    assert.strictEqual(invalidEffort.status, 400);
+    assert.strictEqual(invalidEffort.data.error.param, 'reasoningEffort');
+
     const createAssignmentRes = await request(serverHandle.baseUrl, 'POST', `/orchestration/tasks/${taskId}/assignments`, {
       role: 'executor',
       instructions: 'Implement the feature and add tests.',
+      reasoningEffort: 'high',
       worktreePath,
-      worktreeBranch: 'task/tasks-v1'
+      worktreeBranch: 'task/tasks-v1',
+      branchName: 'task/tasks-v1',
+      baseBranch: 'main',
+      mergeTarget: 'main',
+      writePaths: ['src/tasks.js']
     });
     assert.strictEqual(createAssignmentRes.status, 200);
     assert.strictEqual(createAssignmentRes.data.assignment.status, 'queued');
+    assert.strictEqual(createAssignmentRes.data.assignment.reasoningEffort, 'high');
     assert.strictEqual(createAssignmentRes.data.assignment.worktreePath, worktreePath);
+    assert.strictEqual(createAssignmentRes.data.assignment.branch.branchName, 'task/tasks-v1');
+    assert.strictEqual(createAssignmentRes.data.assignment.branch.status, 'planned');
+    assert.deepStrictEqual(createAssignmentRes.data.assignment.branch.writePaths, ['src/tasks.js']);
+    assert(createAssignmentRes.data.assignment.branch.pathLeaseId, 'assignment with write paths should acquire a path lease');
     const assignmentId = createAssignmentRes.data.assignment.id;
+
+    const conflictingAssignmentRes = await request(serverHandle.baseUrl, 'POST', `/orchestration/tasks/${taskId}/assignments`, {
+      role: 'executor',
+      instructions: 'Try to edit the same file.',
+      worktreePath: path.join(rootDir, 'conflicting-task-worktree'),
+      worktreeBranch: 'task/tasks-v1-conflict',
+      branchName: 'task/tasks-v1-conflict',
+      writePaths: ['src/tasks.js']
+    });
+    assert.strictEqual(conflictingAssignmentRes.status, 409);
+    assert.strictEqual(conflictingAssignmentRes.data.error.code, 'path_lease_conflict');
 
     const patchAssignmentRes = await request(serverHandle.baseUrl, 'PATCH', `/orchestration/tasks/${taskId}/assignments/${assignmentId}`, {
       instructions: 'Implement the feature, add tests, and report status.',
@@ -294,18 +342,156 @@ async function runRouteAssertions() {
       rootSessionId: 'root-task-routes',
       parentSessionId: 'root-task-routes',
       originClient: 'test',
-      externalSessionRef: 'test:task-routes'
+      externalSessionRef: 'test:task-routes',
+      reasoningEffort: 'xhigh'
     });
     assert.strictEqual(startAssignmentRes.status, 200);
     assert.strictEqual(startAssignmentRes.data.assignment.status, 'running');
+    assert.strictEqual(startAssignmentRes.data.assignment.reasoningEffort, 'xhigh');
+    assert.strictEqual(startAssignmentRes.data.assignment.branch.status, 'running');
+    assert.strictEqual(startAssignmentRes.data.assignment.branch.pathLease.status, 'active');
     assert(startAssignmentRes.data.assignment.terminalId, 'started assignment should be linked to a terminal');
+    assert.strictEqual(startAssignmentRes.data.assignment.dispatch.status, 'spawned');
+    assert.strictEqual(startAssignmentRes.data.assignment.dispatchRequests.length, 1);
+    assert.strictEqual(startAssignmentRes.data.assignment.taskSessionBindings.length, 1);
     assert.strictEqual(sessionManager.state.createCalls.length, 1);
     assert.strictEqual(sessionManager.state.sendCalls.length, 1);
     assert.strictEqual(sessionManager.state.createCalls[0].workDir, worktreePath);
     assert.strictEqual(sessionManager.state.createCalls[0].sessionMetadata.taskId, taskId);
     assert.strictEqual(sessionManager.state.createCalls[0].sessionMetadata.taskAssignmentId, assignmentId);
+    assert.strictEqual(sessionManager.state.createCalls[0].reasoningEffort, 'xhigh');
     assert.strictEqual(sessionManager.state.sendCalls[0].message, 'Implement the feature, add tests, and report status.');
     assert.strictEqual(sessionManager.state.createCalls[0].rootSessionId, 'root-task-routes');
+    assert(startAssignmentRes.data.dispatch.dispatchRequestId, 'start response should expose dispatch request linkage');
+    assert(startAssignmentRes.data.dispatch.contextSnapshotId, 'start response should expose context snapshot linkage');
+    assert(startAssignmentRes.data.dispatch.taskSessionBindingId, 'start response should expose task session binding linkage');
+
+    const dispatches = db.listDispatchRequests({ taskAssignmentId: assignmentId });
+    assert.strictEqual(dispatches.length, 1);
+    assert.strictEqual(dispatches[0].status, 'spawned');
+    assert.strictEqual(dispatches[0].taskId, taskId);
+    assert.strictEqual(dispatches[0].rootSessionId, 'root-task-routes');
+    assert.strictEqual(dispatches[0].terminalId, startAssignmentRes.data.assignment.terminalId);
+    assert.strictEqual(dispatches[0].runId, `run-${startAssignmentRes.data.assignment.terminalId}`);
+    assert.strictEqual(dispatches[0].contextSnapshotId, startAssignmentRes.data.dispatch.contextSnapshotId);
+    assert.strictEqual(dispatches[0].boundSessionId, startAssignmentRes.data.dispatch.taskSessionBindingId);
+
+    const contextSnapshot = db.getRunContextSnapshot(startAssignmentRes.data.dispatch.contextSnapshotId);
+    assert.strictEqual(contextSnapshot.dispatchRequestId, startAssignmentRes.data.dispatch.dispatchRequestId);
+    assert.strictEqual(contextSnapshot.workspacePath, worktreePath);
+    assert.strictEqual(contextSnapshot.contextMode, 'task_assignment');
+    assert(contextSnapshot.promptBody.includes('Implement the feature'), 'context snapshot should persist the assignment prompt');
+    assert.strictEqual(contextSnapshot.linkedContext.task.id, taskId);
+    assert.strictEqual(contextSnapshot.linkedContext.assignment.id, assignmentId);
+    assert.strictEqual(contextSnapshot.linkedContext.assignment.reasoningEffort, 'xhigh');
+    assert.strictEqual(contextSnapshot.linkedContext.assignment.branchName, 'task/tasks-v1');
+    assert.deepStrictEqual(contextSnapshot.linkedContext.assignment.writePaths, ['src/tasks.js']);
+
+    const lateLeaseTaskRes = await request(serverHandle.baseUrl, 'POST', '/orchestration/tasks', {
+      title: 'Late lease task',
+      workspaceRoot: rootDir
+    });
+    assert.strictEqual(lateLeaseTaskRes.status, 200);
+    const lateLeaseTaskId = lateLeaseTaskRes.data.task.id;
+    const lateLeaseAssignment = db.createTaskAssignment({
+      id: 'assignment-late-lease',
+      taskId: lateLeaseTaskId,
+      role: 'executor',
+      instructions: 'Start from a legacy row that has write paths but no lease.',
+      branchName: 'task/late-lease',
+      baseBranch: 'main',
+      mergeTarget: 'main',
+      branchStatus: 'planned',
+      writePaths: ['src/late-lease.js'],
+      status: 'queued',
+      createdAt: Date.now()
+    });
+    assert.strictEqual(lateLeaseAssignment.pathLeaseId, null);
+    const lateLeaseStartRes = await request(serverHandle.baseUrl, 'POST', `/orchestration/tasks/${lateLeaseTaskId}/assignments/${lateLeaseAssignment.id}/start`, {
+      rootSessionId: 'root-task-routes',
+      parentSessionId: 'root-task-routes',
+      originClient: 'test',
+      externalSessionRef: 'test:task-routes'
+    });
+    assert.strictEqual(lateLeaseStartRes.status, 200, JSON.stringify(lateLeaseStartRes.data));
+    assert.strictEqual(lateLeaseStartRes.data.assignment.status, 'running');
+    assert.strictEqual(lateLeaseStartRes.data.assignment.branch.status, 'running');
+    assert(lateLeaseStartRes.data.assignment.branch.pathLeaseId, 'start should acquire a missing path lease for legacy assignment rows');
+    assert.strictEqual(lateLeaseStartRes.data.assignment.branch.pathLease.status, 'active');
+    assert.strictEqual(db.getTaskAssignment(lateLeaseAssignment.id).pathLeaseId, lateLeaseStartRes.data.assignment.branch.pathLeaseId);
+
+    const sessionBindings = db.listTaskSessionBindings({ taskAssignmentId: assignmentId });
+    assert.strictEqual(sessionBindings.length, 1);
+    assert.strictEqual(sessionBindings[0].rootSessionId, 'root-task-routes');
+    assert.strictEqual(sessionBindings[0].taskId, taskId);
+    assert.strictEqual(sessionBindings[0].terminalId, startAssignmentRes.data.assignment.terminalId);
+    assert.strictEqual(sessionBindings[0].providerSessionId, `provider-${startAssignmentRes.data.assignment.terminalId}`);
+    assert.strictEqual(sessionBindings[0].runtimeHost, 'tmux');
+    assert.strictEqual(sessionBindings[0].runtimeFidelity, 'managed');
+    assert.strictEqual(sessionBindings[0].reuseDecision.reused, false);
+
+    const dispatchPolicyTaskRes = await request(serverHandle.baseUrl, 'POST', '/orchestration/tasks', {
+      title: 'Dispatch policy task',
+      workspaceRoot: rootDir
+    });
+    assert.strictEqual(dispatchPolicyTaskRes.status, 200);
+    const dispatchPolicyTaskId = dispatchPolicyTaskRes.data.task.id;
+
+    const deferredAssignmentRes = await request(serverHandle.baseUrl, 'POST', `/orchestration/tasks/${dispatchPolicyTaskId}/assignments`, {
+      role: 'executor',
+      instructions: 'Run this later.'
+    });
+    assert.strictEqual(deferredAssignmentRes.status, 200);
+    const deferUntil = Date.now() + 60_000;
+    const createCallsBeforeDeferred = sessionManager.state.createCalls.length;
+    const deferredStartRes = await request(serverHandle.baseUrl, 'POST', `/orchestration/tasks/${dispatchPolicyTaskId}/assignments/${deferredAssignmentRes.data.assignment.id}/start`, {
+      rootSessionId: 'root-task-routes',
+      parentSessionId: 'root-task-routes',
+      originClient: 'test',
+      externalSessionRef: 'test:task-routes',
+      deferUntil
+    });
+    assert.strictEqual(deferredStartRes.status, 202);
+    assert.strictEqual(deferredStartRes.data.assignment.status, 'queued');
+    assert.strictEqual(deferredStartRes.data.dispatch.status, 'deferred');
+    assert.strictEqual(deferredStartRes.data.dispatch.deferUntil, deferUntil);
+    assert.strictEqual(deferredStartRes.data.dispatch.liveness.state, 'deferred');
+    assert.strictEqual(deferredStartRes.data.dispatch.liveness.nextAction, 'wait_until_defer_time');
+    assert.strictEqual(sessionManager.state.createCalls.length, createCallsBeforeDeferred, 'deferred dispatch should not spawn a terminal');
+
+    const coalescedAssignmentRes = await request(serverHandle.baseUrl, 'POST', `/orchestration/tasks/${dispatchPolicyTaskId}/assignments`, {
+      role: 'executor',
+      instructions: 'Coalesce duplicate starts.'
+    });
+    assert.strictEqual(coalescedAssignmentRes.status, 200);
+    const coalescedAssignmentId = coalescedAssignmentRes.data.assignment.id;
+    db.createDispatchRequest({
+      id: 'dispatch-preclaimed-route',
+      taskId: dispatchPolicyTaskId,
+      taskAssignmentId: coalescedAssignmentId,
+      rootSessionId: 'root-task-routes',
+      requestKind: 'assignment_start',
+      status: 'claimed',
+      coalesceKey: `task:${dispatchPolicyTaskId}:assignment:${coalescedAssignmentId}:start`,
+      requestedBy: 'first-supervisor',
+      createdAt: Date.now() - 1000,
+      updatedAt: Date.now() - 1000
+    });
+    const createCallsBeforeCoalesced = sessionManager.state.createCalls.length;
+    const coalescedStartRes = await request(serverHandle.baseUrl, 'POST', `/orchestration/tasks/${dispatchPolicyTaskId}/assignments/${coalescedAssignmentId}/start`, {
+      rootSessionId: 'root-task-routes',
+      parentSessionId: 'root-task-routes',
+      originClient: 'test',
+      externalSessionRef: 'test:task-routes'
+    });
+    assert.strictEqual(coalescedStartRes.status, 202);
+    assert.strictEqual(coalescedStartRes.data.assignment.status, 'queued');
+    assert.strictEqual(coalescedStartRes.data.dispatch.status, 'claimed');
+    assert.strictEqual(coalescedStartRes.data.dispatch.action, 'coalesced');
+    assert.strictEqual(coalescedStartRes.data.dispatch.coalesced, true);
+    assert.strictEqual(coalescedStartRes.data.dispatch.coalescedCount, 1);
+    assert.strictEqual(coalescedStartRes.data.dispatch.liveness.state, 'claimed');
+    assert.strictEqual(sessionManager.state.createCalls.length, createCallsBeforeCoalesced, 'coalesced dispatch should not spawn a duplicate terminal');
 
     db.addUsageRecord({
       rootSessionId: 'root-task-routes',
@@ -349,6 +535,8 @@ async function runRouteAssertions() {
     assert.strictEqual(listAssignmentsRes.data.assignments[0].status, 'running');
     assert.strictEqual(listAssignmentsRes.data.assignments[0].terminalStatus, 'processing');
     assert.strictEqual(listAssignmentsRes.data.assignments[0].usageSummary.totalTokens, 15);
+    assert.strictEqual(listAssignmentsRes.data.assignments[0].dispatch.status, 'spawned');
+    assert.strictEqual(listAssignmentsRes.data.assignments[0].taskSessionBindings[0].rootSessionId, 'root-task-routes');
 
     const liveTerminal = sessionManager.state.terminals.get(startAssignmentRes.data.assignment.terminalId);
     sessionManager.state.terminals.delete(startAssignmentRes.data.assignment.terminalId);

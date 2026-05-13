@@ -11,9 +11,12 @@ const path = require('path');
 const fs = require('fs');
 const crypto = require('crypto');
 const {
+  SESSION_CONTROL_MODES,
+  normalizeSessionControlMode,
   resolveRuntimeHostMetadata,
   serializeRuntimeCapabilities
 } = require('../runtime/host-model');
+const { redactSecretsInText, redactSecretObject } = require('../security/secret-redaction');
 
 /**
  * Generate a unique ID for shared memory entries
@@ -86,6 +89,85 @@ function normalizeUsageConfidence(value) {
   return 'unknown';
 }
 
+function normalizeReasoningEffort(value) {
+  const normalized = String(value || '').trim().toLowerCase();
+  return ['none', 'minimal', 'low', 'medium', 'high', 'xhigh'].includes(normalized)
+    ? normalized
+    : null;
+}
+
+function normalizeTaskAssignmentBranchStatus(value, fallback = null) {
+  const normalized = String(value || '').trim().toLowerCase();
+  return [
+    'planned',
+    'created',
+    'running',
+    'ready_for_review',
+    'accepted',
+    'integrated',
+    'failed'
+  ].includes(normalized)
+    ? normalized
+    : fallback;
+}
+
+function normalizeTaskAssignmentPathLeaseStatus(value, fallback = 'active') {
+  const normalized = String(value || '').trim().toLowerCase();
+  return ['active', 'released', 'expired', 'revoked'].includes(normalized)
+    ? normalized
+    : fallback;
+}
+
+function normalizeWritePathList(value) {
+  const rawPaths = Array.isArray(value)
+    ? value
+    : (typeof value === 'string'
+      ? (() => {
+        const parsed = parseJsonField(value);
+        return Array.isArray(parsed) ? parsed : value.split(',');
+      })()
+      : []);
+  const normalized = [];
+  for (const rawPath of rawPaths) {
+    const trimmed = String(rawPath || '').trim();
+    if (!trimmed) {
+      continue;
+    }
+    const normalizedPath = trimmed
+      .replace(/\\/g, '/')
+      .replace(/^\.\/+/, '')
+      .replace(/\/+/g, '/')
+      .replace(/\/$/, '');
+    if (
+      path.isAbsolute(normalizedPath)
+      || normalizedPath === '..'
+      || normalizedPath.startsWith('../')
+      || normalizedPath.includes('/../')
+    ) {
+      throw new Error(`writePaths must be relative paths inside the workspace: ${trimmed}`);
+    }
+    if (!normalized.includes(normalizedPath || '.')) {
+      normalized.push(normalizedPath || '.');
+    }
+  }
+  return normalized.sort();
+}
+
+function writePathsOverlap(leftPaths = [], rightPaths = []) {
+  const left = normalizeWritePathList(leftPaths);
+  const right = normalizeWritePathList(rightPaths);
+  if (left.length === 0 || right.length === 0) {
+    return false;
+  }
+  return left.some((leftPath) => right.some((rightPath) => (
+    leftPath === '.'
+    || rightPath === '.'
+    || leftPath === rightPath
+    || leftPath.startsWith(`${rightPath}/`)
+    || rightPath.startsWith(`${leftPath}/`)
+  )));
+}
+
 function normalizeUsageRole(value) {
   const normalized = String(value || '').trim().toLowerCase();
   return normalized || 'unknown';
@@ -108,16 +190,23 @@ function classifyUsageRoleBucket(value) {
 
   if (
     role === 'worker'
+    || role === 'executor'
     || role === 'implement'
+    || role === 'implementer'
     || role === 'participant'
     || role === 'reviewer'
+    || role === 'reviewer-bugs'
     || role === 'review'
     || role === 'review-security'
     || role === 'review-performance'
     || role === 'test'
+    || role === 'tester'
     || role === 'fix'
+    || role === 'fixer'
     || role === 'research'
+    || role === 'researcher'
     || role === 'document'
+    || role === 'documenter'
   ) {
     return 'execution';
   }
@@ -202,8 +291,13 @@ function buildUsageRecordFromMetadata(context = {}, metadata = {}) {
 
   const inputTokens = getFirstUsageValue(usageMetadata, ['inputTokens', 'input_tokens', 'promptTokens', 'prompt_tokens']);
   const outputTokens = getFirstUsageValue(usageMetadata, ['outputTokens', 'output_tokens', 'completionTokens', 'completion_tokens', 'candidateTokens', 'candidate_tokens']);
-  const reasoningTokens = getFirstUsageValue(usageMetadata, ['reasoningTokens', 'reasoning_tokens']);
+  const reasoningTokens = getFirstUsageValue(usageMetadata, ['reasoningTokens', 'reasoning_tokens', 'reasoningOutputTokens', 'reasoning_output_tokens']);
   const cachedInputTokens = getFirstUsageValue(usageMetadata, ['cachedInputTokens', 'cached_input_tokens']);
+  const cacheReadInputTokens = getFirstUsageValue(usageMetadata, ['cacheReadInputTokens', 'cache_read_input_tokens']);
+  const cacheCreationInputTokens = getFirstUsageValue(usageMetadata, [
+    'cacheCreationInputTokens',
+    'cache_creation_input_tokens'
+  ]);
   const totalTokens = getFirstUsageValue(usageMetadata, ['totalTokens', 'total_tokens']);
   const costUsd = getFirstUsageValue(usageMetadata, ['costUsd', 'cost_usd', 'totalCostUsd', 'total_cost_usd']);
   const durationMs = getFirstUsageValue(usageMetadata, ['durationMs', 'duration_ms']);
@@ -238,10 +332,14 @@ function buildUsageRecordFromMetadata(context = {}, metadata = {}) {
   const normalizedInputTokens = normalizeInteger(inputTokens, 0);
   const normalizedOutputTokens = normalizeInteger(outputTokens, 0);
   const normalizedReasoningTokens = normalizeInteger(reasoningTokens, 0);
-  const normalizedCachedInputTokens = normalizeInteger(cachedInputTokens, 0);
+  const normalizedCacheReadInputTokens = normalizeInteger(cacheReadInputTokens, 0);
+  const normalizedCacheCreationInputTokens = normalizeInteger(cacheCreationInputTokens, 0);
+  const normalizedCachedInputTokens = cachedInputTokens !== null && cachedInputTokens !== undefined
+    ? normalizeInteger(cachedInputTokens, 0)
+    : normalizedCacheReadInputTokens + normalizedCacheCreationInputTokens;
   const normalizedTotalTokens = normalizeUsageTotalTokens(
     totalTokens,
-    normalizedInputTokens + normalizedOutputTokens + normalizedReasoningTokens
+    normalizedInputTokens + normalizedOutputTokens + normalizedCacheReadInputTokens + normalizedCacheCreationInputTokens
   );
 
   const terminalId = String(context.terminalId || '').trim();
@@ -314,6 +412,10 @@ function buildUsageWhereClause(options = {}) {
     clauses.push('usage_records.task_assignment_id = ?');
     params.push(options.taskAssignmentId);
   }
+  if (options.projectId || options.project_id) {
+    clauses.push('usage_records.project_id = ?');
+    params.push(options.projectId || options.project_id);
+  }
   if (options.participantId) {
     clauses.push('usage_records.participant_id = ?');
     params.push(options.participantId);
@@ -325,12 +427,32 @@ function buildUsageWhereClause(options = {}) {
   };
 }
 
-const MEMORY_SNAPSHOT_SCOPES = new Set(['run', 'root']);
+const MEMORY_SNAPSHOT_SCOPES = new Set(['run', 'root', 'room', 'task', 'project']);
 const MEMORY_SNAPSHOT_GENERATION_TRIGGERS = new Set(['run_completed', 'root_refresh', 'repair', 'manual']);
 const MEMORY_SNAPSHOT_GENERATION_STRATEGIES = new Set(['rule_based']);
+const TERMINAL_INPUT_QUEUE_STATUSES = new Set(['pending', 'held_for_approval', 'delivered', 'expired', 'cancelled']);
+const TERMINAL_INPUT_LEASE_STATUSES = new Set(['active', 'released', 'revoked', 'expired']);
+const TERMINAL_INPUT_KINDS = new Set(['message', 'approval', 'denial']);
 const ROOM_TURN_ACTIVE_STATUSES = new Set(['pending', 'running']);
 const ROOM_TURN_TERMINAL_STATUSES = new Set(['completed', 'partial', 'failed']);
 const DEFAULT_ROOM_TURN_STALE_MS = 30 * 60 * 1000;
+const ROOT_IO_EVENT_KINDS = new Set(['input', 'output', 'screen_snapshot', 'parsed_message', 'tool_event', 'usage', 'liveness']);
+const ROOT_IO_EVENT_SOURCES = new Set(['broker', 'terminal_log', 'provider_metadata', 'parser']);
+const ROOT_IO_RETENTION_CLASSES = new Set(['raw-bounded', 'summary-indefinite', 'metadata-indefinite']);
+const MEMORY_SUMMARY_EDGE_NAMESPACES = new Set(['structural', 'derivation', 'execution']);
+const MEMORY_SUMMARY_EDGE_KINDS = new Set(['contains', 'continues', 'summarizes', 'supersedes', 'derived_from', 'blocks', 'unblocks']);
+const DISPATCH_REQUEST_STATUSES = new Set(['queued', 'claimed', 'spawned', 'deferred', 'cancelled', 'failed']);
+const DISPATCH_REQUEST_COALESCABLE_STATUSES = new Set(['queued', 'claimed', 'deferred']);
+const TASK_SESSION_BINDING_STATUSES = new Set(['active', 'superseded', 'failed', 'cancelled']);
+const CONTEXT_RETENTION_CLASSES = new Set(['raw-bounded', 'summary-indefinite', 'metadata-indefinite']);
+const MEMORY_RECORD_TYPE_ALIASES = new Map([
+  ['usage', 'usage_record'],
+  ['root_io', 'root_io_event'],
+  ['root_io_events', 'root_io_event'],
+  ['dispatch', 'dispatch_request'],
+  ['context_snapshot', 'run_context_snapshot'],
+  ['session_binding', 'task_session_binding']
+]);
 const MEMORY_PROJECTION_JSON_FIELDS = new Set([
   'metadata',
   'payload_json',
@@ -358,15 +480,38 @@ const MEMORY_PROJECTION_SOURCE_LOOKUPS = {
   run_outputs: { primaryKey: 'id' },
   run_tool_events: { primaryKey: 'id' },
   usage_records: { primaryKey: 'id' },
+  terminal_input_queue: { primaryKey: 'id' },
+  terminal_input_leases: { primaryKey: 'id' },
   discussions: { primaryKey: 'id' },
   discussion_messages: { primaryKey: 'id' },
   artifacts: { primaryKey: 'id' },
   findings: { primaryKey: 'id' },
   context: { primaryKey: 'id' },
   memory_snapshots: { primaryKey: 'id' },
+  root_io_events: { primaryKey: 'root_io_event_id' },
+  memory_summary_edges: { primaryKey: 'edge_id' },
+  dispatch_requests: { primaryKey: 'dispatch_request_id' },
+  run_context_snapshots: { primaryKey: 'context_snapshot_id' },
+  task_session_bindings: { primaryKey: 'binding_id' },
   operator_actions: { primaryKey: 'action_id' },
   run_blocked_states: { primaryKey: 'id' }
 };
+
+function normalizeTerminalInputQueueStatus(value, fallback = 'pending') {
+  const normalized = String(value || '').trim().toLowerCase();
+  return TERMINAL_INPUT_QUEUE_STATUSES.has(normalized) ? normalized : fallback;
+}
+
+function normalizeTerminalInputLeaseStatus(value, fallback = 'active') {
+  const normalized = String(value || '').trim().toLowerCase();
+  return TERMINAL_INPUT_LEASE_STATUSES.has(normalized) ? normalized : fallback;
+}
+
+function normalizeTerminalInputKind(value, fallback = 'message') {
+  const normalized = String(value || '').trim().toLowerCase();
+  return TERMINAL_INPUT_KINDS.has(normalized) ? normalized : fallback;
+}
+
 function clampLimit(value, fallback = 100, max = 500) {
   const parsed = Number.parseInt(value, 10);
   if (!Number.isFinite(parsed) || parsed <= 0) {
@@ -447,12 +592,161 @@ function normalizeProjectionList(value) {
     .filter(Boolean);
 }
 
+function normalizeMemoryRecordTypes(value) {
+  return normalizeProjectionList(value).map((entry) => {
+    const normalized = String(entry || '').trim().toLowerCase();
+    return MEMORY_RECORD_TYPE_ALIASES.get(normalized) || normalized;
+  });
+}
+
 function normalizeProjectionTimestamp(value) {
   if (value === undefined || value === null || value === '') {
     return null;
   }
   const parsed = Number(value);
   return Number.isFinite(parsed) ? parsed : null;
+}
+
+function normalizeEnumValue(value, allowedValues, fallback = null) {
+  const normalized = String(value || '').trim().toLowerCase();
+  if (allowedValues.has(normalized)) {
+    return normalized;
+  }
+  return fallback;
+}
+
+function normalizeOptionalInteger(value) {
+  if (value === undefined || value === null || value === '') {
+    return null;
+  }
+  const parsed = Number(value);
+  return Number.isFinite(parsed) ? Math.max(0, Math.round(parsed)) : null;
+}
+
+function normalizeConfidence(value) {
+  if (value === undefined || value === null || value === '') {
+    return null;
+  }
+  const parsed = Number(value);
+  if (!Number.isFinite(parsed)) {
+    return null;
+  }
+  return Math.min(1, Math.max(0, parsed));
+}
+
+function buildRedactedRootIoPayload(eventInput = {}) {
+  const metadata = eventInput.metadata && typeof eventInput.metadata === 'object' && !Array.isArray(eventInput.metadata)
+    ? redactSecretObject({ ...eventInput.metadata })
+    : {};
+  let contentFull = eventInput.contentFull ?? eventInput.content_full ?? eventInput.content ?? null;
+  let contentPreview = eventInput.contentPreview ?? eventInput.content_preview ?? null;
+  const redactionReasons = new Set();
+
+  if (contentFull !== null && contentFull !== undefined) {
+    const redaction = redactSecretsInText(contentFull);
+    contentFull = redaction.content;
+    if (redaction.redacted) {
+      redaction.reasons.forEach((reason) => redactionReasons.add(reason));
+    }
+  } else {
+    contentFull = null;
+  }
+
+  if (contentPreview !== null && contentPreview !== undefined) {
+    const redaction = redactSecretsInText(contentPreview);
+    contentPreview = redaction.content;
+    if (redaction.redacted) {
+      redaction.reasons.forEach((reason) => redactionReasons.add(reason));
+    }
+  } else if (contentFull) {
+    contentPreview = truncateText(contentFull, 500);
+  } else {
+    contentPreview = null;
+  }
+
+  if (redactionReasons.size > 0) {
+    const securityMetadata = metadata.security && typeof metadata.security === 'object'
+      ? { ...metadata.security }
+      : {};
+    securityMetadata.redactedSecretLikeContent = true;
+    securityMetadata.redactionReasonCodes = Array.from(redactionReasons);
+    metadata.security = securityMetadata;
+  }
+
+  return {
+    contentPreview,
+    contentFull,
+    metadata
+  };
+}
+
+function computeRootIoContentHash({ eventKind, source, contentPreview, contentFull, metadata }) {
+  return crypto.createHash('sha256').update(JSON.stringify({
+    eventKind,
+    source,
+    contentPreview: contentPreview || null,
+    contentFull: contentFull || null,
+    metadata: metadata || {}
+  }), 'utf8').digest('hex');
+}
+
+function buildRedactedContextSnapshotPayload(input = {}) {
+  const redactionReasons = new Set();
+  const redactText = (value) => {
+    if (value === undefined || value === null) {
+      return null;
+    }
+    const redaction = redactSecretsInText(String(value));
+    if (redaction.redacted) {
+      redaction.reasons.forEach((reason) => redactionReasons.add(reason));
+    }
+    return redaction.content;
+  };
+
+  const metadata = input.metadata && typeof input.metadata === 'object' && !Array.isArray(input.metadata)
+    ? redactSecretObject({ ...input.metadata })
+    : {};
+  const promptBody = redactText(input.promptBody ?? input.prompt_body ?? input.prompt ?? null);
+  const promptSummary = redactText(
+    input.promptSummary ?? input.prompt_summary ?? truncateText(promptBody, 500)
+  );
+  const linkedContext = input.linkedContext ?? input.linked_context ?? input.linkedContextJson ?? input.linked_context_json ?? null;
+  const toolPolicy = input.toolPolicy ?? input.tool_policy ?? input.toolPolicyJson ?? input.tool_policy_json ?? null;
+  const linkedContextJson = linkedContext && typeof linkedContext === 'object'
+    ? redactSecretObject(linkedContext)
+    : linkedContext;
+  const toolPolicyJson = toolPolicy && typeof toolPolicy === 'object'
+    ? redactSecretObject(toolPolicy)
+    : toolPolicy;
+
+  if (redactionReasons.size > 0) {
+    const securityMetadata = metadata.security && typeof metadata.security === 'object'
+      ? { ...metadata.security }
+      : {};
+    securityMetadata.redactedSecretLikeContent = true;
+    securityMetadata.redactionReasonCodes = Array.from(redactionReasons);
+    metadata.security = securityMetadata;
+  }
+
+  return {
+    promptBody,
+    promptSummary,
+    linkedContextJson,
+    toolPolicyJson,
+    metadata
+  };
+}
+
+function computeContextSnapshotHash({ promptSummary, promptBody, linkedContextJson, toolPolicyJson, adapter, model, reasoningEffort }) {
+  return crypto.createHash('sha256').update(JSON.stringify({
+    promptSummary: promptSummary || null,
+    promptBody: promptBody || null,
+    linkedContextJson: linkedContextJson || null,
+    toolPolicyJson: toolPolicyJson || null,
+    adapter: adapter || null,
+    model: model || null,
+    reasoningEffort: reasoningEffort || null
+  }), 'utf8').digest('hex');
 }
 
 function parseProjectionSourceRow(row) {
@@ -969,6 +1263,15 @@ class OrchestrationDB {
     return String(row?.project_id || '').trim() || null;
   }
 
+  _getRoomProjectId(roomId) {
+    const normalizedRoomId = String(roomId || '').trim();
+    if (!normalizedRoomId || !this._hasColumn('rooms', 'project_id')) {
+      return null;
+    }
+    const row = this.db.prepare('SELECT project_id FROM rooms WHERE id = ?').get(normalizedRoomId);
+    return String(row?.project_id || '').trim() || null;
+  }
+
   _resolveProjectIdForTask(taskId) {
     const existingProjectId = this._getTaskProjectId(taskId);
     if (existingProjectId) {
@@ -1010,6 +1313,26 @@ class OrchestrationDB {
       this._getTaskProjectId(record.taskId || record.task_id),
       this._getRunProjectId(record.runId || record.run_id),
       this._getTerminalProjectId(record.terminalId || record.terminal_id)
+    ]);
+  }
+
+  _resolveProjectIdForMemorySnapshot(snapshot = {}, scope = null, scopeId = null) {
+    const explicitProjectId = String(snapshot.projectId || snapshot.project_id || '').trim();
+    if (explicitProjectId) {
+      return explicitProjectId;
+    }
+
+    const normalizedScope = String(scope || snapshot.scope || '').trim().toLowerCase();
+    const normalizedScopeId = String(scopeId || snapshot.scopeId || snapshot.scope_id || '').trim();
+    if (normalizedScope === 'project' && normalizedScopeId) {
+      return normalizedScopeId;
+    }
+
+    return this._resolveSingleProjectId([
+      this._resolveProjectIdForTask(snapshot.taskId || snapshot.task_id || (normalizedScope === 'task' ? normalizedScopeId : null)),
+      this._getRunProjectId(snapshot.runId || snapshot.run_id || (normalizedScope === 'run' ? normalizedScopeId : null)),
+      this._getRoomProjectId(normalizedScope === 'room' ? normalizedScopeId : null),
+      this._getTerminalProjectId(snapshot.terminalId || snapshot.terminal_id)
     ]);
   }
 
@@ -1684,8 +2007,36 @@ class OrchestrationDB {
     const providerThreadRef = terminalOptions.providerThreadRef || null;
     const adoptedAt = terminalOptions.adoptedAt || null;
     const captureMode = terminalOptions.captureMode || 'raw-tty';
-    const model = terminalOptions.model || null;
+    const model = String(terminalOptions.model || '').trim() || null;
+    const requestedModel = String(
+      terminalOptions.requestedModel
+      ?? terminalOptions.requested_model
+      ?? model
+      ?? ''
+    ).trim() || null;
+    const effectiveModel = String(
+      terminalOptions.effectiveModel
+      ?? terminalOptions.effective_model
+      ?? model
+      ?? ''
+    ).trim() || null;
+    const requestedEffort = normalizeReasoningEffort(
+      terminalOptions.requestedEffort
+      ?? terminalOptions.requested_effort
+      ?? terminalOptions.reasoningEffort
+      ?? terminalOptions.reasoning_effort
+      ?? terminalOptions.effort
+    );
+    const effectiveEffort = normalizeReasoningEffort(
+      terminalOptions.effectiveEffort
+      ?? terminalOptions.effective_effort
+      ?? requestedEffort
+    );
     const lastMessageAt = Number.isFinite(terminalOptions.lastMessageAt) ? terminalOptions.lastMessageAt : null;
+    const sessionControlMode = normalizeSessionControlMode(
+      terminalOptions.sessionControlMode || terminalOptions.session_control_mode,
+      SESSION_CONTROL_MODES.OPERATOR
+    );
     const runtimeMetadata = resolveRuntimeHostMetadata({
       terminalId,
       sessionName,
@@ -1769,6 +2120,26 @@ class OrchestrationDB {
     if (this._hasColumn('terminals', 'runtime_fidelity')) {
       columns.push('runtime_fidelity');
       values.push(runtimeMetadata.runtimeFidelity);
+    }
+    if (this._hasColumn('terminals', 'session_control_mode')) {
+      columns.push('session_control_mode');
+      values.push(sessionControlMode);
+    }
+    if (this._hasColumn('terminals', 'requested_model')) {
+      columns.push('requested_model');
+      values.push(requestedModel);
+    }
+    if (this._hasColumn('terminals', 'effective_model')) {
+      columns.push('effective_model');
+      values.push(effectiveModel);
+    }
+    if (this._hasColumn('terminals', 'requested_effort')) {
+      columns.push('requested_effort');
+      values.push(requestedEffort);
+    }
+    if (this._hasColumn('terminals', 'effective_effort')) {
+      columns.push('effective_effort');
+      values.push(effectiveEffort);
     }
 
     this.db.run(`
@@ -1909,6 +2280,87 @@ class OrchestrationDB {
         SET ${runtimeUpdates.join(', ')}, last_active = CURRENT_TIMESTAMP
         WHERE terminal_id = ?
       `, ...runtimeValues, terminalId);
+    }
+    if (
+      this._hasColumn('terminals', 'session_control_mode')
+      && (terminalOptions.sessionControlMode !== undefined || terminalOptions.session_control_mode !== undefined)
+    ) {
+      this.db.run(`
+        UPDATE terminals
+        SET session_control_mode = ?, last_active = CURRENT_TIMESTAMP
+        WHERE terminal_id = ?
+      `,
+      normalizeSessionControlMode(
+        terminalOptions.sessionControlMode ?? terminalOptions.session_control_mode,
+        SESSION_CONTROL_MODES.OPERATOR
+      ),
+      terminalId);
+    }
+
+    const hasModelStateInput = (
+      terminalOptions.model !== undefined
+      || terminalOptions.requestedModel !== undefined
+      || terminalOptions.requested_model !== undefined
+      || terminalOptions.effectiveModel !== undefined
+      || terminalOptions.effective_model !== undefined
+      || terminalOptions.requestedEffort !== undefined
+      || terminalOptions.requested_effort !== undefined
+      || terminalOptions.effectiveEffort !== undefined
+      || terminalOptions.effective_effort !== undefined
+      || terminalOptions.reasoningEffort !== undefined
+      || terminalOptions.reasoning_effort !== undefined
+      || terminalOptions.effort !== undefined
+    );
+    if (hasModelStateInput) {
+      const requestedModel = String(
+        terminalOptions.requestedModel
+        ?? terminalOptions.requested_model
+        ?? terminalOptions.model
+        ?? ''
+      ).trim() || null;
+      const effectiveModel = String(
+        terminalOptions.effectiveModel
+        ?? terminalOptions.effective_model
+        ?? terminalOptions.model
+        ?? ''
+      ).trim() || null;
+      const requestedEffort = normalizeReasoningEffort(
+        terminalOptions.requestedEffort
+        ?? terminalOptions.requested_effort
+        ?? terminalOptions.reasoningEffort
+        ?? terminalOptions.reasoning_effort
+        ?? terminalOptions.effort
+      );
+      const effectiveEffort = normalizeReasoningEffort(
+        terminalOptions.effectiveEffort
+        ?? terminalOptions.effective_effort
+        ?? requestedEffort
+      );
+      const modelStateUpdates = [];
+      const modelStateValues = [];
+      if (this._hasColumn('terminals', 'requested_model')) {
+        modelStateUpdates.push('requested_model = COALESCE(?, requested_model)');
+        modelStateValues.push(requestedModel);
+      }
+      if (this._hasColumn('terminals', 'effective_model')) {
+        modelStateUpdates.push('effective_model = COALESCE(?, effective_model)');
+        modelStateValues.push(effectiveModel);
+      }
+      if (this._hasColumn('terminals', 'requested_effort')) {
+        modelStateUpdates.push('requested_effort = COALESCE(?, requested_effort)');
+        modelStateValues.push(requestedEffort);
+      }
+      if (this._hasColumn('terminals', 'effective_effort')) {
+        modelStateUpdates.push('effective_effort = COALESCE(?, effective_effort)');
+        modelStateValues.push(effectiveEffort);
+      }
+      if (modelStateUpdates.length > 0) {
+        this.db.run(`
+          UPDATE terminals
+          SET ${modelStateUpdates.join(', ')}, last_active = CURRENT_TIMESTAMP
+          WHERE terminal_id = ?
+        `, ...modelStateValues, terminalId);
+      }
     }
   }
 
@@ -2235,6 +2687,10 @@ class OrchestrationDB {
         continue;
       }
 
+      if (clientName && rowClientName && rowClientName !== clientName) {
+        continue;
+      }
+
       if (!externalSessionRef && clientName && rowClientName !== clientName) {
         continue;
       }
@@ -2293,17 +2749,59 @@ class OrchestrationDB {
   touchTerminalMessage(terminalId, options = {}) {
     const timestamp = Number.isFinite(options.timestamp) ? options.timestamp : Date.now();
     const model = String(options.model || '').trim() || null;
+    const effectiveModel = String(
+      options.effectiveModel
+      ?? options.effective_model
+      ?? model
+      ?? ''
+    ).trim() || null;
+    const requestedModel = String(
+      options.requestedModel
+      ?? options.requested_model
+      ?? ''
+    ).trim() || null;
+    const requestedEffort = normalizeReasoningEffort(
+      options.requestedEffort
+      ?? options.requested_effort
+      ?? options.reasoningEffort
+      ?? options.reasoning_effort
+      ?? options.effort
+    );
+    const effectiveEffort = normalizeReasoningEffort(
+      options.effectiveEffort
+      ?? options.effective_effort
+      ?? requestedEffort
+    );
+    const updates = ['model = COALESCE(?, model)'];
+    const params = [model];
+    if (this._hasColumn('terminals', 'effective_model')) {
+      updates.push('effective_model = COALESCE(?, effective_model)');
+      params.push(effectiveModel);
+    }
+    if (this._hasColumn('terminals', 'requested_model')) {
+      updates.push('requested_model = COALESCE(?, requested_model)');
+      params.push(requestedModel);
+    }
+    if (this._hasColumn('terminals', 'requested_effort')) {
+      updates.push('requested_effort = COALESCE(?, requested_effort)');
+      params.push(requestedEffort);
+    }
+    if (this._hasColumn('terminals', 'effective_effort')) {
+      updates.push('effective_effort = COALESCE(?, effective_effort)');
+      params.push(effectiveEffort);
+    }
+    params.push(timestamp, timestamp, terminalId);
     const result = this.db.run(`
       UPDATE terminals
       SET
-        model = COALESCE(?, model),
+        ${updates.join(',\n        ')},
         last_message_at = CASE
           WHEN last_message_at IS NULL OR last_message_at < ? THEN ?
           ELSE last_message_at
         END,
         last_active = CURRENT_TIMESTAMP
       WHERE terminal_id = ?
-    `, model, timestamp, timestamp, terminalId);
+    `, ...params);
     return result.changes > 0;
   }
 
@@ -2312,6 +2810,697 @@ class OrchestrationDB {
    */
   deleteTerminal(terminalId) {
     this.db.run('DELETE FROM terminals WHERE terminal_id = ?', terminalId);
+  }
+
+  _parseTerminalInputQueueRow(row) {
+    if (!row) {
+      return null;
+    }
+
+    return {
+      id: row.id,
+      terminalId: row.terminal_id,
+      rootSessionId: row.root_session_id || null,
+      runId: row.run_id || null,
+      taskId: row.task_id || null,
+      taskAssignmentId: row.task_assignment_id || null,
+      inputKind: row.input_kind,
+      message: row.message || null,
+      status: row.status,
+      controlMode: row.control_mode || SESSION_CONTROL_MODES.OPERATOR,
+      requestedBy: row.requested_by || null,
+      approvalRequired: Number(row.approval_required) === 1,
+      approvedBy: row.approved_by || null,
+      approvedAt: row.approved_at || null,
+      decision: row.decision || null,
+      holdReason: row.hold_reason || null,
+      expiresAt: row.expires_at || null,
+      deliveredAt: row.delivered_at || null,
+      cancelledAt: row.cancelled_at || null,
+      metadata: parseJsonField(row.metadata),
+      createdAt: row.created_at,
+      updatedAt: row.updated_at
+    };
+  }
+
+  enqueueTerminalInput(input = {}) {
+    const terminalId = String(input.terminalId || input.terminal_id || '').trim();
+    if (!terminalId) {
+      throw new Error('terminalId is required');
+    }
+    if (!this.getTerminal(terminalId)) {
+      throw new Error(`Terminal not found: ${terminalId}`);
+    }
+
+    const terminalRow = this.getTerminal(terminalId);
+    const terminalMetadata = parseJsonField(terminalRow?.session_metadata) || {};
+    const inputKind = normalizeTerminalInputKind(input.inputKind || input.input_kind);
+    const message = input.message == null ? null : String(input.message);
+    if (!message && inputKind === 'message') {
+      throw new Error('message is required');
+    }
+
+    const approvalRequired = input.approvalRequired === true || Number(input.approval_required) === 1;
+    const status = normalizeTerminalInputQueueStatus(
+      input.status || (approvalRequired ? 'held_for_approval' : 'pending')
+    );
+    const controlMode = normalizeSessionControlMode(
+      input.controlMode || input.control_mode,
+      SESSION_CONTROL_MODES.OPERATOR
+    );
+    const now = Number.isFinite(input.createdAt || input.created_at)
+      ? (input.createdAt || input.created_at)
+      : Date.now();
+    const metadata = input.metadata == null
+      ? null
+      : (typeof input.metadata === 'string' ? input.metadata : JSON.stringify(input.metadata));
+    const id = String(input.id || `input_${generateId()}`).trim();
+
+    this.db.prepare(`
+      INSERT INTO terminal_input_queue (
+        id,
+        terminal_id,
+        root_session_id,
+        run_id,
+        task_id,
+        task_assignment_id,
+        input_kind,
+        message,
+        status,
+        control_mode,
+        requested_by,
+        approval_required,
+        approved_by,
+        approved_at,
+        decision,
+        hold_reason,
+        expires_at,
+        delivered_at,
+        cancelled_at,
+        metadata,
+        created_at,
+        updated_at
+      ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+    `).run(
+      id,
+      terminalId,
+      input.rootSessionId || input.root_session_id || terminalRow?.root_session_id || terminalRow?.rootSessionId || null,
+      input.runId || input.run_id || null,
+      input.taskId || input.task_id || terminalMetadata.taskId || null,
+      input.taskAssignmentId || input.task_assignment_id || terminalMetadata.taskAssignmentId || null,
+      inputKind,
+      message,
+      status,
+      controlMode,
+      input.requestedBy || input.requested_by || null,
+      approvalRequired ? 1 : 0,
+      input.approvedBy || input.approved_by || null,
+      Number.isFinite(input.approvedAt || input.approved_at) ? (input.approvedAt || input.approved_at) : null,
+      input.decision || null,
+      input.holdReason || input.hold_reason || (approvalRequired ? 'approval_required' : null),
+      Number.isFinite(input.expiresAt || input.expires_at) ? (input.expiresAt || input.expires_at) : null,
+      Number.isFinite(input.deliveredAt || input.delivered_at) ? (input.deliveredAt || input.delivered_at) : null,
+      Number.isFinite(input.cancelledAt || input.cancelled_at) ? (input.cancelledAt || input.cancelled_at) : null,
+      metadata,
+      now,
+      Number.isFinite(input.updatedAt || input.updated_at) ? (input.updatedAt || input.updated_at) : now
+    );
+
+    return this.getTerminalInputQueueItem(id);
+  }
+
+  getTerminalInputQueueItem(id) {
+    const normalizedId = String(id || '').trim();
+    if (!normalizedId) {
+      return null;
+    }
+    const row = this.db.prepare('SELECT * FROM terminal_input_queue WHERE id = ?').get(normalizedId);
+    return this._parseTerminalInputQueueRow(row);
+  }
+
+  listTerminalInputQueue(options = {}) {
+    const queueOptions = options && typeof options === 'object' ? options : {};
+    const clauses = [];
+    const params = [];
+
+    if (queueOptions.terminalId || queueOptions.terminal_id) {
+      clauses.push('terminal_id = ?');
+      params.push(String(queueOptions.terminalId || queueOptions.terminal_id).trim());
+    }
+    if (queueOptions.rootSessionId || queueOptions.root_session_id) {
+      clauses.push('root_session_id = ?');
+      params.push(String(queueOptions.rootSessionId || queueOptions.root_session_id).trim());
+    }
+    if (queueOptions.taskId || queueOptions.task_id) {
+      clauses.push('task_id = ?');
+      params.push(String(queueOptions.taskId || queueOptions.task_id).trim());
+    }
+    if (queueOptions.status) {
+      const statuses = Array.isArray(queueOptions.status) ? queueOptions.status : [queueOptions.status];
+      const normalizedStatuses = statuses
+        .map((status) => normalizeTerminalInputQueueStatus(status, null))
+        .filter(Boolean);
+      if (normalizedStatuses.length > 0) {
+        clauses.push(`status IN (${normalizedStatuses.map(() => '?').join(', ')})`);
+        params.push(...normalizedStatuses);
+      }
+    }
+
+    const limit = clampLimit(queueOptions.limit, 100, 500);
+    const offset = clampLimit(queueOptions.offset, 0, 100000);
+    const whereSql = clauses.length ? `WHERE ${clauses.join(' AND ')}` : '';
+    const rows = this.db.prepare(`
+      SELECT *
+      FROM terminal_input_queue
+      ${whereSql}
+      ORDER BY created_at DESC, id DESC
+      LIMIT ? OFFSET ?
+    `).all(...params, limit, offset);
+
+    return rows.map((row) => this._parseTerminalInputQueueRow(row));
+  }
+
+  updateTerminalInputQueueItem(id, patch = {}) {
+    const normalizedId = String(id || '').trim();
+    if (!normalizedId) {
+      throw new Error('inputQueueId is required');
+    }
+    const existing = this.getTerminalInputQueueItem(normalizedId);
+    if (!existing) {
+      throw new Error(`Input queue item not found: ${normalizedId}`);
+    }
+
+    const updates = [];
+    const params = [];
+    const addUpdate = (column, value) => {
+      updates.push(`${column} = ?`);
+      params.push(value);
+    };
+
+    if (patch.status !== undefined) {
+      addUpdate('status', normalizeTerminalInputQueueStatus(patch.status));
+    }
+    if (patch.message !== undefined) {
+      addUpdate('message', patch.message == null ? null : String(patch.message));
+    }
+    if (patch.controlMode !== undefined || patch.control_mode !== undefined) {
+      addUpdate('control_mode', normalizeSessionControlMode(patch.controlMode ?? patch.control_mode));
+    }
+    if (patch.requestedBy !== undefined || patch.requested_by !== undefined) {
+      addUpdate('requested_by', patch.requestedBy ?? patch.requested_by ?? null);
+    }
+    if (patch.approvalRequired !== undefined || patch.approval_required !== undefined) {
+      addUpdate('approval_required', (patch.approvalRequired ?? patch.approval_required) ? 1 : 0);
+    }
+    if (patch.approvedBy !== undefined || patch.approved_by !== undefined) {
+      addUpdate('approved_by', patch.approvedBy ?? patch.approved_by ?? null);
+    }
+    if (patch.approvedAt !== undefined || patch.approved_at !== undefined) {
+      addUpdate('approved_at', patch.approvedAt ?? patch.approved_at ?? null);
+    }
+    if (patch.decision !== undefined) {
+      const decision = patch.decision == null ? null : String(patch.decision).trim().toLowerCase();
+      if (decision && !['approved', 'denied'].includes(decision)) {
+        throw new Error(`Invalid decision: ${patch.decision}`);
+      }
+      addUpdate('decision', decision || null);
+    }
+    if (patch.holdReason !== undefined || patch.hold_reason !== undefined) {
+      addUpdate('hold_reason', patch.holdReason ?? patch.hold_reason ?? null);
+    }
+    if (patch.expiresAt !== undefined || patch.expires_at !== undefined) {
+      addUpdate('expires_at', patch.expiresAt ?? patch.expires_at ?? null);
+    }
+    if (patch.deliveredAt !== undefined || patch.delivered_at !== undefined) {
+      addUpdate('delivered_at', patch.deliveredAt ?? patch.delivered_at ?? null);
+    }
+    if (patch.cancelledAt !== undefined || patch.cancelled_at !== undefined) {
+      addUpdate('cancelled_at', patch.cancelledAt ?? patch.cancelled_at ?? null);
+    }
+    if (patch.metadata !== undefined) {
+      addUpdate('metadata', patch.metadata == null
+        ? null
+        : (typeof patch.metadata === 'string' ? patch.metadata : JSON.stringify(patch.metadata)));
+    }
+
+    if (updates.length === 0) {
+      return existing;
+    }
+
+    addUpdate('updated_at', Number.isFinite(patch.updatedAt || patch.updated_at)
+      ? (patch.updatedAt || patch.updated_at)
+      : Date.now());
+
+    this.db.prepare(`
+      UPDATE terminal_input_queue
+      SET ${updates.join(', ')}
+      WHERE id = ?
+    `).run(...params, normalizedId);
+
+    return this.getTerminalInputQueueItem(normalizedId);
+  }
+
+  expireTerminalInputQueueItems(now = Date.now()) {
+    const result = this.db.prepare(`
+      UPDATE terminal_input_queue
+      SET status = 'expired', updated_at = ?
+      WHERE status IN ('pending', 'held_for_approval')
+        AND expires_at IS NOT NULL
+        AND expires_at <= ?
+    `).run(now, now);
+
+    return result.changes || 0;
+  }
+
+  _parseTerminalInputLeaseRow(row) {
+    if (!row) {
+      return null;
+    }
+    return {
+      id: row.id,
+      terminalId: row.terminal_id,
+      rootSessionId: row.root_session_id || null,
+      sessionId: row.session_id || null,
+      holder: row.holder,
+      purpose: row.purpose || null,
+      status: row.status,
+      expiresAt: row.expires_at,
+      heartbeatAt: row.heartbeat_at || null,
+      releasedAt: row.released_at || null,
+      revokedAt: row.revoked_at || null,
+      metadata: parseJsonField(row.metadata) || null,
+      createdAt: row.created_at,
+      updatedAt: row.updated_at
+    };
+  }
+
+  expireTerminalInputLeases(now = Date.now()) {
+    if (!this._hasTable('terminal_input_leases')) {
+      return 0;
+    }
+    const result = this.db.prepare(`
+      UPDATE terminal_input_leases
+      SET status = 'expired', updated_at = ?
+      WHERE status = 'active'
+        AND expires_at <= ?
+    `).run(now, now);
+    return result.changes || 0;
+  }
+
+  getTerminalInputLease(id) {
+    if (!this._hasTable('terminal_input_leases')) {
+      return null;
+    }
+    const normalizedId = String(id || '').trim();
+    if (!normalizedId) {
+      return null;
+    }
+    return this._parseTerminalInputLeaseRow(
+      this.db.prepare('SELECT * FROM terminal_input_leases WHERE id = ?').get(normalizedId)
+    );
+  }
+
+  getActiveTerminalInputLease(terminalId, options = {}) {
+    if (!this._hasTable('terminal_input_leases')) {
+      return null;
+    }
+    const normalizedTerminalId = String(terminalId || '').trim();
+    if (!normalizedTerminalId) {
+      return null;
+    }
+    const now = Number.isFinite(options.now) ? options.now : Date.now();
+    this.expireTerminalInputLeases(now);
+    const row = this.db.prepare(`
+      SELECT *
+      FROM terminal_input_leases
+      WHERE terminal_id = ?
+        AND status = 'active'
+        AND expires_at > ?
+      ORDER BY created_at DESC
+      LIMIT 1
+    `).get(normalizedTerminalId, now);
+    return this._parseTerminalInputLeaseRow(row);
+  }
+
+  acquireTerminalInputLease(input = {}) {
+    if (!this._hasTable('terminal_input_leases')) {
+      return { acquired: false, reason: 'unavailable', lease: null };
+    }
+    const terminalId = String(input.terminalId || input.terminal_id || '').trim();
+    if (!terminalId) {
+      throw new Error('terminalId is required');
+    }
+    if (!this.getTerminal(terminalId)) {
+      throw new Error(`Terminal not found: ${terminalId}`);
+    }
+    const holder = String(input.holder || input.requestedBy || input.requested_by || '').trim();
+    if (!holder) {
+      throw new Error('holder is required');
+    }
+
+    const now = Number.isFinite(input.now) ? input.now : Date.now();
+    const ttlMs = Math.max(1000, normalizeInteger(input.ttlMs ?? input.ttl_ms, 60 * 1000));
+    const expiresAt = Number.isFinite(input.expiresAt ?? input.expires_at)
+      ? normalizeOptionalInteger(input.expiresAt ?? input.expires_at)
+      : now + ttlMs;
+    const leaseId = String(input.id || input.leaseId || input.lease_id || `lease_${generateId()}`).trim();
+    const metadata = input.metadata && typeof input.metadata === 'object' && !Array.isArray(input.metadata)
+      ? redactSecretObject({ ...input.metadata })
+      : null;
+
+    const acquire = this.db.transaction(() => {
+      this.expireTerminalInputLeases(now);
+      const active = this.getActiveTerminalInputLease(terminalId, { now });
+      if (active && active.holder !== holder) {
+        return { acquired: false, reason: 'lease_held', lease: active };
+      }
+      if (active && active.holder === holder) {
+        const refreshed = this.updateTerminalInputLease(active.id, {
+          expiresAt,
+          heartbeatAt: now,
+          updatedAt: now,
+          metadata: metadata || active.metadata
+        });
+        return { acquired: true, reason: 'refreshed', lease: refreshed };
+      }
+
+      this.db.prepare(`
+        INSERT INTO terminal_input_leases (
+          id,
+          terminal_id,
+          root_session_id,
+          session_id,
+          holder,
+          purpose,
+          status,
+          expires_at,
+          heartbeat_at,
+          metadata,
+          created_at,
+          updated_at
+        ) VALUES (?, ?, ?, ?, ?, ?, 'active', ?, ?, ?, ?, ?)
+      `).run(
+        leaseId,
+        terminalId,
+        String(input.rootSessionId || input.root_session_id || '').trim() || null,
+        String(input.sessionId || input.session_id || '').trim() || null,
+        holder,
+        String(input.purpose || '').trim() || null,
+        expiresAt,
+        now,
+        metadata ? JSON.stringify(metadata) : null,
+        now,
+        now
+      );
+      return { acquired: true, reason: 'acquired', lease: this.getTerminalInputLease(leaseId) };
+    });
+
+    return acquire.immediate();
+  }
+
+  updateTerminalInputLease(id, patch = {}) {
+    if (!this._hasTable('terminal_input_leases')) {
+      return null;
+    }
+    const normalizedId = String(id || '').trim();
+    if (!normalizedId) {
+      throw new Error('leaseId is required');
+    }
+    const existing = this.getTerminalInputLease(normalizedId);
+    if (!existing) {
+      throw new Error(`Input lease not found: ${normalizedId}`);
+    }
+
+    const updates = [];
+    const params = [];
+    const addUpdate = (column, value) => {
+      updates.push(`${column} = ?`);
+      params.push(value);
+    };
+    if (patch.status !== undefined) {
+      addUpdate('status', normalizeTerminalInputLeaseStatus(patch.status));
+    }
+    if (patch.expiresAt !== undefined || patch.expires_at !== undefined) {
+      addUpdate('expires_at', normalizeOptionalInteger(patch.expiresAt ?? patch.expires_at));
+    }
+    if (patch.heartbeatAt !== undefined || patch.heartbeat_at !== undefined) {
+      addUpdate('heartbeat_at', normalizeOptionalInteger(patch.heartbeatAt ?? patch.heartbeat_at));
+    }
+    if (patch.releasedAt !== undefined || patch.released_at !== undefined) {
+      addUpdate('released_at', normalizeOptionalInteger(patch.releasedAt ?? patch.released_at));
+    }
+    if (patch.revokedAt !== undefined || patch.revoked_at !== undefined) {
+      addUpdate('revoked_at', normalizeOptionalInteger(patch.revokedAt ?? patch.revoked_at));
+    }
+    if (patch.metadata !== undefined) {
+      addUpdate('metadata', patch.metadata == null
+        ? null
+        : (typeof patch.metadata === 'string' ? patch.metadata : JSON.stringify(redactSecretObject(patch.metadata))));
+    }
+
+    if (updates.length === 0) {
+      return existing;
+    }
+    addUpdate('updated_at', Number.isFinite(patch.updatedAt || patch.updated_at)
+      ? (patch.updatedAt || patch.updated_at)
+      : Date.now());
+
+    this.db.prepare(`
+      UPDATE terminal_input_leases
+      SET ${updates.join(', ')}
+      WHERE id = ?
+    `).run(...params, normalizedId);
+
+    return this.getTerminalInputLease(normalizedId);
+  }
+
+  _parseTaskAssignmentPathLeaseRow(row) {
+    if (!row) {
+      return null;
+    }
+    return {
+      id: row.id,
+      taskId: row.task_id,
+      taskAssignmentId: row.task_assignment_id,
+      workspaceRoot: row.workspace_root,
+      branchName: row.branch_name || null,
+      holder: row.holder,
+      status: row.status,
+      writePaths: normalizeWritePathList(row.write_paths || []),
+      expiresAt: row.expires_at || null,
+      releasedAt: row.released_at || null,
+      metadata: parseJsonField(row.metadata) || {},
+      createdAt: row.created_at,
+      updatedAt: row.updated_at
+    };
+  }
+
+  expireTaskAssignmentPathLeases(now = Date.now()) {
+    if (!this._hasTable('task_assignment_path_leases')) {
+      return 0;
+    }
+    const result = this.db.prepare(`
+      UPDATE task_assignment_path_leases
+      SET status = 'expired', updated_at = ?
+      WHERE status = 'active'
+        AND expires_at IS NOT NULL
+        AND expires_at <= ?
+    `).run(now, now);
+    return result.changes || 0;
+  }
+
+  getTaskAssignmentPathLease(id) {
+    if (!this._hasTable('task_assignment_path_leases')) {
+      return null;
+    }
+    const normalizedId = String(id || '').trim();
+    if (!normalizedId) {
+      return null;
+    }
+    const row = this.db.prepare('SELECT * FROM task_assignment_path_leases WHERE id = ?').get(normalizedId);
+    return this._parseTaskAssignmentPathLeaseRow(row);
+  }
+
+  listTaskAssignmentPathLeases(options = {}) {
+    if (!this._hasTable('task_assignment_path_leases')) {
+      return [];
+    }
+    const clauses = [];
+    const params = [];
+    if (options.taskId || options.task_id) {
+      clauses.push('task_id = ?');
+      params.push(String(options.taskId || options.task_id).trim());
+    }
+    if (options.taskAssignmentId || options.task_assignment_id) {
+      clauses.push('task_assignment_id = ?');
+      params.push(String(options.taskAssignmentId || options.task_assignment_id).trim());
+    }
+    if (options.workspaceRoot || options.workspace_root) {
+      clauses.push('workspace_root = ?');
+      params.push(normalizeWorkspaceRoot(options.workspaceRoot || options.workspace_root) || String(options.workspaceRoot || options.workspace_root).trim());
+    }
+    if (options.status) {
+      const statuses = Array.isArray(options.status) ? options.status : [options.status];
+      const normalizedStatuses = statuses
+        .map((status) => normalizeTaskAssignmentPathLeaseStatus(status, null))
+        .filter(Boolean);
+      if (normalizedStatuses.length > 0) {
+        clauses.push(`status IN (${normalizedStatuses.map(() => '?').join(', ')})`);
+        params.push(...normalizedStatuses);
+      }
+    }
+    const whereSql = clauses.length ? `WHERE ${clauses.join(' AND ')}` : '';
+    const limit = clampLimit(options.limit, 100, 500);
+    const rows = this.db.prepare(`
+      SELECT *
+      FROM task_assignment_path_leases
+      ${whereSql}
+      ORDER BY created_at DESC, id DESC
+      LIMIT ?
+    `).all(...params, limit);
+    return rows.map((row) => this._parseTaskAssignmentPathLeaseRow(row));
+  }
+
+  acquireTaskAssignmentPathLease(input = {}) {
+    if (!this._hasTable('task_assignment_path_leases')) {
+      return { acquired: false, reason: 'unavailable', lease: null };
+    }
+    const taskId = String(input.taskId || input.task_id || '').trim();
+    const taskAssignmentId = String(input.taskAssignmentId || input.task_assignment_id || '').trim();
+    const workspaceRoot = normalizeWorkspaceRoot(input.workspaceRoot || input.workspace_root)
+      || String(input.workspaceRoot || input.workspace_root || '').trim();
+    const writePaths = normalizeWritePathList(input.writePaths ?? input.write_paths ?? []);
+    const branchName = String(input.branchName || input.branch_name || '').trim() || null;
+    const holder = String(input.holder || input.requestedBy || input.requested_by || taskAssignmentId || '').trim();
+    const now = Number.isFinite(input.now) ? input.now : Date.now();
+    const expiresAt = Number.isFinite(input.expiresAt ?? input.expires_at)
+      ? normalizeOptionalInteger(input.expiresAt ?? input.expires_at)
+      : null;
+    const leaseId = String(input.id || input.leaseId || input.lease_id || `path_lease_${generateId()}`).trim();
+    const metadata = input.metadata && typeof input.metadata === 'object' && !Array.isArray(input.metadata)
+      ? redactSecretObject({ ...input.metadata })
+      : {};
+
+    if (!taskId) {
+      throw new Error('taskId is required');
+    }
+    if (!taskAssignmentId) {
+      throw new Error('taskAssignmentId is required');
+    }
+    if (!workspaceRoot) {
+      throw new Error('workspaceRoot is required');
+    }
+    if (writePaths.length === 0) {
+      return { acquired: true, reason: 'no_write_paths', lease: null };
+    }
+
+    const acquire = this.db.transaction(() => {
+      this.expireTaskAssignmentPathLeases(now);
+      const existingForAssignment = this.listTaskAssignmentPathLeases({
+        taskAssignmentId,
+        status: 'active',
+        limit: 10
+      }).find((lease) => lease.workspaceRoot === workspaceRoot);
+      if (existingForAssignment) {
+        return { acquired: true, reason: 'already_held', lease: existingForAssignment };
+      }
+
+      const activeLeases = this.listTaskAssignmentPathLeases({
+        workspaceRoot,
+        status: 'active',
+        limit: 500
+      });
+      const conflict = activeLeases.find((lease) => (
+        lease.taskAssignmentId !== taskAssignmentId
+        && writePathsOverlap(lease.writePaths, writePaths)
+      ));
+      if (conflict) {
+        return { acquired: false, reason: 'path_conflict', lease: conflict };
+      }
+
+      this.db.prepare(`
+        INSERT INTO task_assignment_path_leases (
+          id,
+          task_id,
+          task_assignment_id,
+          workspace_root,
+          branch_name,
+          holder,
+          status,
+          write_paths,
+          expires_at,
+          metadata,
+          created_at,
+          updated_at
+        ) VALUES (?, ?, ?, ?, ?, ?, 'active', ?, ?, ?, ?, ?)
+      `).run(
+        leaseId,
+        taskId,
+        taskAssignmentId,
+        workspaceRoot,
+        branchName,
+        holder,
+        JSON.stringify(writePaths),
+        expiresAt,
+        JSON.stringify(metadata),
+        now,
+        now
+      );
+      return { acquired: true, reason: 'acquired', lease: this.getTaskAssignmentPathLease(leaseId) };
+    });
+
+    return acquire.immediate();
+  }
+
+  updateTaskAssignmentPathLease(id, patch = {}) {
+    if (!this._hasTable('task_assignment_path_leases')) {
+      return null;
+    }
+    const normalizedId = String(id || '').trim();
+    if (!normalizedId) {
+      throw new Error('pathLeaseId is required');
+    }
+    const existing = this.getTaskAssignmentPathLease(normalizedId);
+    if (!existing) {
+      throw new Error(`Path lease not found: ${normalizedId}`);
+    }
+
+    const updates = [];
+    const params = [];
+    const addUpdate = (column, value) => {
+      updates.push(`${column} = ?`);
+      params.push(value);
+    };
+
+    if (patch.status !== undefined) {
+      addUpdate('status', normalizeTaskAssignmentPathLeaseStatus(patch.status));
+    }
+    if (patch.expiresAt !== undefined || patch.expires_at !== undefined) {
+      addUpdate('expires_at', normalizeOptionalInteger(patch.expiresAt ?? patch.expires_at));
+    }
+    if (patch.releasedAt !== undefined || patch.released_at !== undefined) {
+      addUpdate('released_at', normalizeOptionalInteger(patch.releasedAt ?? patch.released_at));
+    }
+    if (patch.metadata !== undefined) {
+      addUpdate('metadata', patch.metadata == null
+        ? null
+        : (typeof patch.metadata === 'string' ? patch.metadata : JSON.stringify(redactSecretObject(patch.metadata))));
+    }
+
+    if (updates.length === 0) {
+      return existing;
+    }
+    addUpdate('updated_at', Number.isFinite(patch.updatedAt || patch.updated_at)
+      ? (patch.updatedAt || patch.updated_at)
+      : Date.now());
+
+    this.db.prepare(`
+      UPDATE task_assignment_path_leases
+      SET ${updates.join(', ')}
+      WHERE id = ?
+    `).run(...params, normalizedId);
+
+    return this.getTaskAssignmentPathLease(normalizedId);
   }
 
   /**
@@ -2473,6 +3662,1361 @@ class OrchestrationDB {
       payload_json: parseJsonField(row.payload_json),
       metadata: parseJsonField(row.metadata)
     }));
+  }
+
+  listSessionEventsForTask(taskId, options = {}) {
+    const normalizedTaskId = String(taskId || '').trim();
+    if (!normalizedTaskId) {
+      return [];
+    }
+
+    const limit = clampLimit(options.limit, 10, 50);
+    return this.db.prepare(`
+      WITH task_roots(root_session_id) AS (
+        SELECT root_session_id
+        FROM tasks
+        WHERE id = ?
+          AND root_session_id IS NOT NULL
+          AND TRIM(root_session_id) <> ''
+        UNION
+        SELECT root_session_id
+        FROM runs
+        WHERE task_id = ?
+          AND root_session_id IS NOT NULL
+          AND TRIM(root_session_id) <> ''
+        UNION
+        SELECT root_session_id
+        FROM rooms
+        WHERE task_id = ?
+          AND root_session_id IS NOT NULL
+          AND TRIM(root_session_id) <> ''
+        UNION
+        SELECT t.root_session_id
+        FROM task_assignments ta
+        JOIN terminals t ON t.terminal_id = ta.terminal_id
+        WHERE ta.task_id = ?
+          AND t.root_session_id IS NOT NULL
+          AND TRIM(t.root_session_id) <> ''
+      )
+      SELECT se.*
+      FROM session_events se
+      JOIN task_roots tr ON tr.root_session_id = se.root_session_id
+      ORDER BY se.occurred_at DESC, se.recorded_at DESC, se.id DESC
+      LIMIT ?
+    `).all(normalizedTaskId, normalizedTaskId, normalizedTaskId, normalizedTaskId, limit).map((row) => ({
+      ...row,
+      payload_json: parseJsonField(row.payload_json),
+      metadata: parseJsonField(row.metadata)
+    }));
+  }
+
+  _parseRootIoEventRow(row) {
+    if (!row) {
+      return null;
+    }
+
+    return {
+      ...row,
+      rootIoEventId: row.root_io_event_id,
+      idempotencyKey: row.idempotency_key || null,
+      rootSessionId: row.root_session_id || null,
+      terminalId: row.terminal_id || null,
+      runId: row.run_id || null,
+      taskId: row.task_id || null,
+      taskAssignmentId: row.task_assignment_id || null,
+      roomId: row.room_id || null,
+      discussionId: row.discussion_id || null,
+      traceId: row.trace_id || null,
+      projectId: row.project_id || null,
+      eventKind: row.event_kind,
+      contentPreview: row.content_preview || null,
+      contentFull: row.content_full || null,
+      contentSha256: row.content_sha256 || null,
+      logPath: row.log_path || null,
+      logOffsetStart: row.log_offset_start,
+      logOffsetEnd: row.log_offset_end,
+      screenRows: row.screen_rows,
+      screenCols: row.screen_cols,
+      parsedRole: row.parsed_role || null,
+      confidence: row.confidence,
+      retentionClass: row.retention_class,
+      occurredAt: row.occurred_at,
+      recordedAt: row.recorded_at,
+      metadata: parseJsonField(row.metadata) || {}
+    };
+  }
+
+  getNextRootIoEventSequence(rootSessionId) {
+    const normalizedRootSessionId = String(rootSessionId || '').trim();
+    if (!normalizedRootSessionId || !this._hasTable('root_io_events')) {
+      return 1;
+    }
+    const row = this.db.get(`
+      SELECT COALESCE(MAX(sequence_no), 0) + 1 AS next_sequence
+      FROM root_io_events
+      WHERE root_session_id = ?
+    `, normalizedRootSessionId);
+    return row?.next_sequence || 1;
+  }
+
+  _resolveProjectIdForRootIoEvent(eventInput = {}) {
+    const explicitProjectId = String(eventInput.projectId || eventInput.project_id || '').trim();
+    if (explicitProjectId) {
+      return explicitProjectId;
+    }
+
+    return this._resolveSingleProjectId([
+      this._getTaskProjectId(eventInput.taskId || eventInput.task_id),
+      this._getRunProjectId(eventInput.runId || eventInput.run_id),
+      this._getTerminalProjectId(eventInput.terminalId || eventInput.terminal_id)
+    ]);
+  }
+
+  appendRootIoEvent(event = {}) {
+    if (!this._hasTable('root_io_events')) {
+      return null;
+    }
+
+    const eventInput = event && typeof event === 'object' ? event : {};
+    const rootSessionId = String(eventInput.rootSessionId || eventInput.root_session_id || '').trim();
+    if (!rootSessionId) {
+      throw new Error('rootSessionId is required');
+    }
+
+    const eventKind = normalizeEnumValue(
+      eventInput.eventKind || eventInput.event_kind,
+      ROOT_IO_EVENT_KINDS
+    );
+    if (!eventKind) {
+      throw new Error(`eventKind must be one of ${Array.from(ROOT_IO_EVENT_KINDS).join(', ')}`);
+    }
+
+    const source = normalizeEnumValue(
+      eventInput.source,
+      ROOT_IO_EVENT_SOURCES,
+      'broker'
+    );
+    const retentionClass = normalizeEnumValue(
+      eventInput.retentionClass || eventInput.retention_class,
+      ROOT_IO_RETENTION_CLASSES,
+      'raw-bounded'
+    );
+    const terminalId = String(eventInput.terminalId || eventInput.terminal_id || '').trim() || null;
+    const runId = String(eventInput.runId || eventInput.run_id || '').trim() || null;
+    const taskId = String(eventInput.taskId || eventInput.task_id || '').trim() || null;
+    const taskAssignmentId = String(eventInput.taskAssignmentId || eventInput.task_assignment_id || '').trim() || null;
+    const roomId = String(eventInput.roomId || eventInput.room_id || '').trim() || null;
+    const discussionId = String(eventInput.discussionId || eventInput.discussion_id || '').trim() || null;
+    const traceId = String(eventInput.traceId || eventInput.trace_id || '').trim() || null;
+    const logPath = String(eventInput.logPath || eventInput.log_path || '').trim() || null;
+    const logOffsetStart = normalizeOptionalInteger(eventInput.logOffsetStart ?? eventInput.log_offset_start);
+    const logOffsetEnd = normalizeOptionalInteger(eventInput.logOffsetEnd ?? eventInput.log_offset_end);
+    const idempotencyKey = String(eventInput.idempotencyKey || eventInput.idempotency_key || (
+      logPath && logOffsetStart !== null && logOffsetEnd !== null
+        ? `${rootSessionId}:${source}:${eventKind}:${logPath}:${logOffsetStart}:${logOffsetEnd}`
+        : ''
+    )).trim() || null;
+    const occurredAt = Number.isFinite(eventInput.occurredAt)
+      ? eventInput.occurredAt
+      : (Number.isFinite(eventInput.occurred_at) ? eventInput.occurred_at : Date.now());
+    const recordedAt = Number.isFinite(eventInput.recordedAt)
+      ? eventInput.recordedAt
+      : (Number.isFinite(eventInput.recorded_at) ? eventInput.recorded_at : Date.now());
+    const redactedPayload = buildRedactedRootIoPayload(eventInput);
+    const contentSha256 = String(eventInput.contentSha256 || eventInput.content_sha256 || '').trim()
+      || computeRootIoContentHash({
+        eventKind,
+        source,
+        contentPreview: redactedPayload.contentPreview,
+        contentFull: redactedPayload.contentFull,
+        metadata: redactedPayload.metadata
+      });
+    const projectId = this._resolveProjectIdForRootIoEvent({
+      ...eventInput,
+      terminalId,
+      runId,
+      taskId
+    });
+
+    const insertEvent = this.db.transaction(() => {
+      if (idempotencyKey) {
+        const existing = this.db.get(`
+          SELECT *
+          FROM root_io_events
+          WHERE idempotency_key = ?
+        `, idempotencyKey);
+        if (existing) {
+          return existing;
+        }
+      }
+
+      const rootIoEventId = String(eventInput.rootIoEventId || eventInput.root_io_event_id || eventInput.id || `rio_${generateId()}`).trim();
+      const sequenceNo = Number.isInteger(eventInput.sequenceNo) && eventInput.sequenceNo > 0
+        ? eventInput.sequenceNo
+        : (Number.isInteger(eventInput.sequence_no) && eventInput.sequence_no > 0
+          ? eventInput.sequence_no
+          : this.getNextRootIoEventSequence(rootSessionId));
+
+      this.db.run(`
+        INSERT INTO root_io_events (
+          root_io_event_id,
+          idempotency_key,
+          root_session_id,
+          terminal_id,
+          run_id,
+          task_id,
+          task_assignment_id,
+          room_id,
+          discussion_id,
+          trace_id,
+          project_id,
+          event_kind,
+          source,
+          sequence_no,
+          content_preview,
+          content_full,
+          content_sha256,
+          log_path,
+          log_offset_start,
+          log_offset_end,
+          screen_rows,
+          screen_cols,
+          parsed_role,
+          confidence,
+          retention_class,
+          expires_at,
+          metadata,
+          occurred_at,
+          recorded_at
+        )
+        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+      `,
+      rootIoEventId,
+      idempotencyKey,
+      rootSessionId,
+      terminalId,
+      runId,
+      taskId,
+      taskAssignmentId,
+      roomId,
+      discussionId,
+      traceId,
+      projectId,
+      eventKind,
+      source,
+      sequenceNo,
+      redactedPayload.contentPreview,
+      redactedPayload.contentFull,
+      contentSha256,
+      logPath,
+      logOffsetStart,
+      logOffsetEnd,
+      normalizeOptionalInteger(eventInput.screenRows ?? eventInput.screen_rows),
+      normalizeOptionalInteger(eventInput.screenCols ?? eventInput.screen_cols),
+      String(eventInput.parsedRole || eventInput.parsed_role || '').trim() || null,
+      normalizeConfidence(eventInput.confidence),
+      retentionClass,
+      normalizeOptionalInteger(eventInput.expiresAt ?? eventInput.expires_at),
+      JSON.stringify(redactedPayload.metadata),
+      occurredAt,
+      recordedAt);
+
+      return this.db.get('SELECT * FROM root_io_events WHERE root_io_event_id = ?', rootIoEventId);
+    });
+
+    return this._parseRootIoEventRow(insertEvent.immediate());
+  }
+
+  listRootIoEvents(options = {}) {
+    if (!this._hasTable('root_io_events')) {
+      return [];
+    }
+
+    const eventOptions = options && typeof options === 'object' ? options : {};
+    const clauses = [];
+    const params = [];
+    const pushTextMatch = (column, value) => {
+      const normalized = String(value || '').trim();
+      if (!normalized) {
+        return;
+      }
+      clauses.push(`${column} = ?`);
+      params.push(normalized);
+    };
+
+    pushTextMatch('root_session_id', eventOptions.rootSessionId || eventOptions.root_session_id);
+    pushTextMatch('terminal_id', eventOptions.terminalId || eventOptions.terminal_id);
+    pushTextMatch('run_id', eventOptions.runId || eventOptions.run_id);
+    pushTextMatch('task_id', eventOptions.taskId || eventOptions.task_id);
+    pushTextMatch('task_assignment_id', eventOptions.taskAssignmentId || eventOptions.task_assignment_id);
+    pushTextMatch('room_id', eventOptions.roomId || eventOptions.room_id);
+    pushTextMatch('discussion_id', eventOptions.discussionId || eventOptions.discussion_id);
+    pushTextMatch('trace_id', eventOptions.traceId || eventOptions.trace_id);
+    pushTextMatch('project_id', eventOptions.projectId || eventOptions.project_id);
+    pushTextMatch('event_kind', eventOptions.eventKind || eventOptions.event_kind);
+    pushTextMatch('source', eventOptions.source);
+
+    const since = normalizeProjectionTimestamp(eventOptions.since);
+    if (since !== null) {
+      clauses.push('occurred_at >= ?');
+      params.push(since);
+    }
+    const until = normalizeProjectionTimestamp(eventOptions.until);
+    if (until !== null) {
+      clauses.push('occurred_at <= ?');
+      params.push(until);
+    }
+
+    const whereSql = clauses.length ? `WHERE ${clauses.join(' AND ')}` : '';
+    const limit = clampLimit(eventOptions.limit, 100, 500);
+    const orderDirection = String(eventOptions.order || eventOptions.orderBy || '').trim().toLowerCase() === 'desc'
+      ? 'DESC'
+      : 'ASC';
+    const rootIoEventOrder = orderDirection === 'DESC'
+      ? 'occurred_at DESC, sequence_no DESC, recorded_at DESC, root_io_event_id ASC'
+      : 'occurred_at ASC, sequence_no ASC, recorded_at ASC, root_io_event_id ASC';
+    return this.db.all(`
+      SELECT *
+      FROM root_io_events
+      ${whereSql}
+      ORDER BY ${rootIoEventOrder}
+      LIMIT ?
+    `, ...params, limit).map((row) => this._parseRootIoEventRow(row));
+  }
+
+  getLatestRootIoLogOffset(options = {}) {
+    if (!this._hasTable('root_io_events')) {
+      return null;
+    }
+
+    const offsetOptions = options && typeof options === 'object' ? options : {};
+    const rootSessionId = String(offsetOptions.rootSessionId || offsetOptions.root_session_id || '').trim();
+    const terminalId = String(offsetOptions.terminalId || offsetOptions.terminal_id || '').trim();
+    const logPath = String(offsetOptions.logPath || offsetOptions.log_path || '').trim();
+    if (!rootSessionId || !terminalId || !logPath) {
+      return null;
+    }
+
+    const row = this.db.get(`
+      SELECT MAX(log_offset_end) AS log_offset_end
+      FROM root_io_events
+      WHERE root_session_id = ?
+        AND terminal_id = ?
+        AND log_path = ?
+        AND source = 'terminal_log'
+        AND event_kind = 'output'
+        AND log_offset_end IS NOT NULL
+    `, rootSessionId, terminalId, logPath);
+    return Number.isFinite(row?.log_offset_end) ? row.log_offset_end : null;
+  }
+
+  _parseMemorySummaryEdgeRow(row) {
+    if (!row) {
+      return null;
+    }
+    return {
+      ...row,
+      edgeId: row.edge_id,
+      edgeNamespace: row.edge_namespace,
+      parentScopeType: row.parent_scope_type,
+      parentScopeId: row.parent_scope_id,
+      childScopeType: row.child_scope_type,
+      childScopeId: row.child_scope_id,
+      edgeKind: row.edge_kind,
+      metadata: parseJsonField(row.metadata) || {},
+      createdAt: row.created_at,
+      updatedAt: row.updated_at
+    };
+  }
+
+  appendMemorySummaryEdge(edge = {}) {
+    if (!this._hasTable('memory_summary_edges')) {
+      return null;
+    }
+
+    const edgeInput = edge && typeof edge === 'object' ? edge : {};
+    const edgeNamespace = normalizeEnumValue(
+      edgeInput.edgeNamespace || edgeInput.edge_namespace,
+      MEMORY_SUMMARY_EDGE_NAMESPACES,
+      'derivation'
+    );
+    const edgeKind = normalizeEnumValue(
+      edgeInput.edgeKind || edgeInput.edge_kind,
+      MEMORY_SUMMARY_EDGE_KINDS,
+      'summarizes'
+    );
+    const parentScopeType = String(edgeInput.parentScopeType || edgeInput.parent_scope_type || '').trim();
+    const parentScopeId = String(edgeInput.parentScopeId || edgeInput.parent_scope_id || '').trim();
+    const childScopeType = String(edgeInput.childScopeType || edgeInput.child_scope_type || '').trim();
+    const childScopeId = String(edgeInput.childScopeId || edgeInput.child_scope_id || '').trim();
+    if (!parentScopeType || !parentScopeId || !childScopeType || !childScopeId) {
+      throw new Error('parentScopeType, parentScopeId, childScopeType, and childScopeId are required');
+    }
+    if (parentScopeType === childScopeType && parentScopeId === childScopeId) {
+      throw new Error('memory summary edges cannot point to themselves');
+    }
+
+    const reverse = this.db.get(`
+      SELECT edge_id
+      FROM memory_summary_edges
+      WHERE parent_scope_type = ?
+        AND parent_scope_id = ?
+        AND child_scope_type = ?
+        AND child_scope_id = ?
+      LIMIT 1
+    `, childScopeType, childScopeId, parentScopeType, parentScopeId);
+    if (reverse) {
+      throw new Error('memory summary edges cannot create a direct cycle');
+    }
+
+    const now = Date.now();
+    const createdAt = Number.isFinite(edgeInput.createdAt)
+      ? edgeInput.createdAt
+      : (Number.isFinite(edgeInput.created_at) ? edgeInput.created_at : now);
+    const updatedAt = Number.isFinite(edgeInput.updatedAt)
+      ? edgeInput.updatedAt
+      : (Number.isFinite(edgeInput.updated_at) ? edgeInput.updated_at : createdAt);
+    const metadata = edgeInput.metadata && typeof edgeInput.metadata === 'object' && !Array.isArray(edgeInput.metadata)
+      ? redactSecretObject({ ...edgeInput.metadata })
+      : {};
+
+    const insertEdge = this.db.transaction(() => {
+      const existing = this.db.get(`
+        SELECT *
+        FROM memory_summary_edges
+        WHERE edge_namespace = ?
+          AND parent_scope_type = ?
+          AND parent_scope_id = ?
+          AND child_scope_type = ?
+          AND child_scope_id = ?
+          AND edge_kind = ?
+      `, edgeNamespace, parentScopeType, parentScopeId, childScopeType, childScopeId, edgeKind);
+      if (existing) {
+        return existing;
+      }
+
+      const edgeId = String(edgeInput.edgeId || edgeInput.edge_id || edgeInput.id || `mse_${generateId()}`).trim();
+      this.db.run(`
+        INSERT INTO memory_summary_edges (
+          edge_id,
+          edge_namespace,
+          parent_scope_type,
+          parent_scope_id,
+          child_scope_type,
+          child_scope_id,
+          edge_kind,
+          metadata,
+          created_at,
+          updated_at
+        )
+        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+      `,
+      edgeId,
+      edgeNamespace,
+      parentScopeType,
+      parentScopeId,
+      childScopeType,
+      childScopeId,
+      edgeKind,
+      JSON.stringify(metadata),
+      createdAt,
+      updatedAt);
+
+      return this.db.get('SELECT * FROM memory_summary_edges WHERE edge_id = ?', edgeId);
+    });
+
+    return this._parseMemorySummaryEdgeRow(insertEdge.immediate());
+  }
+
+  listMemorySummaryEdges(options = {}) {
+    if (!this._hasTable('memory_summary_edges')) {
+      return [];
+    }
+
+    const edgeOptions = options && typeof options === 'object' ? options : {};
+    const clauses = [];
+    const params = [];
+    const pushTextMatch = (column, value) => {
+      const normalized = String(value || '').trim();
+      if (!normalized) {
+        return;
+      }
+      clauses.push(`${column} = ?`);
+      params.push(normalized);
+    };
+
+    pushTextMatch('edge_namespace', edgeOptions.edgeNamespace || edgeOptions.edge_namespace);
+    pushTextMatch('edge_kind', edgeOptions.edgeKind || edgeOptions.edge_kind);
+    pushTextMatch('parent_scope_type', edgeOptions.parentScopeType || edgeOptions.parent_scope_type);
+    pushTextMatch('parent_scope_id', edgeOptions.parentScopeId || edgeOptions.parent_scope_id);
+    pushTextMatch('child_scope_type', edgeOptions.childScopeType || edgeOptions.child_scope_type);
+    pushTextMatch('child_scope_id', edgeOptions.childScopeId || edgeOptions.child_scope_id);
+
+    const whereSql = clauses.length ? `WHERE ${clauses.join(' AND ')}` : '';
+    const limit = clampLimit(edgeOptions.limit, 100, 500);
+    return this.db.all(`
+      SELECT *
+      FROM memory_summary_edges
+      ${whereSql}
+      ORDER BY created_at DESC, edge_id ASC
+      LIMIT ?
+    `, ...params, limit).map((row) => this._parseMemorySummaryEdgeRow(row));
+  }
+
+  // =============================
+  // Long-Horizon Dispatch State
+  // =============================
+
+  _parseDispatchRequestRow(row) {
+    if (!row) {
+      return null;
+    }
+
+    return {
+      id: row.dispatch_request_id,
+      dispatchRequestId: row.dispatch_request_id,
+      idempotencyKey: row.idempotency_key || null,
+      orchestrationId: row.orchestration_id || null,
+      phaseId: row.phase_id || null,
+      taskId: row.task_id || null,
+      taskAssignmentId: row.task_assignment_id || null,
+      roomId: row.room_id || null,
+      rootSessionId: row.root_session_id || null,
+      requestedBy: row.requested_by || null,
+      requestKind: row.request_kind || 'general',
+      status: row.status || 'queued',
+      coalesceKey: row.coalesce_key || null,
+      coalescedCount: row.coalesced_count || 0,
+      deferUntil: row.defer_until || null,
+      contextSnapshotId: row.context_snapshot_id || null,
+      boundSessionId: row.bound_session_id || null,
+      runId: row.run_id || null,
+      terminalId: row.terminal_id || null,
+      claimOwner: row.claim_owner || null,
+      claimedAt: row.claimed_at || null,
+      claimExpiresAt: row.claim_expires_at || null,
+      metadata: parseJsonField(row.metadata) || {},
+      createdAt: row.created_at,
+      updatedAt: row.updated_at,
+      dispatchedAt: row.dispatched_at || null,
+      cancelledAt: row.cancelled_at || null
+    };
+  }
+
+  createDispatchRequest(input = {}) {
+    if (!this._hasTable('dispatch_requests')) {
+      return null;
+    }
+
+    const dispatchRequestId = String(input.dispatchRequestId || input.dispatch_request_id || input.id || `dispatch_${generateId()}`).trim();
+    const idempotencyKey = String(input.idempotencyKey || input.idempotency_key || '').trim() || null;
+    const status = normalizeEnumValue(input.status, DISPATCH_REQUEST_STATUSES, 'queued');
+    const requestKind = String(input.requestKind || input.request_kind || 'general').trim().toLowerCase() || 'general';
+    const metadata = input.metadata && typeof input.metadata === 'object' && !Array.isArray(input.metadata)
+      ? redactSecretObject({ ...input.metadata })
+      : {};
+    const now = Number.isFinite(input.createdAt)
+      ? input.createdAt
+      : (Number.isFinite(input.created_at) ? input.created_at : Date.now());
+    const updatedAt = Number.isFinite(input.updatedAt)
+      ? input.updatedAt
+      : (Number.isFinite(input.updated_at) ? input.updated_at : now);
+
+    if (!dispatchRequestId) {
+      throw new Error('dispatchRequestId is required');
+    }
+
+    const create = this.db.transaction(() => {
+      if (idempotencyKey) {
+        const existing = this.db.get('SELECT * FROM dispatch_requests WHERE idempotency_key = ?', idempotencyKey);
+        if (existing) {
+          return existing;
+        }
+      }
+
+      this.db.run(`
+        INSERT INTO dispatch_requests (
+          dispatch_request_id,
+          idempotency_key,
+          orchestration_id,
+          phase_id,
+          task_id,
+          task_assignment_id,
+          room_id,
+          root_session_id,
+          requested_by,
+          request_kind,
+          status,
+          coalesce_key,
+          coalesced_count,
+          defer_until,
+          context_snapshot_id,
+          bound_session_id,
+          run_id,
+          terminal_id,
+          claim_owner,
+          claimed_at,
+          claim_expires_at,
+          metadata,
+          created_at,
+          updated_at,
+          dispatched_at,
+          cancelled_at
+        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+      `,
+      dispatchRequestId,
+      idempotencyKey,
+      String(input.orchestrationId || input.orchestration_id || '').trim() || null,
+      String(input.phaseId || input.phase_id || '').trim() || null,
+      String(input.taskId || input.task_id || '').trim() || null,
+      String(input.taskAssignmentId || input.task_assignment_id || input.assignmentId || input.assignment_id || '').trim() || null,
+      String(input.roomId || input.room_id || '').trim() || null,
+      String(input.rootSessionId || input.root_session_id || '').trim() || null,
+      String(input.requestedBy || input.requested_by || '').trim() || null,
+      requestKind,
+      status,
+      String(input.coalesceKey || input.coalesce_key || '').trim() || null,
+      normalizeInteger(input.coalescedCount ?? input.coalesced_count, 0),
+      normalizeOptionalInteger(input.deferUntil ?? input.defer_until),
+      String(input.contextSnapshotId || input.context_snapshot_id || '').trim() || null,
+      String(input.boundSessionId || input.bound_session_id || '').trim() || null,
+      String(input.runId || input.run_id || '').trim() || null,
+      String(input.terminalId || input.terminal_id || '').trim() || null,
+      String(input.claimOwner || input.claim_owner || '').trim() || null,
+      normalizeOptionalInteger(input.claimedAt ?? input.claimed_at),
+      normalizeOptionalInteger(input.claimExpiresAt ?? input.claim_expires_at),
+      JSON.stringify(metadata),
+      now,
+      updatedAt,
+      normalizeOptionalInteger(input.dispatchedAt ?? input.dispatched_at),
+      normalizeOptionalInteger(input.cancelledAt ?? input.cancelled_at));
+
+      return this.db.get('SELECT * FROM dispatch_requests WHERE dispatch_request_id = ?', dispatchRequestId);
+    });
+
+    return this._parseDispatchRequestRow(create.immediate());
+  }
+
+  getActiveDispatchRequestByCoalesceKey(coalesceKey, options = {}) {
+    if (!this._hasTable('dispatch_requests')) {
+      return null;
+    }
+
+    const normalizedCoalesceKey = String(coalesceKey || '').trim();
+    if (!normalizedCoalesceKey) {
+      return null;
+    }
+
+    const now = Number.isFinite(options.now)
+      ? options.now
+      : (Number.isFinite(options.now_ms) ? options.now_ms : Date.now());
+    const statusValues = Array.from(DISPATCH_REQUEST_COALESCABLE_STATUSES);
+    const placeholders = statusValues.map(() => '?').join(', ');
+    const row = this.db.get(`
+      SELECT *
+      FROM dispatch_requests
+      WHERE coalesce_key = ?
+        AND status IN (${placeholders})
+        AND (
+          status <> 'deferred'
+          OR defer_until IS NULL
+          OR defer_until > ?
+        )
+      ORDER BY created_at ASC, dispatch_request_id ASC
+      LIMIT 1
+    `, normalizedCoalesceKey, ...statusValues, now);
+    return this._parseDispatchRequestRow(row);
+  }
+
+  createOrCoalesceDispatchRequest(input = {}, options = {}) {
+    if (!this._hasTable('dispatch_requests')) {
+      return { dispatch: null, action: 'unavailable', coalesced: false };
+    }
+
+    const dispatchInput = input && typeof input === 'object' ? input : {};
+    const idempotencyKey = String(dispatchInput.idempotencyKey || dispatchInput.idempotency_key || '').trim();
+    const coalesceKey = String(dispatchInput.coalesceKey || dispatchInput.coalesce_key || '').trim();
+    const shouldCoalesce = options.coalesceActive !== false && options.coalesce !== false;
+    const now = Number.isFinite(options.now)
+      ? options.now
+      : (Number.isFinite(options.now_ms) ? options.now_ms : Date.now());
+
+    if (idempotencyKey) {
+      const existing = this.db.get('SELECT * FROM dispatch_requests WHERE idempotency_key = ?', idempotencyKey);
+      if (existing) {
+        return {
+          dispatch: this._parseDispatchRequestRow(existing),
+          action: 'idempotent_replay',
+          coalesced: false
+        };
+      }
+    }
+
+    if (shouldCoalesce && coalesceKey) {
+      const existing = this.getActiveDispatchRequestByCoalesceKey(coalesceKey, { now });
+      if (existing?.id) {
+        const metadata = existing.metadata && typeof existing.metadata === 'object' && !Array.isArray(existing.metadata)
+          ? existing.metadata
+          : {};
+        const existingCoalescing = metadata.coalescing && typeof metadata.coalescing === 'object' && !Array.isArray(metadata.coalescing)
+          ? metadata.coalescing
+          : {};
+        const nextCoalescedCount = normalizeInteger(existing.coalescedCount, 0) + 1;
+        this.db.run(`
+          UPDATE dispatch_requests
+          SET coalesced_count = ?,
+              updated_at = ?,
+              metadata = ?
+          WHERE dispatch_request_id = ?
+        `,
+        nextCoalescedCount,
+        now,
+        JSON.stringify(redactSecretObject({
+          ...metadata,
+          coalescing: {
+            ...existingCoalescing,
+            lastCoalescedAt: now,
+            coalescedCount: nextCoalescedCount,
+            requestedBy: String(dispatchInput.requestedBy || dispatchInput.requested_by || '').trim() || null
+          }
+        })),
+        existing.id);
+
+        return {
+          dispatch: this.getDispatchRequest(existing.id),
+          action: 'coalesced',
+          coalesced: true
+        };
+      }
+    }
+
+    const dispatch = this.createDispatchRequest(dispatchInput);
+    return {
+      dispatch,
+      action: dispatch?.status === 'deferred' ? 'deferred' : 'created',
+      coalesced: false
+    };
+  }
+
+  getDispatchRequest(dispatchRequestId) {
+    if (!this._hasTable('dispatch_requests')) {
+      return null;
+    }
+    const row = this.db.get('SELECT * FROM dispatch_requests WHERE dispatch_request_id = ?', dispatchRequestId);
+    return this._parseDispatchRequestRow(row);
+  }
+
+  listDispatchRequests(options = {}) {
+    if (!this._hasTable('dispatch_requests')) {
+      return [];
+    }
+
+    const clauses = [];
+    const params = [];
+    const pushTextMatch = (column, value) => {
+      const normalized = String(value || '').trim();
+      if (!normalized) {
+        return;
+      }
+      clauses.push(`${column} = ?`);
+      params.push(normalized);
+    };
+
+    pushTextMatch('status', options.status);
+    pushTextMatch('root_session_id', options.rootSessionId || options.root_session_id);
+    pushTextMatch('task_id', options.taskId || options.task_id);
+    pushTextMatch('task_assignment_id', options.taskAssignmentId || options.task_assignment_id || options.assignmentId || options.assignment_id);
+    pushTextMatch('room_id', options.roomId || options.room_id);
+    pushTextMatch('coalesce_key', options.coalesceKey || options.coalesce_key);
+    pushTextMatch('request_kind', options.requestKind || options.request_kind);
+
+    const whereSql = clauses.length ? `WHERE ${clauses.join(' AND ')}` : '';
+    const limit = clampLimit(options.limit, 100, 500);
+    return this.db.all(`
+      SELECT *
+      FROM dispatch_requests
+      ${whereSql}
+      ORDER BY created_at DESC, dispatch_request_id ASC
+      LIMIT ?
+    `, ...params, limit).map((row) => this._parseDispatchRequestRow(row));
+  }
+
+  listDispatchRequestsForTask(taskId, options = {}) {
+    if (!this._hasTable('dispatch_requests')) {
+      return [];
+    }
+
+    const normalizedTaskId = String(taskId || '').trim();
+    if (!normalizedTaskId) {
+      return [];
+    }
+
+    const scopeClauses = ['task_id = ?'];
+    const params = [normalizedTaskId];
+    if (this._hasTable('task_assignments')) {
+      scopeClauses.push('task_assignment_id IN (SELECT id FROM task_assignments WHERE task_id = ?)');
+      params.push(normalizedTaskId);
+    }
+
+    const clauses = [`(${scopeClauses.join(' OR ')})`];
+    const pushTextMatch = (column, value) => {
+      const normalized = String(value || '').trim();
+      if (!normalized) {
+        return;
+      }
+      clauses.push(`${column} = ?`);
+      params.push(normalized);
+    };
+
+    pushTextMatch('status', options.status);
+    pushTextMatch('root_session_id', options.rootSessionId || options.root_session_id);
+    pushTextMatch('request_kind', options.requestKind || options.request_kind);
+
+    const limit = clampLimit(options.limit, 100, 500);
+    return this.db.all(`
+      SELECT *
+      FROM dispatch_requests
+      WHERE ${clauses.join(' AND ')}
+      ORDER BY COALESCE(dispatched_at, updated_at, created_at) DESC, dispatch_request_id ASC
+      LIMIT ?
+    `, ...params, limit).map((row) => this._parseDispatchRequestRow(row));
+  }
+
+  listStaleDispatchRequests(options = {}) {
+    if (!this._hasTable('dispatch_requests')) {
+      return [];
+    }
+
+    const now = Number.isFinite(options.now)
+      ? options.now
+      : (Number.isFinite(options.now_ms) ? options.now_ms : Date.now());
+    const staleMs = Number.isFinite(options.staleMs)
+      ? options.staleMs
+      : (Number.isFinite(options.stale_ms) ? options.stale_ms : 10 * 60 * 1000);
+    const cutoff = Math.max(0, now - Math.max(0, staleMs));
+    const clauses = [`
+      (
+        (status IN ('queued', 'claimed') AND terminal_id IS NULL AND updated_at <= ?)
+        OR (status = 'deferred' AND defer_until IS NOT NULL AND defer_until <= ?)
+      )
+    `];
+    const params = [cutoff, now];
+    const rootSessionId = String(options.rootSessionId || options.root_session_id || '').trim();
+    if (rootSessionId) {
+      clauses.push('root_session_id = ?');
+      params.push(rootSessionId);
+    }
+    const taskId = String(options.taskId || options.task_id || '').trim();
+    if (taskId) {
+      clauses.push('task_id = ?');
+      params.push(taskId);
+    }
+    const limit = clampLimit(options.limit, 100, 500);
+    return this.db.all(`
+      SELECT *
+      FROM dispatch_requests
+      WHERE ${clauses.join(' AND ')}
+      ORDER BY updated_at ASC, created_at ASC, dispatch_request_id ASC
+      LIMIT ?
+    `, ...params, limit).map((row) => this._parseDispatchRequestRow(row));
+  }
+
+  updateDispatchRequest(dispatchRequestId, patch = {}) {
+    if (!this._hasTable('dispatch_requests')) {
+      return null;
+    }
+
+    const updates = [];
+    const params = [];
+    if (patch.status !== undefined) {
+      const status = normalizeEnumValue(patch.status, DISPATCH_REQUEST_STATUSES);
+      if (!status) {
+        throw new Error(`status must be one of ${Array.from(DISPATCH_REQUEST_STATUSES).join(', ')}`);
+      }
+      updates.push('status = ?');
+      params.push(status);
+    }
+    if (patch.contextSnapshotId !== undefined || patch.context_snapshot_id !== undefined) {
+      updates.push('context_snapshot_id = ?');
+      params.push(String(patch.contextSnapshotId || patch.context_snapshot_id || '').trim() || null);
+    }
+    if (patch.boundSessionId !== undefined || patch.bound_session_id !== undefined) {
+      updates.push('bound_session_id = ?');
+      params.push(String(patch.boundSessionId || patch.bound_session_id || '').trim() || null);
+    }
+    if (patch.runId !== undefined || patch.run_id !== undefined) {
+      updates.push('run_id = ?');
+      params.push(String(patch.runId || patch.run_id || '').trim() || null);
+    }
+    if (patch.terminalId !== undefined || patch.terminal_id !== undefined) {
+      updates.push('terminal_id = ?');
+      params.push(String(patch.terminalId || patch.terminal_id || '').trim() || null);
+    }
+    if (patch.claimOwner !== undefined || patch.claim_owner !== undefined) {
+      updates.push('claim_owner = ?');
+      params.push(String(patch.claimOwner || patch.claim_owner || '').trim() || null);
+    }
+    if (patch.claimedAt !== undefined || patch.claimed_at !== undefined) {
+      updates.push('claimed_at = ?');
+      params.push(normalizeOptionalInteger(patch.claimedAt ?? patch.claimed_at));
+    }
+    if (patch.claimExpiresAt !== undefined || patch.claim_expires_at !== undefined) {
+      updates.push('claim_expires_at = ?');
+      params.push(normalizeOptionalInteger(patch.claimExpiresAt ?? patch.claim_expires_at));
+    }
+    if (patch.coalescedCount !== undefined || patch.coalesced_count !== undefined) {
+      updates.push('coalesced_count = ?');
+      params.push(normalizeInteger(patch.coalescedCount ?? patch.coalesced_count, 0));
+    }
+    if (patch.deferUntil !== undefined || patch.defer_until !== undefined) {
+      updates.push('defer_until = ?');
+      params.push(normalizeOptionalInteger(patch.deferUntil ?? patch.defer_until));
+    }
+    if (patch.metadata !== undefined) {
+      const metadata = patch.metadata && typeof patch.metadata === 'object' && !Array.isArray(patch.metadata)
+        ? redactSecretObject({ ...patch.metadata })
+        : {};
+      updates.push('metadata = ?');
+      params.push(JSON.stringify(metadata));
+    }
+    if (patch.dispatchedAt !== undefined || patch.dispatched_at !== undefined) {
+      updates.push('dispatched_at = ?');
+      params.push(normalizeOptionalInteger(patch.dispatchedAt ?? patch.dispatched_at));
+    }
+    if (patch.cancelledAt !== undefined || patch.cancelled_at !== undefined) {
+      updates.push('cancelled_at = ?');
+      params.push(normalizeOptionalInteger(patch.cancelledAt ?? patch.cancelled_at));
+    }
+
+    if (updates.length === 0) {
+      return this.getDispatchRequest(dispatchRequestId);
+    }
+
+    const updatedAt = Number.isFinite(patch.updatedAt)
+      ? patch.updatedAt
+      : (Number.isFinite(patch.updated_at) ? patch.updated_at : Date.now());
+    updates.push('updated_at = ?');
+    params.push(updatedAt);
+    params.push(dispatchRequestId);
+
+    this.db.run(`
+      UPDATE dispatch_requests
+      SET ${updates.join(', ')}
+      WHERE dispatch_request_id = ?
+    `, ...params);
+    return this.getDispatchRequest(dispatchRequestId);
+  }
+
+  claimDispatchRequest(dispatchRequestId, options = {}) {
+    if (!this._hasTable('dispatch_requests')) {
+      return { claimed: false, reason: 'unavailable', dispatch: null };
+    }
+
+    const id = String(dispatchRequestId || '').trim();
+    if (!id) {
+      throw new Error('dispatchRequestId is required');
+    }
+
+    const now = Number.isFinite(options.now)
+      ? options.now
+      : (Number.isFinite(options.now_ms) ? options.now_ms : Date.now());
+    const owner = String(options.claimOwner || options.claim_owner || options.owner || '').trim() || null;
+    const ttlMs = normalizeInteger(options.ttlMs ?? options.ttl_ms, 10 * 60 * 1000);
+    const claimExpiresAt = Number.isFinite(options.claimExpiresAt ?? options.claim_expires_at)
+      ? normalizeOptionalInteger(options.claimExpiresAt ?? options.claim_expires_at)
+      : now + ttlMs;
+
+    const claim = this.db.transaction(() => {
+      const existing = this.getDispatchRequest(id);
+      if (!existing) {
+        return { claimed: false, reason: 'not_found', dispatch: null };
+      }
+
+      if (existing.status === 'deferred' && existing.deferUntil && existing.deferUntil > now) {
+        return { claimed: false, reason: 'deferred', dispatch: existing };
+      }
+
+      if (existing.status === 'claimed' && existing.claimExpiresAt && existing.claimExpiresAt > now) {
+        return { claimed: false, reason: 'already_claimed', dispatch: existing };
+      }
+
+      if (!['queued', 'claimed', 'deferred'].includes(existing.status)) {
+        return { claimed: false, reason: `not_claimable:${existing.status}`, dispatch: existing };
+      }
+
+      const result = this.db.prepare(`
+        UPDATE dispatch_requests
+        SET status = 'claimed',
+            claim_owner = ?,
+            claimed_at = ?,
+            claim_expires_at = ?,
+            updated_at = ?
+        WHERE dispatch_request_id = ?
+          AND (
+            status = 'queued'
+            OR (status = 'deferred' AND (defer_until IS NULL OR defer_until <= ?))
+            OR (status = 'claimed' AND (claim_expires_at IS NULL OR claim_expires_at <= ?))
+          )
+      `).run(owner, now, claimExpiresAt, now, id, now, now);
+
+      const dispatch = this.getDispatchRequest(id);
+      return {
+        claimed: result.changes === 1,
+        reason: result.changes === 1 ? 'claimed' : 'claim_conflict',
+        dispatch
+      };
+    });
+
+    return claim.immediate();
+  }
+
+  _parseRunContextSnapshotRow(row) {
+    if (!row) {
+      return null;
+    }
+    return {
+      id: row.context_snapshot_id,
+      contextSnapshotId: row.context_snapshot_id,
+      dispatchRequestId: row.dispatch_request_id,
+      workspacePath: row.workspace_path || null,
+      contextMode: row.context_mode || 'prompt',
+      promptSummary: row.prompt_summary || null,
+      promptBody: row.prompt_body || null,
+      linkedContext: parseJsonField(row.linked_context_json) || null,
+      toolPolicy: parseJsonField(row.tool_policy_json) || null,
+      adapter: row.adapter || null,
+      model: row.model || null,
+      reasoningEffort: row.reasoning_effort || null,
+      contentSha256: row.content_sha256 || null,
+      retentionClass: row.retention_class || 'raw-bounded',
+      metadata: parseJsonField(row.metadata) || {},
+      createdAt: row.created_at
+    };
+  }
+
+  createRunContextSnapshot(input = {}) {
+    if (!this._hasTable('run_context_snapshots')) {
+      return null;
+    }
+
+    const contextSnapshotId = String(input.contextSnapshotId || input.context_snapshot_id || input.id || `context_${generateId()}`).trim();
+    const dispatchRequestId = String(input.dispatchRequestId || input.dispatch_request_id || '').trim();
+    if (!contextSnapshotId) {
+      throw new Error('contextSnapshotId is required');
+    }
+    if (!dispatchRequestId) {
+      throw new Error('dispatchRequestId is required');
+    }
+
+    const adapter = String(input.adapter || '').trim() || null;
+    const model = String(input.model || '').trim() || null;
+    const reasoningEffort = normalizeReasoningEffort(input.reasoningEffort ?? input.reasoning_effort);
+    const retentionClass = normalizeEnumValue(
+      input.retentionClass || input.retention_class,
+      CONTEXT_RETENTION_CLASSES,
+      'raw-bounded'
+    );
+    const payload = buildRedactedContextSnapshotPayload(input);
+    const contentSha256 = String(input.contentSha256 || input.content_sha256 || '').trim()
+      || computeContextSnapshotHash({
+        ...payload,
+        adapter,
+        model,
+        reasoningEffort
+      });
+    const linkedContextJson = payload.linkedContextJson === null || payload.linkedContextJson === undefined
+      ? null
+      : (typeof payload.linkedContextJson === 'string' ? payload.linkedContextJson : JSON.stringify(payload.linkedContextJson));
+    const toolPolicyJson = payload.toolPolicyJson === null || payload.toolPolicyJson === undefined
+      ? null
+      : (typeof payload.toolPolicyJson === 'string' ? payload.toolPolicyJson : JSON.stringify(payload.toolPolicyJson));
+    const createdAt = Number.isFinite(input.createdAt)
+      ? input.createdAt
+      : (Number.isFinite(input.created_at) ? input.created_at : Date.now());
+
+    this.db.run(`
+      INSERT INTO run_context_snapshots (
+        context_snapshot_id,
+        dispatch_request_id,
+        workspace_path,
+        context_mode,
+        prompt_summary,
+        prompt_body,
+        linked_context_json,
+        tool_policy_json,
+        adapter,
+        model,
+        reasoning_effort,
+        content_sha256,
+        retention_class,
+        metadata,
+        created_at
+      ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+    `,
+    contextSnapshotId,
+    dispatchRequestId,
+    String(input.workspacePath || input.workspace_path || '').trim() || null,
+    String(input.contextMode || input.context_mode || 'prompt').trim().toLowerCase() || 'prompt',
+    payload.promptSummary,
+    payload.promptBody,
+    linkedContextJson,
+    toolPolicyJson,
+    adapter,
+    model,
+    reasoningEffort,
+    contentSha256,
+    retentionClass,
+    JSON.stringify(payload.metadata),
+    createdAt);
+
+    const snapshot = this.getRunContextSnapshot(contextSnapshotId);
+    const dispatch = this.getDispatchRequest(dispatchRequestId);
+    if (dispatch && !dispatch.contextSnapshotId) {
+      this.updateDispatchRequest(dispatchRequestId, {
+        contextSnapshotId,
+        updatedAt: createdAt
+      });
+    }
+    return snapshot;
+  }
+
+  getRunContextSnapshot(contextSnapshotId) {
+    if (!this._hasTable('run_context_snapshots')) {
+      return null;
+    }
+    const row = this.db.get('SELECT * FROM run_context_snapshots WHERE context_snapshot_id = ?', contextSnapshotId);
+    return this._parseRunContextSnapshotRow(row);
+  }
+
+  listRunContextSnapshotsForTask(taskId, options = {}) {
+    if (!this._hasTable('run_context_snapshots') || !this._hasTable('dispatch_requests')) {
+      return [];
+    }
+
+    const normalizedTaskId = String(taskId || '').trim();
+    if (!normalizedTaskId) {
+      return [];
+    }
+
+    const scopeClauses = ['dr.task_id = ?'];
+    const params = [normalizedTaskId];
+    if (this._hasTable('task_assignments')) {
+      scopeClauses.push('dr.task_assignment_id IN (SELECT id FROM task_assignments WHERE task_id = ?)');
+      params.push(normalizedTaskId);
+    }
+
+    const clauses = [`(${scopeClauses.join(' OR ')})`];
+    const contextMode = String(options.contextMode || options.context_mode || '').trim();
+    if (contextMode) {
+      clauses.push('rcs.context_mode = ?');
+      params.push(contextMode);
+    }
+
+    const limit = clampLimit(options.limit, 100, 500);
+    return this.db.all(`
+      SELECT rcs.*
+      FROM run_context_snapshots rcs
+      INNER JOIN dispatch_requests dr
+        ON dr.dispatch_request_id = rcs.dispatch_request_id
+      WHERE ${clauses.join(' AND ')}
+      ORDER BY rcs.created_at DESC, rcs.context_snapshot_id ASC
+      LIMIT ?
+    `, ...params, limit).map((row) => this._parseRunContextSnapshotRow(row));
+  }
+
+  _parseTaskSessionBindingRow(row) {
+    if (!row) {
+      return null;
+    }
+    return {
+      id: row.binding_id,
+      bindingId: row.binding_id,
+      rootSessionId: row.root_session_id || null,
+      taskId: row.task_id || null,
+      taskAssignmentId: row.task_assignment_id || null,
+      orchestrationId: row.orchestration_id || null,
+      phaseId: row.phase_id || null,
+      adapter: row.adapter,
+      model: row.model || null,
+      reasoningEffort: row.reasoning_effort || null,
+      terminalId: row.terminal_id || null,
+      providerSessionId: row.provider_session_id || null,
+      runtimeHost: row.runtime_host || null,
+      runtimeFidelity: row.runtime_fidelity || null,
+      reusePolicy: row.reuse_policy || null,
+      reuseDecision: parseJsonField(row.reuse_decision_json) || null,
+      status: row.status || 'active',
+      metadata: parseJsonField(row.metadata) || {},
+      createdAt: row.created_at,
+      lastVerifiedAt: row.last_verified_at || null
+    };
+  }
+
+  createTaskSessionBinding(input = {}) {
+    if (!this._hasTable('task_session_bindings')) {
+      return null;
+    }
+
+    const bindingId = String(input.bindingId || input.binding_id || input.id || `binding_${generateId()}`).trim();
+    const adapter = String(input.adapter || '').trim();
+    if (!bindingId) {
+      throw new Error('bindingId is required');
+    }
+    if (!adapter) {
+      throw new Error('adapter is required');
+    }
+
+    const status = normalizeEnumValue(input.status, TASK_SESSION_BINDING_STATUSES, 'active');
+    const reuseDecision = input.reuseDecision ?? input.reuse_decision ?? input.reuseDecisionJson ?? input.reuse_decision_json ?? null;
+    const reuseDecisionJson = reuseDecision === null || reuseDecision === undefined
+      ? null
+      : (typeof reuseDecision === 'string' ? reuseDecision : JSON.stringify(redactSecretObject(reuseDecision)));
+    const metadata = input.metadata && typeof input.metadata === 'object' && !Array.isArray(input.metadata)
+      ? redactSecretObject({ ...input.metadata })
+      : {};
+    const createdAt = Number.isFinite(input.createdAt)
+      ? input.createdAt
+      : (Number.isFinite(input.created_at) ? input.created_at : Date.now());
+
+    const columns = [
+      'binding_id',
+      'task_id',
+      'task_assignment_id',
+      'orchestration_id',
+      'phase_id',
+      'adapter',
+      'model',
+      'reasoning_effort',
+      'terminal_id',
+      'provider_session_id',
+      'runtime_host',
+      'runtime_fidelity',
+      'reuse_policy',
+      'reuse_decision_json',
+      'status',
+      'metadata',
+      'created_at',
+      'last_verified_at'
+    ];
+    const values = [
+      bindingId,
+      String(input.taskId || input.task_id || '').trim() || null,
+      String(input.taskAssignmentId || input.task_assignment_id || input.assignmentId || input.assignment_id || '').trim() || null,
+      String(input.orchestrationId || input.orchestration_id || '').trim() || null,
+      String(input.phaseId || input.phase_id || '').trim() || null,
+      adapter,
+      String(input.model || '').trim() || null,
+      normalizeReasoningEffort(input.reasoningEffort ?? input.reasoning_effort),
+      String(input.terminalId || input.terminal_id || '').trim() || null,
+      String(input.providerSessionId || input.provider_session_id || '').trim() || null,
+      String(input.runtimeHost || input.runtime_host || '').trim() || null,
+      String(input.runtimeFidelity || input.runtime_fidelity || '').trim() || null,
+      String(input.reusePolicy || input.reuse_policy || '').trim() || null,
+      reuseDecisionJson,
+      status,
+      JSON.stringify(metadata),
+      createdAt,
+      normalizeOptionalInteger(input.lastVerifiedAt ?? input.last_verified_at) || createdAt
+    ];
+    if (this._hasColumn('task_session_bindings', 'root_session_id')) {
+      columns.splice(1, 0, 'root_session_id');
+      values.splice(1, 0, String(input.rootSessionId || input.root_session_id || '').trim() || null);
+    }
+
+    this.db.run(`
+      INSERT INTO task_session_bindings (${columns.join(', ')})
+      VALUES (${columns.map(() => '?').join(', ')})
+    `, ...values);
+
+    return this.getTaskSessionBinding(bindingId);
+  }
+
+  getTaskSessionBinding(bindingId) {
+    if (!this._hasTable('task_session_bindings')) {
+      return null;
+    }
+    const row = this.db.get('SELECT * FROM task_session_bindings WHERE binding_id = ?', bindingId);
+    return this._parseTaskSessionBindingRow(row);
+  }
+
+  listTaskSessionBindings(options = {}) {
+    if (!this._hasTable('task_session_bindings')) {
+      return [];
+    }
+
+    const clauses = [];
+    const params = [];
+    const pushTextMatch = (column, value) => {
+      const normalized = String(value || '').trim();
+      if (!normalized) {
+        return;
+      }
+      clauses.push(`${column} = ?`);
+      params.push(normalized);
+    };
+
+    pushTextMatch('task_id', options.taskId || options.task_id);
+    if (this._hasColumn('task_session_bindings', 'root_session_id')) {
+      pushTextMatch('root_session_id', options.rootSessionId || options.root_session_id);
+    }
+    pushTextMatch('task_assignment_id', options.taskAssignmentId || options.task_assignment_id || options.assignmentId || options.assignment_id);
+    pushTextMatch('terminal_id', options.terminalId || options.terminal_id);
+    pushTextMatch('adapter', options.adapter);
+    pushTextMatch('provider_session_id', options.providerSessionId || options.provider_session_id);
+    pushTextMatch('status', options.status);
+
+    const whereSql = clauses.length ? `WHERE ${clauses.join(' AND ')}` : '';
+    const limit = clampLimit(options.limit, 100, 500);
+    return this.db.all(`
+      SELECT *
+      FROM task_session_bindings
+      ${whereSql}
+      ORDER BY created_at DESC, binding_id ASC
+      LIMIT ?
+    `, ...params, limit).map((row) => this._parseTaskSessionBindingRow(row));
+  }
+
+  listTaskSessionBindingsForTask(taskId, options = {}) {
+    if (!this._hasTable('task_session_bindings')) {
+      return [];
+    }
+
+    const normalizedTaskId = String(taskId || '').trim();
+    if (!normalizedTaskId) {
+      return [];
+    }
+
+    const scopeClauses = ['task_id = ?'];
+    const params = [normalizedTaskId];
+    if (this._hasTable('task_assignments')) {
+      scopeClauses.push('task_assignment_id IN (SELECT id FROM task_assignments WHERE task_id = ?)');
+      params.push(normalizedTaskId);
+    }
+
+    const clauses = [`(${scopeClauses.join(' OR ')})`];
+    const pushTextMatch = (column, value) => {
+      const normalized = String(value || '').trim();
+      if (!normalized) {
+        return;
+      }
+      clauses.push(`${column} = ?`);
+      params.push(normalized);
+    };
+
+    if (this._hasColumn('task_session_bindings', 'root_session_id')) {
+      pushTextMatch('root_session_id', options.rootSessionId || options.root_session_id);
+    }
+    pushTextMatch('adapter', options.adapter);
+    pushTextMatch('status', options.status);
+
+    const limit = clampLimit(options.limit, 100, 500);
+    return this.db.all(`
+      SELECT *
+      FROM task_session_bindings
+      WHERE ${clauses.join(' AND ')}
+      ORDER BY COALESCE(last_verified_at, created_at) DESC, binding_id ASC
+      LIMIT ?
+    `, ...params, limit).map((row) => this._parseTaskSessionBindingRow(row));
   }
 
   /**
@@ -2910,6 +5454,21 @@ class OrchestrationDB {
   addMessage(terminalId, role, content, options = {}) {
     const { traceId = null, metadata = {}, rootSessionId: explicitRootSessionId = null } = options;
     const terminalRow = this.getTerminal(terminalId);
+    const normalizedRole = String(role || '').trim().toLowerCase();
+    const normalizedMetadata = metadata && typeof metadata === 'object' && !Array.isArray(metadata)
+      ? redactSecretObject({ ...metadata })
+      : {};
+    let persistedContent = content == null ? '' : String(content);
+    const redaction = redactSecretsInText(persistedContent);
+    if (redaction.redacted) {
+      persistedContent = redaction.content;
+      const securityMetadata = normalizedMetadata.security && typeof normalizedMetadata.security === 'object'
+        ? { ...normalizedMetadata.security }
+        : {};
+      securityMetadata.redactedSecretLikeContent = true;
+      securityMetadata.redactionReasonCodes = redaction.reasons;
+      normalizedMetadata.security = securityMetadata;
+    }
 
     const stmt = this.db.prepare(`
       INSERT INTO messages (terminal_id, trace_id, root_session_id, role, content, metadata, created_at)
@@ -2921,18 +5480,48 @@ class OrchestrationDB {
       terminalId,
       traceId,
       explicitRootSessionId || terminalRow?.root_session_id || null,
-      role,
-      content,
-      JSON.stringify(metadata),
+      normalizedRole,
+      persistedContent,
+      JSON.stringify(normalizedMetadata),
       createdAt
     );
+    const persistedRootSessionId = explicitRootSessionId || terminalRow?.root_session_id || null;
 
     this.touchTerminalMessage(terminalId, {
       timestamp: createdAt,
-      model: metadata?.model || null
+      model: normalizedMetadata?.model || null
     });
 
-    const usageRecord = buildUsageRecordFromMessage(terminalRow, terminalId, role, metadata, {
+    if (persistedRootSessionId && this._hasTable('root_io_events')) {
+      try {
+        this.appendRootIoEvent({
+          idempotencyKey: `message:${result.lastInsertRowid}`,
+          rootSessionId: persistedRootSessionId,
+          terminalId,
+          runId: normalizedMetadata.runId || normalizedMetadata.run_id || null,
+          taskId: normalizedMetadata.taskId || normalizedMetadata.task_id || null,
+          taskAssignmentId: normalizedMetadata.taskAssignmentId || normalizedMetadata.task_assignment_id || null,
+          roomId: normalizedMetadata.roomId || normalizedMetadata.room_id || null,
+          discussionId: normalizedMetadata.discussionId || normalizedMetadata.discussion_id || null,
+          traceId,
+          eventKind: 'parsed_message',
+          source: 'broker',
+          contentFull: persistedContent,
+          parsedRole: normalizedRole,
+          metadata: {
+            sourceTable: 'messages',
+            messageId: result.lastInsertRowid
+          },
+          occurredAt: createdAt,
+          recordedAt: createdAt,
+          retentionClass: 'raw-bounded'
+        });
+      } catch (error) {
+        console.warn('[db] Failed to append root IO event for message:', error.message);
+      }
+    }
+
+    const usageRecord = buildUsageRecordFromMessage(terminalRow, terminalId, normalizedRole, normalizedMetadata, {
       traceId
     });
     if (usageRecord) {
@@ -3012,7 +5601,49 @@ class OrchestrationDB {
       VALUES (${columns.map(() => '?').join(', ')})
     `, ...values);
 
-    return result.lastID;
+    const usageRecordId = result.lastID;
+    const rootSessionId = usage.rootSessionId || usage.root_session_id || null;
+    if (rootSessionId && this._hasTable('root_io_events')) {
+      try {
+        this.appendRootIoEvent({
+          idempotencyKey: `usage_records:${usageRecordId}`,
+          rootSessionId,
+          terminalId: usage.terminalId,
+          runId: usage.runId || null,
+          taskId: usage.taskId || null,
+          taskAssignmentId: usage.taskAssignmentId || null,
+          eventKind: 'usage',
+          source: 'provider_metadata',
+          contentPreview: `${usage.model || usage.adapter || 'usage'} ${normalizeUsageTotalTokens(
+            usage.totalTokens,
+            normalizeInteger(usage.inputTokens, 0) + normalizeInteger(usage.outputTokens, 0) + normalizeInteger(usage.reasoningTokens, 0)
+          )} tokens`,
+          metadata: {
+            sourceTable: 'usage_records',
+            usageRecordId,
+            adapter: usage.adapter || null,
+            provider: usage.provider || null,
+            model: usage.model || null,
+            sourceConfidence: normalizeUsageConfidence(usage.sourceConfidence || 'unknown'),
+            inputTokens: normalizeInteger(usage.inputTokens, 0),
+            outputTokens: normalizeInteger(usage.outputTokens, 0),
+            reasoningTokens: normalizeInteger(usage.reasoningTokens, 0),
+            cachedInputTokens: normalizeInteger(usage.cachedInputTokens, 0),
+            totalTokens: normalizeUsageTotalTokens(
+              usage.totalTokens,
+              normalizeInteger(usage.inputTokens, 0) + normalizeInteger(usage.outputTokens, 0) + normalizeInteger(usage.reasoningTokens, 0)
+            )
+          },
+          occurredAt: createdAt,
+          recordedAt: createdAt,
+          retentionClass: 'metadata-indefinite'
+        });
+      } catch (error) {
+        console.warn('[db] Failed to append root IO event for usage record:', error.message);
+      }
+    }
+
+    return usageRecordId;
   }
 
   addUsageRecordFromMetadata(input = {}) {
@@ -3732,9 +6363,22 @@ class OrchestrationDB {
       instructions: row.instructions,
       adapter: row.adapter || null,
       model: row.model || null,
+      reasoningEffort: row.reasoning_effort || null,
       status: row.status || 'queued',
       worktreePath: row.worktree_path || null,
       worktreeBranch: row.worktree_branch || null,
+      baseBranch: row.base_branch || null,
+      branchName: row.branch_name || null,
+      mergeTarget: row.merge_target || null,
+      branchStatus: row.branch_status || null,
+      writePaths: normalizeWritePathList(row.write_paths || []),
+      pathLeaseId: row.path_lease_id || null,
+      baseSha: row.base_sha || null,
+      headSha: row.head_sha || null,
+      diffStats: parseJsonField(row.diff_stats) || null,
+      testStatus: row.test_status || null,
+      reviewStatus: row.review_status || null,
+      integratedAt: row.integrated_at || null,
       acceptanceCriteria: row.acceptance_criteria || null,
       metadata: parseJsonField(row.metadata) || {},
       startedAt: row.started_at || null,
@@ -3796,6 +6440,10 @@ class OrchestrationDB {
     if (options.workspaceRoot) {
       clauses.push('workspace_root = ?');
       params.push(String(options.workspaceRoot));
+    }
+    if ((options.projectId || options.project_id) && this._hasColumn('tasks', 'project_id')) {
+      clauses.push('project_id = ?');
+      params.push(String(options.projectId || options.project_id).trim());
     }
     const whereSql = clauses.length ? `WHERE ${clauses.join(' AND ')}` : '';
     const limit = clampLimit(options.limit, 50, 500);
@@ -3877,9 +6525,27 @@ class OrchestrationDB {
     const instructions = String(input.instructions || '').trim();
     const adapter = String(input.adapter || '').trim() || null;
     const model = String(input.model || '').trim() || null;
+    const reasoningEffort = normalizeReasoningEffort(input.reasoningEffort ?? input.reasoning_effort ?? input.effort);
     const status = String(input.status || 'queued').trim().toLowerCase() || 'queued';
     const worktreePath = String(input.worktreePath || '').trim() || null;
     const worktreeBranch = String(input.worktreeBranch || '').trim() || null;
+    const baseBranch = String(input.baseBranch || input.base_branch || '').trim() || null;
+    const branchName = String(input.branchName || input.branch_name || '').trim() || null;
+    const mergeTarget = String(input.mergeTarget || input.merge_target || '').trim() || null;
+    const branchStatus = normalizeTaskAssignmentBranchStatus(
+      input.branchStatus || input.branch_status,
+      branchName || worktreeBranch ? 'planned' : null
+    );
+    const writePaths = normalizeWritePathList(input.writePaths ?? input.write_paths ?? []);
+    const pathLeaseId = String(input.pathLeaseId || input.path_lease_id || '').trim() || null;
+    const baseSha = String(input.baseSha || input.base_sha || '').trim() || null;
+    const headSha = String(input.headSha || input.head_sha || '').trim() || null;
+    const diffStats = input.diffStats ?? input.diff_stats ?? null;
+    const testStatus = String(input.testStatus || input.test_status || '').trim() || null;
+    const reviewStatus = String(input.reviewStatus || input.review_status || '').trim() || null;
+    const integratedAt = Number.isFinite(input.integratedAt ?? input.integrated_at)
+      ? (input.integratedAt ?? input.integrated_at)
+      : null;
     const acceptanceCriteria = typeof input.acceptanceCriteria === 'string' ? input.acceptanceCriteria : null;
     const metadata = input.metadata && typeof input.metadata === 'object' && !Array.isArray(input.metadata)
       ? input.metadata
@@ -3898,13 +6564,12 @@ class OrchestrationDB {
       throw new Error('instructions is required');
     }
 
-    this.db.prepare(`
-      INSERT INTO task_assignments (
-        id, task_id, terminal_id, role, instructions, adapter, model, status,
-        worktree_path, worktree_branch, acceptance_criteria, metadata, started_at,
-        completed_at, created_at, updated_at
-      ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-    `).run(
+    const columns = [
+      'id', 'task_id', 'terminal_id', 'role', 'instructions', 'adapter', 'model', 'status',
+      'worktree_path', 'worktree_branch', 'acceptance_criteria', 'metadata', 'started_at',
+      'completed_at', 'created_at', 'updated_at'
+    ];
+    const values = [
       id,
       taskId,
       terminalId,
@@ -3921,7 +6586,34 @@ class OrchestrationDB {
       completedAt,
       now,
       now
-    );
+    ];
+    if (this._hasColumn('task_assignments', 'reasoning_effort')) {
+      columns.splice(7, 0, 'reasoning_effort');
+      values.splice(7, 0, reasoningEffort);
+    }
+    const addOptionalColumn = (column, value) => {
+      if (this._hasColumn('task_assignments', column)) {
+        columns.push(column);
+        values.push(value);
+      }
+    };
+    addOptionalColumn('base_branch', baseBranch);
+    addOptionalColumn('branch_name', branchName);
+    addOptionalColumn('merge_target', mergeTarget);
+    addOptionalColumn('branch_status', branchStatus);
+    addOptionalColumn('write_paths', writePaths.length > 0 ? JSON.stringify(writePaths) : null);
+    addOptionalColumn('path_lease_id', pathLeaseId);
+    addOptionalColumn('base_sha', baseSha);
+    addOptionalColumn('head_sha', headSha);
+    addOptionalColumn('diff_stats', diffStats ? JSON.stringify(diffStats) : null);
+    addOptionalColumn('test_status', testStatus);
+    addOptionalColumn('review_status', reviewStatus);
+    addOptionalColumn('integrated_at', integratedAt);
+
+    this.db.prepare(`
+      INSERT INTO task_assignments (${columns.join(', ')})
+      VALUES (${columns.map(() => '?').join(', ')})
+    `).run(...values);
 
     return this.getTaskAssignment(id);
   }
@@ -3971,6 +6663,12 @@ class OrchestrationDB {
       updates.push('model = ?');
       params.push(String(patch.model || '').trim() || null);
     }
+    if (patch.reasoningEffort !== undefined || patch.reasoning_effort !== undefined || patch.effort !== undefined) {
+      if (this._hasColumn('task_assignments', 'reasoning_effort')) {
+        updates.push('reasoning_effort = ?');
+        params.push(normalizeReasoningEffort(patch.reasoningEffort ?? patch.reasoning_effort ?? patch.effort));
+      }
+    }
     if (patch.status !== undefined) {
       updates.push('status = ?');
       params.push(String(patch.status || '').trim().toLowerCase() || 'queued');
@@ -3982,6 +6680,80 @@ class OrchestrationDB {
     if (patch.worktreeBranch !== undefined) {
       updates.push('worktree_branch = ?');
       params.push(String(patch.worktreeBranch || '').trim() || null);
+    }
+    if (patch.baseBranch !== undefined || patch.base_branch !== undefined) {
+      if (this._hasColumn('task_assignments', 'base_branch')) {
+        updates.push('base_branch = ?');
+        params.push(String((patch.baseBranch ?? patch.base_branch) || '').trim() || null);
+      }
+    }
+    if (patch.branchName !== undefined || patch.branch_name !== undefined) {
+      if (this._hasColumn('task_assignments', 'branch_name')) {
+        updates.push('branch_name = ?');
+        params.push(String((patch.branchName ?? patch.branch_name) || '').trim() || null);
+      }
+    }
+    if (patch.mergeTarget !== undefined || patch.merge_target !== undefined) {
+      if (this._hasColumn('task_assignments', 'merge_target')) {
+        updates.push('merge_target = ?');
+        params.push(String((patch.mergeTarget ?? patch.merge_target) || '').trim() || null);
+      }
+    }
+    if (patch.branchStatus !== undefined || patch.branch_status !== undefined) {
+      if (this._hasColumn('task_assignments', 'branch_status')) {
+        updates.push('branch_status = ?');
+        params.push(normalizeTaskAssignmentBranchStatus(patch.branchStatus ?? patch.branch_status, null));
+      }
+    }
+    if (patch.writePaths !== undefined || patch.write_paths !== undefined) {
+      if (this._hasColumn('task_assignments', 'write_paths')) {
+        const writePaths = normalizeWritePathList(patch.writePaths ?? patch.write_paths ?? []);
+        updates.push('write_paths = ?');
+        params.push(writePaths.length > 0 ? JSON.stringify(writePaths) : null);
+      }
+    }
+    if (patch.pathLeaseId !== undefined || patch.path_lease_id !== undefined) {
+      if (this._hasColumn('task_assignments', 'path_lease_id')) {
+        updates.push('path_lease_id = ?');
+        params.push(String((patch.pathLeaseId ?? patch.path_lease_id) || '').trim() || null);
+      }
+    }
+    if (patch.baseSha !== undefined || patch.base_sha !== undefined) {
+      if (this._hasColumn('task_assignments', 'base_sha')) {
+        updates.push('base_sha = ?');
+        params.push(String((patch.baseSha ?? patch.base_sha) || '').trim() || null);
+      }
+    }
+    if (patch.headSha !== undefined || patch.head_sha !== undefined) {
+      if (this._hasColumn('task_assignments', 'head_sha')) {
+        updates.push('head_sha = ?');
+        params.push(String((patch.headSha ?? patch.head_sha) || '').trim() || null);
+      }
+    }
+    if (patch.diffStats !== undefined || patch.diff_stats !== undefined) {
+      if (this._hasColumn('task_assignments', 'diff_stats')) {
+        const diffStats = patch.diffStats ?? patch.diff_stats;
+        updates.push('diff_stats = ?');
+        params.push(diffStats == null ? null : (typeof diffStats === 'string' ? diffStats : JSON.stringify(diffStats)));
+      }
+    }
+    if (patch.testStatus !== undefined || patch.test_status !== undefined) {
+      if (this._hasColumn('task_assignments', 'test_status')) {
+        updates.push('test_status = ?');
+        params.push(String((patch.testStatus ?? patch.test_status) || '').trim() || null);
+      }
+    }
+    if (patch.reviewStatus !== undefined || patch.review_status !== undefined) {
+      if (this._hasColumn('task_assignments', 'review_status')) {
+        updates.push('review_status = ?');
+        params.push(String((patch.reviewStatus ?? patch.review_status) || '').trim() || null);
+      }
+    }
+    if (patch.integratedAt !== undefined || patch.integrated_at !== undefined) {
+      if (this._hasColumn('task_assignments', 'integrated_at')) {
+        updates.push('integrated_at = ?');
+        params.push(Number.isFinite(patch.integratedAt ?? patch.integrated_at) ? (patch.integratedAt ?? patch.integrated_at) : null);
+      }
     }
     if (patch.acceptanceCriteria !== undefined) {
       updates.push('acceptance_criteria = ?');
@@ -4201,6 +6973,14 @@ class OrchestrationDB {
     if (options.status) {
       clauses.push('status = ?');
       params.push(options.status);
+    }
+    if (options.taskId || options.task_id) {
+      clauses.push('task_id = ?');
+      params.push(String(options.taskId || options.task_id).trim());
+    }
+    if ((options.projectId || options.project_id) && this._hasColumn('rooms', 'project_id')) {
+      clauses.push('project_id = ?');
+      params.push(String(options.projectId || options.project_id).trim());
     }
     const whereSql = clauses.length ? `WHERE ${clauses.join(' AND ')}` : '';
     const limit = clampLimit(options.limit, 20, 100);
@@ -4990,38 +7770,63 @@ class OrchestrationDB {
     const createdAt = existing?.createdAt || (Number.isFinite(snapshot.createdAt) ? snapshot.createdAt : now);
     const brief = truncateText(snapshot.brief, 1500) || '(no brief available)';
 
+    const columns = [
+      'id',
+      'scope',
+      'scope_id',
+      'run_id',
+      'root_session_id',
+      'task_id',
+      'brief',
+      'key_decisions',
+      'pending_items',
+      'generation_trigger',
+      'generation_strategy',
+      'metadata',
+      'created_at',
+      'updated_at'
+    ];
+    const values = [
+      id,
+      scope,
+      scopeId,
+      snapshot.runId || null,
+      snapshot.rootSessionId || null,
+      snapshot.taskId || null,
+      brief,
+      JSON.stringify(dedupeStrings(snapshot.keyDecisions || [], 20)),
+      JSON.stringify(dedupeStrings(snapshot.pendingItems || [], 20)),
+      generationTrigger,
+      generationStrategy,
+      snapshot.metadata == null ? null : JSON.stringify(snapshot.metadata),
+      createdAt,
+      now
+    ];
+    const updateColumns = [
+      'run_id',
+      'root_session_id',
+      'task_id',
+      'brief',
+      'key_decisions',
+      'pending_items',
+      'generation_trigger',
+      'generation_strategy',
+      'metadata',
+      'updated_at'
+    ];
+
+    if (this._hasColumn('memory_snapshots', 'project_id')) {
+      columns.push('project_id');
+      values.push(this._resolveProjectIdForMemorySnapshot(snapshot, scope, scopeId));
+      updateColumns.push('project_id');
+    }
+
     this.db.run(`
-      INSERT INTO memory_snapshots (
-        id, scope, scope_id, run_id, root_session_id, task_id,
-        brief, key_decisions, pending_items, generation_trigger,
-        generation_strategy, metadata, created_at, updated_at
-      ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+      INSERT INTO memory_snapshots (${columns.join(', ')})
+      VALUES (${columns.map(() => '?').join(', ')})
       ON CONFLICT(scope, scope_id) DO UPDATE SET
-        run_id = excluded.run_id,
-        root_session_id = excluded.root_session_id,
-        task_id = excluded.task_id,
-        brief = excluded.brief,
-        key_decisions = excluded.key_decisions,
-        pending_items = excluded.pending_items,
-        generation_trigger = excluded.generation_trigger,
-        generation_strategy = excluded.generation_strategy,
-        metadata = excluded.metadata,
-        updated_at = excluded.updated_at
-    `,
-    id,
-    scope,
-    scopeId,
-    snapshot.runId || null,
-    snapshot.rootSessionId || null,
-    snapshot.taskId || null,
-    brief,
-    JSON.stringify(dedupeStrings(snapshot.keyDecisions || [], 20)),
-    JSON.stringify(dedupeStrings(snapshot.pendingItems || [], 20)),
-    generationTrigger,
-    generationStrategy,
-    snapshot.metadata == null ? null : JSON.stringify(snapshot.metadata),
-    createdAt,
-    now);
+        ${updateColumns.map((column) => `${column} = excluded.${column}`).join(',\n        ')}
+    `, ...values);
 
     return id;
   }
@@ -5150,6 +7955,72 @@ class OrchestrationDB {
     return rows.map((row) => this._mapRunRow(row));
   }
 
+  getLatestRunsForProject(projectId, limit = 10) {
+    if (!this._hasColumn('runs', 'project_id')) {
+      return [];
+    }
+    const rows = this.db.prepare(`
+      SELECT * FROM runs
+      WHERE project_id = ?
+      ORDER BY COALESCE(completed_at, started_at) DESC, id DESC
+      LIMIT ?
+    `).all(projectId, clampLimit(limit, 10, 50));
+    return rows.map((row) => this._mapRunRow(row));
+  }
+
+  getLatestActivityAtForTask(taskId) {
+    const row = this.db.prepare(`
+      SELECT MAX(activity_at) AS latest_activity_at
+      FROM (
+        SELECT updated_at AS activity_at FROM tasks WHERE id = ?
+        UNION ALL SELECT updated_at FROM task_assignments WHERE task_id = ?
+        UNION ALL SELECT COALESCE(completed_at, started_at) FROM runs WHERE task_id = ?
+        UNION ALL SELECT updated_at FROM rooms WHERE task_id = ?
+        UNION ALL SELECT created_at FROM findings WHERE task_id = ?
+        UNION ALL SELECT created_at FROM artifacts WHERE task_id = ?
+        UNION ALL SELECT created_at FROM context WHERE task_id = ?
+        UNION ALL SELECT created_at FROM usage_records WHERE task_id = ?
+        UNION ALL
+          SELECT updated_at
+          FROM memory_snapshots
+          WHERE task_id = ?
+            AND NOT (scope = 'task' AND scope_id = ?)
+      )
+    `).get(taskId, taskId, taskId, taskId, taskId, taskId, taskId, taskId, taskId, taskId);
+    return row?.latest_activity_at || null;
+  }
+
+  getLatestActivityAtForProject(projectId) {
+    if (!this._hasTable('projects')) {
+      return null;
+    }
+
+    const selects = ['SELECT updated_at AS activity_at FROM projects WHERE id = ?'];
+    const params = [projectId];
+    const appendProjectSelect = (tableName, columnName = 'updated_at', extraWhere = '') => {
+      if (!this._hasColumn(tableName, 'project_id')) {
+        return;
+      }
+      selects.push(`SELECT ${columnName} FROM ${tableName} WHERE project_id = ? ${extraWhere}`.trim());
+      params.push(projectId);
+    };
+
+    appendProjectSelect('tasks', 'updated_at');
+    appendProjectSelect('runs', 'COALESCE(completed_at, started_at)');
+    appendProjectSelect('rooms', 'updated_at');
+    appendProjectSelect('terminals', 'COALESCE(last_message_at, created_at)');
+    appendProjectSelect('usage_records', 'created_at');
+    appendProjectSelect('memory_snapshots', 'updated_at', "AND NOT (scope = 'project' AND scope_id = project_id)");
+
+    const row = this.db.prepare(`
+      SELECT MAX(activity_at) AS latest_activity_at
+      FROM (
+        ${selects.join('\n        UNION ALL\n        ')}
+      )
+    `).get(...params);
+    return row?.latest_activity_at || null;
+  }
+
   getRunById(runId) {
     const run = this.db.get('SELECT * FROM runs WHERE id = ?', runId);
     return run ? this._mapRunRow(run) : null;
@@ -5252,6 +8123,43 @@ class OrchestrationDB {
       runKind: row.run_kind || null,
       runStatus: row.run_status || null,
       completedAt: row.completed_at || null
+    }));
+  }
+
+  listRunSnapshotsByProject(projectId, limit = 10) {
+    if (!this._hasColumn('memory_snapshots', 'project_id')) {
+      return [];
+    }
+    return this.db.prepare(`
+      SELECT ms.*, r.kind AS run_kind, r.status AS run_status, r.completed_at
+      FROM memory_snapshots ms
+      LEFT JOIN runs r ON r.id = ms.run_id
+      WHERE ms.scope = 'run' AND ms.project_id = ?
+      ORDER BY COALESCE(r.completed_at, r.started_at, ms.updated_at) DESC, ms.updated_at DESC
+      LIMIT ?
+    `).all(projectId, clampLimit(limit, 10, 50)).map((row) => ({
+      ...this._parseMemorySnapshotRow(row),
+      runKind: row.run_kind || null,
+      runStatus: row.run_status || null,
+      completedAt: row.completed_at || null
+    }));
+  }
+
+  listTaskSnapshotsByProject(projectId, limit = 10) {
+    if (!this._hasColumn('memory_snapshots', 'project_id')) {
+      return [];
+    }
+    return this.db.prepare(`
+      SELECT ms.*, t.title AS task_title, t.kind AS task_kind
+      FROM memory_snapshots ms
+      LEFT JOIN tasks t ON t.id = ms.task_id
+      WHERE ms.scope = 'task' AND ms.project_id = ?
+      ORDER BY ms.updated_at DESC, ms.created_at DESC
+      LIMIT ?
+    `).all(projectId, clampLimit(limit, 10, 50)).map((row) => ({
+      ...this._parseMemorySnapshotRow(row),
+      taskTitle: row.task_title || null,
+      taskKind: row.task_kind || null
     }));
   }
 
@@ -5570,29 +8478,184 @@ class OrchestrationDB {
       updatedAt: entry.updatedAt
     }));
     const latestCompletedAt = this.getLatestCompletedAtForRoot(scopeId);
-    if (!snapshot && recentRuns.length === 0 && !latestCompletedAt) {
+    const recentRootIoEvents = this.listRootIoEvents({ rootSessionId: scopeId, limit: 20, order: 'desc' }).map((event) => ({
+      id: event.rootIoEventId,
+      eventKind: event.eventKind,
+      source: event.source,
+      terminalId: event.terminalId,
+      runId: event.runId,
+      taskId: event.taskId,
+      taskAssignmentId: event.taskAssignmentId,
+      parsedRole: event.parsedRole,
+      preview: truncateText(event.contentPreview || event.contentFull, 240),
+      occurredAt: event.occurredAt,
+      recordedAt: event.recordedAt
+    }));
+    let recentMessages = [];
+    try {
+      recentMessages = this.queryMessages({ rootSessionId: scopeId, limit: 20 }).map((message) => ({
+        id: message.id,
+        terminalId: message.terminal_id,
+        role: message.role,
+        preview: truncateText(message.content, 240),
+        createdAt: message.created_at
+      }));
+    } catch {}
+    const recentSessionEvents = this.listSessionEvents({ rootSessionId: scopeId, limit: 20 }).map((event) => ({
+      id: event.id,
+      sessionId: event.session_id,
+      runId: event.run_id || null,
+      eventType: event.event_type,
+      payloadSummary: event.payload_summary || null,
+      occurredAt: event.occurred_at,
+      recordedAt: event.recorded_at
+    }));
+    const usage = this.summarizeUsage({ rootSessionId: scopeId });
+    const latestRootIoAt = recentRootIoEvents.reduce((latest, event) => Math.max(latest, event.occurredAt || 0), 0);
+    const latestMessageAt = recentMessages.reduce((latest, message) => Math.max(latest, message.createdAt || 0), 0);
+    const latestSessionEventAt = recentSessionEvents.reduce((latest, event) => Math.max(latest, event.occurredAt || event.recordedAt || 0), 0);
+    const latestRootActivityAt = Math.max(latestCompletedAt || 0, latestRootIoAt, latestMessageAt, latestSessionEventAt);
+    if (!snapshot && recentRuns.length === 0 && !latestCompletedAt && recentRootIoEvents.length === 0 && recentMessages.length === 0 && recentSessionEvents.length === 0 && !usage.recordCount) {
       return null;
     }
-    const isStale = Boolean(snapshot && latestCompletedAt && latestCompletedAt > snapshot.updatedAt);
+    const isStale = Boolean(snapshot && latestRootActivityAt && latestRootActivityAt > snapshot.updatedAt);
 
+    const rootIoBrief = recentRootIoEvents.length
+      ? recentRootIoEvents
+        .filter((entry) => entry.preview)
+        .slice(0, 5)
+        .map((entry, index) => `${index + 1}. ${entry.eventKind}${entry.parsedRole ? `/${entry.parsedRole}` : ''}: ${entry.preview}`)
+        .join('\n')
+      : null;
+    const messageBrief = !rootIoBrief && recentMessages.length
+      ? recentMessages
+        .filter((entry) => entry.preview)
+        .slice(-5)
+        .map((entry, index) => `${index + 1}. ${entry.role}: ${entry.preview}`)
+        .join('\n')
+      : null;
+    const sessionEventBrief = !rootIoBrief && !messageBrief && recentSessionEvents.length
+      ? recentSessionEvents
+        .slice(-5)
+        .map((entry, index) => `${index + 1}. ${entry.eventType}${entry.payloadSummary ? `: ${entry.payloadSummary}` : ''}`)
+        .join('\n')
+      : null;
     const fallbackBrief = recentRuns.length
       ? truncateText(recentRuns.map((entry, index) => `${index + 1}. ${entry.brief || `${entry.kind || 'run'} ${entry.runId}`}`).join('\n'), 1500)
-      : null;
+      : truncateText(rootIoBrief || messageBrief || sessionEventBrief, 1500);
+    const derivedKeyDecisions = recentRuns.length
+      ? dedupeStrings(recentRuns.flatMap((entry) => entry.keyDecisions), 20)
+      : dedupeStrings(
+        [
+          ...recentRootIoEvents
+            .filter((event) => event.eventKind === 'output' || event.parsedRole === 'assistant')
+            .map((event) => event.preview),
+          ...recentMessages
+            .filter((message) => message.role === 'assistant')
+            .map((message) => message.preview)
+        ],
+        20
+      );
+    const derivedPendingItems = recentRuns.length
+      ? dedupeStrings(recentRuns.flatMap((entry) => entry.pendingItems), 20)
+      : dedupeStrings(
+        [
+          ...recentRootIoEvents
+            .filter((event) => event.eventKind === 'input' || event.parsedRole === 'user')
+            .map((event) => event.preview),
+          ...recentMessages
+            .filter((message) => message.role === 'user')
+            .map((message) => message.preview)
+        ],
+        20
+      );
 
     return {
       scopeType: 'root',
       scopeId,
       brief: snapshot?.brief || fallbackBrief,
-      keyDecisions: snapshot?.keyDecisions || dedupeStrings(recentRuns.flatMap((entry) => entry.keyDecisions), 20),
-      pendingItems: snapshot?.pendingItems || dedupeStrings(recentRuns.flatMap((entry) => entry.pendingItems), 20),
+      keyDecisions: snapshot?.keyDecisions || derivedKeyDecisions,
+      pendingItems: snapshot?.pendingItems || derivedPendingItems,
       findings: [],
+      usage,
+      recentRootIoEvents,
+      recentMessages,
+      recentSessionEvents,
       recentRuns,
       rawPointers: options.includeRawPointers === false
         ? null
         : {
-            runIds: recentRuns.map((entry) => entry.runId)
+            runIds: recentRuns.map((entry) => entry.runId),
+            rootIoEventIds: recentRootIoEvents.map((event) => event.id),
+            messageIds: recentMessages.map((message) => message.id),
+            sessionEventIds: recentSessionEvents.map((event) => event.id),
+            usageRecordCount: usage.recordCount
           },
-      isStale: !snapshot ? recentRuns.length > 0 : isStale
+      isStale: !snapshot ? latestRootActivityAt > 0 : isStale
+    };
+  }
+
+  _buildRoomMemoryBundle(scopeId, options = {}) {
+    const room = this.getRoom(scopeId);
+    const snapshot = this.getMemorySnapshot('room', scopeId);
+    if (!room && !snapshot) {
+      return null;
+    }
+
+    const recentMessages = room
+      ? this.getRecentRoomMessages(scopeId, 12, { artifactMode: 'exclude' }).map((message) => ({
+          id: message.id,
+          turnId: message.turnId,
+          participantId: message.participantId,
+          role: message.role,
+          preview: truncateText(message.content, 240),
+          createdAt: message.createdAt
+        }))
+      : [];
+    const participants = room
+      ? this.listRoomParticipants(scopeId).map((participant) => ({
+          id: participant.id,
+          adapter: participant.adapter,
+          displayName: participant.displayName,
+          model: participant.model,
+          status: participant.status,
+          lastMessageAt: participant.lastMessageAt
+        }))
+      : [];
+    const fallbackBrief = recentMessages.length
+      ? truncateText(recentMessages.map((message) => `${message.role}: ${message.preview}`).join('\n'), 1500)
+      : null;
+
+    return {
+      scopeType: 'room',
+      scopeId,
+      brief: snapshot?.brief || fallbackBrief,
+      keyDecisions: snapshot?.keyDecisions || dedupeStrings(
+        recentMessages
+          .filter((message) => message.role === 'assistant' || message.role === 'system')
+          .map((message) => message.preview),
+        20
+      ),
+      pendingItems: snapshot?.pendingItems || dedupeStrings(
+        recentMessages
+          .filter((message) => message.role === 'user')
+          .map((message) => message.preview),
+        20
+      ),
+      findings: room?.taskId ? this.getTopFindings(room.taskId, 20) : [],
+      participants,
+      recentMessages,
+      recentRuns: [],
+      rawPointers: options.includeRawPointers === false
+        ? null
+        : {
+            roomId: scopeId,
+            rootSessionId: room?.rootSessionId || snapshot?.rootSessionId || null,
+            taskId: room?.taskId || snapshot?.taskId || null,
+            participantIds: participants.map((participant) => participant.id),
+            messageIds: recentMessages.map((message) => message.id)
+          },
+      isStale: false
     };
   }
 
@@ -5621,6 +8684,107 @@ class OrchestrationDB {
     }));
     const contextIds = this.getContext(scopeId).slice(0, 5).map((entry) => entry.id);
     const snapshotByRunId = new Map(runSnapshots.map((entry) => [entry.runId, entry]));
+    const compactDispatchRequest = (dispatch) => ({
+      id: dispatch.id,
+      requestKind: dispatch.requestKind,
+      status: dispatch.status,
+      taskAssignmentId: dispatch.taskAssignmentId,
+      rootSessionId: dispatch.rootSessionId,
+      terminalId: dispatch.terminalId,
+      runId: dispatch.runId,
+      contextSnapshotId: dispatch.contextSnapshotId,
+      boundSessionId: dispatch.boundSessionId,
+      coalescedCount: dispatch.coalescedCount,
+      createdAt: dispatch.createdAt,
+      updatedAt: dispatch.updatedAt,
+      dispatchedAt: dispatch.dispatchedAt,
+      cancelledAt: dispatch.cancelledAt
+    });
+    const compactContextSnapshot = (snapshot) => ({
+      id: snapshot.id,
+      dispatchRequestId: snapshot.dispatchRequestId,
+      contextMode: snapshot.contextMode,
+      promptSummary: snapshot.promptSummary,
+      adapter: snapshot.adapter,
+      model: snapshot.model,
+      reasoningEffort: snapshot.reasoningEffort,
+      retentionClass: snapshot.retentionClass,
+      createdAt: snapshot.createdAt
+    });
+    const compactTaskSessionBinding = (binding) => ({
+      id: binding.id,
+      rootSessionId: binding.rootSessionId,
+      taskAssignmentId: binding.taskAssignmentId,
+      adapter: binding.adapter,
+      model: binding.model,
+      reasoningEffort: binding.reasoningEffort,
+      terminalId: binding.terminalId,
+      providerSessionId: binding.providerSessionId,
+      runtimeHost: binding.runtimeHost,
+      runtimeFidelity: binding.runtimeFidelity,
+      reusePolicy: binding.reusePolicy,
+      status: binding.status,
+      createdAt: binding.createdAt,
+      lastVerifiedAt: binding.lastVerifiedAt
+    });
+    const dispatchRequests = (typeof this.listDispatchRequestsForTask === 'function'
+      ? this.listDispatchRequestsForTask(scopeId, { limit: 20 })
+      : this.listDispatchRequests({ taskId: scopeId, limit: 20 })).map(compactDispatchRequest);
+    const contextSnapshots = (typeof this.listRunContextSnapshotsForTask === 'function'
+      ? this.listRunContextSnapshotsForTask(scopeId, { limit: 20 })
+      : []).map(compactContextSnapshot);
+    const taskSessionBindings = (typeof this.listTaskSessionBindingsForTask === 'function'
+      ? this.listTaskSessionBindingsForTask(scopeId, { limit: 20 })
+      : this.listTaskSessionBindings({ taskId: scopeId, limit: 20 })).map(compactTaskSessionBinding);
+    const assignments = this.listTaskAssignments(scopeId, { limit: 20 }).map((assignment) => ({
+      id: assignment.id,
+      role: assignment.role,
+      status: assignment.status,
+      terminalId: assignment.terminalId,
+      adapter: assignment.adapter,
+      model: assignment.model,
+      reasoningEffort: assignment.reasoningEffort || null,
+      worktreePath: assignment.worktreePath,
+      worktreeBranch: assignment.worktreeBranch,
+      baseBranch: assignment.baseBranch,
+      branchName: assignment.branchName,
+      mergeTarget: assignment.mergeTarget,
+      branchStatus: assignment.branchStatus,
+      writePaths: assignment.writePaths,
+      pathLeaseId: assignment.pathLeaseId,
+      baseSha: assignment.baseSha,
+      headSha: assignment.headSha,
+      testStatus: assignment.testStatus,
+      reviewStatus: assignment.reviewStatus,
+      integratedAt: assignment.integratedAt,
+      startedAt: assignment.startedAt,
+      completedAt: assignment.completedAt,
+      updatedAt: assignment.updatedAt,
+      dispatchRequestIds: dispatchRequests
+        .filter((dispatch) => dispatch.taskAssignmentId === assignment.id)
+        .map((dispatch) => dispatch.id),
+      taskSessionBindingIds: taskSessionBindings
+        .filter((binding) => binding.taskAssignmentId === assignment.id)
+        .map((binding) => binding.id)
+    }));
+    const rooms = this.listRooms({ taskId: scopeId, limit: 10 }).map((room) => ({
+      id: room.id,
+      rootSessionId: room.rootSessionId,
+      title: room.title,
+      status: room.status,
+      updatedAt: room.updatedAt
+    }));
+    const usage = this.summarizeUsage({ taskId: scopeId });
+    const usageAttribution = this.summarizeUsageAttribution({ taskId: scopeId });
+    const recentSessionEvents = this.listSessionEventsForTask(scopeId, { limit: 10 }).map((event) => ({
+      id: event.id,
+      rootSessionId: event.root_session_id,
+      sessionId: event.session_id,
+      eventType: event.event_type,
+      payloadSummary: event.payload_summary || null,
+      occurredAt: event.occurred_at,
+      recordedAt: event.recorded_at
+    }));
 
     return {
       scopeType: 'task',
@@ -5629,6 +8793,14 @@ class OrchestrationDB {
       keyDecisions,
       pendingItems,
       findings,
+      assignments,
+      rooms,
+      dispatchRequests,
+      contextSnapshots,
+      taskSessionBindings,
+      usage,
+      usageAttribution,
+      recentSessionEvents,
       recentRuns: latestRuns.slice(0, recentRunsLimit).map((run) => {
         const snapshot = snapshotByRunId.get(run.id);
         return {
@@ -5645,11 +8817,101 @@ class OrchestrationDB {
         ? null
         : {
             runIds: latestRuns.map((run) => run.id),
+            assignmentIds: assignments.map((assignment) => assignment.id),
+            roomIds: rooms.map((room) => room.id),
+            dispatchRequestIds: dispatchRequests.map((dispatch) => dispatch.id),
+            contextSnapshotIds: contextSnapshots.map((snapshot) => snapshot.id),
+            taskSessionBindingIds: taskSessionBindings.map((binding) => binding.id),
             artifactKeys: artifacts,
             findingIds: findings.map((finding) => finding.id),
-            contextIds
+            contextIds,
+            usageRecordCount: usage.recordCount,
+            sessionEventIds: recentSessionEvents.map((event) => event.id)
           },
       isStale: false
+    };
+  }
+
+  _buildProjectMemoryBundle(scopeId, options = {}) {
+    const project = this.getProject(scopeId);
+    const snapshot = this.getMemorySnapshot('project', scopeId);
+    if (!project && !snapshot) {
+      return null;
+    }
+
+    const recentRunsLimit = clampLimit(options.recentRunsLimit, 3, 10);
+    const taskSnapshots = this.listTaskSnapshotsByProject(scopeId, 10);
+    const runSnapshots = this.listRunSnapshotsByProject(scopeId, 10);
+    const recentTasks = this.listTasks({ projectId: scopeId, limit: 20 }).map((task) => ({
+      id: task.id,
+      title: task.title,
+      kind: task.kind,
+      updatedAt: task.updatedAt
+    }));
+    const rooms = this.listRooms({ projectId: scopeId, limit: 10 }).map((room) => ({
+      id: room.id,
+      taskId: room.taskId,
+      rootSessionId: room.rootSessionId,
+      title: room.title,
+      status: room.status,
+      updatedAt: room.updatedAt
+    }));
+    const usage = this.summarizeUsage({ projectId: scopeId });
+    const fallbackBrief = recentTasks.length
+      ? truncateText([
+        project?.workspaceRoot ? `Project: ${project.workspaceRoot}` : `Project: ${scopeId}`,
+        `Recent tasks: ${recentTasks.slice(0, 5).map((task) => task.title || task.id).join(', ')}`
+      ].join('\n'), 1500)
+      : (project?.workspaceRoot ? `Project: ${project.workspaceRoot}` : null);
+    const latestActivityAt = this.getLatestActivityAtForProject(scopeId);
+    const isStale = snapshot
+      ? Boolean(latestActivityAt && latestActivityAt > snapshot.updatedAt)
+      : Boolean(latestActivityAt);
+
+    return {
+      scopeType: 'project',
+      scopeId,
+      brief: snapshot?.brief || fallbackBrief,
+      keyDecisions: snapshot?.keyDecisions || dedupeStrings(
+        [
+          ...taskSnapshots.flatMap((entry) => entry.keyDecisions),
+          ...runSnapshots.flatMap((entry) => entry.keyDecisions)
+        ],
+        20
+      ),
+      pendingItems: snapshot?.pendingItems || dedupeStrings(
+        [
+          ...taskSnapshots.flatMap((entry) => entry.pendingItems),
+          ...runSnapshots.flatMap((entry) => entry.pendingItems)
+        ],
+        20
+      ),
+      findings: [],
+      recentTasks,
+      rooms,
+      usage,
+      recentRuns: runSnapshots.slice(0, recentRunsLimit).map((entry) => ({
+        runId: entry.runId,
+        brief: entry.brief,
+        keyDecisions: entry.keyDecisions,
+        pendingItems: entry.pendingItems,
+        status: entry.runStatus,
+        kind: entry.runKind,
+        completedAt: entry.completedAt,
+        updatedAt: entry.updatedAt
+      })),
+      rawPointers: options.includeRawPointers === false
+        ? null
+        : {
+            projectId: scopeId,
+            workspaceRoot: project?.workspaceRoot || null,
+            taskIds: recentTasks.map((task) => task.id),
+            taskSnapshotIds: taskSnapshots.map((entry) => entry.id),
+            runIds: runSnapshots.map((entry) => entry.runId).filter(Boolean),
+            roomIds: rooms.map((room) => room.id),
+            usageRecordCount: usage.recordCount
+          },
+      isStale
     };
   }
 
@@ -5666,8 +8928,14 @@ class OrchestrationDB {
     if (normalizedScopeType === 'root') {
       return this._buildRootMemoryBundle(scopeId, bundleOptions);
     }
+    if (normalizedScopeType === 'room') {
+      return this._buildRoomMemoryBundle(scopeId, bundleOptions);
+    }
     if (normalizedScopeType === 'task') {
       return this._buildTaskMemoryBundle(scopeId, bundleOptions);
+    }
+    if (normalizedScopeType === 'project') {
+      return this._buildProjectMemoryBundle(scopeId, bundleOptions);
     }
 
     throw new Error(`Unsupported memory bundle scope type: ${scopeType}`);
@@ -5788,10 +9056,39 @@ class OrchestrationDB {
     };
   }
 
+  _memoryRecordsProjectionSql() {
+    const projections = ['SELECT * FROM memory_records_v1'];
+    if (this._memoryReadModelHasRelation('memory_records_root_io_v1')) {
+      projections.push('SELECT * FROM memory_records_root_io_v1');
+    }
+    if (this._memoryReadModelHasRelation('memory_records_dispatch_v1')) {
+      projections.push('SELECT * FROM memory_records_dispatch_v1');
+    }
+    return projections.length === 1
+      ? 'memory_records_v1'
+      : `(${projections.join(' UNION ALL ')})`;
+  }
+
+  _memoryEdgesProjectionSql() {
+    const projections = ['SELECT * FROM memory_edges_v1'];
+    if (this._memoryReadModelHasRelation('memory_root_io_edges_v1')) {
+      projections.push('SELECT * FROM memory_root_io_edges_v1');
+    }
+    if (this._memoryReadModelHasRelation('memory_summary_edges_v1')) {
+      projections.push('SELECT * FROM memory_summary_edges_v1');
+    }
+    if (this._memoryReadModelHasRelation('memory_dispatch_edges_v1')) {
+      projections.push('SELECT * FROM memory_dispatch_edges_v1');
+    }
+    return projections.length === 1
+      ? 'memory_edges_v1'
+      : `(${projections.join(' UNION ALL ')})`;
+  }
+
   queryMemoryRecords(options = {}) {
     this._assertMemoryReadModelReady('memory_records_v1');
     const { clauses, params } = this._buildMemoryReadModelFilters(options);
-    const types = normalizeProjectionList(options.types);
+    const types = normalizeMemoryRecordTypes(options.types);
     const sourceTable = String(options.sourceTable || options.source_table || '').trim();
     const sourceId = options.sourceId ?? options.source_id;
     const queryText = String(options.q || '').trim().toLowerCase();
@@ -5815,9 +9112,10 @@ class OrchestrationDB {
 
     const whereSql = clauses.length ? `WHERE ${clauses.join(' AND ')}` : '';
     const limit = clampLimit(options.limit, 100, 500);
+    const projectionSql = this._memoryRecordsProjectionSql();
     const rows = this.db.prepare(`
       SELECT *
-      FROM memory_records_v1
+      FROM ${projectionSql}
       ${whereSql}
       ORDER BY activity_at DESC, created_at DESC, source_table ASC, source_id ASC
       LIMIT ?
@@ -5903,9 +9201,10 @@ class OrchestrationDB {
 
     const whereSql = clauses.length ? `WHERE ${clauses.join(' AND ')}` : '';
     const limit = clampLimit(options.limit, 100, 500);
+    const projectionSql = this._memoryEdgesProjectionSql();
     const rows = this.db.prepare(`
       SELECT *
-      FROM memory_edges_v1
+      FROM ${projectionSql}
       ${whereSql}
       ORDER BY activity_at DESC, created_at DESC, source_table ASC, source_id ASC, edge_type ASC
       LIMIT ?

@@ -35,13 +35,21 @@ const {
   buildManagedRootRecoveryLaunchOptions,
   buildManagedRootContextLaunchOptions
 } = require('../index');
+const { getConfiguredApiKey } = require('../server/auth');
 
 const CLIAGENTS_URL = process.env.CLIAGENTS_URL || 'http://localhost:4001';
-const CLIAGENTS_API_KEY = process.env.CLIAGENTS_API_KEY || process.env.CLI_AGENTS_API_KEY || null;
 const MCP_POLL_INTERVAL_MS = parseInt(process.env.CLIAGENTS_MCP_POLL_MS || '3000', 10);
 const MCP_SYNC_WAIT_MS = parseInt(process.env.CLIAGENTS_MCP_SYNC_WAIT_MS || '25000', 10);
 const MCP_ROOM_DISCUSSION_TIMEOUT_MS = parseInt(process.env.CLIAGENTS_MCP_ROOM_DISCUSSION_TIMEOUT_MS || '90000', 10);
 const MCP_STATUS_RETRY_AFTER_MS = parseInt(process.env.CLIAGENTS_MCP_RETRY_AFTER_MS || String(Math.max(MCP_POLL_INTERVAL_MS * 2, 8000)), 10);
+const DEFAULT_ROUTE_RETRY_DELAY_MS = parseInt(process.env.CLIAGENTS_MCP_ROUTE_RETRY_DELAY_MS || '500', 10);
+const MAX_ROUTE_RETRY_DELAY_MS = (() => {
+  const parsed = Number.parseInt(process.env.CLIAGENTS_MCP_ROUTE_RETRY_DELAY_MAX_MS || '5000', 10);
+  if (!Number.isFinite(parsed) || parsed < 0) {
+    return 5000;
+  }
+  return parsed;
+})();
 const SESSION_GRAPH_WRITES_ENABLED = process.env.SESSION_GRAPH_WRITES_ENABLED === '1';
 const REQUIRE_ROOT_ATTACH = process.env.CLIAGENTS_REQUIRE_ROOT_ATTACH === '1';
 
@@ -72,14 +80,115 @@ function sendError(id, code, message) {
   process.stdout.write(JSON.stringify(response) + '\n');
 }
 
+function looksLikeJsonPayload(raw) {
+  if (typeof raw !== 'string') {
+    return false;
+  }
+
+  const trimmed = raw.trim();
+  if (!trimmed) {
+    return false;
+  }
+
+  const first = trimmed[0];
+  const last = trimmed[trimmed.length - 1];
+  return (first === '{' && last === '}') || (first === '[' && last === ']');
+}
+
+function escapeControlCharsInJsonStrings(raw) {
+  let repaired = '';
+  let inString = false;
+  let escaped = false;
+
+  for (const char of raw) {
+    if (!inString) {
+      repaired += char;
+      if (char === '"') {
+        inString = true;
+      }
+      continue;
+    }
+
+    if (escaped) {
+      repaired += char;
+      escaped = false;
+      continue;
+    }
+
+    if (char === '\\') {
+      repaired += char;
+      escaped = true;
+      continue;
+    }
+
+    if (char === '"') {
+      repaired += char;
+      inString = false;
+      continue;
+    }
+
+    const code = char.charCodeAt(0);
+    if (code >= 0x00 && code <= 0x1f) {
+      switch (char) {
+        case '\b':
+          repaired += '\\b';
+          break;
+        case '\f':
+          repaired += '\\f';
+          break;
+        case '\n':
+          repaired += '\\n';
+          break;
+        case '\r':
+          repaired += '\\r';
+          break;
+        case '\t':
+          repaired += '\\t';
+          break;
+        default:
+          repaired += `\\u${code.toString(16).padStart(4, '0')}`;
+          break;
+      }
+    } else {
+      repaired += char;
+    }
+  }
+
+  return repaired;
+}
+
+function parseCliagentsJsonResponse(raw) {
+  if (typeof raw !== 'string' || !looksLikeJsonPayload(raw)) {
+    return { parsed: false, value: raw };
+  }
+
+  try {
+    return { parsed: true, value: JSON.parse(raw) };
+  } catch {}
+
+  const repaired = escapeControlCharsInJsonStrings(raw);
+  if (repaired !== raw) {
+    try {
+      return { parsed: true, value: JSON.parse(repaired) };
+    } catch {}
+  }
+
+  return { parsed: false, value: raw };
+}
+
+function getCliagentsApiKey() {
+  return getConfiguredApiKey();
+}
+
 // HTTP client for cliagents API
 async function callCliagents(method, path, body = null, requestTimeout = 600000) {
   return new Promise((resolve, reject) => {
     const url = new URL(path, CLIAGENTS_URL);
     const headers = { 'Content-Type': 'application/json' };
-    if (CLIAGENTS_API_KEY) {
-      headers['Authorization'] = `Bearer ${CLIAGENTS_API_KEY}`;
-      headers['X-API-Key'] = CLIAGENTS_API_KEY;
+    const apiKey = getCliagentsApiKey();
+    if (apiKey) {
+      headers['Authorization'] = `Bearer ${apiKey}`;
+      headers['X-API-Key'] = apiKey;
     }
     const options = {
       method,
@@ -94,11 +203,8 @@ async function callCliagents(method, path, body = null, requestTimeout = 600000)
       let data = '';
       res.on('data', chunk => data += chunk);
       res.on('end', () => {
-        try {
-          resolve({ status: res.statusCode, data: JSON.parse(data) });
-        } catch {
-          resolve({ status: res.statusCode, data });
-        }
+        const parsed = parseCliagentsJsonResponse(data);
+        resolve({ status: res.statusCode, data: parsed.value });
       });
     });
 
@@ -257,22 +363,82 @@ function getMcpRootStateFilePath(
   return path.join(getMcpRootStateDir(), `${safeClient}-${safeScope}-${digest}.json`);
 }
 
-function loadPersistedRootContext() {
-  const filePath = getMcpRootStateFilePath();
-  if (!fs.existsSync(filePath)) {
-    return null;
-  }
+const ROOT_CONTEXT_RESET_MARKER = '__root_context_reset__';
+const ROOT_CONTEXT_CLIENT_ALIASES = [
+  'mcp-client',
+  'mcp',
+  'codex',
+  'claude',
+  'opencode',
+  'qwen',
+  'gemini',
+  'openclaw'
+];
 
+function listRootContextClientCandidates(primaryClientName = inferMcpClientName()) {
+  const inferredFromEnv = inferClientNameFromEnvironment();
+  const candidates = [
+    primaryClientName,
+    process.env.CLIAGENTS_CLIENT_NAME,
+    process.env.MCP_CLIENT_NAME,
+    process.env.CLIENT_NAME,
+    inferredFromEnv,
+    ...ROOT_CONTEXT_CLIENT_ALIASES
+  ];
+  const deduped = [];
+  for (const candidate of candidates) {
+    const normalized = String(candidate || '').trim();
+    if (!normalized || deduped.includes(normalized)) {
+      continue;
+    }
+    deduped.push(normalized);
+  }
+  return deduped;
+}
+
+function listRootContextStateFilePaths({
+  clientName = inferMcpClientName(),
+  workspaceRoot = inferWorkspaceRoot(),
+  sessionScope = inferMcpSessionScope()
+} = {}) {
+  const paths = [];
+  for (const candidateClientName of listRootContextClientCandidates(clientName)) {
+    const filePath = getMcpRootStateFilePath(candidateClientName, workspaceRoot, sessionScope);
+    if (!paths.includes(filePath)) {
+      paths.push(filePath);
+    }
+  }
+  return paths;
+}
+
+function parsePersistedRootContextFile(filePath, {
+  defaultClientName = inferMcpClientName(),
+  workspaceRoot = inferWorkspaceRoot(),
+  sessionScope = inferMcpSessionScope()
+} = {}) {
   try {
     const parsed = JSON.parse(fs.readFileSync(filePath, 'utf8'));
-    if (!parsed || typeof parsed !== 'object' || !parsed.rootSessionId) {
+    if (!parsed || typeof parsed !== 'object') {
       return null;
     }
 
-    const clientName = parsed.clientName || inferMcpClientName();
-    const workspaceRoot = inferWorkspaceRoot();
-    const sessionScope = parsed.sessionScope || inferMcpSessionScope();
-    const externalSessionRef = parsed.externalSessionRef || buildStickyExternalSessionRef(clientName, workspaceRoot, sessionScope);
+    if (parsed[ROOT_CONTEXT_RESET_MARKER] === true) {
+      return {
+        resetMarker: true
+      };
+    }
+
+    if (!parsed.rootSessionId) {
+      return null;
+    }
+
+    const clientName = parsed.clientName || defaultClientName;
+    const resolvedSessionScope = parsed.sessionScope || sessionScope;
+    const externalSessionRef = parsed.externalSessionRef || buildStickyExternalSessionRef(
+      clientName,
+      workspaceRoot,
+      resolvedSessionScope
+    );
     const sessionMetadata = parsed.sessionMetadata && typeof parsed.sessionMetadata === 'object'
       ? { ...parsed.sessionMetadata }
       : {};
@@ -289,13 +455,14 @@ function loadPersistedRootContext() {
       sessionMetadata.workspaceRoot = workspaceRoot;
     }
     if (!sessionMetadata.mcpSessionScope) {
-      sessionMetadata.mcpSessionScope = sessionScope;
+      sessionMetadata.mcpSessionScope = resolvedSessionScope;
     }
 
     return {
       clientName,
       rootSessionId: parsed.rootSessionId,
       externalSessionRef,
+      sessionScope: resolvedSessionScope,
       originClient: parsed.originClient || 'mcp',
       sessionMetadata
     };
@@ -305,43 +472,103 @@ function loadPersistedRootContext() {
   }
 }
 
+function loadPersistedRootContext() {
+  const workspaceRoot = inferWorkspaceRoot();
+  const sessionScope = inferMcpSessionScope();
+  const clientName = inferMcpClientName();
+  const existingFiles = listRootContextStateFilePaths({
+    clientName,
+    workspaceRoot,
+    sessionScope
+  })
+    .filter((filePath) => fs.existsSync(filePath))
+    .map((filePath) => {
+      let mtimeMs = 0;
+      try {
+        mtimeMs = fs.statSync(filePath).mtimeMs || 0;
+      } catch {}
+      return { filePath, mtimeMs };
+    })
+    .sort((a, b) => b.mtimeMs - a.mtimeMs);
+
+  if (existingFiles.length === 0) {
+    return null;
+  }
+
+  for (const candidate of existingFiles) {
+    const parsed = parsePersistedRootContextFile(candidate.filePath, {
+      defaultClientName: clientName,
+      workspaceRoot,
+      sessionScope
+    });
+    if (!parsed) {
+      continue;
+    }
+    return parsed;
+  }
+
+  return null;
+}
+
 function persistRootContext(rootContext) {
   if (!rootContext?.rootSessionId) {
     return;
   }
 
-  const filePath = getMcpRootStateFilePath(
-    rootContext.clientName || inferMcpClientName(),
-    inferWorkspaceRoot()
-  );
+  const resolvedClientName = rootContext.clientName || inferMcpClientName();
+  const workspaceRoot = inferWorkspaceRoot();
+  const sessionScope = rootContext.sessionScope || inferMcpSessionScope();
   const payload = {
-      clientName: rootContext.clientName || inferMcpClientName(),
-      rootSessionId: rootContext.rootSessionId,
-      externalSessionRef: rootContext.externalSessionRef,
-      originClient: rootContext.originClient || 'mcp',
-      sessionScope: rootContext.sessionScope || inferMcpSessionScope(),
-      sessionMetadata: rootContext.sessionMetadata || {}
-    };
+    clientName: resolvedClientName,
+    rootSessionId: rootContext.rootSessionId,
+    externalSessionRef: rootContext.externalSessionRef,
+    originClient: rootContext.originClient || 'mcp',
+    sessionScope,
+    sessionMetadata: rootContext.sessionMetadata || {}
+  };
 
-  try {
-    fs.mkdirSync(path.dirname(filePath), { recursive: true });
-    const tmpPath = `${filePath}.tmp`;
-    fs.writeFileSync(tmpPath, JSON.stringify(payload, null, 2));
-    fs.renameSync(tmpPath, filePath);
-  } catch (error) {
-    console.warn(`[cliagents-mcp] Failed to persist root context to ${filePath}: ${error.message}`);
+  const targets = [
+    getMcpRootStateFilePath(resolvedClientName, workspaceRoot, sessionScope),
+    getMcpRootStateFilePath(inferMcpClientName(), workspaceRoot, sessionScope)
+  ].filter((filePath, index, arr) => filePath && arr.indexOf(filePath) === index);
+
+  for (const filePath of targets) {
+    try {
+      fs.mkdirSync(path.dirname(filePath), { recursive: true });
+      const tmpPath = `${filePath}.tmp`;
+      fs.writeFileSync(tmpPath, JSON.stringify(payload, null, 2));
+      fs.renameSync(tmpPath, filePath);
+    } catch (error) {
+      console.warn(`[cliagents-mcp] Failed to persist root context to ${filePath}: ${error.message}`);
+    }
   }
 }
 
-function clearPersistedRootContext() {
-  const filePath = getMcpRootStateFilePath();
+function clearPersistedRootContext(options = {}) {
+  const workspaceRoot = options.workspaceRoot || inferWorkspaceRoot();
+  const sessionScope = options.sessionScope || inferMcpSessionScope();
+  const preferredClientName = options.clientName || inferMcpClientName();
+  const targetPaths = listRootContextStateFilePaths({
+    clientName: preferredClientName,
+    workspaceRoot,
+    sessionScope
+  });
   cachedMcpRootContext = null;
-  try {
-    if (fs.existsSync(filePath)) {
-      fs.unlinkSync(filePath);
+
+  const payload = {
+    [ROOT_CONTEXT_RESET_MARKER]: true,
+    clearedAt: new Date().toISOString(),
+    sessionScope
+  };
+  for (const filePath of targetPaths) {
+    try {
+      fs.mkdirSync(path.dirname(filePath), { recursive: true });
+      const tmpPath = `${filePath}.tmp`;
+      fs.writeFileSync(tmpPath, JSON.stringify(payload, null, 2));
+      fs.renameSync(tmpPath, filePath);
+    } catch (error) {
+      console.warn(`[cliagents-mcp] Failed to clear persisted root context at ${filePath}: ${error.message}`);
     }
-  } catch (error) {
-    console.warn(`[cliagents-mcp] Failed to clear persisted root context at ${filePath}: ${error.message}`);
   }
 }
 
@@ -374,13 +601,15 @@ function createImplicitRootContext() {
 function getImplicitRootContext(options = {}) {
   const allowAutoCreate = options?.allowAutoCreate === true;
   if (!cachedMcpRootContext) {
-    if (hasExplicitRootOverrides()) {
+    const persisted = loadPersistedRootContext();
+    if (persisted?.resetMarker) {
+      cachedMcpRootContext = null;
+    } else if (persisted) {
+      cachedMcpRootContext = persisted;
+    } else if (hasExplicitRootOverrides()) {
       cachedMcpRootContext = createImplicitRootContext();
-    } else {
-      cachedMcpRootContext = loadPersistedRootContext();
-      if (!cachedMcpRootContext && allowAutoCreate && !REQUIRE_ROOT_ATTACH) {
-        cachedMcpRootContext = createImplicitRootContext();
-      }
+    } else if (allowAutoCreate && !REQUIRE_ROOT_ATTACH) {
+      cachedMcpRootContext = createImplicitRootContext();
     }
   }
   return cachedMcpRootContext;
@@ -454,6 +683,27 @@ function requireAttachedRootContext(toolName) {
   return rootContext;
 }
 
+function buildTerminalInputForbiddenError(prefix) {
+  const payload = {
+    error: {
+      code: 'terminal_input_forbidden',
+      message: 'Terminal input access denied.'
+    }
+  };
+  const error = new Error(`${prefix}: ${JSON.stringify(payload)}`);
+  error.code = 'terminal_input_forbidden';
+  error.data = payload;
+  return error;
+}
+
+function requireAttachedRootContextForTerminalInput(prefix) {
+  const rootContext = getAttachedRootContext();
+  if (!rootContext?.rootSessionId) {
+    throw buildTerminalInputForbiddenError(prefix);
+  }
+  return rootContext;
+}
+
 function maybeThrowRootAttachError(response, toolName) {
   if (!response || response.status !== 428) {
     return;
@@ -493,6 +743,7 @@ function buildRouteRequest({
   systemPrompt,
   workingDirectory,
   model,
+  reasoningEffort,
   sessionLabel,
   preferReuse,
   forceFreshSession,
@@ -514,6 +765,9 @@ function buildRouteRequest({
   if (model) {
     routeRequest.model = model;
   }
+  if (reasoningEffort) {
+    routeRequest.reasoningEffort = reasoningEffort;
+  }
   if (sessionLabel) {
     routeRequest.sessionLabel = sessionLabel;
   }
@@ -533,6 +787,133 @@ function buildRouteRequest({
     routeRequest.sessionMetadata = controlPlaneContext.sessionMetadata;
   }
   return routeRequest;
+}
+
+function formatRouteReuseLine(routeData = {}) {
+  const reuse = routeData.reuse || routeData.reuseDecision || null;
+  if (!reuse) {
+    return null;
+  }
+
+  const preferred = reuse.preferred === true ? 'yes' : 'no';
+  const selected = (reuse.selected === true || routeData.reused === true) ? 'yes' : 'no';
+  const reason = reuse.reason || routeData.reuseReason || 'n/a';
+  const candidate = reuse.candidateTerminalId ? `, candidate=${reuse.candidateTerminalId}` : '';
+  const newBinding = reuse.requiredNewBinding === true ? ', new_binding=yes' : '';
+  return `**Reuse:** preferred=${preferred}, selected=${selected}, reason=${reason}${candidate}${newBinding}`;
+}
+
+function toFiniteNonNegative(value, fallback = null) {
+  const parsed = Number.parseInt(value, 10);
+  if (!Number.isFinite(parsed) || parsed < 0) {
+    return fallback;
+  }
+  return parsed;
+}
+
+function isExplicitTerminalBusySignal(errorCode, normalizedMessage) {
+  if (errorCode === 'terminal_busy') {
+    return true;
+  }
+
+  if (!normalizedMessage) {
+    return false;
+  }
+
+  if (normalizedMessage.includes('terminal_busy')) {
+    return true;
+  }
+
+  const hasTerminalBusy = normalizedMessage.includes('terminal') && normalizedMessage.includes('busy');
+  const hasSessionBusy = normalizedMessage.includes('session') && normalizedMessage.includes('busy');
+  const hasTerminalProcessing = normalizedMessage.includes('terminal') && normalizedMessage.includes('processing');
+  return hasTerminalBusy || hasSessionBusy || hasTerminalProcessing;
+}
+
+function normalizeRouteRetryDelayMs(retryAfterMs, fallbackMs) {
+  const normalizedFallback = toFiniteNonNegative(fallbackMs, 0) ?? 0;
+  const normalizedDelay = toFiniteNonNegative(retryAfterMs, normalizedFallback) ?? normalizedFallback;
+  return Math.min(normalizedDelay, MAX_ROUTE_RETRY_DELAY_MS);
+}
+
+function classifyRouteRetryResponse(response) {
+  if (!response || response.status === 200) {
+    return null;
+  }
+
+  const errorCode = String(response.data?.error?.code || '').trim().toLowerCase();
+  const errorMessage = String(response.data?.error?.message || '').trim().toLowerCase();
+  const retryAfterMs = toFiniteNonNegative(response.data?.error?.retryAfterMs, null);
+  const isTerminalBusy = isExplicitTerminalBusySignal(errorCode, errorMessage);
+
+  if (isTerminalBusy) {
+    return {
+      reason: 'terminal_busy',
+      delayMs: normalizeRouteRetryDelayMs(retryAfterMs, DEFAULT_ROUTE_RETRY_DELAY_MS)
+    };
+  }
+
+  if (
+    errorCode === 'terminal_not_found'
+    || errorMessage.includes('terminal not found')
+    || errorMessage.includes('tmux session not found')
+    || errorMessage.includes('tmux window not found')
+  ) {
+    return {
+      reason: 'terminal_missing',
+      delayMs: normalizeRouteRetryDelayMs(retryAfterMs, 0)
+    };
+  }
+
+  return null;
+}
+
+function buildRouteRetryRequest(routeRequest, retryPlan) {
+  const retryRequest = {
+    ...routeRequest,
+    preferReuse: false,
+    forceFreshSession: true
+  };
+
+  if (routeRequest?.sessionMetadata && typeof routeRequest.sessionMetadata === 'object') {
+    retryRequest.sessionMetadata = {
+      ...routeRequest.sessionMetadata,
+      routeRetry: {
+        reason: retryPlan.reason,
+        strategy: 'force_fresh_session'
+      }
+    };
+  }
+
+  return retryRequest;
+}
+
+async function callRouteWithReuseRecovery(routeRequest, toolName) {
+  const firstResponse = await callCliagents('POST', '/orchestration/route', routeRequest);
+  maybeThrowRootAttachError(firstResponse, toolName);
+
+  if (firstResponse.status === 200) {
+    return { response: firstResponse, retried: false, retryPlan: null };
+  }
+
+  const retryPlan = classifyRouteRetryResponse(firstResponse);
+  if (!retryPlan) {
+    return { response: firstResponse, retried: false, retryPlan: null };
+  }
+
+  if ((retryPlan.delayMs || 0) > 0) {
+    await sleep(retryPlan.delayMs);
+  }
+
+  const retryRequest = buildRouteRetryRequest(routeRequest, retryPlan);
+  const retryResponse = await callCliagents('POST', '/orchestration/route', retryRequest);
+  maybeThrowRootAttachError(retryResponse, toolName);
+
+  return {
+    response: retryResponse,
+    retried: true,
+    retryPlan
+  };
 }
 
 async function fetchTerminalOutput(terminalId) {
@@ -895,6 +1276,11 @@ Timeout presets: "simple" (3 min), "standard" (10 min, default), "complex" (30 m
           type: 'string',
           description: 'Optional model override for the selected adapter. Example: o4-mini, gemini-2.5-pro, qwen-max.'
         },
+        reasoningEffort: {
+          type: 'string',
+          enum: ['none', 'minimal', 'low', 'medium', 'high', 'xhigh'],
+          description: 'Optional reasoning effort override for adapters that support it, such as Codex.'
+        },
         sessionLabel: {
           type: 'string',
           description: 'Optional stable label for intentionally reusing the same child shell under the same root. This is a broker-side reuse hint, not a guarantee of provider conversation continuity; use reply_to_terminal when you need to continue an exact known terminal.'
@@ -947,6 +1333,94 @@ Timeout presets: "simple" (3 min), "standard" (10 min, default), "complex" (30 m
         }
       },
       required: ['terminalId', 'message']
+    }
+  },
+  {
+    name: 'enqueue_terminal_input',
+    description: 'Queue remote terminal input, approval, or denial for durable review and explicit delivery.',
+    inputSchema: {
+      type: 'object',
+      properties: {
+        terminalId: { type: 'string', description: 'Terminal ID to queue input for.' },
+        message: { type: 'string', description: 'Input text. Defaults to y/n for approval/denial kinds.' },
+        inputKind: {
+          type: 'string',
+          enum: ['message', 'approval', 'denial'],
+          description: 'Input kind. Use approval/denial for permission prompts.'
+        },
+        approvalRequired: { type: 'boolean', description: 'Hold the queued input until explicitly approved.' },
+        controlMode: {
+          type: 'string',
+          enum: ['observer', 'operator', 'exclusive'],
+          description: 'Control mode recorded for this input.'
+        },
+        expiresAt: { type: 'integer', description: 'Optional expiration timestamp in milliseconds.' },
+        requestedBy: { type: 'string', description: 'Optional operator/client identifier.' },
+        metadata: { type: 'object', description: 'Optional queue metadata such as diff references.' }
+      },
+      required: ['terminalId']
+    }
+  },
+  {
+    name: 'list_terminal_input_queue',
+    description: 'List durable queued terminal inputs and approval/denial records.',
+    inputSchema: {
+      type: 'object',
+      properties: {
+        terminalId: { type: 'string', description: 'Optional terminal filter.' },
+        rootSessionId: { type: 'string', description: 'Optional root-session filter.' },
+        taskId: { type: 'string', description: 'Optional task filter.' },
+        status: { type: 'string', description: 'Optional comma-separated status filter.' },
+        limit: { type: 'integer', description: 'Maximum records to return. Default 100.' }
+      }
+    }
+  },
+  {
+    name: 'approve_terminal_input',
+    description: 'Approve a held terminal input queue item so it can be delivered.',
+    inputSchema: {
+      type: 'object',
+      properties: {
+        inputId: { type: 'string', description: 'Input queue item ID.' },
+        approvedBy: { type: 'string', description: 'Optional approver identifier.' }
+      },
+      required: ['inputId']
+    }
+  },
+  {
+    name: 'deny_terminal_input',
+    description: 'Deny a pending or held terminal input queue item without delivering it.',
+    inputSchema: {
+      type: 'object',
+      properties: {
+        inputId: { type: 'string', description: 'Input queue item ID.' },
+        deniedBy: { type: 'string', description: 'Optional operator identifier.' },
+        reason: { type: 'string', description: 'Optional denial reason.' }
+      },
+      required: ['inputId']
+    }
+  },
+  {
+    name: 'cancel_terminal_input',
+    description: 'Cancel a pending or held terminal input queue item without delivering it.',
+    inputSchema: {
+      type: 'object',
+      properties: {
+        inputId: { type: 'string', description: 'Input queue item ID.' },
+        reason: { type: 'string', description: 'Optional cancellation reason.' }
+      },
+      required: ['inputId']
+    }
+  },
+  {
+    name: 'deliver_terminal_input',
+    description: 'Deliver a pending terminal input queue item through runtime-capability-gated broker input.',
+    inputSchema: {
+      type: 'object',
+      properties: {
+        inputId: { type: 'string', description: 'Input queue item ID.' }
+      },
+      required: ['inputId']
     }
   },
   {
@@ -1086,6 +1560,57 @@ This calls cliagents' direct-session discussion route and returns the completed 
         }
       },
       required: ['message', 'participants']
+    }
+  },
+  {
+    name: 'run_bpe_scenario',
+    description: 'Run the deterministic Browser Perception Engine scenario (session -> state -> single action) and return normalized evidence payload.',
+    inputSchema: {
+      type: 'object',
+      properties: {
+        targetUrl: {
+          type: 'string',
+          description: 'Scenario target URL. Defaults to https://example.com.'
+        },
+        resumeSessionId: {
+          type: 'string',
+          description: 'Optional existing BPE session ID to resume.'
+        },
+        interaction: {
+          type: 'object',
+          description: 'Optional interaction override. Defaults to one deterministic click action.'
+        },
+        runtime: {
+          type: 'object',
+          description: 'Optional runtime options forwarded to BPE session create.'
+        },
+        trace: {
+          type: 'object',
+          description: 'Optional trace metadata forwarded to BPE.'
+        },
+        timeoutMs: {
+          type: 'number',
+          description: 'Optional end-to-end timeout in milliseconds.'
+        },
+        actionTimeoutMs: {
+          type: 'number',
+          description: 'Optional action step timeout in milliseconds.'
+        },
+        idempotencyKey: {
+          type: 'string',
+          description: 'Optional idempotency key for the action call.'
+        },
+        expectedStateVersion: {
+          type: 'number',
+          description: 'Optional expected state version for the action step.'
+        },
+        format: {
+          type: 'string',
+          enum: ['summary', 'json'],
+          description: 'Return concise text summary or full JSON payload. Default: summary',
+          default: 'summary'
+        }
+      }
     }
   },
   {
@@ -1401,6 +1926,11 @@ This calls cliagents' direct-session discussion route and returns the completed 
           type: 'string',
           description: 'Optional model override for the launched root.'
         },
+        reasoningEffort: {
+          type: 'string',
+          enum: ['none', 'minimal', 'low', 'medium', 'high', 'xhigh'],
+          description: 'Optional reasoning effort override for adapters that support it, such as Codex.'
+        },
         profile: {
           type: 'string',
           description: 'Optional managed-root launch profile. Defaults to guarded-root.'
@@ -1682,17 +2212,17 @@ This calls cliagents' direct-session discussion route and returns the completed 
   },
   {
     name: 'get_memory_bundle',
-    description: 'Get a consolidated memory bundle (brief, key decisions, findings) for a run, root, or task.',
+    description: 'Get a consolidated memory bundle (brief, key decisions, findings) for a run, root, room, task, or project.',
     inputSchema: {
       type: 'object',
       properties: {
         scopeId: {
           type: 'string',
-          description: 'The ID of the run, root session, or task.'
+          description: 'The ID of the run, root session, room, task, or project.'
         },
         scopeType: {
           type: 'string',
-          enum: ['run', 'root', 'task'],
+          enum: ['run', 'root', 'room', 'task', 'project'],
           description: 'The type of scope for the memory bundle. Default: task',
           default: 'task'
         },
@@ -1848,6 +2378,11 @@ This calls cliagents' direct-session discussion route and returns the completed 
           type: 'string',
           description: 'Optional preferred model.'
         },
+        reasoningEffort: {
+          type: 'string',
+          enum: ['none', 'minimal', 'low', 'medium', 'high', 'xhigh'],
+          description: 'Optional preferred reasoning effort for adapters that support it.'
+        },
         worktreePath: {
           type: 'string',
           description: 'Optional worktree path to use as the working directory override when started.'
@@ -1855,6 +2390,27 @@ This calls cliagents' direct-session discussion route and returns the completed 
         worktreeBranch: {
           type: 'string',
           description: 'Optional worktree branch metadata.'
+        },
+        autoBranch: {
+          type: 'boolean',
+          description: 'When true, allocate a deterministic assignment branch and git worktree from the task workspace.'
+        },
+        baseBranch: {
+          type: 'string',
+          description: 'Optional source branch for assignment branch orchestration.'
+        },
+        branchName: {
+          type: 'string',
+          description: 'Optional assignment branch name.'
+        },
+        mergeTarget: {
+          type: 'string',
+          description: 'Optional branch to integrate into after review.'
+        },
+        writePaths: {
+          type: 'array',
+          items: { type: 'string' },
+          description: 'Optional relative workspace paths this assignment intends to edit; used for conflict leases.'
         },
         acceptanceCriteria: {
           type: 'string',
@@ -1915,7 +2471,48 @@ This calls cliagents' direct-session discussion route and returns the completed 
         systemPrompt: {
           type: 'string',
           description: 'Optional system prompt override at start time.'
+        },
+        reasoningEffort: {
+          type: 'string',
+          enum: ['none', 'minimal', 'low', 'medium', 'high', 'xhigh'],
+          description: 'Optional reasoning effort override at start time.'
         }
+      },
+      required: ['taskId', 'assignmentId']
+    }
+  },
+  {
+    name: 'update_task_assignment_branch',
+    description: 'Update branch lifecycle metadata for a task assignment.',
+    inputSchema: {
+      type: 'object',
+      properties: {
+        taskId: { type: 'string', description: 'Task ID that owns the assignment.' },
+        assignmentId: { type: 'string', description: 'Assignment ID to update.' },
+        branchStatus: {
+          type: 'string',
+          enum: ['planned', 'created', 'running', 'ready_for_review', 'accepted', 'integrated', 'failed'],
+          description: 'Optional branch lifecycle status.'
+        },
+        testStatus: { type: 'string', description: 'Optional test gate status.' },
+        reviewStatus: { type: 'string', description: 'Optional review gate status.' },
+        headSha: { type: 'string', description: 'Optional branch head SHA.' },
+        refresh: { type: 'boolean', description: 'Refresh branch head and diff metadata from git when possible.' }
+      },
+      required: ['taskId', 'assignmentId']
+    }
+  },
+  {
+    name: 'integrate_task_assignment_branch',
+    description: 'Integrate an accepted assignment branch into its merge target.',
+    inputSchema: {
+      type: 'object',
+      properties: {
+        taskId: { type: 'string', description: 'Task ID that owns the assignment.' },
+        assignmentId: { type: 'string', description: 'Assignment ID to integrate.' },
+        mergeTarget: { type: 'string', description: 'Optional merge target override.' },
+        force: { type: 'boolean', description: 'Allow integration before branchStatus is accepted.' },
+        completeAssignment: { type: 'boolean', description: 'Whether integration should mark the assignment completed. Default true.' }
       },
       required: ['taskId', 'assignmentId']
     }
@@ -2266,6 +2863,7 @@ async function handleDelegateTask(args) {
     adapter,
     systemPrompt,
     model,
+    reasoningEffort,
     sessionLabel,
     collaborator = false,
     preferReuse,
@@ -2318,6 +2916,7 @@ async function handleDelegateTask(args) {
     systemPrompt,
     workingDirectory,
     model,
+    reasoningEffort,
     sessionLabel,
     preferReuse,
     forceFreshSession,
@@ -2336,14 +2935,18 @@ async function handleDelegateTask(args) {
     } : null
   });
 
-  const routeRes = await callCliagents('POST', '/orchestration/route', routeRequest);
-
-  maybeThrowRootAttachError(routeRes, 'delegate_task');
+  const routeOutcome = await callRouteWithReuseRecovery(routeRequest, 'delegate_task');
+  const routeRes = routeOutcome.response;
   if (routeRes.status !== 200) {
     throw new Error(`Routing failed: ${JSON.stringify(routeRes.data)}`);
   }
 
   const { terminalId, adapter: usedAdapter, taskType, profile: routedProfile } = routeRes.data;
+  const retrySummaryLine = routeOutcome.retried
+    ? `**Recovery:** retried route with forceFreshSession after ${routeOutcome.retryPlan?.reason || 'transient_error'}`
+    : null;
+  const reuseSummaryLine = formatRouteReuseLine(routeRes.data);
+  const routeSummaryLines = [retrySummaryLine, reuseSummaryLine].filter(Boolean).join('\n');
 
   if (wait) {
     const syncWaitMs = Math.max(
@@ -2354,12 +2957,13 @@ async function handleDelegateTask(args) {
       )
     );
     const waitResult = await waitForTerminalCompletion(terminalId, syncWaitMs);
+    const waitStatus = waitResult.status || waitResult.lastStatus || 'unknown';
 
     if (waitResult.state === 'completed') {
       return {
         content: [{
           type: 'text',
-          text: `## ${profileDisplay} (${usedAdapter}) Response\n\n**Terminal ID:** ${terminalId}\n**Status:** completed\n\n${waitResult.output || 'No output captured'}`
+          text: `## ${profileDisplay} (${usedAdapter}) Response\n\n**Terminal ID:** ${terminalId}\n**Status:** completed${routeSummaryLines ? `\n${routeSummaryLines}` : ''}\n\n${waitResult.output || 'No output captured'}`
         }]
       };
     }
@@ -2368,7 +2972,7 @@ async function handleDelegateTask(args) {
       return {
         content: [{
           type: 'text',
-          text: `## ${profileDisplay} (${usedAdapter}) Task Failed\n\n**Terminal ID:** ${terminalId}\n**Status:** ${waitResult.lastStatus}\n\n${waitResult.output || 'No output captured'}`
+          text: `## ${profileDisplay} (${usedAdapter}) Task Failed\n\n**Terminal ID:** ${terminalId}\n**Status:** ${waitStatus}${routeSummaryLines ? `\n${routeSummaryLines}` : ''}\n\n${waitResult.output || 'No output captured'}`
         }]
       };
     }
@@ -2377,7 +2981,7 @@ async function handleDelegateTask(args) {
       return {
         content: [{
           type: 'text',
-          text: `## ${profileDisplay} (${usedAdapter}) Waiting\n\n**Terminal ID:** ${terminalId}\n**Status:** ${waitResult.lastStatus}\n\nThe delegated task is blocked on an interactive prompt. Use \`check_task_status({ terminalId: "${terminalId}" })\` for the blocker details or \`check_tasks_status({ terminalIds: ["${terminalId}"] })\` if you are monitoring several tasks.`
+          text: `## ${profileDisplay} (${usedAdapter}) Waiting\n\n**Terminal ID:** ${terminalId}\n**Status:** ${waitStatus}${routeSummaryLines ? `\n${routeSummaryLines}` : ''}\n\nThe delegated task is blocked on an interactive prompt. Use \`check_task_status({ terminalId: "${terminalId}" })\` for the blocker details or \`check_tasks_status({ terminalIds: ["${terminalId}"] })\` if you are monitoring several tasks.`
         }]
       };
     }
@@ -2385,7 +2989,7 @@ async function handleDelegateTask(args) {
     return {
       content: [{
         type: 'text',
-        text: `## ${profileDisplay} (${usedAdapter}) Still Running\n\n**Terminal ID:** ${terminalId}\n**Status:** ${waitResult.lastStatus}\n\nThe task exceeded the MCP synchronous wait window (${Math.round(syncWaitMs / 1000)}s) but is still running. Continue with \`check_task_status({ terminalId: "${terminalId}" })\`, or use \`check_tasks_status\` / \`wait_for_tasks\` if you are coordinating several terminals.`
+        text: `## ${profileDisplay} (${usedAdapter}) Still Running\n\n**Terminal ID:** ${terminalId}\n**Status:** ${waitStatus}${routeSummaryLines ? `\n${routeSummaryLines}` : ''}\n\nThe task exceeded the MCP synchronous wait window (${Math.round(syncWaitMs / 1000)}s) but is still running. Continue with \`check_task_status({ terminalId: "${terminalId}" })\`, or use \`check_tasks_status\` / \`wait_for_tasks\` if you are coordinating several terminals.`
       }]
     };
   }
@@ -2393,7 +2997,7 @@ async function handleDelegateTask(args) {
   return {
     content: [{
       type: 'text',
-      text: `## Task Delegated: ASYNC\n\n**Terminal ID:** ${terminalId}\n**Profile:** ${routedProfile || profileDisplay}\n**Adapter:** ${usedAdapter}\n**Task Type:** ${taskType}\n\nThe task is running asynchronously. Use \`check_task_status({ terminalId: "${terminalId}" })\` for a single task, \`check_tasks_status({ terminalIds: ["${terminalId}"] })\` for grouped monitoring, or \`get_terminal_output({ terminalId: "${terminalId}" })\` to inspect partial output.`
+      text: `## Task Delegated: ASYNC\n\n**Terminal ID:** ${terminalId}\n**Profile:** ${routedProfile || profileDisplay}\n**Adapter:** ${usedAdapter}\n**Task Type:** ${taskType}${routeSummaryLines ? `\n${routeSummaryLines}` : ''}\n\nThe task is running asynchronously. Use \`check_task_status({ terminalId: "${terminalId}" })\` for a single task, \`check_tasks_status({ terminalIds: ["${terminalId}"] })\` for grouped monitoring, or \`get_terminal_output({ terminalId: "${terminalId}" })\` to inspect partial output.`
     }]
   };
 }
@@ -2407,8 +3011,18 @@ async function handleReplyToTerminal(args) {
     throw new Error('message is required');
   }
 
+  const rootContext = requireAttachedRootContextForTerminalInput('Failed to send input');
+  const controlPlanePayload = {
+    rootSessionId: rootContext.rootSessionId,
+    parentSessionId: rootContext.rootSessionId,
+    originClient: rootContext.originClient || null,
+    externalSessionRef: rootContext.externalSessionRef || null,
+    sessionMetadata: rootContext.sessionMetadata || null
+  };
+
   const res = await callCliagents('POST', `/orchestration/terminals/${encodeURIComponent(terminalId)}/input`, {
-    message
+    message,
+    ...controlPlanePayload
   });
 
   if (res.status === 403 && res.data?.error?.code === 'root_read_only') {
@@ -2425,6 +3039,231 @@ async function handleReplyToTerminal(args) {
     content: [{
       type: 'text',
       text: `## Terminal Updated\n\n**Terminal ID:** ${terminalId}\n**Status:** input sent\n\nThe follow-up message was delivered to the existing terminal. Continue with \`check_task_status({ terminalId: "${terminalId}" })\` or \`get_terminal_output({ terminalId: "${terminalId}" })\` to monitor the same session.`
+    }]
+  };
+}
+
+function formatInputQueueItem(item = {}) {
+  return [
+    `${item.id || 'n/a'} (${item.inputKind || 'message'})`,
+    `terminal=${item.terminalId || 'n/a'}`,
+    `status=${item.status || 'pending'}`,
+    item.controlMode ? `control=${item.controlMode}` : null,
+    item.expiresAt ? `expires=${new Date(item.expiresAt).toISOString()}` : null
+  ].filter(Boolean).join(' • ');
+}
+
+async function handleEnqueueTerminalInput(args = {}) {
+  const terminalId = args.terminalId || args.terminal_id;
+  if (!terminalId) {
+    throw new Error('terminalId is required');
+  }
+
+  const rootContext = getAttachedRootContext();
+  const controlPlanePayload = rootContext?.rootSessionId
+    ? {
+        rootSessionId: rootContext.rootSessionId,
+        parentSessionId: rootContext.rootSessionId,
+        originClient: rootContext.originClient || null,
+        externalSessionRef: rootContext.externalSessionRef || null,
+        sessionMetadata: rootContext.sessionMetadata || null
+      }
+    : {};
+
+  const res = await callCliagents('POST', `/orchestration/terminals/${encodeURIComponent(terminalId)}/input-queue`, {
+    message: args.message || null,
+    inputKind: args.inputKind || args.input_kind || 'message',
+    approvalRequired: args.approvalRequired === true || args.approval_required === true,
+    controlMode: args.controlMode || args.control_mode || null,
+    expiresAt: args.expiresAt || args.expires_at || null,
+    requestedBy: args.requestedBy || args.requested_by || null,
+    metadata: args.metadata || null,
+    ...controlPlanePayload
+  });
+  if (res.status !== 200) {
+    throw new Error(`Failed to enqueue terminal input: ${JSON.stringify(res.data)}`);
+  }
+
+  const item = res.data?.input || {};
+  return {
+    content: [{
+      type: 'text',
+      text: [
+        '## Terminal Input Queued',
+        '',
+        `input_id: ${item.id || 'n/a'}`,
+        `terminal_id: ${item.terminalId || terminalId}`,
+        `kind: ${item.inputKind || args.inputKind || 'message'}`,
+        `status: ${item.status || 'pending'}`,
+        `control_mode: ${item.controlMode || 'operator'}`
+      ].join('\n')
+    }]
+  };
+}
+
+async function handleListTerminalInputQueue(args = {}) {
+  const params = new URLSearchParams();
+  if (args.terminalId || args.terminal_id) {
+    params.set('terminalId', args.terminalId || args.terminal_id);
+  }
+  if (args.rootSessionId || args.root_session_id) {
+    params.set('rootSessionId', args.rootSessionId || args.root_session_id);
+  }
+  if (args.taskId || args.task_id) {
+    params.set('taskId', args.taskId || args.task_id);
+  }
+  if (args.status) {
+    params.set('status', Array.isArray(args.status) ? args.status.join(',') : String(args.status));
+  }
+  if (Number.isFinite(args.limit)) {
+    params.set('limit', String(args.limit));
+  }
+
+  const qs = params.toString();
+  const res = await callCliagents('GET', `/orchestration/input-queue${qs ? `?${qs}` : ''}`);
+  if (res.status !== 200) {
+    throw new Error(`Failed to list terminal input queue: ${JSON.stringify(res.data)}`);
+  }
+
+  const inputs = Array.isArray(res.data?.inputs) ? res.data.inputs : [];
+  return {
+    content: [{
+      type: 'text',
+      text: [
+        '## Terminal Input Queue',
+        '',
+        `returned: ${inputs.length}`,
+        '',
+        inputs.map(formatInputQueueItem).join('\n')
+      ].filter(Boolean).join('\n')
+    }]
+  };
+}
+
+async function handleApproveTerminalInput(args = {}) {
+  const inputId = args.inputId || args.input_id;
+  if (!inputId) {
+    throw new Error('inputId is required');
+  }
+  const rootContext = getAttachedRootContext();
+  const controlPlanePayload = rootContext?.rootSessionId
+    ? {
+        rootSessionId: rootContext.rootSessionId,
+        parentSessionId: rootContext.rootSessionId,
+        originClient: rootContext.originClient || null,
+        externalSessionRef: rootContext.externalSessionRef || null,
+        sessionMetadata: rootContext.sessionMetadata || null
+      }
+    : {};
+  const res = await callCliagents('POST', `/orchestration/input-queue/${encodeURIComponent(inputId)}/approve`, {
+    approvedBy: args.approvedBy || args.approved_by || null,
+    ...controlPlanePayload
+  });
+  if (res.status !== 200) {
+    throw new Error(`Failed to approve terminal input: ${JSON.stringify(res.data)}`);
+  }
+  const item = res.data?.input || {};
+  return {
+    content: [{
+      type: 'text',
+      text: `## Terminal Input Approved\n\ninput_id: ${item.id || inputId}\nstatus: ${item.status || 'pending'}`
+    }]
+  };
+}
+
+async function handleDenyTerminalInput(args = {}) {
+  const inputId = args.inputId || args.input_id;
+  if (!inputId) {
+    throw new Error('inputId is required');
+  }
+  const rootContext = getAttachedRootContext();
+  const controlPlanePayload = rootContext?.rootSessionId
+    ? {
+        rootSessionId: rootContext.rootSessionId,
+        parentSessionId: rootContext.rootSessionId,
+        originClient: rootContext.originClient || null,
+        externalSessionRef: rootContext.externalSessionRef || null,
+        sessionMetadata: rootContext.sessionMetadata || null
+      }
+    : {};
+  const res = await callCliagents('POST', `/orchestration/input-queue/${encodeURIComponent(inputId)}/deny`, {
+    deniedBy: args.deniedBy || args.denied_by || null,
+    reason: args.reason || null,
+    ...controlPlanePayload
+  });
+  if (res.status !== 200) {
+    throw new Error(`Failed to deny terminal input: ${JSON.stringify(res.data)}`);
+  }
+  const item = res.data?.input || {};
+  return {
+    content: [{
+      type: 'text',
+      text: `## Terminal Input Denied\n\ninput_id: ${item.id || inputId}\nstatus: ${item.status || 'cancelled'}`
+    }]
+  };
+}
+
+async function handleCancelTerminalInput(args = {}) {
+  const inputId = args.inputId || args.input_id;
+  if (!inputId) {
+    throw new Error('inputId is required');
+  }
+  const rootContext = getAttachedRootContext();
+  const controlPlanePayload = rootContext?.rootSessionId
+    ? {
+        rootSessionId: rootContext.rootSessionId,
+        parentSessionId: rootContext.rootSessionId,
+        originClient: rootContext.originClient || null,
+        externalSessionRef: rootContext.externalSessionRef || null,
+        sessionMetadata: rootContext.sessionMetadata || null
+      }
+    : {};
+  const res = await callCliagents('POST', `/orchestration/input-queue/${encodeURIComponent(inputId)}/cancel`, {
+    reason: args.reason || null,
+    ...controlPlanePayload
+  });
+  if (res.status !== 200) {
+    throw new Error(`Failed to cancel terminal input: ${JSON.stringify(res.data)}`);
+  }
+  const item = res.data?.input || {};
+  return {
+    content: [{
+      type: 'text',
+      text: `## Terminal Input Cancelled\n\ninput_id: ${item.id || inputId}\nstatus: ${item.status || 'cancelled'}`
+    }]
+  };
+}
+
+async function handleDeliverTerminalInput(args = {}) {
+  const inputId = args.inputId || args.input_id;
+  if (!inputId) {
+    throw new Error('inputId is required');
+  }
+  const rootContext = getAttachedRootContext();
+  const controlPlanePayload = rootContext?.rootSessionId
+    ? {
+        rootSessionId: rootContext.rootSessionId,
+        parentSessionId: rootContext.rootSessionId,
+        originClient: rootContext.originClient || null,
+        externalSessionRef: rootContext.externalSessionRef || null,
+        sessionMetadata: rootContext.sessionMetadata || null
+      }
+    : {};
+  const res = await callCliagents('POST', `/orchestration/input-queue/${encodeURIComponent(inputId)}/deliver`, controlPlanePayload);
+  if (res.status !== 200) {
+    throw new Error(`Failed to deliver terminal input: ${JSON.stringify(res.data)}`);
+  }
+  const item = res.data?.input || {};
+  return {
+    content: [{
+      type: 'text',
+      text: [
+        '## Terminal Input Delivered',
+        '',
+        `input_id: ${item.id || inputId}`,
+        `terminal_id: ${item.terminalId || 'n/a'}`,
+        `status: ${item.status || 'delivered'}`
+      ].join('\n')
     }]
   };
 }
@@ -3012,6 +3851,77 @@ async function handleRunDiscussion(args) {
   };
 }
 
+async function handleRunBpeScenario(args = {}) {
+  const format = args?.format === 'json' ? 'json' : 'summary';
+  const body = {
+    targetUrl: args?.targetUrl || null,
+    resumeSessionId: args?.resumeSessionId || null,
+    interaction: args?.interaction || null,
+    interactionPolicy: args?.interactionPolicy || null,
+    runtime: args?.runtime || null,
+    trace: args?.trace || null,
+    timeoutMs: args?.timeoutMs || null,
+    actionTimeoutMs: args?.actionTimeoutMs || null,
+    idempotencyKey: args?.idempotencyKey || null,
+    expectedStateVersion: args?.expectedStateVersion || null
+  };
+
+  const res = await callCliagents('POST', '/orchestration/browser-perception-engine/scenario', body);
+  const data = res.data || {};
+
+  if (format === 'json') {
+    return {
+      content: [{
+        type: 'text',
+        text: JSON.stringify({
+          status: res.status,
+          ...data
+        }, null, 2)
+      }]
+    };
+  }
+
+  if (res.status !== 200) {
+    const failureClass = data.failureClass || 'transport_error';
+    const terminalFailureReason = data.terminalFailureReason || failureClass;
+    return {
+      content: [{
+        type: 'text',
+        text: [
+          '## BPE Scenario Failed',
+          '',
+          `status_code: ${res.status}`,
+          `failure_class: ${failureClass}`,
+          `terminal_failure_reason: ${terminalFailureReason}`,
+          `session_id: ${data.sessionId || 'n/a'}`,
+          `action_id: ${data.actionId || 'n/a'}`,
+          `message: ${data.message || 'unknown error'}`,
+          data.details ? `details: ${JSON.stringify(data.details)}` : null
+        ].filter(Boolean).join('\n')
+      }]
+    };
+  }
+
+  return {
+    content: [{
+      type: 'text',
+      text: [
+        '## BPE Scenario Completed',
+        '',
+        `provider: ${data.provider || 'browser_perception_engine'}`,
+        `scenario: ${data.scenario?.kind || 'deterministic_single_interaction'}`,
+        `target_url: ${data.scenario?.targetUrl || data.scenario?.target_url || data.state?.url || 'n/a'}`,
+        `session_id: ${data.session?.sessionId || data.session?.session_id || data.evidence?.session_id || 'n/a'}`,
+        `state_version: ${data.state?.stateVersion ?? 'n/a'}`,
+        `action_id: ${data.action?.actionId || data.action?.action_id || data.evidence?.action_id || 'n/a'}`,
+        `action_status: ${data.action?.status || 'n/a'}`,
+        `action_state_version: ${data.action?.stateVersion ?? 'n/a'}`,
+        `terminal_failure_reason: ${data.evidence?.terminal_failure_reason ?? 'null'}`
+      ].join('\n')
+    }]
+  };
+}
+
 async function handleGetRunDetail(args) {
   const { runId, format = 'summary' } = args || {};
 
@@ -3509,8 +4419,12 @@ async function handleAttachRootSession(args) {
 }
 
 async function handleResetRootSession() {
-  const previous = cachedMcpRootContext || loadPersistedRootContext();
-  clearPersistedRootContext();
+  const persisted = loadPersistedRootContext();
+  const previous = cachedMcpRootContext || (persisted?.resetMarker ? null : persisted);
+  clearPersistedRootContext({
+    clientName: previous?.clientName || inferMcpClientName(),
+    sessionScope: previous?.sessionScope || inferMcpSessionScope()
+  });
 
   return {
     content: [{
@@ -3532,6 +4446,7 @@ async function handleLaunchRootSession(args) {
     workDir: args?.workDir || args?.workingDirectory || process.cwd(),
     model: args?.model || null,
     modelExplicit: Object.prototype.hasOwnProperty.call(args || {}, 'model'),
+    reasoningEffort: args?.reasoningEffort || args?.reasoning_effort || null,
     profile: args?.profile || 'guarded-root',
     profileExplicit: Object.prototype.hasOwnProperty.call(args || {}, 'profile'),
     permissionMode: args?.permissionMode || null,
@@ -3581,6 +4496,7 @@ async function handleLaunchRootSession(args) {
       adapter: launchOptions.adapter,
       workDir: launchOptions.workDir,
       model: launchOptions.model || null,
+      reasoningEffort: launchOptions.reasoningEffort || null,
       permissionMode: launchOptions.permissionMode || null,
       profile: launchOptions.profile,
       systemPrompt: launchOptions.systemPrompt || null,
@@ -3607,6 +4523,7 @@ async function handleLaunchRootSession(args) {
           `root_session_id: ${data.rootSessionId || 'n/a'}`,
           `terminal_id: ${data.terminalId || 'n/a'}`,
           `session_name: ${data.sessionName || 'n/a'}`,
+          launchOptions.reasoningEffort ? `reasoning_effort: ${launchOptions.reasoningEffort}` : null,
           launchOptions.resumeMode === 'exact' ? `provider_session_id: ${launchOptions.providerSessionId}` : null,
           launchOptions.providerResumePicker ? 'provider_resume: picker' : null,
           launchOptions.sourceRootSessionId ? `source_root_session_id: ${launchOptions.sourceRootSessionId}` : null,
@@ -3963,8 +4880,14 @@ async function handleCreateTaskAssignment(args) {
     instructions: args?.instructions,
     adapter: args?.adapter || null,
     model: args?.model || null,
+    reasoningEffort: args?.reasoningEffort || args?.reasoning_effort || null,
     worktreePath: args?.worktreePath || null,
     worktreeBranch: args?.worktreeBranch || null,
+    autoBranch: args?.autoBranch === true || args?.auto_branch === true,
+    baseBranch: args?.baseBranch || args?.base_branch || null,
+    branchName: args?.branchName || args?.branch_name || null,
+    mergeTarget: args?.mergeTarget || args?.merge_target || null,
+    writePaths: Array.isArray(args?.writePaths) ? args.writePaths : (Array.isArray(args?.write_paths) ? args.write_paths : undefined),
     acceptanceCriteria: args?.acceptanceCriteria || null,
     metadata: args?.metadata || {}
   });
@@ -3985,7 +4908,11 @@ async function handleCreateTaskAssignment(args) {
         `role: ${assignment.role || args?.role || 'n/a'}`,
         `status: ${assignment.status || 'queued'}`,
         assignment.adapter ? `adapter: ${assignment.adapter}` : null,
-        assignment.model ? `model: ${assignment.model}` : null
+        assignment.model ? `model: ${assignment.model}` : null,
+        assignment.reasoningEffort ? `reasoning_effort: ${assignment.reasoningEffort}` : null,
+        assignment.branch?.branchName ? `branch: ${assignment.branch.branchName}` : null,
+        assignment.branch?.status ? `branch_status: ${assignment.branch.status}` : null,
+        assignment.branch?.pathLeaseId ? `path_lease_id: ${assignment.branch.pathLeaseId}` : null
       ].filter(Boolean).join('\n')
     }]
   };
@@ -4019,6 +4946,16 @@ async function handleListTaskAssignments(args) {
           `status=${assignment.status || 'queued'}`,
           assignment.terminalId ? `terminal=${assignment.terminalId}` : null,
           assignment.adapter ? `adapter=${assignment.adapter}` : null,
+          assignment.reasoningEffort ? `effort=${assignment.reasoningEffort}` : null,
+          assignment.dispatch?.id ? `dispatch=${assignment.dispatch.id}:${assignment.dispatch.status || 'unknown'}` : null,
+          Array.isArray(assignment.taskSessionBindings) && assignment.taskSessionBindings.length > 0
+            ? `bindings=${assignment.taskSessionBindings.length}`
+            : null,
+          assignment.branch?.branchName ? `branch=${assignment.branch.branchName}` : null,
+          assignment.branch?.status ? `branch_status=${assignment.branch.status}` : null,
+          assignment.branch?.pathLeaseId ? `path_lease=${assignment.branch.pathLeaseId}` : null,
+          assignment.isolation?.mode ? `isolation=${assignment.isolation.mode}` : null,
+          assignment.isolation?.branch ? `branch=${assignment.isolation.branch}` : null,
           assignment.usageSummary ? `total_tokens=${assignment.usageSummary.totalTokens || 0}` : null
         ].filter(Boolean).join(' • ')).join('\n')
       ].filter(Boolean).join('\n')
@@ -4049,7 +4986,8 @@ async function handleStartTaskAssignment(args) {
       preferReuse: typeof args?.preferReuse === 'boolean' ? args.preferReuse : undefined,
       forceFreshSession: typeof args?.forceFreshSession === 'boolean' ? args.forceFreshSession : undefined,
       sessionLabel: args?.sessionLabel || null,
-      systemPrompt: args?.systemPrompt || null
+      systemPrompt: args?.systemPrompt || null,
+      reasoningEffort: args?.reasoningEffort || args?.reasoning_effort || null
     }
   );
 
@@ -4073,8 +5011,90 @@ async function handleStartTaskAssignment(args) {
         `status: ${assignment.status || 'running'}`,
         `adapter: ${assignment.adapter || data.route?.adapter || 'n/a'}`,
         `model: ${assignment.model || data.route?.model || 'n/a'}`,
+        assignment.reasoningEffort || data.route?.reasoningEffort ? `reasoning_effort: ${assignment.reasoningEffort || data.route?.reasoningEffort}` : null,
         assignment.worktreePath ? `worktree_path: ${assignment.worktreePath}` : null,
-        assignment.worktreeBranch ? `worktree_branch: ${assignment.worktreeBranch}` : null
+        assignment.worktreeBranch ? `worktree_branch: ${assignment.worktreeBranch}` : null,
+        assignment.branch?.branchName ? `branch: ${assignment.branch.branchName}` : null,
+        assignment.branch?.status ? `branch_status: ${assignment.branch.status}` : null,
+        assignment.branch?.pathLeaseId ? `path_lease_id: ${assignment.branch.pathLeaseId}` : null,
+        assignment.dispatch?.id || data.dispatch?.dispatchRequestId ? `dispatch_request_id: ${assignment.dispatch?.id || data.dispatch?.dispatchRequestId}` : null,
+        assignment.dispatch?.status || data.dispatch?.status ? `dispatch_status: ${assignment.dispatch?.status || data.dispatch?.status}` : null,
+        data.dispatch?.contextSnapshotId ? `context_snapshot_id: ${data.dispatch.contextSnapshotId}` : null,
+        data.dispatch?.taskSessionBindingId ? `task_session_binding_id: ${data.dispatch.taskSessionBindingId}` : null,
+        Array.isArray(assignment.taskSessionBindings) && assignment.taskSessionBindings.length > 0
+          ? `task_session_bindings: ${assignment.taskSessionBindings.length}`
+          : null,
+        assignment.isolation?.mode ? `isolation_mode: ${assignment.isolation.mode}` : null,
+        assignment.isolation?.created !== undefined ? `isolation_created: ${assignment.isolation.created === true}` : null,
+        assignment.isolation?.dirty !== undefined && assignment.isolation?.dirty !== null ? `isolation_dirty: ${assignment.isolation.dirty === true}` : null,
+        assignment.isolation?.head ? `isolation_head: ${assignment.isolation.head}` : null
+      ].filter(Boolean).join('\n')
+    }]
+  };
+}
+
+async function handleUpdateTaskAssignmentBranch(args) {
+  const res = await callCliagents(
+    'PATCH',
+    `/orchestration/tasks/${encodeURIComponent(args?.taskId || '')}/assignments/${encodeURIComponent(args?.assignmentId || '')}/branch`,
+    {
+      branchStatus: args?.branchStatus || args?.branch_status || null,
+      testStatus: args?.testStatus || args?.test_status || null,
+      reviewStatus: args?.reviewStatus || args?.review_status || null,
+      headSha: args?.headSha || args?.head_sha || null,
+      refresh: args?.refresh === true
+    }
+  );
+  if (res.status !== 200) {
+    throw new Error(`Failed to update task assignment branch: ${JSON.stringify(res.data)}`);
+  }
+  const assignment = res.data?.assignment || {};
+  return {
+    content: [{
+      type: 'text',
+      text: [
+        '## Task Assignment Branch Updated',
+        '',
+        `task_id: ${args?.taskId || 'n/a'}`,
+        `assignment_id: ${assignment.id || args?.assignmentId || 'n/a'}`,
+        assignment.branch?.branchName ? `branch: ${assignment.branch.branchName}` : null,
+        assignment.branch?.status ? `branch_status: ${assignment.branch.status}` : null,
+        assignment.branch?.headSha ? `head_sha: ${assignment.branch.headSha}` : null,
+        assignment.branch?.testStatus ? `test_status: ${assignment.branch.testStatus}` : null,
+        assignment.branch?.reviewStatus ? `review_status: ${assignment.branch.reviewStatus}` : null
+      ].filter(Boolean).join('\n')
+    }]
+  };
+}
+
+async function handleIntegrateTaskAssignmentBranch(args) {
+  const res = await callCliagents(
+    'POST',
+    `/orchestration/tasks/${encodeURIComponent(args?.taskId || '')}/assignments/${encodeURIComponent(args?.assignmentId || '')}/integrate`,
+    {
+      mergeTarget: args?.mergeTarget || args?.merge_target || null,
+      force: args?.force === true,
+      completeAssignment: args?.completeAssignment !== false && args?.complete_assignment !== false
+    }
+  );
+  if (res.status !== 200) {
+    throw new Error(`Failed to integrate task assignment branch: ${JSON.stringify(res.data)}`);
+  }
+  const assignment = res.data?.assignment || {};
+  const integration = res.data?.integration || {};
+  return {
+    content: [{
+      type: 'text',
+      text: [
+        '## Task Assignment Branch Integrated',
+        '',
+        `task_id: ${args?.taskId || 'n/a'}`,
+        `assignment_id: ${assignment.id || args?.assignmentId || 'n/a'}`,
+        assignment.branch?.branchName ? `branch: ${assignment.branch.branchName}` : null,
+        integration.targetBranch ? `merge_target: ${integration.targetBranch}` : null,
+        integration.afterSha ? `head_sha: ${integration.afterSha}` : null,
+        `assignment_status: ${assignment.status || 'n/a'}`,
+        assignment.branch?.status ? `branch_status: ${assignment.branch.status}` : null
       ].filter(Boolean).join('\n')
     }]
   };
@@ -4137,8 +5157,9 @@ async function handleListRooms(args) {
             `${room.id || 'n/a'}${room.title ? ` (${room.title})` : ''}`,
             `participants=${entry.participantCount || 0}`,
             `messages=${entry.messageCount || 0}`,
-            `latest_turn=${entry.latestTurn?.status || 'n/a'}`
-          ].join(' • ');
+            `latest_turn=${entry.latestTurn?.status || 'n/a'}`,
+            entry.moderator?.status ? `moderator=${entry.moderator.status}` : null
+          ].filter(Boolean).join(' • ');
         }).join('\n')
       ].filter(Boolean).join('\n')
     }]
@@ -4188,7 +5209,9 @@ async function handleGetRoom(args) {
         data.room?.title ? `title: ${data.room.title}` : null,
         `participants: ${Array.isArray(data.participants) ? data.participants.length : 0}`,
         data.latestTurn?.id ? `latest_turn_id: ${data.latestTurn.id}` : null,
-        data.latestTurn?.status ? `latest_turn_status: ${data.latestTurn.status}` : null
+        data.latestTurn?.status ? `latest_turn_status: ${data.latestTurn.status}` : null,
+        data.moderator?.status ? `moderator_status: ${data.moderator.status}` : null,
+        data.moderator?.summary ? `moderator_summary: ${truncateText(data.moderator.summary, 240)}` : null
       ].filter(Boolean).join('\n')
     }]
   };
@@ -4253,8 +5276,10 @@ async function handleDiscussRoom(args) {
         `status: ${data.turn?.status || 'unknown'}`,
         `run_id: ${data.runId || 'n/a'}`,
         `discussion_id: ${data.discussionId || 'n/a'}`,
-        `writeback_mode: ${data.turn?.metadata?.writebackMode || args?.writebackMode || 'summary'}`
-      ].join('\n')
+        `writeback_mode: ${data.turn?.metadata?.writebackMode || args?.writebackMode || 'summary'}`,
+        data.moderator?.status ? `moderator_status: ${data.moderator.status}` : null,
+        data.moderator?.summary ? `moderator_summary: ${truncateText(data.moderator.summary, 240)}` : null
+      ].filter(Boolean).join('\n')
     }]
   };
 }
@@ -4600,10 +5625,89 @@ async function handleGetMemoryBundle(args) {
     text += `### Top Findings\n${bundle.findings.map(f => `- [${f.severity}/${f.type}] ${f.content}`).join('\n')}\n\n`;
   }
 
+  if (bundle.usage && bundle.usage.recordCount > 0) {
+    text += `### Usage\n`;
+    text += `- totalTokens=${bundle.usage.totalTokens} inputTokens=${bundle.usage.inputTokens} outputTokens=${bundle.usage.outputTokens} reasoningTokens=${bundle.usage.reasoningTokens}\n\n`;
+  }
+
+  if (bundle.assignments?.length > 0) {
+    text += `### Assignments\n`;
+    for (const assignment of bundle.assignments.slice(0, 10)) {
+      const runtime = [assignment.adapter, assignment.model, assignment.reasoningEffort].filter(Boolean).join('/');
+      text += `- **${assignment.id}** (${assignment.role}): ${assignment.status}${runtime ? ` - ${runtime}` : ''}\n`;
+    }
+    text += '\n';
+  }
+
+  if (bundle.dispatchRequests?.length > 0) {
+    text += `### Dispatch Requests\n`;
+    for (const dispatch of bundle.dispatchRequests.slice(0, 10)) {
+      text += `- **${dispatch.id}** (${dispatch.requestKind}): ${dispatch.status}`;
+      text += dispatch.taskAssignmentId ? ` assignment=${dispatch.taskAssignmentId}` : '';
+      text += dispatch.terminalId ? ` terminal=${dispatch.terminalId}` : '';
+      text += '\n';
+    }
+    text += '\n';
+  }
+
+  if (bundle.contextSnapshots?.length > 0) {
+    text += `### Context Snapshots\n`;
+    for (const snapshot of bundle.contextSnapshots.slice(0, 10)) {
+      const runtime = [snapshot.adapter, snapshot.model, snapshot.reasoningEffort].filter(Boolean).join('/');
+      text += `- **${snapshot.id}** (${snapshot.contextMode}): ${snapshot.promptSummary || 'no summary'}${runtime ? ` - ${runtime}` : ''}\n`;
+    }
+    text += '\n';
+  }
+
+  if (bundle.taskSessionBindings?.length > 0) {
+    text += `### Task Session Bindings\n`;
+    for (const binding of bundle.taskSessionBindings.slice(0, 10)) {
+      const runtime = [binding.adapter, binding.model, binding.reasoningEffort].filter(Boolean).join('/');
+      text += `- **${binding.id}**: ${binding.status}${runtime ? ` - ${runtime}` : ''}`;
+      text += binding.terminalId ? ` terminal=${binding.terminalId}` : '';
+      text += binding.reusePolicy ? ` reuse=${binding.reusePolicy}` : '';
+      text += '\n';
+    }
+    text += '\n';
+  }
+
+  if (bundle.recentTasks?.length > 0) {
+    text += `### Recent Tasks\n`;
+    for (const task of bundle.recentTasks.slice(0, 10)) {
+      text += `- **${task.id}** (${task.kind || 'general'}): ${task.title || 'untitled'}\n`;
+    }
+    text += '\n';
+  }
+
   if (bundle.recentRuns?.length > 0) {
     text += `### Recent Runs\n`;
     for (const run of bundle.recentRuns) {
       text += `- **${run.runId}** (${run.kind}): ${run.status} - ${run.brief || 'no brief'}\n`;
+    }
+    text += '\n';
+  }
+
+  if (bundle.recentRootIoEvents?.length > 0) {
+    text += `### Recent Root IO\n`;
+    for (const event of bundle.recentRootIoEvents.slice(0, 10)) {
+      const role = event.parsedRole ? `/${event.parsedRole}` : '';
+      text += `- **${event.id}** (${event.eventKind}${role}): ${event.preview || 'no preview'}\n`;
+    }
+    text += '\n';
+  }
+
+  if (bundle.recentMessages?.length > 0) {
+    text += `### Recent Messages\n`;
+    for (const message of bundle.recentMessages.slice(-10)) {
+      text += `- **${message.id}** (${message.role}): ${message.preview || 'no preview'}\n`;
+    }
+    text += '\n';
+  }
+
+  if (bundle.recentSessionEvents?.length > 0) {
+    text += `### Recent Session Events\n`;
+    for (const event of bundle.recentSessionEvents.slice(-10)) {
+      text += `- **${event.id}** (${event.eventType})${event.payloadSummary ? `: ${event.payloadSummary}` : ''}\n`;
     }
     text += '\n';
   }
@@ -4932,11 +6036,32 @@ async function handleRequest(request) {
           case 'reply_to_terminal':
             result = await handleReplyToTerminal(args);
             break;
+          case 'enqueue_terminal_input':
+            result = await handleEnqueueTerminalInput(args);
+            break;
+          case 'list_terminal_input_queue':
+            result = await handleListTerminalInputQueue(args);
+            break;
+          case 'approve_terminal_input':
+            result = await handleApproveTerminalInput(args);
+            break;
+          case 'deny_terminal_input':
+            result = await handleDenyTerminalInput(args);
+            break;
+          case 'cancel_terminal_input':
+            result = await handleCancelTerminalInput(args);
+            break;
+          case 'deliver_terminal_input':
+            result = await handleDeliverTerminalInput(args);
+            break;
           case 'run_workflow':
             result = await handleRunWorkflow(args);
             break;
           case 'run_discussion':
             result = await handleRunDiscussion(args);
+            break;
+          case 'run_bpe_scenario':
+            result = await handleRunBpeScenario(args);
             break;
           case 'get_run_detail':
             result = await handleGetRunDetail(args);
@@ -5033,6 +6158,12 @@ async function handleRequest(request) {
             break;
           case 'start_task_assignment':
             result = await handleStartTaskAssignment(args);
+            break;
+          case 'update_task_assignment_branch':
+            result = await handleUpdateTaskAssignmentBranch(args);
+            break;
+          case 'integrate_task_assignment_branch':
+            result = await handleIntegrateTaskAssignmentBranch(args);
             break;
           case 'create_room':
             result = await handleCreateRoom(args);
@@ -5131,6 +6262,12 @@ module.exports = {
   handleCheckTasksStatus,
   handleDelegateTask,
   handleReplyToTerminal,
+  handleEnqueueTerminalInput,
+  handleListTerminalInputQueue,
+  handleApproveTerminalInput,
+  handleDenyTerminalInput,
+  handleCancelTerminalInput,
+  handleDeliverTerminalInput,
   handleGetTerminalOutput,
   handleGetRootSessionStatus,
   handleGetRemoteSnapshot,
@@ -5148,6 +6285,8 @@ module.exports = {
   handleCreateTaskAssignment,
   handleListTaskAssignments,
   handleStartTaskAssignment,
+  handleUpdateTaskAssignmentBranch,
+  handleIntegrateTaskAssignmentBranch,
   handleCreateRoom,
   handleListRooms,
   handleSendRoomMessage,
@@ -5155,6 +6294,7 @@ module.exports = {
   handleGetRoomMessages,
   handleDiscussRoom,
   handleGetRunDetail,
+  handleRunBpeScenario,
   handleListRootSessions,
   handleListRuns,
   handleGetMemoryBundle,

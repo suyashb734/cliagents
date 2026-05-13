@@ -16,7 +16,9 @@ const GeminiCliAdapter = require('../adapters/gemini-cli');
 const { isCollaboratorReadyAdapter } = require('../orchestration/child-session-support');
 const { getModelRoutingService } = require('../services/model-routing');
 const { resolveClaudeCliPath } = require('../utils/claude-cli-path');
+const { isAdapterAuthenticated } = require('../utils/adapter-auth');
 const { extractOutput, stripAnsiCodes } = require('../utils/output-extractor');
+const { createManagedRootNotifierFromEnv } = require('../services/managed-root-notifier');
 const {
   RUNTIME_HOSTS,
   RUNTIME_FIDELITY,
@@ -96,16 +98,52 @@ function generateRunId() {
 const SAFE_TMUX_NAME_PATTERN = /^[a-zA-Z0-9_-]+$/;
 const MIN_ORPHANED_LOG_TAIL_BYTES = 5000;
 const MAX_ORPHANED_LOG_TAIL_BYTES = 50000;
+const MAX_ROOT_IO_OUTPUT_CHUNK_BYTES = 12000;
 const DEFAULT_MANAGED_ROOT_STARTUP_DELAY_MS = 1500;
 const DEFAULT_WORKER_STARTUP_DELAY_MS = 250;
 const DEFAULT_DEFERRED_PROVIDER_ATTACH_TIMEOUT_MS = 20000;
 const DEFERRED_PROVIDER_ATTACH_POLL_INTERVAL_MS = 150;
 const DEFAULT_POST_ATTACH_PROVIDER_START_DELAY_MS = 120;
+const DEFAULT_MANAGED_ROOT_NOTIFICATION_POLL_MS = 3000;
+const DEFAULT_MANAGED_ROOT_TMUX_HISTORY_LIMIT = 5000;
 const DEFAULT_CODEX_ORCHESTRATION_MODEL = process.env.CLIAGENTS_CODEX_ORCHESTRATION_MODEL || 'gpt-5.4';
 const ENABLE_STATUS_DEBUG_LOGS = process.env.CLIAGENTS_STATUS_DEBUG === '1';
+const REASONING_EFFORT_LEVELS = new Set(['none', 'minimal', 'low', 'medium', 'high', 'xhigh']);
+
+const BROKER_MODEL_ALIASES = Object.freeze({
+  'claude-code': Object.freeze({
+    opus: 'claude-opus-4-7',
+    sonnet: 'claude-sonnet-4-6',
+    haiku: 'claude-haiku-4-5'
+  }),
+  'codex-cli': Object.freeze({
+    gpt5: 'gpt-5.5',
+    gpt5mini: 'gpt-5.4-mini',
+    codex: 'gpt-5.5',
+    codexmini: 'gpt-5.4-mini'
+  })
+});
 
 function hashSessionShape(value) {
   return crypto.createHash('sha256').update(String(value || ''), 'utf8').digest('hex');
+}
+
+function normalizeTmuxHistoryLimit(value, fallback = DEFAULT_MANAGED_ROOT_TMUX_HISTORY_LIMIT) {
+  if (value === null || value === undefined || value === '') {
+    return fallback;
+  }
+
+  const normalized = typeof value === 'string' ? value.trim().toLowerCase() : value;
+  if (normalized === false || normalized === 'false' || normalized === 'off' || normalized === 'disabled') {
+    return null;
+  }
+
+  const parsed = Number.parseInt(String(value), 10);
+  if (!Number.isInteger(parsed) || parsed <= 0) {
+    return fallback;
+  }
+
+  return Math.min(Math.max(parsed, 100), 200000);
 }
 
 function summarizeMessage(content, maxLength = 120) {
@@ -154,6 +192,22 @@ function summarizeTerminalActivity(content, maxLength = 240) {
   return `${bestLine.slice(0, Math.max(0, maxLength - 1)).trimEnd()}…`;
 }
 
+function isLikelyManagedRootProgressOnly(content) {
+  const normalized = String(content || '').replace(/\s+/g, ' ').trim();
+  if (!normalized) {
+    return false;
+  }
+
+  return (
+    /(?:^|[•\s])Working\s*\(/i.test(normalized)
+    || /Waiting for background terminal/i.test(normalized)
+    || /background terminal (?:running|runs?)/i.test(normalized)
+    || /esc to interrupt/i.test(normalized)
+    || /\/ps to view/i.test(normalized)
+    || /\/stop to close/i.test(normalized)
+  );
+}
+
 function buildTerminalBusyError(terminalId, status) {
   const currentStatus = String(status || TerminalStatus.PROCESSING);
   const error = new Error(
@@ -189,17 +243,36 @@ function resolveGeminiCommandModel(model) {
 }
 
 function resolveCodexOneShotModel(model) {
-  if (model && model !== 'default') {
-    return model;
+  const normalizedModel = normalizeBrokerModelAlias('codex-cli', model);
+  if (normalizedModel && normalizedModel !== 'default') {
+    return normalizedModel;
   }
   return DEFAULT_CODEX_ORCHESTRATION_MODEL || null;
 }
 
-function resolveTerminalModel(adapter, role, sessionKind, model) {
-  if (adapter === 'codex-cli' && (role === 'worker' || sessionKind === 'child')) {
-    return resolveCodexOneShotModel(model);
+function normalizeBrokerModelAlias(adapter, model) {
+  const normalizedModel = String(model || '').trim();
+  if (!normalizedModel) {
+    return null;
   }
-  return model || null;
+  const aliases = BROKER_MODEL_ALIASES[adapter] || null;
+  return aliases?.[normalizedModel.toLowerCase()] || normalizedModel;
+}
+
+function normalizeReasoningEffort(effort) {
+  const normalized = String(effort || '').trim().toLowerCase();
+  if (!normalized) {
+    return null;
+  }
+  return REASONING_EFFORT_LEVELS.has(normalized) ? normalized : null;
+}
+
+function resolveTerminalModel(adapter, role, sessionKind, model) {
+  const normalizedModel = normalizeBrokerModelAlias(adapter, model);
+  if (adapter === 'codex-cli' && (role === 'worker' || sessionKind === 'child')) {
+    return resolveCodexOneShotModel(normalizedModel);
+  }
+  return normalizedModel || null;
 }
 
 function normalizeUuid(value) {
@@ -241,6 +314,275 @@ function getLastMatchValue(text, regex) {
     return null;
   }
   return matches[matches.length - 1][1] || null;
+}
+
+function normalizeReportedModelId(adapter, value) {
+  const raw = String(value || '').trim();
+  if (!raw || raw.length > 160) {
+    return null;
+  }
+
+  const stripped = raw
+    .replace(/^models\//, '')
+    .replace(/^[`"']+|[`"'.,;:]+$/g, '')
+    .trim();
+  if (!stripped || stripped.toLowerCase() === 'default' || stripped.toLowerCase() === 'unknown') {
+    return null;
+  }
+
+  const normalized = normalizeBrokerModelAlias(adapter, stripped);
+  if (!/^[A-Za-z0-9._:@/-]+$/.test(normalized)) {
+    return null;
+  }
+
+  if (adapter === 'codex-cli') {
+    return /^(?:gpt-|o\d|codex-)/i.test(normalized) ? normalized : null;
+  }
+  if (adapter === 'claude-code') {
+    return /^claude-/i.test(normalized) ? normalized : null;
+  }
+  if (adapter === 'gemini-cli') {
+    return /^gemini-/i.test(normalized) ? normalized : null;
+  }
+  if (adapter === 'qwen-cli') {
+    return /^(?:qwen|openrouter\/qwen|opencode-go\/qwen)/i.test(normalized) ? normalized : null;
+  }
+  if (adapter === 'opencode-cli') {
+    return /^[A-Za-z0-9._:-]+\/[A-Za-z0-9._:@/-]+$/.test(normalized)
+      || /^(?:minimax|qwen|glm|kimi|deepseek|claude|gemini)/i.test(normalized)
+      ? normalized
+      : null;
+  }
+
+  return normalized;
+}
+
+function collectReportedModelCandidates(adapter, value, candidates = []) {
+  if (value == null) {
+    return candidates;
+  }
+
+  if (typeof value === 'string') {
+    const normalized = normalizeReportedModelId(adapter, value);
+    if (normalized) {
+      candidates.push(normalized);
+    }
+    return candidates;
+  }
+
+  if (Array.isArray(value)) {
+    for (const entry of value) {
+      collectReportedModelCandidates(adapter, entry, candidates);
+    }
+    return candidates;
+  }
+
+  if (typeof value !== 'object') {
+    return candidates;
+  }
+
+  for (const key of ['model', 'modelId', 'model_id', 'selectedModel', 'selected_model', 'effectiveModel', 'effective_model']) {
+    collectReportedModelCandidates(adapter, value[key], candidates);
+  }
+
+  for (const key of ['modelUsage', 'models']) {
+    if (value[key] && typeof value[key] === 'object' && !Array.isArray(value[key])) {
+      for (const modelId of Object.keys(value[key])) {
+        collectReportedModelCandidates(adapter, modelId, candidates);
+      }
+    }
+  }
+
+  for (const key of ['usage', 'stats', 'metadata', 'responseMetadata', 'result']) {
+    if (value[key] && typeof value[key] === 'object') {
+      collectReportedModelCandidates(adapter, value[key], candidates);
+    }
+  }
+
+  return candidates;
+}
+
+function parseJsonObjectsFromOutput(output) {
+  const objects = [];
+  const lines = String(output || '').split(/\r?\n/);
+  for (const line of lines) {
+    const trimmed = line.trim();
+    if (!trimmed || !trimmed.startsWith('{') || !trimmed.endsWith('}')) {
+      continue;
+    }
+    try {
+      objects.push(JSON.parse(trimmed));
+    } catch {
+      // Ignore non-JSON terminal noise.
+    }
+  }
+  return objects;
+}
+
+function inferEffectiveModelFromOutput(adapter, output) {
+  const source = String(output || '');
+  if (!source.trim()) {
+    return null;
+  }
+
+  const candidates = [];
+  for (const object of parseJsonObjectsFromOutput(source)) {
+    collectReportedModelCandidates(adapter, object, candidates);
+  }
+
+  const regexes = [
+    /"model"\s*:\s*"([^"]+)"/g,
+    /"model_id"\s*:\s*"([^"]+)"/g,
+    /"modelId"\s*:\s*"([^"]+)"/g,
+    /"modelUsage"\s*:\s*\{\s*"([^"]+)"/g,
+    /"models"\s*:\s*\{\s*"([^"]+)"/g,
+    /\bmodel:\s*([A-Za-z0-9._:@/-]+)/gi,
+    /│\s*model:\s*([A-Za-z0-9._:@/-]+)/gi,
+    /\b([A-Za-z0-9._:-]+\/(?:claude|gemini|qwen|glm|kimi|deepseek|minimax)[A-Za-z0-9._:@/-]*)\b/gi
+  ];
+  for (const regex of regexes) {
+    for (const match of source.matchAll(regex)) {
+      collectReportedModelCandidates(adapter, match[1], candidates);
+    }
+  }
+
+  return candidates.length > 0 ? candidates[candidates.length - 1] : null;
+}
+
+function inferEffectiveReasoningEffortFromOutput(output) {
+  const source = String(output || '');
+  if (!source.trim()) {
+    return null;
+  }
+
+  for (const object of parseJsonObjectsFromOutput(source)) {
+    const candidates = [
+      object?.reasoning_effort,
+      object?.reasoningEffort,
+      object?.effort,
+      object?.model_reasoning_effort,
+      object?.modelReasoningEffort
+    ];
+    for (const candidate of candidates) {
+      const normalized = normalizeReasoningEffort(candidate);
+      if (normalized) {
+        return normalized;
+      }
+    }
+  }
+
+  const uiMatch = source.match(/\b(?:gpt-[\w.-]+|o\d[\w.-]*)\s+(none|minimal|low|medium|high|xhigh)\b/i);
+  return uiMatch ? normalizeReasoningEffort(uiMatch[1]) : null;
+}
+
+function normalizeUsageTokenSum(values = []) {
+  return values.reduce((sum, value) => {
+    const parsed = Number(value);
+    return Number.isFinite(parsed) ? sum + Math.max(0, Math.round(parsed)) : sum;
+  }, 0);
+}
+
+function extractUsageMetadataFromOutput(adapter, output) {
+  const objects = parseJsonObjectsFromOutput(output);
+  for (let index = objects.length - 1; index >= 0; index -= 1) {
+    const object = objects[index];
+    if (!object || typeof object !== 'object' || Array.isArray(object)) {
+      continue;
+    }
+
+    const usage = object.usage && typeof object.usage === 'object' && !Array.isArray(object.usage)
+      ? object.usage
+      : null;
+    const modelUsage = object.modelUsage && typeof object.modelUsage === 'object' && !Array.isArray(object.modelUsage)
+      ? object.modelUsage
+      : null;
+    const modelUsageEntry = modelUsage
+      ? Object.entries(modelUsage).find(([, value]) => value && typeof value === 'object' && !Array.isArray(value))
+      : null;
+
+    if (!usage && !modelUsageEntry) {
+      continue;
+    }
+
+    const modelUsageMetadata = modelUsageEntry
+      ? {
+          model: modelUsageEntry[0],
+          ...modelUsageEntry[1]
+        }
+      : {};
+    const inputTokens = usage?.input_tokens
+      ?? usage?.inputTokens
+      ?? modelUsageMetadata.inputTokens
+      ?? modelUsageMetadata.input_tokens
+      ?? null;
+    const outputTokens = usage?.output_tokens
+      ?? usage?.outputTokens
+      ?? modelUsageMetadata.outputTokens
+      ?? modelUsageMetadata.output_tokens
+      ?? null;
+    const reasoningTokens = usage?.reasoning_tokens
+      ?? usage?.reasoningTokens
+      ?? usage?.reasoning_output_tokens
+      ?? usage?.reasoningOutputTokens
+      ?? modelUsageMetadata.reasoningTokens
+      ?? modelUsageMetadata.reasoning_tokens
+      ?? modelUsageMetadata.reasoningOutputTokens
+      ?? modelUsageMetadata.reasoning_output_tokens
+      ?? null;
+    const cacheCreationInputTokens = usage?.cache_creation_input_tokens
+      ?? usage?.cacheCreationInputTokens
+      ?? modelUsageMetadata.cacheCreationInputTokens
+      ?? modelUsageMetadata.cache_creation_input_tokens
+      ?? null;
+    const cacheReadInputTokens = usage?.cache_read_input_tokens
+      ?? usage?.cacheReadInputTokens
+      ?? modelUsageMetadata.cacheReadInputTokens
+      ?? modelUsageMetadata.cache_read_input_tokens
+      ?? null;
+    const reportedCachedInputTokens = usage?.cached_input_tokens
+      ?? usage?.cachedInputTokens
+      ?? modelUsageMetadata.cachedInputTokens
+      ?? modelUsageMetadata.cached_input_tokens
+      ?? null;
+    const totalTokens = usage?.total_tokens
+      ?? usage?.totalTokens
+      ?? modelUsageMetadata.totalTokens
+      ?? modelUsageMetadata.total_tokens
+      ?? null;
+    const cacheRelatedInputTokens = normalizeUsageTokenSum([cacheCreationInputTokens, cacheReadInputTokens]);
+    // Reasoning tokens are a breakdown of output tokens for Codex/OpenAI-style
+    // usage. Track them separately, but do not double-count them in totals.
+    const computedTotalTokens = totalTokens ?? normalizeUsageTokenSum([
+      inputTokens,
+      outputTokens,
+      cacheCreationInputTokens,
+      cacheReadInputTokens
+    ]);
+
+    return {
+      ...object,
+      adapter,
+      source: 'tracked-run-output',
+      usage: {
+        ...(usage || {}),
+        ...modelUsageMetadata,
+        inputTokens,
+        outputTokens,
+        reasoningTokens,
+        cacheCreationInputTokens,
+        cacheReadInputTokens,
+        cachedInputTokens: reportedCachedInputTokens ?? cacheRelatedInputTokens,
+        totalTokens: computedTotalTokens,
+        costUsd: object.total_cost_usd
+          ?? object.totalCostUsd
+          ?? modelUsageMetadata.costUSD
+          ?? modelUsageMetadata.costUsd
+          ?? null
+      }
+    };
+  }
+
+  return null;
 }
 
 function hasTrackedRunStartMarker(text, runId) {
@@ -424,8 +766,9 @@ function buildClaudeOneShotCommand(message, terminal) {
     `"${escapeForDoubleQuotes(claudePath)}"`
   ];
 
-  if (terminal.model) {
-    args.push('--model', `"${escapeForDoubleQuotes(terminal.model)}"`);
+  const resolvedModel = normalizeBrokerModelAlias('claude-code', terminal.model);
+  if (resolvedModel) {
+    args.push('--model', `"${escapeForDoubleQuotes(resolvedModel)}"`);
   }
 
   args.push(
@@ -482,6 +825,14 @@ function buildCodexOneShotCommand(message, terminal) {
   if (resolvedModel) {
     args.push('-m', resolvedModel);
   }
+  const reasoningEffort = normalizeReasoningEffort(
+    terminal.reasoningEffort
+    || terminal.requestedEffort
+    || terminal.effectiveEffort
+  );
+  if (reasoningEffort) {
+    args.push('-c', `'model_reasoning_effort="${reasoningEffort}"'`);
+  }
   args.push('--full-auto', '--json', '--skip-git-repo-check');
   args.push(`'${escapedPrompt}'`);
 
@@ -509,6 +860,11 @@ function buildQwenOneShotCommand(message, terminal) {
   }
 
   return args.join(' ');
+}
+
+function buildQwenAuthPreflightFailureCommand(reason) {
+  const message = `Qwen provider authentication failed: ${reason || 'Qwen Code is not configured for non-interactive use.'}`;
+  return `printf '%s\\n' '${escapeForSingleQuotes(message)}'; false`;
 }
 
 function buildOpencodeOneShotCommand(message, terminal) {
@@ -688,6 +1044,25 @@ function normalizeLaunchEnvironment(env) {
   return normalized;
 }
 
+function buildBrokerClientEnvironment(options = {}) {
+  const baseUrl = String(options.baseUrl || '').trim();
+  const dataDir = String(options.dataDir || '').trim();
+  const localApiKeyFilePath = String(options.localApiKeyFilePath || '').trim();
+  const env = {};
+
+  if (baseUrl) {
+    env.CLIAGENTS_URL = baseUrl;
+  }
+  if (dataDir) {
+    env.CLIAGENTS_DATA_DIR = dataDir;
+  }
+  if (localApiKeyFilePath) {
+    env.CLIAGENTS_LOCAL_API_KEY_FILE = localApiKeyFilePath;
+  }
+
+  return env;
+}
+
 function buildManagedRootControlPlaneEnv(options = {}) {
   const {
     role = null,
@@ -777,8 +1152,9 @@ const CLI_COMMANDS = {
     args.push('--output-format', 'stream-json');
 
     // Model selection
-    if (options.model) {
-      args.push('--model', options.model);
+    const resolvedModel = normalizeBrokerModelAlias('claude-code', options.model);
+    if (resolvedModel) {
+      args.push('--model', resolvedModel);
     }
 
     if (resumeSessionId) {
@@ -883,8 +1259,13 @@ const CLI_COMMANDS = {
     }
 
     // Model selection
-    if (options.model) {
-      args.push('--model', options.model);
+    const resolvedModel = normalizeBrokerModelAlias('codex-cli', options.model);
+    if (resolvedModel) {
+      args.push('--model', resolvedModel);
+    }
+    const reasoningEffort = normalizeReasoningEffort(options.reasoningEffort || options.effort);
+    if (reasoningEffort) {
+      args.push('-c', `'model_reasoning_effort="${reasoningEffort}"'`);
     }
 
     return wrapManagedRootProviderCommand(args.join(' '), {
@@ -959,6 +1340,13 @@ class PersistentSessionManager extends EventEmitter {
     super();
 
     this.db = options.db || null;
+    this.brokerBaseUrl = String(options.brokerBaseUrl || process.env.CLIAGENTS_URL || '').trim() || null;
+    this.brokerDataDir = String(options.dataDir || process.env.CLIAGENTS_DATA_DIR || '').trim() || null;
+    this.localApiKeyFilePath = String(
+      options.localApiKeyFilePath
+      || process.env.CLIAGENTS_LOCAL_API_KEY_FILE
+      || (this.brokerDataDir ? path.join(this.brokerDataDir, 'local-api-key') : '')
+    ).trim() || null;
     this.tmux = options.tmuxClient || new TmuxClient({
       logDir: options.logDir || path.join(process.cwd(), 'logs'),
       socketPath: options.tmuxSocketPath || null
@@ -978,6 +1366,22 @@ class PersistentSessionManager extends EventEmitter {
     this.modelRoutingService = options.modelRoutingService || getModelRoutingService({
       configPath: options.modelRoutingPath || path.join(process.cwd(), 'config', 'model-routing.json')
     });
+    this.managedRootNotifier = Object.prototype.hasOwnProperty.call(options, 'managedRootNotifier')
+      ? options.managedRootNotifier
+      : createManagedRootNotifierFromEnv();
+    this.managedRootNotificationPollMs = Math.max(
+      Number(options.managedRootNotificationPollMs || process.env.CLIAGENTS_NOTIFY_POLL_MS || DEFAULT_MANAGED_ROOT_NOTIFICATION_POLL_MS),
+      500
+    );
+    this.managedRootNotificationMonitor = null;
+    this.managedRootTmuxHistoryLimit = normalizeTmuxHistoryLimit(
+      options.managedRootTmuxHistoryLimit
+        ?? process.env.CLIAGENTS_MANAGED_ROOT_TMUX_HISTORY_LIMIT
+        ?? process.env.CLIAGENTS_TMUX_HISTORY_LIMIT,
+      DEFAULT_MANAGED_ROOT_TMUX_HISTORY_LIMIT
+    );
+    this.managedRootTmuxAutoTrim = options.managedRootTmuxAutoTrim
+      ?? process.env.CLIAGENTS_MANAGED_ROOT_TMUX_AUTOTRIM !== '0';
 
     // Ensure directories exist
     if (!fs.existsSync(this.logDir)) {
@@ -986,6 +1390,10 @@ class PersistentSessionManager extends EventEmitter {
 
     // Recover terminals from database on startup
     this._recoverFromDatabase();
+
+    if (options.managedRootNotificationMonitor !== false) {
+      this._startManagedRootNotificationMonitor();
+    }
   }
 
   /**
@@ -1028,6 +1436,31 @@ class PersistentSessionManager extends EventEmitter {
         const providerThreadRef = dbTerminal.providerThreadRef || dbTerminal.provider_thread_ref || null;
         const adoptedAt = dbTerminal.adoptedAt || dbTerminal.adopted_at || null;
         const captureMode = dbTerminal.captureMode || dbTerminal.capture_mode || 'raw-tty';
+        const requestedModel = String(
+          dbTerminal.requestedModel
+          || dbTerminal.requested_model
+          || dbTerminal.model
+          || ''
+        ).trim() || null;
+        const effectiveModel = String(
+          dbTerminal.effectiveModel
+          || dbTerminal.effective_model
+          || dbTerminal.model
+          || requestedModel
+          || ''
+        ).trim() || null;
+        const requestedEffort = normalizeReasoningEffort(
+          dbTerminal.requestedEffort
+          || dbTerminal.requested_effort
+          || sessionMetadata?.reasoningEffort
+          || sessionMetadata?.requestedEffort
+          || sessionMetadata?.effort
+        );
+        const effectiveEffort = normalizeReasoningEffort(
+          dbTerminal.effectiveEffort
+          || dbTerminal.effective_effort
+          || requestedEffort
+        );
         const runtimeMetadata = resolveRuntimeHostMetadata({
           ...dbTerminal,
           terminalId,
@@ -1056,6 +1489,12 @@ class PersistentSessionManager extends EventEmitter {
             agentProfile,
             role,
             workDir,
+            model: effectiveModel,
+            requestedModel,
+            effectiveModel,
+            reasoningEffort: requestedEffort,
+            requestedEffort,
+            effectiveEffort,
             logPath: path.join(this.logDir, `${terminalId}.log`),
             status: dbTerminal.status || TerminalStatus.IDLE,
             createdAt: new Date(createdAt),
@@ -1084,6 +1523,7 @@ class PersistentSessionManager extends EventEmitter {
             role: recoveredTerminal.role,
             workDir: recoveredTerminal.workDir,
             model: recoveredTerminal.model || null,
+            reasoningEffort: recoveredTerminal.requestedEffort || null,
             allowedTools: recoveredTerminal.allowedTools || null,
             permissionMode: recoveredTerminal.permissionMode || 'auto',
             rootSessionId: recoveredTerminal.rootSessionId,
@@ -1091,6 +1531,9 @@ class PersistentSessionManager extends EventEmitter {
             sessionKind: recoveredTerminal.sessionKind
           }));
           this.terminals.set(terminalId, recoveredTerminal);
+          this._applyManagedRootTmuxHistoryPolicy(recoveredTerminal, {
+            trim: this.managedRootTmuxAutoTrim
+          });
           recovered++;
         } else {
           // Session no longer exists, mark as orphaned in DB
@@ -1325,19 +1768,226 @@ class PersistentSessionManager extends EventEmitter {
     return messageId;
   }
 
+  _recordRootIoEvent(terminal, event = {}) {
+    if (!terminal || !this.db?.appendRootIoEvent) {
+      return null;
+    }
+
+    const rootSessionId = terminal.rootSessionId || terminal.terminalId;
+    if (!rootSessionId) {
+      return null;
+    }
+
+    const sessionMetadata = terminal.sessionMetadata && typeof terminal.sessionMetadata === 'object'
+      ? terminal.sessionMetadata
+      : {};
+    try {
+      return this.db.appendRootIoEvent({
+        idempotencyKey: event.idempotencyKey || null,
+        rootSessionId,
+        terminalId: terminal.terminalId,
+        runId: event.runId || sessionMetadata.runId || null,
+        taskId: event.taskId || sessionMetadata.taskId || null,
+        taskAssignmentId: event.taskAssignmentId || sessionMetadata.taskAssignmentId || null,
+        roomId: event.roomId || sessionMetadata.roomId || null,
+        discussionId: event.discussionId || sessionMetadata.discussionId || null,
+        traceId: event.traceId || null,
+        eventKind: event.eventKind,
+        source: event.source || 'broker',
+        contentPreview: event.contentPreview,
+        contentFull: event.contentFull,
+        logPath: event.logPath || null,
+        logOffsetStart: event.logOffsetStart ?? null,
+        logOffsetEnd: event.logOffsetEnd ?? null,
+        screenRows: event.screenRows ?? null,
+        screenCols: event.screenCols ?? null,
+        parsedRole: event.parsedRole || null,
+        confidence: event.confidence ?? null,
+        metadata: {
+          adapter: terminal.adapter,
+          role: terminal.role || null,
+          sessionKind: terminal.sessionKind || null,
+          agentProfile: terminal.agentProfile || null,
+          ...(event.metadata || {})
+        },
+        occurredAt: event.occurredAt || Date.now(),
+        recordedAt: event.recordedAt || Date.now(),
+        retentionClass: event.retentionClass || 'raw-bounded'
+      });
+    } catch (error) {
+      console.warn('[SessionManager] Failed to record root IO event:', error.message);
+      return null;
+    }
+  }
+
+  _getRootLogOffsetStart(terminal, logSize) {
+    if (Number.isInteger(terminal._lastRootIoLogOffset)) {
+      return terminal._lastRootIoLogOffset > logSize ? 0 : terminal._lastRootIoLogOffset;
+    }
+
+    let persistedOffset = null;
+    if (typeof this.db?.getLatestRootIoLogOffset === 'function') {
+      persistedOffset = this.db.getLatestRootIoLogOffset({
+        rootSessionId: terminal.rootSessionId || terminal.terminalId,
+        terminalId: terminal.terminalId,
+        logPath: terminal.logPath
+      });
+    }
+
+    const offset = Number.isInteger(persistedOffset) && persistedOffset >= 0
+      ? Math.min(persistedOffset, logSize)
+      : 0;
+    terminal._lastRootIoLogOffset = offset;
+    return offset;
+  }
+
+  _readLogByteRange(terminal, start, end) {
+    if (!terminal?.logPath || !Number.isInteger(start) || !Number.isInteger(end) || end <= start) {
+      return '';
+    }
+
+    try {
+      const length = end - start;
+      const buffer = Buffer.alloc(length);
+      const fd = fs.openSync(terminal.logPath, 'r');
+      try {
+        fs.readSync(fd, buffer, 0, length, start);
+      } finally {
+        fs.closeSync(fd);
+      }
+      return buffer.toString('utf8');
+    } catch {
+      return '';
+    }
+  }
+
+  _recordRootOutputChunk(terminal) {
+    if (!terminal?.logPath || !this.db?.appendRootIoEvent) {
+      return null;
+    }
+
+    let stats = null;
+    try {
+      stats = fs.statSync(terminal.logPath);
+    } catch {
+      return null;
+    }
+
+    const logOffsetStart = this._getRootLogOffsetStart(terminal, stats.size);
+    const logOffsetEnd = stats.size;
+    if (logOffsetEnd <= logOffsetStart) {
+      return null;
+    }
+
+    const storedOffsetStart = Math.max(logOffsetStart, logOffsetEnd - MAX_ROOT_IO_OUTPUT_CHUNK_BYTES);
+    const contentFull = this._readLogByteRange(terminal, storedOffsetStart, logOffsetEnd);
+    if (!contentFull) {
+      terminal._lastRootIoLogOffset = logOffsetEnd;
+      return null;
+    }
+
+    const event = this._recordRootIoEvent(terminal, {
+      idempotencyKey: `output:${terminal.terminalId}:${terminal.logPath}:${logOffsetStart}:${logOffsetEnd}`,
+      eventKind: 'output',
+      source: 'terminal_log',
+      contentPreview: summarizeMessage(stripAnsiCodes(contentFull), 500),
+      contentFull,
+      logPath: terminal.logPath,
+      logOffsetStart,
+      logOffsetEnd,
+      metadata: {
+        source: 'session-manager.getStatus',
+        logByteLength: logOffsetEnd - logOffsetStart,
+        storedLogOffsetStart: storedOffsetStart,
+        storedLogOffsetEnd: logOffsetEnd,
+        truncated: storedOffsetStart > logOffsetStart
+      },
+      retentionClass: 'raw-bounded'
+    });
+
+    if (event) {
+      terminal._lastRootIoLogOffset = logOffsetEnd;
+    }
+    return event;
+  }
+
+  _recordRootOutputSnapshot(terminal, output, options = {}) {
+    if (!terminal || !this.db?.appendRootIoEvent) {
+      return null;
+    }
+
+    const normalizedOutput = this._normalizeInteractiveOutput(output);
+    if (!normalizedOutput) {
+      return null;
+    }
+
+    const outputSha256 = crypto.createHash('sha256').update(normalizedOutput, 'utf8').digest('hex');
+    if (terminal._lastRootIoOutputSha256 === outputSha256) {
+      return null;
+    }
+    terminal._lastRootIoOutputSha256 = outputSha256;
+
+    const maxStoredChars = 4000;
+    const contentFull = normalizedOutput.length > maxStoredChars
+      ? normalizedOutput.slice(-maxStoredChars)
+      : normalizedOutput;
+
+    return this._recordRootIoEvent(terminal, {
+      idempotencyKey: `screen_snapshot:${terminal.terminalId}:${outputSha256}`,
+      eventKind: 'screen_snapshot',
+      source: 'terminal_log',
+      contentPreview: summarizeMessage(normalizedOutput, 500),
+      contentFull,
+      metadata: {
+        source: 'session-manager.getStatus',
+        detectedStatus: options.detectedStatus || null,
+        outputSha256,
+        truncated: normalizedOutput.length > maxStoredChars
+      },
+      retentionClass: 'raw-bounded'
+    });
+  }
+
+  _recordTerminalLiveness(terminal, nextStatus, extra = {}) {
+    if (!terminal || !nextStatus) {
+      return null;
+    }
+
+    const previousStatus = extra.previousStatus || null;
+    const attentionCode = String(extra.attention?.code || '').trim() || null;
+    const runId = terminal.activeRun?.runId || null;
+    return this._recordRootIoEvent(terminal, {
+      idempotencyKey: `liveness:${terminal.terminalId}:${runId || 'session'}:${previousStatus || 'unknown'}:${nextStatus}:${attentionCode || 'none'}`,
+      eventKind: 'liveness',
+      source: 'broker',
+      contentPreview: attentionCode
+        ? `status ${nextStatus}: ${attentionCode}`
+        : `status ${nextStatus}`,
+      metadata: {
+        source: extra.source || 'session-manager.status',
+        previousStatus,
+        nextStatus,
+        runId,
+        attentionCode,
+        attentionMessage: extra.attention?.message || null
+      },
+      retentionClass: 'metadata-indefinite'
+    });
+  }
+
   _syncInteractiveTranscript(terminal, output, nextStatus) {
     if (!this._supportsInteractiveTranscriptSync(terminal)) {
-      return;
+      return null;
     }
 
     const syncState = this._ensureInteractiveTranscriptState(terminal);
     if (!syncState) {
-      return;
+      return null;
     }
 
     const cleanedOutput = this._normalizeInteractiveOutput(output);
     if (!cleanedOutput.trim()) {
-      return;
+      return null;
     }
 
     const isSettledStatus = [
@@ -1347,12 +1997,12 @@ class PersistentSessionManager extends EventEmitter {
     ].includes(nextStatus);
 
     if (!isSettledStatus) {
-      return;
+      return null;
     }
 
     const completedTurn = this._extractLatestCompletedInteractiveTurn(cleanedOutput, terminal.adapter);
     if (!completedTurn) {
-      return;
+      return null;
     }
 
     const insertedUserMessage = this._recordInteractiveTranscriptMessage(terminal, 'user', completedTurn.user);
@@ -1364,6 +2014,12 @@ class PersistentSessionManager extends EventEmitter {
     if (insertedAssistantMessage || this._normalizeMessageContent(completedTurn.assistant) === syncState.latestAssistantContent) {
       syncState.awaitingAssistant = false;
     }
+
+    return {
+      completedTurn,
+      insertedUserMessage,
+      insertedAssistantMessage
+    };
   }
 
   _isShellLikeCommand(command) {
@@ -1460,6 +2116,10 @@ class PersistentSessionManager extends EventEmitter {
         agentProfile: terminal.agentProfile || null,
         role: terminal.role || 'worker',
         model: terminal.model || null,
+        requestedModel: terminal.requestedModel || null,
+        effectiveModel: terminal.effectiveModel || terminal.model || null,
+        requestedEffort: terminal.requestedEffort || null,
+        effectiveEffort: terminal.effectiveEffort || terminal.requestedEffort || null,
         workDir: terminal.workDir || null,
         sessionKind: terminal.sessionKind || 'legacy'
       },
@@ -1492,6 +2152,8 @@ class PersistentSessionManager extends EventEmitter {
         tmuxTarget: `${terminal.sessionName}:${terminal.windowName}`,
         workDir: terminal.workDir || null,
         model: terminal.model || null,
+        requestedModel: terminal.requestedModel || null,
+        effectiveModel: terminal.effectiveModel || terminal.model || null,
         harnessSessionId: terminal.harnessSessionId || null,
         providerThreadRef: terminal.providerThreadRef || null
       },
@@ -1523,6 +2185,8 @@ class PersistentSessionManager extends EventEmitter {
         agentProfile: terminal.agentProfile || null,
         role: terminal.role || 'worker',
         model: terminal.model || null,
+        requestedModel: terminal.requestedModel || null,
+        effectiveModel: terminal.effectiveModel || terminal.model || null,
         workDir: terminal.workDir || null,
         sessionKind: terminal.sessionKind || 'legacy',
         reuseReason: extra.reuseReason || 'compatible-root-session'
@@ -1577,6 +2241,260 @@ class PersistentSessionManager extends EventEmitter {
     }
 
     return Boolean(this.modelRoutingService?.getAdapterPolicy?.(terminal.adapter));
+  }
+
+  _isManagedRootTerminal(terminal) {
+    if (!terminal) {
+      return false;
+    }
+
+    return (
+      terminal.role === 'main'
+      || terminal.sessionKind === 'main'
+      || terminal.sessionMetadata?.managedLaunch === true
+      || terminal.sessionMetadata?.attachMode === 'managed-root-launch'
+    );
+  }
+
+  _getManagedRootTmuxHistoryLimit(terminal) {
+    return this._isManagedRootTerminal(terminal) ? this.managedRootTmuxHistoryLimit : null;
+  }
+
+  _applyManagedRootTmuxHistoryPolicy(terminal, options = {}) {
+    const limit = this._getManagedRootTmuxHistoryLimit(terminal);
+    if (!terminal || !limit || !terminal.sessionName || !terminal.windowName) {
+      return null;
+    }
+
+    try {
+      if (typeof this.tmux.setHistoryLimit === 'function') {
+        this.tmux.setHistoryLimit(terminal.sessionName, terminal.windowName, limit);
+      }
+      if (options.trim === true && typeof this.tmux.clearHistory === 'function') {
+        this.tmux.clearHistory(terminal.sessionName, terminal.windowName);
+      }
+    } catch (error) {
+      console.warn(`[SessionManager] Failed to apply managed root tmux history policy for ${terminal.terminalId}: ${error.message}`);
+      return null;
+    }
+
+    terminal.tmuxHistoryLimit = limit;
+    return limit;
+  }
+
+  trimTerminalTmuxHistory(terminalId, options = {}) {
+    const terminal = this.terminals.get(terminalId);
+    if (!terminal) {
+      return null;
+    }
+
+    const reconciledTerminal = this._reconcileTerminalBacking(terminal);
+    if (!reconciledTerminal) {
+      return null;
+    }
+
+    const limit = this._getManagedRootTmuxHistoryLimit(reconciledTerminal)
+      || normalizeTmuxHistoryLimit(options.historyLimit, this.managedRootTmuxHistoryLimit);
+    if (!limit) {
+      return {
+        terminalId,
+        rootSessionId: reconciledTerminal.rootSessionId || terminalId,
+        trimmed: false,
+        reason: 'tmux_history_limit_disabled'
+      };
+    }
+
+    if (typeof this.tmux.setHistoryLimit === 'function') {
+      this.tmux.setHistoryLimit(reconciledTerminal.sessionName, reconciledTerminal.windowName, limit);
+    }
+    if (typeof this.tmux.clearHistory === 'function') {
+      this.tmux.clearHistory(reconciledTerminal.sessionName, reconciledTerminal.windowName);
+    }
+
+    reconciledTerminal.tmuxHistoryLimit = limit;
+    return {
+      terminalId,
+      rootSessionId: reconciledTerminal.rootSessionId || terminalId,
+      sessionName: reconciledTerminal.sessionName,
+      windowName: reconciledTerminal.windowName,
+      historyLimit: limit,
+      trimmed: true,
+      preserved: ['broker_logs', 'persisted_messages', 'database_records']
+    };
+  }
+
+  trimRootSessionTmuxHistory(rootSessionId, options = {}) {
+    const normalizedRootSessionId = String(rootSessionId || '').trim();
+    if (!normalizedRootSessionId) {
+      return null;
+    }
+
+    const terminals = Array.from(this.terminals.values()).filter((terminal) => (
+      terminal.rootSessionId === normalizedRootSessionId
+      || terminal.terminalId === normalizedRootSessionId
+    ));
+    if (terminals.length === 0) {
+      return null;
+    }
+
+    const managedOnly = options.managedOnly !== false;
+    const results = [];
+    for (const terminal of terminals) {
+      if (managedOnly && !this._isManagedRootTerminal(terminal)) {
+        continue;
+      }
+      const result = this.trimTerminalTmuxHistory(terminal.terminalId, options);
+      if (result) {
+        results.push(result);
+      }
+    }
+
+    return {
+      rootSessionId: normalizedRootSessionId,
+      managedOnly,
+      count: results.length,
+      trimmedCount: results.filter((result) => result.trimmed).length,
+      terminals: results
+    };
+  }
+
+  _startManagedRootNotificationMonitor() {
+    if (this.managedRootNotificationMonitor || !this.managedRootNotifier?.isEnabled?.()) {
+      return;
+    }
+
+    this.managedRootNotificationMonitor = setInterval(() => {
+      for (const terminal of this.terminals.values()) {
+        if (!this._isManagedRootTerminal(terminal)) {
+          continue;
+        }
+        if (terminal.status === 'orphaned' || terminal.destroyed) {
+          continue;
+        }
+        try {
+          this.getStatus(terminal.terminalId);
+        } catch {
+          // Status polling is best-effort; notification failures must not affect the root.
+        }
+      }
+    }, this.managedRootNotificationPollMs);
+
+    if (typeof this.managedRootNotificationMonitor.unref === 'function') {
+      this.managedRootNotificationMonitor.unref();
+    }
+  }
+
+  stopManagedRootNotificationMonitor() {
+    if (!this.managedRootNotificationMonitor) {
+      return;
+    }
+    clearInterval(this.managedRootNotificationMonitor);
+    this.managedRootNotificationMonitor = null;
+  }
+
+  _notifyManagedRootStatusChange(terminal, previousStatus, nextStatus, extra = {}) {
+    if (!this.managedRootNotifier?.isEnabled?.() || !this._isManagedRootTerminal(terminal)) {
+      return;
+    }
+    if (previousStatus !== TerminalStatus.PROCESSING || nextStatus === TerminalStatus.PROCESSING) {
+      return;
+    }
+    if (!this.managedRootNotifier.shouldNotifyStatus?.(nextStatus)) {
+      return;
+    }
+
+    const output = extra.runOutput || extra.output || '';
+    const summary = summarizeTerminalActivity(stripAnsiCodes(output), 220);
+    if (isLikelyManagedRootProgressOnly(summary)) {
+      return;
+    }
+
+    const payload = {
+      type: 'managed_root_status',
+      terminalId: terminal.terminalId,
+      rootSessionId: terminal.rootSessionId || terminal.terminalId,
+      adapter: terminal.adapter,
+      status: nextStatus,
+      previousStatus,
+      model: terminal.effectiveModel || terminal.model || terminal.requestedModel || null,
+      reasoningEffort: terminal.effectiveEffort || terminal.requestedEffort || null,
+      workDir: terminal.workDir || null,
+      originClient: terminal.originClient || null,
+      externalSessionRef: terminal.externalSessionRef || null,
+      providerThreadRef: terminal.providerThreadRef || null,
+      attentionCode: extra.attention?.code || null,
+      attentionMessage: extra.attention?.message || null,
+      summary,
+      occurredAt: new Date().toISOString()
+    };
+
+    this.emit('managed-root-notification', payload);
+    void this.managedRootNotifier.notifyManagedRootStatus(payload).catch((error) => {
+      this.emit('managed-root-notification-error', {
+        terminalId: terminal.terminalId,
+        rootSessionId: payload.rootSessionId,
+        error: error.message
+      });
+    });
+  }
+
+  _notifyManagedRootSettledActivity(terminal, nextStatus, extra = {}) {
+    if (!this.managedRootNotifier?.isEnabled?.() || !this._isManagedRootTerminal(terminal)) {
+      return;
+    }
+    if (extra.previousStatus === TerminalStatus.PROCESSING) {
+      return;
+    }
+    if (!this.managedRootNotifier.shouldNotifyStatus?.(nextStatus)) {
+      return;
+    }
+
+    const insertedAssistantMessage = extra.transcriptSync?.insertedAssistantMessage || null;
+    if (!insertedAssistantMessage) {
+      return;
+    }
+
+    const notificationKey = `${nextStatus}:${insertedAssistantMessage}`;
+    if (terminal._lastManagedRootNotificationKey === notificationKey) {
+      return;
+    }
+    terminal._lastManagedRootNotificationKey = notificationKey;
+
+    const output = extra.runOutput || extra.output || '';
+    const summarySource = extra.transcriptSync?.completedTurn?.assistant || output;
+    const summary = summarizeTerminalActivity(stripAnsiCodes(summarySource), 220);
+    if (isLikelyManagedRootProgressOnly(summary)) {
+      return;
+    }
+
+    const payload = {
+      type: 'managed_root_status',
+      terminalId: terminal.terminalId,
+      rootSessionId: terminal.rootSessionId || terminal.terminalId,
+      adapter: terminal.adapter,
+      status: nextStatus,
+      previousStatus: extra.previousStatus || terminal.status || null,
+      model: terminal.effectiveModel || terminal.model || terminal.requestedModel || null,
+      reasoningEffort: terminal.effectiveEffort || terminal.requestedEffort || null,
+      workDir: terminal.workDir || null,
+      originClient: terminal.originClient || null,
+      externalSessionRef: terminal.externalSessionRef || null,
+      providerThreadRef: terminal.providerThreadRef || null,
+      attentionCode: extra.attention?.code || null,
+      attentionMessage: extra.attention?.message || null,
+      summary,
+      trigger: 'settled_activity',
+      occurredAt: new Date().toISOString()
+    };
+
+    this.emit('managed-root-notification', payload);
+    void this.managedRootNotifier.notifyManagedRootStatus(payload).catch((error) => {
+      this.emit('managed-root-notification-error', {
+        terminalId: terminal.terminalId,
+        rootSessionId: payload.rootSessionId,
+        error: error.message
+      });
+    });
   }
 
   _classifyModelExecutionFailure(terminal, nextStatus, extra = {}) {
@@ -1635,10 +2553,20 @@ class PersistentSessionManager extends EventEmitter {
   }
 
   _applyStatusUpdate(terminal, nextStatus, extra = {}) {
-    if (!terminal || !nextStatus || terminal.status === nextStatus) {
+    if (!terminal || !nextStatus) {
       return nextStatus;
     }
 
+    if (terminal.status === nextStatus) {
+      if ([TerminalStatus.COMPLETED, TerminalStatus.ERROR].includes(nextStatus)) {
+        this._persistTrackedRunUsageFromOutput(terminal, extra.runOutput || terminal.activeRun?.outputText || '', {
+          exitCode: extra.exitCode
+        });
+      }
+      return nextStatus;
+    }
+
+    const previousStatus = terminal.status;
     terminal.status = nextStatus;
     if (Object.prototype.hasOwnProperty.call(extra, 'attention')) {
       terminal.attention = extra.attention || null;
@@ -1646,9 +2574,19 @@ class PersistentSessionManager extends EventEmitter {
     if (this.db) {
       this.db.updateStatus(terminal.terminalId, nextStatus);
     }
+    this._recordTerminalLiveness(terminal, nextStatus, {
+      ...extra,
+      previousStatus
+    });
     this._interruptFatalTrackedRun(terminal, nextStatus);
     this._recordModelExecutionOutcome(terminal, nextStatus, extra);
+    if ([TerminalStatus.COMPLETED, TerminalStatus.ERROR].includes(nextStatus)) {
+      this._persistTrackedRunUsageFromOutput(terminal, extra.runOutput || terminal.activeRun?.outputText || '', {
+        exitCode: extra.exitCode
+      });
+    }
     this.emit('status-change', { terminalId: terminal.terminalId, status: nextStatus });
+    this._notifyManagedRootStatusChange(terminal, previousStatus, nextStatus, extra);
 
     if ([TerminalStatus.COMPLETED, TerminalStatus.ERROR].includes(nextStatus)) {
       this._recordSessionTerminated(terminal, nextStatus, extra);
@@ -1808,6 +2746,174 @@ class PersistentSessionManager extends EventEmitter {
     return this._updateProviderThreadRef(terminal, providerThreadRef);
   }
 
+  _recordEffectiveModelVerification(terminal, effectiveModel, previousModel, options = {}) {
+    if (!terminal || !effectiveModel) {
+      return null;
+    }
+
+    const runId = terminal.activeRun?.runId || null;
+    const requestedModel = String(
+      options.requestedModel
+      || terminal.requestedModel
+      || previousModel
+      || ''
+    ).trim() || null;
+    const changed = Boolean(previousModel && previousModel !== effectiveModel);
+    const requestedModelMatched = !requestedModel || requestedModel === effectiveModel;
+    const stableStepKey = runId ? `run-${runId}-${effectiveModel}` : `model-${effectiveModel}`;
+    return this._recordSessionEvent({
+      rootSessionId: terminal.rootSessionId || terminal.terminalId,
+      sessionId: terminal.terminalId,
+      parentSessionId: terminal.parentSessionId || null,
+      eventType: 'model_verified',
+      originClient: terminal.originClient || 'legacy',
+      idempotencyKey: this._buildSessionEventIdempotencyKey(
+        terminal.rootSessionId || terminal.terminalId,
+        terminal.terminalId,
+        'model_verified',
+        stableStepKey
+      ),
+      payloadSummary: changed
+        ? `${terminal.adapter} effective model changed from ${previousModel} to ${effectiveModel}`
+        : `${terminal.adapter} effective model verified as ${effectiveModel}`,
+      payloadJson: {
+        adapter: terminal.adapter,
+        requestedModel,
+        previousEffectiveModel: previousModel || null,
+        effectiveModel,
+        changed,
+        requestedModelMatched,
+        runId,
+        source: options.source || null
+      },
+      metadata: terminal.sessionMetadata || null
+    });
+  }
+
+  _syncEffectiveModelFromOutput(terminal, output, options = {}) {
+    if (!terminal || !output) {
+      return terminal?.effectiveModel || terminal?.model || null;
+    }
+
+    const effectiveModel = inferEffectiveModelFromOutput(terminal.adapter, output);
+    if (!effectiveModel) {
+      return terminal.effectiveModel || terminal.model || null;
+    }
+
+    const previousModel = String(terminal.effectiveModel || terminal.model || '').trim() || null;
+    const requestedModel = String(terminal.requestedModel || previousModel || '').trim() || null;
+    const verifiedKey = `${terminal.activeRun?.runId || 'session'}:${effectiveModel}`;
+    if (terminal._lastEffectiveModelVerificationKey === verifiedKey) {
+      return terminal.effectiveModel || terminal.model || effectiveModel;
+    }
+    terminal._lastEffectiveModelVerificationKey = verifiedKey;
+
+    if (previousModel !== effectiveModel) {
+      terminal.effectiveModel = effectiveModel;
+      terminal.model = effectiveModel;
+      if (this.db?.touchTerminalMessage) {
+        this.db.touchTerminalMessage(terminal.terminalId, {
+          model: effectiveModel,
+          effectiveModel,
+          requestedModel: terminal.requestedModel || null,
+          timestamp: Date.now()
+        });
+      }
+    } else if (!terminal.effectiveModel) {
+      terminal.effectiveModel = effectiveModel;
+    }
+
+    this._recordEffectiveModelVerification(terminal, effectiveModel, previousModel, {
+      ...options,
+      requestedModel
+    });
+    return effectiveModel;
+  }
+
+  _syncEffectiveReasoningEffortFromOutput(terminal, output) {
+    if (!terminal || !output) {
+      return terminal?.effectiveEffort || terminal?.requestedEffort || null;
+    }
+
+    const effectiveEffort = inferEffectiveReasoningEffortFromOutput(output);
+    if (!effectiveEffort) {
+      return terminal.effectiveEffort || terminal.requestedEffort || null;
+    }
+
+    const previousEffort = terminal.effectiveEffort || terminal.requestedEffort || null;
+    terminal.effectiveEffort = effectiveEffort;
+    if (!terminal.reasoningEffort) {
+      terminal.reasoningEffort = effectiveEffort;
+    }
+
+    if (previousEffort !== effectiveEffort && this.db?.touchTerminalMessage) {
+      this.db.touchTerminalMessage(terminal.terminalId, {
+        model: terminal.model || null,
+        requestedModel: terminal.requestedModel || null,
+        effectiveModel: terminal.effectiveModel || terminal.model || null,
+        requestedEffort: terminal.requestedEffort || null,
+        effectiveEffort,
+        timestamp: Date.now()
+      });
+    }
+
+    return effectiveEffort;
+  }
+
+  _persistTrackedRunUsageFromOutput(terminal, output, options = {}) {
+    if (!terminal || !terminal.activeRun || terminal.activeRun.usagePersisted) {
+      return null;
+    }
+    if (typeof this.db?.addUsageRecordFromMetadata !== 'function') {
+      return null;
+    }
+
+    let metadata = extractUsageMetadataFromOutput(terminal.adapter, output);
+    if (!metadata && terminal.logPath) {
+      metadata = extractUsageMetadataFromOutput(
+        terminal.adapter,
+        this.readLogTail(terminal.terminalId, 20000)
+      );
+    }
+    if (!metadata) {
+      return null;
+    }
+
+    const sessionMetadata = terminal.sessionMetadata && typeof terminal.sessionMetadata === 'object'
+      ? terminal.sessionMetadata
+      : {};
+    const usageMetadata = {
+      ...metadata,
+      taskId: sessionMetadata.taskId || null,
+      taskAssignmentId: sessionMetadata.taskAssignmentId || null,
+      terminalId: terminal.terminalId,
+      rootSessionId: terminal.rootSessionId || terminal.terminalId,
+      runId: terminal.activeRun.runId,
+      requestedEffort: terminal.requestedEffort || null,
+      effectiveEffort: terminal.effectiveEffort || terminal.requestedEffort || null,
+      exitCode: options.exitCode ?? terminal.activeRun.exitCode ?? null
+    };
+    const usageId = this.db.addUsageRecordFromMetadata({
+      rootSessionId: terminal.rootSessionId || terminal.terminalId,
+      terminalId: terminal.terminalId,
+      runId: terminal.activeRun.runId,
+      taskId: sessionMetadata.taskId || null,
+      taskAssignmentId: sessionMetadata.taskAssignmentId || null,
+      participantId: terminal.terminalId,
+      adapter: terminal.adapter,
+      model: terminal.effectiveModel || terminal.model || null,
+      role: sessionMetadata.taskRole || terminal.role || null,
+      sourceConfidence: 'provider_reported',
+      metadata: usageMetadata,
+      createdAt: Date.now()
+    });
+
+    if (usageId) {
+      terminal.activeRun.usagePersisted = true;
+    }
+    return usageId || null;
+  }
+
   _restoreTrackedRunFromPersistence(terminal, output, detector) {
     if (!terminal || terminal.activeRun) {
       return terminal?.activeRun || null;
@@ -1876,7 +2982,14 @@ class PersistentSessionManager extends EventEmitter {
       : (run.baselineOutputLength > 0 && run.baselineOutputLength < outputText.length)
         ? outputText.slice(run.baselineOutputLength)
         : outputText;
+    const setRunOutputText = (value) => {
+      if (value) {
+        run.outputText = value;
+      }
+    };
     this._syncProviderThreadRefFromOutput(terminal, tail, detector);
+    this._syncEffectiveModelFromOutput(terminal, tail, { source: 'tracked-run-output' });
+    this._syncEffectiveReasoningEffortFromOutput(terminal, tail);
     const sawStartMarkerInTail = hasTrackedRunStartMarker(tail, run.runId);
     const exitMatch = matchTrackedRunExitMarker(tail, run.exitMarkerPrefix);
 
@@ -1884,17 +2997,21 @@ class PersistentSessionManager extends EventEmitter {
       const exitCode = Number.parseInt(exitMatch[1], 10);
       run.exitCode = exitCode;
       run.completedAt = new Date();
+      setRunOutputText(tail);
       return exitCode === 0 ? TerminalStatus.COMPLETED : TerminalStatus.ERROR;
     }
 
     const logTail = terminal.logPath ? this.readLogTail(terminal.terminalId, 12000) : '';
     this._syncProviderThreadRefFromOutput(terminal, logTail, detector);
+    this._syncEffectiveModelFromOutput(terminal, logTail, { source: 'tracked-run-log' });
+    this._syncEffectiveReasoningEffortFromOutput(terminal, logTail);
     const sawStartMarkerInLog = hasTrackedRunStartMarker(logTail, run.runId);
     const logExitMatch = matchTrackedRunExitMarker(logTail, run.exitMarkerPrefix);
     if (logExitMatch) {
       const exitCode = Number.parseInt(logExitMatch[1], 10);
       run.exitCode = exitCode;
       run.completedAt = new Date();
+      setRunOutputText([tail, logTail].filter(Boolean).join('\n'));
       return exitCode === 0 ? TerminalStatus.COMPLETED : TerminalStatus.ERROR;
     }
 
@@ -1926,12 +3043,14 @@ class PersistentSessionManager extends EventEmitter {
             run.exitCode = 0;
           }
           run.completedAt = new Date();
+          setRunOutputText([tail, logTail].filter(Boolean).join('\n'));
           return TerminalStatus.COMPLETED;
         }
         if (run.exitCode == null) {
           run.exitCode = 1;
         }
         run.completedAt = new Date();
+        setRunOutputText([tail, logTail].filter(Boolean).join('\n'));
         return run.exitCode !== 0 ? TerminalStatus.ERROR : TerminalStatus.COMPLETED;
       }
       return TerminalStatus.PROCESSING;
@@ -1958,15 +3077,20 @@ class PersistentSessionManager extends EventEmitter {
   }
 
   _buildReuseContext(options = {}) {
+    const metadata = options.sessionMetadata && typeof options.sessionMetadata === 'object'
+      ? options.sessionMetadata
+      : {};
     const parentSessionId = options.parentSessionId || null;
     const normalizedAllowedTools = Array.isArray(options.allowedTools)
       ? [...options.allowedTools].map((tool) => String(tool || '').trim()).filter(Boolean).sort()
       : [];
     const sessionLabel = String(
       options.sessionLabel
-      || options.sessionMetadata?.sessionLabel
+      || metadata.sessionLabel
       || ''
     ).trim() || null;
+    const taskId = String(options.taskId || metadata.taskId || '').trim() || null;
+    const taskAssignmentId = String(options.taskAssignmentId || metadata.taskAssignmentId || '').trim() || null;
 
     return {
       rootSessionId: options.rootSessionId || null,
@@ -1975,10 +3099,13 @@ class PersistentSessionManager extends EventEmitter {
       role: options.role || 'worker',
       workDir: path.resolve(options.workDir || this.workDir),
       model: options.model || null,
+      reasoningEffort: normalizeReasoningEffort(options.reasoningEffort || options.effort),
       sessionKind: deriveControlPlaneSessionKind(options),
       permissionMode: options.permissionMode || 'auto',
       allowedTools: normalizedAllowedTools,
       sessionLabel,
+      taskId,
+      taskAssignmentId,
       systemPromptHash: hashSessionShape(options.systemPrompt || '')
     };
   }
@@ -2056,33 +3183,149 @@ class PersistentSessionManager extends EventEmitter {
     return status === TerminalStatus.IDLE || status === TerminalStatus.COMPLETED;
   }
 
-  _findReusableTerminal(options = {}) {
-    const preferReuse = options.preferReuse ?? !!options.rootSessionId;
-    if (!preferReuse || options.forceFreshSession || !options.rootSessionId) {
-      return null;
+  _describeReuseContextMismatch(candidateContext = {}, requestedContext = {}) {
+    const scalarFields = [
+      ['adapter', 'adapter_mismatch'],
+      ['model', 'model_mismatch'],
+      ['reasoningEffort', 'effort_mismatch'],
+      ['workDir', 'workdir_mismatch'],
+      ['role', 'role_mismatch'],
+      ['agentProfile', 'profile_mismatch'],
+      ['sessionKind', 'session_kind_mismatch'],
+      ['sessionLabel', 'session_label_mismatch'],
+      ['permissionMode', 'permission_mode_mismatch'],
+      ['taskId', 'task_id_mismatch'],
+      ['taskAssignmentId', 'task_assignment_id_mismatch'],
+      ['systemPromptHash', 'system_prompt_mismatch']
+    ];
+
+    for (const [field, reason] of scalarFields) {
+      if ((candidateContext?.[field] || null) !== (requestedContext?.[field] || null)) {
+        return reason;
+      }
     }
 
-    const requestedSignature = this._buildReuseSignature(this._buildReuseContext(options));
+    const candidateTools = JSON.stringify(candidateContext?.allowedTools || []);
+    const requestedTools = JSON.stringify(requestedContext?.allowedTools || []);
+    if (candidateTools !== requestedTools) {
+      return 'tool_policy_mismatch';
+    }
+
+    return null;
+  }
+
+  _buildReuseDecision(options = {}) {
+    const preferReuse = options.preferReuse ?? !!options.rootSessionId;
+    const decision = {
+      preferred: preferReuse === true,
+      selected: false,
+      reason: null,
+      candidateTerminalId: null,
+      requiredNewBinding: false
+    };
+
+    if (!preferReuse) {
+      decision.reason = 'reuse_not_preferred';
+      decision.requiredNewBinding = !!options.rootSessionId;
+      return decision;
+    }
+
+    if (options.forceFreshSession) {
+      decision.reason = 'force_fresh_session';
+      decision.requiredNewBinding = true;
+      return decision;
+    }
+
+    if (!options.rootSessionId) {
+      decision.reason = 'missing_root_session';
+      return decision;
+    }
+
+    const requestedContext = this._buildReuseContext(options);
+    const requestedSignature = this._buildReuseSignature(requestedContext);
+    let shapeMismatchFallback = null;
+    let exactShapeBlockedFallback = null;
+
     for (const terminal of this.terminals.values()) {
       if (!terminal || terminal.rootSessionId !== options.rootSessionId) {
         continue;
       }
-      if (!terminal._reuseSignature || terminal._reuseSignature !== requestedSignature) {
+
+      const mismatchReason = terminal._reuseSignature === requestedSignature
+        ? null
+        : this._describeReuseContextMismatch(terminal._reuseContext || {}, requestedContext);
+      if (mismatchReason) {
+        if (!shapeMismatchFallback) {
+          shapeMismatchFallback = {
+            reason: mismatchReason,
+            candidateTerminalId: terminal.terminalId
+          };
+        }
         continue;
       }
+
+      if (!terminal._reuseSignature) {
+        if (!shapeMismatchFallback) {
+          shapeMismatchFallback = {
+            reason: 'candidate_missing_reuse_context',
+            candidateTerminalId: terminal.terminalId
+          };
+        }
+        continue;
+      }
+
       if (this._isTerminalReserved(terminal)) {
+        if (!exactShapeBlockedFallback) {
+          exactShapeBlockedFallback = {
+            reason: 'candidate_reserved',
+            candidateTerminalId: terminal.terminalId
+          };
+        }
         continue;
       }
 
       const currentStatus = this.getStatus(terminal.terminalId);
       if (!this._isReusableTerminalStatus(currentStatus)) {
+        if (!exactShapeBlockedFallback) {
+          exactShapeBlockedFallback = {
+            reason: `candidate_${currentStatus || 'unknown'}_not_reusable`,
+            candidateTerminalId: terminal.terminalId
+          };
+        }
         continue;
       }
 
-      return terminal;
+      return {
+        ...decision,
+        selected: true,
+        reason: 'matching-root-session-shape',
+        candidateTerminalId: terminal.terminalId,
+        requiredNewBinding: false
+      };
     }
 
-    return null;
+    const fallback = exactShapeBlockedFallback || shapeMismatchFallback || {
+      reason: 'no_compatible_terminal',
+      candidateTerminalId: null
+    };
+    decision.reason = fallback.reason;
+    decision.candidateTerminalId = fallback.candidateTerminalId;
+    decision.requiredNewBinding = true;
+
+    return decision;
+  }
+
+  _findReusableTerminalWithDecision(options = {}) {
+    const reuseDecision = this._buildReuseDecision(options);
+    const terminal = reuseDecision?.selected && reuseDecision.candidateTerminalId
+      ? this.terminals.get(reuseDecision.candidateTerminalId) || null
+      : null;
+
+    return { terminal, reuseDecision };
+  }
+
+  _findReusableTerminal(options = {}) {
+    return this._findReusableTerminalWithDecision(options).terminal;
   }
 
   _getProcessState(terminal) {
@@ -2156,7 +3399,7 @@ class PersistentSessionManager extends EventEmitter {
       return null;
     }
 
-    if (/401 invalid access token|token expired|invalid access token|authentication failed/i.test(output)) {
+    if (/401 invalid access token|token expired|invalid access token|authentication failed|qwen provider authentication failed/i.test(output)) {
       return {
         code: 'auth_expired',
         message: 'Qwen access token is invalid or expired.'
@@ -2294,6 +3537,8 @@ class PersistentSessionManager extends EventEmitter {
       runtime: runtimeMetadata.runtime,
       workDir: terminal.workDir || null,
       model: terminal.model || null,
+      requestedModel: terminal.requestedModel || null,
+      effectiveModel: terminal.effectiveModel || terminal.model || null,
       sessionLabel: terminal.sessionMetadata?.sessionLabel || terminal.sessionLabel || null,
       sessionMetadata: terminal.sessionMetadata || null,
       deferredProviderStart: terminal.deferredProviderStart === true,
@@ -2308,6 +3553,7 @@ class PersistentSessionManager extends EventEmitter {
       attention,
       reused: false,
       reuseReason: null,
+      reuseDecision: null,
       ...extra
     };
   }
@@ -2370,6 +3616,14 @@ class PersistentSessionManager extends EventEmitter {
     }
 
     const reuseReason = options.reuseReason || 'matching-root-session-shape';
+    const reuseDecision = {
+      ...(options.reuseDecision || {}),
+      preferred: true,
+      selected: true,
+      reason: reuseReason,
+      candidateTerminalId: terminal.terminalId,
+      requiredNewBinding: false
+    };
     this._recordSessionResumed(terminal, {
       reuseReason,
       metadata: options.sessionMetadata || terminal.sessionMetadata || null
@@ -2383,7 +3637,8 @@ class PersistentSessionManager extends EventEmitter {
 
     return this._buildTerminalResponse(terminal, {
       reused: true,
-      reuseReason
+      reuseReason,
+      reuseDecision
     });
   }
 
@@ -2401,6 +3656,14 @@ class PersistentSessionManager extends EventEmitter {
     }
 
     const reuseReason = options.reuseReason || 'matching-root-session-shape';
+    const reuseDecision = {
+      ...(options.reuseDecision || {}),
+      preferred: true,
+      selected: true,
+      reason: reuseReason,
+      candidateTerminalId: terminal.terminalId,
+      requiredNewBinding: false
+    };
     this._recordSessionResumed(terminal, {
       reuseReason,
       metadata: options.sessionMetadata || terminal.sessionMetadata || null
@@ -2414,7 +3677,8 @@ class PersistentSessionManager extends EventEmitter {
 
     return this._buildTerminalResponse(terminal, {
       reused: true,
-      reuseReason
+      reuseReason,
+      reuseDecision
     });
   }
 
@@ -2574,6 +3838,7 @@ class PersistentSessionManager extends EventEmitter {
       workDir = this.workDir,
       systemPrompt = null,
       model = null,
+      reasoningEffort = null,
       allowedTools = null,
       sessionLabel = null,
       // Permission mode support (Gap #4 resolution)
@@ -2634,6 +3899,15 @@ class PersistentSessionManager extends EventEmitter {
         throw new Error('Invalid model name: only alphanumeric, dot, dash, underscore, slash, colon, and at-sign allowed (max 100 chars)');
       }
     }
+    const requestedEffort = normalizeReasoningEffort(
+      reasoningEffort
+      || resolvedSessionMetadata.reasoningEffort
+      || resolvedSessionMetadata.requestedEffort
+      || resolvedSessionMetadata.effort
+    );
+    if ((reasoningEffort || resolvedSessionMetadata.reasoningEffort || resolvedSessionMetadata.requestedEffort || resolvedSessionMetadata.effort) && !requestedEffort) {
+      throw new Error('Invalid reasoning effort: expected one of none, minimal, low, medium, high, xhigh');
+    }
 
     // SECURITY: Validate allowedTools if provided (used as CLI arguments)
     if (allowedTools && Array.isArray(allowedTools)) {
@@ -2658,7 +3932,11 @@ class PersistentSessionManager extends EventEmitter {
     if (resolvedSessionKind === 'collaborator' && !isCollaboratorReadyAdapter(adapter)) {
       throw new Error(`Adapter '${adapter}' is not collaborator-ready in the current child-session runtime`);
     }
+    if (resolvedSessionKind === 'collaborator' && !resolvedSessionLabel) {
+      throw new Error('sessionLabel is required for collaborator sessions');
+    }
     const effectiveModel = resolveTerminalModel(adapter, role, resolvedSessionKind, model);
+    const requestedModel = effectiveModel || null;
     const shouldHonorProviderResumeSessionId = (
       recoveredManagedRoot
       || resolvedSessionKind === 'main'
@@ -2680,13 +3958,14 @@ class PersistentSessionManager extends EventEmitter {
       ? String(recoveryMetadata.providerResumeCommand || '').trim() || null
       : null;
 
-    const reusableTerminal = this._findReusableTerminal({
+    const reuseLookup = this._findReusableTerminalWithDecision({
       adapter,
       agentProfile,
       role,
       workDir,
       systemPrompt,
       model: effectiveModel,
+      reasoningEffort: requestedEffort,
       allowedTools,
       sessionLabel: resolvedSessionLabel,
       permissionMode,
@@ -2696,10 +3975,13 @@ class PersistentSessionManager extends EventEmitter {
       preferReuse,
       forceFreshSession
     });
+    const reusableTerminal = reuseLookup.terminal;
+    const reuseDecision = reuseLookup.reuseDecision;
     if (reusableTerminal) {
       const preserveProviderStateOnReuse = resolvedSessionKind === 'main' || resolvedSessionKind === 'collaborator';
       return this._reuseTerminal(reusableTerminal, {
         reuseReason: 'matching-root-session-shape',
+        reuseDecision,
         sessionMetadata: Object.keys(resolvedSessionMetadata).length > 0 ? resolvedSessionMetadata : null,
         resetProviderState: !preserveProviderStateOnReuse
       });
@@ -2783,26 +4065,39 @@ class PersistentSessionManager extends EventEmitter {
       workspaceRoot: workDir,
       sessionMetadata: Object.keys(resolvedSessionMetadata).length > 0 ? resolvedSessionMetadata : null
     });
+    const brokerClientEnv = buildBrokerClientEnvironment({
+      baseUrl: this.brokerBaseUrl,
+      dataDir: this.brokerDataDir,
+      localApiKeyFilePath: this.localApiKeyFilePath
+    });
     const sessionEnv = preserveRichTerminalUi
       ? {
           NO_COLOR: null,
           CI: null,
           ...normalizeLaunchEnvironment(launchEnvironment || resolvedSessionMetadata?.launchEnvironment),
+          ...brokerClientEnv,
           ...managedRootControlPlaneEnv
         }
       : {
           NO_COLOR: '1',
+          ...brokerClientEnv,
           ...managedRootControlPlaneEnv
         };
     const launchGeometry = preserveRichTerminalUi
       ? resolveLaunchGeometry(launchEnvironment || resolvedSessionMetadata?.launchEnvironment)
       : null;
+    const tmuxHistoryLimit = this._getManagedRootTmuxHistoryLimit({
+      role,
+      sessionKind: resolvedSessionKind,
+      sessionMetadata: Object.keys(resolvedSessionMetadata).length > 0 ? resolvedSessionMetadata : null
+    });
 
     this.tmux.createSession(sessionName, windowName, terminalId, {
       workingDir: workDir,
       env: sessionEnv,
       width: launchGeometry?.width || null,
-      height: launchGeometry?.height || null
+      height: launchGeometry?.height || null,
+      historyLimit: tmuxHistoryLimit || null
     });
     if (preserveRichTerminalUi && typeof this.tmux.setSessionStatusVisible === 'function') {
       this.tmux.setSessionStatusVisible(sessionName, false);
@@ -2825,6 +4120,7 @@ class PersistentSessionManager extends EventEmitter {
       role,              // CRITICAL: needed for orchestration mode detection
       systemPrompt,
       model: effectiveModel,
+      reasoningEffort: requestedEffort,
       allowedTools,
       providerSessionId: derivedManagedRootProviderSessionId,
       resumeSessionId: providerResumeSessionId,
@@ -2851,6 +4147,11 @@ class PersistentSessionManager extends EventEmitter {
       role,
       workDir,
       model: effectiveModel,
+      requestedModel,
+      effectiveModel,
+      reasoningEffort: requestedEffort,
+      requestedEffort,
+      effectiveEffort: requestedEffort,
       systemPrompt,
       allowedTools: Array.isArray(allowedTools) ? [...allowedTools] : null,
       permissionMode: effectivePermissionMode,
@@ -2881,6 +4182,7 @@ class PersistentSessionManager extends EventEmitter {
         runtimeHost: RUNTIME_HOSTS.TMUX,
         runtimeFidelity: RUNTIME_FIDELITY.MANAGED
       }),
+      tmuxHistoryLimit,
       deferredProviderStart: shouldDeferProviderStart,
       providerStartState: shouldDeferProviderStart ? 'pending_attach' : 'immediate',
       pendingProviderCommand: shouldDeferProviderStart ? cliCommand : null
@@ -2893,6 +4195,7 @@ class PersistentSessionManager extends EventEmitter {
       workDir,
       systemPrompt,
       model: effectiveModel,
+      reasoningEffort: requestedEffort,
       allowedTools,
       sessionLabel: resolvedSessionLabel,
       permissionMode: effectivePermissionMode,
@@ -2926,6 +4229,10 @@ class PersistentSessionManager extends EventEmitter {
           sessionMetadata: terminal.sessionMetadata,
           harnessSessionId: terminal.harnessSessionId,
           model: terminal.model || null,
+          requestedModel: terminal.requestedModel || null,
+          effectiveModel: terminal.effectiveModel || terminal.model || null,
+          requestedEffort: terminal.requestedEffort || null,
+          effectiveEffort: terminal.effectiveEffort || terminal.requestedEffort || null,
           providerThreadRef: terminal.providerThreadRef,
           adoptedAt: terminal.adoptedAt,
           captureMode: terminal.captureMode,
@@ -2968,7 +4275,9 @@ class PersistentSessionManager extends EventEmitter {
       });
     }
 
-    return this._buildTerminalResponse(terminal);
+    return this._buildTerminalResponse(terminal, {
+      reuseDecision
+    });
   }
 
   /**
@@ -3024,6 +4333,28 @@ class PersistentSessionManager extends EventEmitter {
     const adoptedAt = options.adoptedAt || new Date().toISOString();
     const captureMode = options.captureMode || 'raw-tty';
     const providerThreadRef = options.providerThreadRef || null;
+    const adoptedRequestedModel = normalizeBrokerModelAlias(
+      adapter,
+      options.requestedModel
+      ?? options.requested_model
+      ?? options.model
+      ?? dbTerminal?.requested_model
+      ?? dbTerminal?.model
+      ?? existingTerminal?.requestedModel
+      ?? existingTerminal?.model
+      ?? null
+    );
+    const adoptedEffectiveModel = normalizeBrokerModelAlias(
+      adapter,
+      options.effectiveModel
+      ?? options.effective_model
+      ?? dbTerminal?.effective_model
+      ?? dbTerminal?.model
+      ?? existingTerminal?.effectiveModel
+      ?? existingTerminal?.model
+      ?? adoptedRequestedModel
+      ?? null
+    );
     const runtimeMetadata = resolveRuntimeHostMetadata({
       sessionName,
       windowName,
@@ -3047,7 +4378,9 @@ class PersistentSessionManager extends EventEmitter {
           agentProfile: dbTerminal.agent_profile || dbTerminal.agentProfile || null,
           role: role || dbTerminal.role || 'main',
           workDir,
-          model: options.model || null,
+          model: adoptedEffectiveModel,
+          requestedModel: adoptedRequestedModel,
+          effectiveModel: adoptedEffectiveModel,
           logPath: dbTerminal.log_path || dbTerminal.logPath || logPath,
           status: dbTerminal.status || TerminalStatus.IDLE,
           createdAt: new Date(dbTerminal.created_at || dbTerminal.createdAt || Date.now()),
@@ -3092,7 +4425,9 @@ class PersistentSessionManager extends EventEmitter {
           agentProfile: null,
           role,
           workDir,
-          model: options.model || null,
+          model: adoptedEffectiveModel,
+          requestedModel: adoptedRequestedModel,
+          effectiveModel: adoptedEffectiveModel,
           logPath,
           status: TerminalStatus.IDLE,
           createdAt: new Date(),
@@ -3132,7 +4467,9 @@ class PersistentSessionManager extends EventEmitter {
       terminal.adapter = adapter || terminal.adapter;
       terminal.role = role || terminal.role;
       terminal.workDir = workDir || terminal.workDir;
-      terminal.model = options.model || terminal.model || null;
+      terminal.requestedModel = adoptedRequestedModel || terminal.requestedModel || null;
+      terminal.effectiveModel = adoptedEffectiveModel || terminal.effectiveModel || terminal.model || null;
+      terminal.model = terminal.effectiveModel || terminal.model || null;
       terminal.rootSessionId = rootSessionId;
       terminal.parentSessionId = parentSessionId;
       terminal.sessionKind = sessionKind;
@@ -3151,6 +4488,10 @@ class PersistentSessionManager extends EventEmitter {
       terminal.lastActive = new Date();
     }
 
+    this._applyManagedRootTmuxHistoryPolicy(terminal, {
+      trim: this.managedRootTmuxAutoTrim
+    });
+
     this.tmux.pipePaneToFile(sessionName, windowName, terminal.logPath);
 
     if (this.db) {
@@ -3159,6 +4500,8 @@ class PersistentSessionManager extends EventEmitter {
           adapter: terminal.adapter,
           role: terminal.role,
           model: terminal.model || null,
+          requestedModel: terminal.requestedModel || null,
+          effectiveModel: terminal.effectiveModel || terminal.model || null,
           workDir: terminal.workDir,
           logPath: terminal.logPath,
           rootSessionId: terminal.rootSessionId,
@@ -3198,6 +4541,8 @@ class PersistentSessionManager extends EventEmitter {
             sessionMetadata: terminal.sessionMetadata,
             harnessSessionId: terminal.harnessSessionId,
             model: terminal.model || null,
+            requestedModel: terminal.requestedModel || null,
+            effectiveModel: terminal.effectiveModel || terminal.model || null,
             providerThreadRef: terminal.providerThreadRef,
             adoptedAt: terminal.adoptedAt,
             captureMode: terminal.captureMode,
@@ -3401,7 +4746,10 @@ class PersistentSessionManager extends EventEmitter {
         true
       );
     } else if (isQwenOrchestration) {
-      const qwenCommand = buildQwenOneShotCommand(message, terminal);
+      const qwenAuth = isAdapterAuthenticated('qwen-cli');
+      const qwenCommand = qwenAuth.authenticated
+        ? buildQwenOneShotCommand(message, terminal)
+        : buildQwenAuthPreflightFailureCommand(qwenAuth.reason);
       terminal.messageCount = Number.isInteger(terminal.messageCount) ? terminal.messageCount + 1 : 1;
 
       this.tmux.sendKeys(
@@ -3427,11 +4775,29 @@ class PersistentSessionManager extends EventEmitter {
     }
 
     // Update status
+    const previousStatus = terminal.status;
     terminal.status = TerminalStatus.PROCESSING;
     terminal.lastActive = new Date();
 
     if (this.db) {
       this.db.updateStatus(terminalId, TerminalStatus.PROCESSING);
+      this._recordTerminalLiveness(terminal, TerminalStatus.PROCESSING, {
+        previousStatus,
+        source: 'session-manager.sendInput'
+      });
+
+      this._recordRootIoEvent(terminal, {
+        eventKind: 'input',
+        source: 'broker',
+        contentFull: message,
+        parsedRole: 'user',
+        traceId: options.traceId || null,
+        metadata: {
+          source: 'session-manager.sendInput',
+          inputKind: 'message',
+          ...(options.metadata || {})
+        }
+      });
 
       // Store input message in conversation history
       this.db.addMessage(terminalId, 'user', message, {
@@ -3460,7 +4826,7 @@ class PersistentSessionManager extends EventEmitter {
    * @param {string} terminalId - Terminal ID
    * @param {string} key - Key to send (Enter, Tab, C-c, etc.)
    */
-  sendSpecialKey(terminalId, key) {
+  sendSpecialKey(terminalId, key, options = {}) {
     const terminal = this.terminals.get(terminalId);
     if (!terminal) {
       throw new Error(`Terminal not found: ${terminalId}`);
@@ -3468,6 +4834,19 @@ class PersistentSessionManager extends EventEmitter {
 
     this.tmux.sendSpecialKey(terminal.sessionName, terminal.windowName, key);
     terminal.lastActive = new Date();
+    this._recordRootIoEvent(terminal, {
+      eventKind: 'input',
+      source: 'broker',
+      contentPreview: `[special-key] ${key}`,
+      parsedRole: 'user',
+      traceId: options.traceId || null,
+      metadata: {
+        source: 'session-manager.sendSpecialKey',
+        inputKind: 'special_key',
+        key,
+        ...(options.metadata || {})
+      }
+    });
   }
 
   /**
@@ -3531,29 +4910,50 @@ class PersistentSessionManager extends EventEmitter {
     const output = this.getOutput(terminalId);
     // Use status detector if available
     const detector = this.statusDetectors.get(reconciledTerminal.adapter);
+    this._syncEffectiveModelFromOutput(reconciledTerminal, output, { source: 'terminal-output' });
+    this._syncEffectiveReasoningEffortFromOutput(reconciledTerminal, output);
     this._restoreTrackedRunFromPersistence(reconciledTerminal, output, detector);
     const trackedRunStatus = this._detectTrackedRunStatus(reconciledTerminal, output, detector);
     const attention = this._getTerminalAttention(reconciledTerminal, { output });
+    this._recordRootOutputChunk(reconciledTerminal);
     if (trackedRunStatus) {
-      this._syncInteractiveTranscript(reconciledTerminal, output, trackedRunStatus);
+      this._recordRootOutputSnapshot(reconciledTerminal, output, { detectedStatus: trackedRunStatus });
+      const previousStatus = reconciledTerminal.status;
+      const transcriptSync = this._syncInteractiveTranscript(reconciledTerminal, output, trackedRunStatus);
       this._applyStatusUpdate(reconciledTerminal, trackedRunStatus, {
         exitCode: reconciledTerminal.activeRun?.exitCode ?? null,
-        attention
+        attention,
+        runOutput: reconciledTerminal.activeRun?.outputText || output
+      });
+      this._notifyManagedRootSettledActivity(reconciledTerminal, trackedRunStatus, {
+        previousStatus,
+        attention,
+        runOutput: reconciledTerminal.activeRun?.outputText || output,
+        transcriptSync
       });
       return trackedRunStatus;
     }
 
     if (detector) {
       const detectedStatus = detector.detectStatus(output);
-      this._syncInteractiveTranscript(reconciledTerminal, output, detectedStatus);
+      this._recordRootOutputSnapshot(reconciledTerminal, output, { detectedStatus });
+      const previousStatus = reconciledTerminal.status;
+      const transcriptSync = this._syncInteractiveTranscript(reconciledTerminal, output, detectedStatus);
 
       // Update cached status
-      this._applyStatusUpdate(reconciledTerminal, detectedStatus, { attention });
+      this._applyStatusUpdate(reconciledTerminal, detectedStatus, { attention, output });
+      this._notifyManagedRootSettledActivity(reconciledTerminal, detectedStatus, {
+        previousStatus,
+        attention,
+        output,
+        transcriptSync
+      });
 
       return detectedStatus;
     }
 
     // Return cached status if no detector
+    this._recordRootOutputSnapshot(reconciledTerminal, output, { detectedStatus: reconciledTerminal.status });
     return reconciledTerminal.status;
   }
 
@@ -4056,6 +5456,9 @@ module.exports = {
   resolveTerminalStartupDelayMs,
   extractProviderThreadRefFromOutput,
   normalizeProviderThreadRef,
+  inferEffectiveModelFromOutput,
+  inferEffectiveReasoningEffortFromOutput,
+  extractUsageMetadataFromOutput,
   buildGeminiOneShotRunnerCommand,
   buildClaudeOneShotCommand,
   buildCodexOneShotCommand,

@@ -35,6 +35,8 @@ class FakeTmuxClient {
     this.createCalls = [];
     this.resizeCalls = [];
     this.statusVisibilityCalls = [];
+    this.historyLimitCalls = [];
+    this.clearHistoryCalls = [];
     this.respawnCalls = [];
     this.specialKeys = [];
     this.existingSessions = new Set();
@@ -70,6 +72,16 @@ class FakeTmuxClient {
 
   setSessionStatusVisible(sessionName, visible) {
     this.statusVisibilityCalls.push({ sessionName, visible });
+    return true;
+  }
+
+  setHistoryLimit(sessionName, windowName, historyLimit) {
+    this.historyLimitCalls.push({ sessionName, windowName, historyLimit });
+    return true;
+  }
+
+  clearHistory(sessionName, windowName) {
+    this.clearHistoryCalls.push({ sessionName, windowName });
     return true;
   }
 
@@ -154,6 +166,9 @@ async function run() {
     const manager = new PersistentSessionManager({
       db,
       tmuxClient: fakeTmux,
+      dataDir: rootDir,
+      localApiKeyFilePath: path.join(rootDir, 'local-api-key'),
+      brokerBaseUrl: 'http://127.0.0.1:4999',
       logDir,
       workDir: rootDir,
       sessionGraphWritesEnabled: true,
@@ -191,6 +206,11 @@ async function run() {
     assert.strictEqual(persistedTerminal.session_kind, 'reviewer');
     assert.strictEqual(persistedTerminal.origin_client, 'mcp');
     assert.strictEqual(persistedTerminal.external_session_ref, 'opencode:thread-42');
+    const workerCreateCall = fakeTmux.createCalls.find((call) => call.terminalId === terminal.terminalId);
+    assert.strictEqual(workerCreateCall.options.env.CLIAGENTS_URL, 'http://127.0.0.1:4999');
+    assert.strictEqual(workerCreateCall.options.env.CLIAGENTS_DATA_DIR, rootDir);
+    assert.strictEqual(workerCreateCall.options.env.CLIAGENTS_LOCAL_API_KEY_FILE, path.join(rootDir, 'local-api-key'));
+    assert.strictEqual(workerCreateCall.options.historyLimit, null, 'worker sessions should not get managed-root tmux history policy');
 
     const recoveredRoot = await manager.createTerminal({
       adapter: 'codex-cli',
@@ -209,12 +229,22 @@ async function run() {
       }
     });
     const recoveredHistory = fakeTmux.getHistory(recoveredRoot.sessionName, recoveredRoot.windowName);
+    const recoveredCreateCall = fakeTmux.createCalls.find((call) => call.terminalId === recoveredRoot.terminalId);
+    assert.strictEqual(recoveredCreateCall.options.historyLimit, 5000, 'managed roots should get bounded tmux history by default');
     assert(recoveredHistory.includes('codex resume 019d94a6-2cd8-7742-8e4e-123456789abc'), 'expected recovered root to launch Codex in resume mode');
     assert(fakeTmux.respawnCalls.some((call) => call.sessionName === recoveredRoot.sessionName),
       'expected managed Codex root startup to respawn the pane directly');
     assert.strictEqual(recoveredRoot.providerThreadRef, '019d94a6-2cd8-7742-8e4e-123456789abc');
     const persistedRecoveredRoot = db.getTerminal(recoveredRoot.terminalId);
     assert.strictEqual(persistedRecoveredRoot.provider_thread_ref, '019d94a6-2cd8-7742-8e4e-123456789abc');
+
+    const trimResult = manager.trimTerminalTmuxHistory(recoveredRoot.terminalId);
+    assert.strictEqual(trimResult.trimmed, true);
+    assert.strictEqual(trimResult.historyLimit, 5000);
+    assert(fakeTmux.historyLimitCalls.some((call) => call.sessionName === recoveredRoot.sessionName && call.historyLimit === 5000),
+      'expected explicit trim to enforce managed-root history limit');
+    assert(fakeTmux.clearHistoryCalls.some((call) => call.sessionName === recoveredRoot.sessionName),
+      'expected explicit trim to clear tmux scrollback');
 
     const claudeRootSessionId = 'bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb';
     const claudeProviderThreadRef = 'bbbbbbbb-bbbb-bbbb-bbbb-bbbbbbbbbbbb';
@@ -308,6 +338,16 @@ async function run() {
       geometryCreateCall.options.env.CLIAGENTS_MANAGED_ROOT,
       '1',
       'expected managed root launch to mark the provider environment as broker-managed'
+    );
+    assert.strictEqual(
+      geometryCreateCall.options.env.CLIAGENTS_URL,
+      'http://127.0.0.1:4999',
+      'expected managed roots to inherit the broker URL for nested cliagents calls'
+    );
+    assert.strictEqual(
+      geometryCreateCall.options.env.CLIAGENTS_LOCAL_API_KEY_FILE,
+      path.join(rootDir, 'local-api-key'),
+      'expected managed roots to inherit the local-token file path without copying the token'
     );
     assert(
       fakeTmux.resizeCalls.some((call) => (
@@ -751,18 +791,24 @@ async function run() {
     const liveTerminal = manager.terminals.get(terminal.terminalId);
     const codexWorkerThreadRef = 'thread-codex-123';
     assert.strictEqual(liveTerminal.status, TerminalStatus.PROCESSING);
+    let livenessEvents = db.listRootIoEvents({
+      terminalId: terminal.terminalId,
+      eventKind: 'liveness',
+      limit: 10
+    });
+    assert(
+      livenessEvents.some((event) => event.metadata.nextStatus === TerminalStatus.PROCESSING && event.metadata.source === 'session-manager.sendInput'),
+      'sendInput should persist a processing liveness root IO event'
+    );
     assert(liveTerminal.activeRun, 'tracked one-shot run should be active');
 
-    fs.writeFileSync(
-      liveTerminal.logPath,
-      [
-        liveTerminal.activeRun.startMarker,
-        `{"type":"thread.started","thread_id":"${codexWorkerThreadRef}"}`,
-        '{"type":"item.completed","item":{"type":"agent_message","text":"Running review..."}}',
-        `${liveTerminal.activeRun.exitMarkerPrefix}0`
-      ].join('\n'),
-      'utf8'
-    );
+    const codexWorkerLog = [
+      liveTerminal.activeRun.startMarker,
+      `{"type":"thread.started","thread_id":"${codexWorkerThreadRef}"}`,
+      '{"type":"item.completed","item":{"type":"agent_message","text":"Running review..."}}',
+      `${liveTerminal.activeRun.exitMarkerPrefix}0`
+    ].join('\n');
+    fs.writeFileSync(liveTerminal.logPath, codexWorkerLog, 'utf8');
     fakeTmux.setHistory(
       liveTerminal.sessionName,
       liveTerminal.windowName,
@@ -773,6 +819,50 @@ async function run() {
     const status = manager.getStatus(terminal.terminalId);
     assert.strictEqual(status, TerminalStatus.COMPLETED);
     assert.strictEqual(liveTerminal.providerThreadRef, codexWorkerThreadRef);
+    livenessEvents = db.listRootIoEvents({
+      terminalId: terminal.terminalId,
+      eventKind: 'liveness',
+      limit: 10
+    });
+    assert(
+      livenessEvents.some((event) => event.metadata.nextStatus === TerminalStatus.COMPLETED && event.metadata.source === 'session-manager.status'),
+      'status transition should persist a completed liveness root IO event'
+    );
+    const screenSnapshots = db.listRootIoEvents({
+      terminalId: terminal.terminalId,
+      eventKind: 'screen_snapshot',
+      limit: 10
+    });
+    assert(
+      screenSnapshots.some((event) => event.contentFull.includes('Running review') && event.metadata.source === 'session-manager.getStatus'),
+      'getStatus should persist a deduplicated screen snapshot root IO event'
+    );
+    const logOutputEvents = db.listRootIoEvents({
+      terminalId: terminal.terminalId,
+      eventKind: 'output',
+      limit: 10
+    });
+    const codexOutputEvent = logOutputEvents.find((event) => (
+      event.logPath === liveTerminal.logPath
+      && event.logOffsetStart === 0
+      && event.logOffsetEnd === Buffer.byteLength(codexWorkerLog, 'utf8')
+      && event.contentFull.includes('Running review')
+    ));
+    assert(codexOutputEvent, 'getStatus should persist terminal-log output chunks with byte offsets');
+    assert.strictEqual(codexOutputEvent.metadata.storedLogOffsetEnd, Buffer.byteLength(codexWorkerLog, 'utf8'));
+    const screenSnapshotCount = screenSnapshots.length;
+    const logOutputEventCount = logOutputEvents.length;
+    assert.strictEqual(manager.getStatus(terminal.terminalId), TerminalStatus.COMPLETED);
+    assert.strictEqual(
+      db.listRootIoEvents({ terminalId: terminal.terminalId, eventKind: 'screen_snapshot', limit: 10 }).length,
+      screenSnapshotCount,
+      'unchanged getStatus output should not duplicate screen snapshot root IO events'
+    );
+    assert.strictEqual(
+      db.listRootIoEvents({ terminalId: terminal.terminalId, eventKind: 'output', limit: 10 }).length,
+      logOutputEventCount,
+      'unchanged getStatus output should not duplicate terminal-log output root IO events'
+    );
 
     const persistedCodexWorker = db.getTerminal(terminal.terminalId);
     assert.strictEqual(persistedCodexWorker.provider_thread_ref, codexWorkerThreadRef);

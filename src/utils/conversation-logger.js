@@ -7,6 +7,7 @@
 
 const fs = require('fs');
 const path = require('path');
+const { redactSecretsInText, redactSecretObject } = require('../security/secret-redaction');
 
 // Logs directory - relative to project root
 const LOGS_DIR = path.join(__dirname, '../../logs');
@@ -39,36 +40,64 @@ function logConversation(sessionId, adapter, data) {
   const logPath = getLogFilePath(sessionId, adapter);
   const latestPath = getLatestLogPath(adapter);
 
-  const entry = {
-    timestamp,
-    sessionId,
-    adapter,
-    ...data
-  };
+  const normalizedData = data && typeof data === 'object' ? data : {};
+  const sanitizedData = { ...normalizedData };
+  let redactionMatches = 0;
+  let redactionApplied = false;
+
+  if (normalizedData.prompt) {
+    const redacted = redactSecretsInText(normalizedData.prompt);
+    sanitizedData.prompt = redacted.content;
+    redactionMatches += redacted.reasons.length;
+    redactionApplied = redactionApplied || redacted.redacted;
+  }
+
+  if (normalizedData.response) {
+    const redacted = redactSecretsInText(normalizedData.response);
+    sanitizedData.response = redacted.content;
+    redactionMatches += redacted.reasons.length;
+    redactionApplied = redactionApplied || redacted.redacted;
+  }
+
+  if (normalizedData.error) {
+    const redacted = redactSecretsInText(normalizedData.error);
+    sanitizedData.error = redacted.content;
+    redactionMatches += redacted.reasons.length;
+    redactionApplied = redactionApplied || redacted.redacted;
+  }
+
+  if (normalizedData.stats !== undefined) {
+    sanitizedData.stats = redactSecretObject(normalizedData.stats);
+  }
 
   const separator = '\n' + '='.repeat(80) + '\n';
   let logText = separator;
   logText += `[${timestamp}] ${adapter.toUpperCase()} - Session: ${sessionId}\n`;
   logText += '-'.repeat(80) + '\n';
 
-  if (data.prompt) {
-    logText += `PROMPT (${data.prompt.length} chars):\n`;
-    logText += data.prompt + '\n';
+  if (sanitizedData.prompt) {
+    logText += `PROMPT (${sanitizedData.prompt.length} chars):\n`;
+    logText += sanitizedData.prompt + '\n';
     logText += '-'.repeat(80) + '\n';
   }
 
-  if (data.response) {
-    logText += `RESPONSE (${data.response.length} chars):\n`;
-    logText += data.response + '\n';
+  if (sanitizedData.response) {
+    logText += `RESPONSE (${sanitizedData.response.length} chars):\n`;
+    logText += sanitizedData.response + '\n';
   }
 
-  if (data.error) {
-    logText += `ERROR: ${data.error}\n`;
+  if (sanitizedData.error) {
+    logText += `ERROR: ${sanitizedData.error}\n`;
   }
 
-  if (data.stats) {
+  if (sanitizedData.stats) {
     logText += '-'.repeat(80) + '\n';
-    logText += `STATS: ${JSON.stringify(data.stats)}\n`;
+    logText += `STATS: ${JSON.stringify(sanitizedData.stats)}\n`;
+  }
+
+  if (redactionApplied) {
+    logText += '-'.repeat(80) + '\n';
+    logText += `REDACTION: applied (${redactionMatches} match${redactionMatches === 1 ? '' : 'es'})\n`;
   }
 
   // Append to session-specific log

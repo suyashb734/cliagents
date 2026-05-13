@@ -29,13 +29,30 @@ const {
 const { getChildSessionSupport } = require('../orchestration/child-session-support');
 const { AdapterReadinessService } = require('../orchestration/adapter-readiness');
 const { prepareTaskAssignmentWorktree } = require('../orchestration/task-worktree');
+const {
+  buildAssignmentBranchPlan,
+  integrateAssignmentBranch,
+  normalizeWritePaths,
+  readBranchSnapshot,
+  readDiffStats,
+  shouldAllocateBranch
+} = require('../orchestration/assignment-branching');
 const { sendMessage, broadcastMessage } = require('../orchestration/send-message');
+const {
+  createBrowserPerceptionEngineClient,
+  BrowserPerceptionEngineError,
+  FAILURE_CLASSES: BPE_FAILURE_CLASSES
+} = require('../orchestration/browser-perception-engine');
 const { getAgentProfiles, resolveProfile } = require('../services/agent-profiles');
+const { deriveSessionState } = require('../services/session-peek');
 const { createMemoryRouter } = require('../routes/memory');
 const { isAdapterAuthenticated } = require('../utils/adapter-auth');
+const { redactSecretsInText } = require('../security/secret-redaction');
 const {
   RUNTIME_HOSTS,
   RUNTIME_FIDELITY,
+  SESSION_CONTROL_MODES,
+  normalizeSessionControlMode,
   normalizeRuntimeCapabilities,
   resolveRuntimeHostMetadata
 } = require('../runtime/host-model');
@@ -55,8 +72,17 @@ function createOrchestrationRouter(context) {
   const runLedgerWritesEnabled = process.env.RUN_LEDGER_ENABLED === '1';
   const runLedgerReadsEnabled = process.env.RUN_LEDGER_READS_ENABLED === '1';
   const requireRootAttach = process.env.CLIAGENTS_REQUIRE_ROOT_ATTACH === '1';
+  const dispatchStaleMs = Math.max(
+    1000,
+    Number.parseInt(process.env.CLIAGENTS_DISPATCH_STALE_MS || '', 10) || 10 * 60 * 1000
+  );
   const runLedger = runLedgerWritesEnabled || runLedgerReadsEnabled ? new RunLedgerService(db) : null;
   const providerSessionRegistry = getProviderSessionRegistry();
+  const bpeClient = createBrowserPerceptionEngineClient({
+    baseUrl: context.browserPerceptionEngine?.baseUrl,
+    apiKey: context.browserPerceptionEngine?.apiKey,
+    defaultTimeoutMs: context.browserPerceptionEngine?.defaultTimeoutMs
+  });
   const adapterReadinessService = new AdapterReadinessService({
     db,
     apiSessionManager,
@@ -97,6 +123,40 @@ function createOrchestrationRouter(context) {
       return false;
     }
     return fallback;
+  }
+
+  function parseOptionalTimestamp(value, paramName) {
+    if (value === undefined || value === null || value === '') {
+      return { provided: false, value: null };
+    }
+
+    if (typeof value === 'number' && Number.isFinite(value)) {
+      return { provided: true, value };
+    }
+
+    const text = String(value).trim();
+    if (!text) {
+      return { provided: false, value: null };
+    }
+
+    const numeric = Number(text);
+    if (Number.isFinite(numeric)) {
+      return { provided: true, value: numeric };
+    }
+
+    const parsedDate = Date.parse(text);
+    if (Number.isFinite(parsedDate)) {
+      return { provided: true, value: parsedDate };
+    }
+
+    return {
+      provided: true,
+      error: {
+        code: 'invalid_parameter',
+        message: `${paramName} must be a Unix timestamp in milliseconds or an ISO timestamp`,
+        param: paramName
+      }
+    };
   }
 
   function parseSessionMetadataValue(value) {
@@ -208,7 +268,25 @@ function createOrchestrationRouter(context) {
       adapter: liveTerminal?.adapter || terminalRow?.adapter || null,
       role: liveTerminal?.role || terminalRow?.role || null,
       agentProfile: terminalRow?.agent_profile || terminalRow?.agentProfile || null,
+      model: liveTerminal?.model || terminalRow?.model || null,
+      requestedModel: liveTerminal?.requestedModel
+        || terminalRow?.requested_model
+        || terminalRow?.requestedModel
+        || null,
+      effectiveModel: liveTerminal?.effectiveModel
+        || terminalRow?.effective_model
+        || terminalRow?.effectiveModel
+        || liveTerminal?.model
+        || terminalRow?.model
+        || null,
       status: liveTerminal?.taskState || liveTerminal?.status || terminalRow?.status || null,
+      sessionControlMode: normalizeSessionControlMode(
+        liveTerminal?.sessionControlMode
+          || liveTerminal?.session_control_mode
+          || terminalRow?.session_control_mode
+          || terminalRow?.sessionControlMode,
+        SESSION_CONTROL_MODES.OPERATOR
+      ),
       lastActive: liveTerminal?.lastActive || terminalRow?.last_active || terminalRow?.lastActive || null,
       providerThreadRefPresent: Boolean(providerThreadRef),
       runtimeHost: runtimeMetadata.runtimeHost,
@@ -241,6 +319,18 @@ function createOrchestrationRouter(context) {
     }
 
     return resolveRuntimeHostMetadata(terminalRow);
+  }
+
+  function getTerminalSessionControlMode(terminalId) {
+    const liveTerminal = getLiveTerminal(terminalId);
+    const terminalRow = liveTerminal || (typeof db?.getTerminal === 'function' ? db.getTerminal(terminalId) : null);
+    return normalizeSessionControlMode(
+      liveTerminal?.sessionControlMode
+        || liveTerminal?.session_control_mode
+        || terminalRow?.session_control_mode
+        || terminalRow?.sessionControlMode,
+      SESSION_CONTROL_MODES.OPERATOR
+    );
   }
 
   function getLiveOutput(terminalId, options = {}) {
@@ -299,6 +389,313 @@ function createOrchestrationRouter(context) {
       eventLimit: 120,
       terminalLimit: 200
     });
+  }
+
+  function validateTerminalRemoteControlAccess(terminalId, options = {}) {
+    const inputKind = String(options.inputKind || 'message').trim().toLowerCase();
+    const rootSnapshot = resolveTerminalRootAccess(terminalId);
+    const runtimeMetadata = getTerminalRuntimeMetadata(terminalId);
+    const requiredCapability = inputKind === 'approval' || inputKind === 'denial'
+      ? 'approve_permission'
+      : 'send_input';
+
+    if (runtimeMetadata) {
+      const capabilities = runtimeMetadata.runtimeCapabilities || [];
+      const supported = capabilities.includes(requiredCapability)
+        || (requiredCapability === 'approve_permission' && capabilities.includes('send_input'));
+      if (!supported) {
+        return {
+          ok: false,
+          status: 403,
+          body: {
+            error: {
+              code: 'runtime_capability_unsupported',
+              message: `Runtime host ${runtimeMetadata.runtimeHost} does not support ${requiredCapability} for terminal ${terminalId}.`,
+              terminalId,
+              runtimeHost: runtimeMetadata.runtimeHost,
+              requiredCapability,
+              runtimeCapabilities: capabilities
+            }
+          }
+        };
+      }
+    }
+
+    const sessionControlMode = getTerminalSessionControlMode(terminalId);
+    if (sessionControlMode === SESSION_CONTROL_MODES.OBSERVER) {
+      return {
+        ok: false,
+        status: 403,
+        body: {
+          error: {
+            code: 'session_control_observer',
+            message: `Terminal ${terminalId} is in observer mode and cannot accept remote input.`,
+            terminalId,
+            sessionControlMode
+          }
+        }
+      };
+    }
+
+    if (rootSnapshot?.rootMode === 'attached') {
+      const terminalSession = (rootSnapshot.sessions || []).find(s => s.sessionId === terminalId);
+      const liveTerminal = getLiveTerminal(terminalId);
+      const isRoot = terminalId === rootSnapshot.rootSessionId;
+      const liveRootSessionId = liveTerminal?.rootSessionId || liveTerminal?.root_session_id || null;
+      const liveParentSessionId = liveTerminal?.parentSessionId || liveTerminal?.parent_session_id || null;
+      const dbParentSessionId = terminalSession?.parentSessionId || terminalSession?.parent_session_id || null;
+      const dbOriginClient = String(terminalSession?.originClient || terminalSession?.origin_client || '').trim().toLowerCase();
+      const liveOriginClient = String(liveTerminal?.originClient || liveTerminal?.origin_client || '').trim().toLowerCase();
+      const dbSessionKind = String(terminalSession?.sessionKind || terminalSession?.session_kind || '').trim().toLowerCase();
+      const liveSessionKind = String(liveTerminal?.sessionKind || liveTerminal?.session_kind || '').trim().toLowerCase();
+      const originClientsMatch = Boolean(dbOriginClient) && Boolean(liveOriginClient) && dbOriginClient === liveOriginClient;
+      const hasBrokerChildRole = Boolean(terminalSession?.agentProfile || terminalSession?.agent_profile || liveTerminal?.agentProfile)
+        || ATTACHED_ROOT_BROKER_CHILD_SESSION_KINDS.has(dbSessionKind || liveSessionKind);
+      const isBrokerOwnedChild = Boolean(terminalSession && liveTerminal)
+        && liveRootSessionId === rootSnapshot.rootSessionId
+        && liveParentSessionId === rootSnapshot.rootSessionId
+        && dbParentSessionId === rootSnapshot.rootSessionId
+        && originClientsMatch
+        && dbOriginClient !== 'legacy'
+        && hasBrokerChildRole
+        && (!dbSessionKind || !liveSessionKind || dbSessionKind === liveSessionKind);
+
+      if (isRoot || !isBrokerOwnedChild) {
+        return {
+          ok: false,
+          status: 403,
+          body: {
+            error: {
+              code: 'root_read_only',
+              message: `Root session ${rootSnapshot.rootSessionId} is attached and read-only. Remote execution requires a managed or adopted root.`,
+              rootSessionId: rootSnapshot.rootSessionId,
+              rootMode: rootSnapshot.rootMode,
+              terminalId
+            }
+          }
+        };
+      }
+    }
+
+    return {
+      ok: true,
+      rootSnapshot,
+      runtimeMetadata,
+      sessionControlMode
+    };
+  }
+
+  function buildTerminalInputOwnershipDeniedBody() {
+    return {
+      error: {
+        code: 'terminal_input_forbidden',
+        message: 'Terminal input access denied.'
+      }
+    };
+  }
+
+  function auditTerminalInputOwnershipDenied(details = {}) {
+    const payload = {
+      terminalId: details.terminalId || null,
+      callerRootSessionId: details.callerRootSessionId || null,
+      ownerRootSessionId: details.ownerRootSessionId || null,
+      reason: details.reason || 'forbidden'
+    };
+    console.warn('[orchestration][terminal-input-ownership-denied]', JSON.stringify(payload));
+  }
+
+  function denyTerminalInputOwnership(res, details = {}) {
+    auditTerminalInputOwnershipDenied(details);
+    res.status(403).json(buildTerminalInputOwnershipDeniedBody());
+    return null;
+  }
+
+  function resolveTerminalOwnerContext(terminalId) {
+    if (!terminalId) {
+      return {
+        terminalRow: null,
+        ownerRootSessionId: null
+      };
+    }
+
+    const liveTerminal = getLiveTerminal(terminalId);
+    const terminalRow = liveTerminal || (typeof db?.getTerminal === 'function' ? db.getTerminal(terminalId) : null);
+    const ownerRootSessionId = String(
+      liveTerminal?.rootSessionId
+      || liveTerminal?.root_session_id
+      || terminalRow?.root_session_id
+      || terminalRow?.rootSessionId
+      || ''
+    ).trim() || null;
+
+    return {
+      terminalRow,
+      ownerRootSessionId
+    };
+  }
+
+  function resolveCallerRootForTerminalInput(req, res, endpoint) {
+    const resolvedControlPlane = resolveRequestControlPlaneContext(req, {
+      rootSessionId: req.body?.rootSessionId || req.body?.root_session_id || null,
+      parentSessionId: req.body?.parentSessionId || req.body?.parent_session_id || null,
+      originClient: req.body?.originClient || req.body?.origin_client || null,
+      externalSessionRef: req.body?.externalSessionRef || req.body?.external_session_ref || null,
+      sessionMetadata: req.body?.sessionMetadata || req.body?.session_metadata || null
+    }, {
+      defaultParentToRoot: true
+    });
+
+    if (resolvedControlPlane?.conflictingRootSessionId) {
+      return denyTerminalInputOwnership(res, {
+        terminalId: null,
+        callerRootSessionId: String(resolvedControlPlane?.rootSessionId || '').trim() || null,
+        ownerRootSessionId: String(resolvedControlPlane?.conflictingRootSessionId || '').trim() || null,
+        reason: 'root_binding_conflict'
+      });
+    }
+
+    const callerRootSessionId = String(resolvedControlPlane?.rootSessionId || '').trim() || null;
+    if (!callerRootSessionId) {
+      return denyTerminalInputOwnership(res, {
+        terminalId: null,
+        callerRootSessionId: null,
+        ownerRootSessionId: null,
+        reason: 'missing_root_context'
+      });
+    }
+
+    const externalSessionRef = String(resolvedControlPlane?.externalSessionRef || '').trim() || null;
+    if (!externalSessionRef) {
+      return denyTerminalInputOwnership(res, {
+        terminalId: null,
+        callerRootSessionId,
+        ownerRootSessionId: null,
+        reason: 'missing_root_binding'
+      });
+    }
+
+    const boundRootRow = typeof db?.findLatestRootSessionByClientRef === 'function'
+      ? db.findLatestRootSessionByClientRef({
+          originClient: resolvedControlPlane?.originClient || null,
+          externalSessionRef,
+          clientName: resolvedControlPlane?.clientName || null
+        })
+      : null;
+    const boundRootSessionId = String(
+      boundRootRow?.root_session_id
+      || boundRootRow?.rootSessionId
+      || ''
+    ).trim() || null;
+
+    if (!boundRootSessionId) {
+      return denyTerminalInputOwnership(res, {
+        terminalId: null,
+        callerRootSessionId,
+        ownerRootSessionId: null,
+        reason: 'unbound_root_context'
+      });
+    }
+
+    if (boundRootSessionId !== callerRootSessionId) {
+      return denyTerminalInputOwnership(res, {
+        terminalId: null,
+        callerRootSessionId,
+        ownerRootSessionId: boundRootSessionId,
+        reason: 'root_binding_mismatch'
+      });
+    }
+
+    return {
+      callerRootSessionId,
+      resolvedControlPlane
+    };
+  }
+
+  function requireTerminalInputOwnershipByTerminalId(req, res, endpoint, terminalId) {
+    const caller = resolveCallerRootForTerminalInput(req, res, endpoint);
+    if (!caller) {
+      return null;
+    }
+
+    const owner = resolveTerminalOwnerContext(terminalId);
+    if (!owner.terminalRow) {
+      return denyTerminalInputOwnership(res, {
+        terminalId,
+        callerRootSessionId: caller.callerRootSessionId,
+        ownerRootSessionId: null,
+        reason: 'unknown_terminal'
+      });
+    }
+
+    if (!owner.ownerRootSessionId) {
+      return denyTerminalInputOwnership(res, {
+        terminalId,
+        callerRootSessionId: caller.callerRootSessionId,
+        ownerRootSessionId: null,
+        reason: 'missing_owner_root'
+      });
+    }
+
+    if (owner.ownerRootSessionId !== caller.callerRootSessionId) {
+      return denyTerminalInputOwnership(res, {
+        terminalId,
+        callerRootSessionId: caller.callerRootSessionId,
+        ownerRootSessionId: owner.ownerRootSessionId,
+        reason: 'root_mismatch'
+      });
+    }
+
+    return {
+      callerRootSessionId: caller.callerRootSessionId,
+      ownerRootSessionId: owner.ownerRootSessionId,
+      terminalRow: owner.terminalRow
+    };
+  }
+
+  function requireTerminalInputOwnershipByQueueItem(req, res, endpoint, queueItem, details = {}) {
+    const caller = resolveCallerRootForTerminalInput(req, res, endpoint);
+    if (!caller) {
+      return null;
+    }
+
+    if (!queueItem || !queueItem.terminalId) {
+      return denyTerminalInputOwnership(res, {
+        terminalId: null,
+        callerRootSessionId: caller.callerRootSessionId,
+        ownerRootSessionId: null,
+        reason: details.reason || 'unknown_input'
+      });
+    }
+
+    const owner = resolveTerminalOwnerContext(queueItem.terminalId);
+    const ownerRootSessionId = owner.ownerRootSessionId
+      || String(queueItem.rootSessionId || '').trim()
+      || null;
+
+    if (!owner.terminalRow || !ownerRootSessionId) {
+      return denyTerminalInputOwnership(res, {
+        terminalId: queueItem.terminalId,
+        callerRootSessionId: caller.callerRootSessionId,
+        ownerRootSessionId: ownerRootSessionId || null,
+        reason: owner.terminalRow ? 'missing_owner_root' : 'unknown_terminal'
+      });
+    }
+
+    if (ownerRootSessionId !== caller.callerRootSessionId) {
+      return denyTerminalInputOwnership(res, {
+        terminalId: queueItem.terminalId,
+        callerRootSessionId: caller.callerRootSessionId,
+        ownerRootSessionId,
+        reason: 'root_mismatch'
+      });
+    }
+
+    return {
+      callerRootSessionId: caller.callerRootSessionId,
+      ownerRootSessionId,
+      terminalRow: owner.terminalRow,
+      item: queueItem
+    };
   }
 
   function readHeaderValue(req, name) {
@@ -668,7 +1065,8 @@ function createOrchestrationRouter(context) {
     return {
       room: snapshot.room,
       participants: snapshot.participants,
-      latestTurn: snapshot.latestTurn
+      latestTurn: snapshot.latestTurn,
+      moderator: snapshot.moderator || null
     };
   }
 
@@ -699,6 +1097,90 @@ function createOrchestrationRouter(context) {
     ['review', 'review'],
     ['judge', 'review']
   ]);
+  const REASONING_EFFORT_LEVELS = new Set(['none', 'minimal', 'low', 'medium', 'high', 'xhigh']);
+  const TASK_ASSIGNMENT_BRANCH_STATUSES = new Set([
+    'planned',
+    'created',
+    'running',
+    'ready_for_review',
+    'accepted',
+    'integrated',
+    'failed'
+  ]);
+
+  function normalizeReasoningEffort(value) {
+    const normalized = String(value || '').trim().toLowerCase();
+    return REASONING_EFFORT_LEVELS.has(normalized) ? normalized : null;
+  }
+
+  function parseReasoningEffortFromBody(body = {}) {
+    const hasInput = body.reasoningEffort !== undefined
+      || body.reasoning_effort !== undefined
+      || body.effort !== undefined;
+    if (!hasInput) {
+      return { provided: false, value: undefined };
+    }
+    const raw = body.reasoningEffort ?? body.reasoning_effort ?? body.effort;
+    if (raw === null || raw === '') {
+      return { provided: true, value: null };
+    }
+    const normalized = normalizeReasoningEffort(raw);
+    if (!normalized) {
+      return { provided: true, error: String(raw) };
+    }
+    return { provided: true, value: normalized };
+  }
+
+  function normalizeBranchStatus(value, fallback = null) {
+    const normalized = String(value || '').trim().toLowerCase();
+    return TASK_ASSIGNMENT_BRANCH_STATUSES.has(normalized) ? normalized : fallback;
+  }
+
+  function readAssignmentBranchFields(body = {}) {
+    const patch = {};
+    if (body.baseBranch !== undefined || body.base_branch !== undefined) {
+      patch.baseBranch = body.baseBranch ?? body.base_branch;
+    }
+    if (body.branchName !== undefined || body.branch_name !== undefined) {
+      patch.branchName = body.branchName ?? body.branch_name;
+    }
+    if (body.mergeTarget !== undefined || body.merge_target !== undefined) {
+      patch.mergeTarget = body.mergeTarget ?? body.merge_target;
+    }
+    if (body.branchStatus !== undefined || body.branch_status !== undefined) {
+      const branchStatus = normalizeBranchStatus(body.branchStatus ?? body.branch_status, null);
+      if (!branchStatus && (body.branchStatus ?? body.branch_status)) {
+        return { error: { code: 'invalid_parameter', message: 'branchStatus is invalid', param: 'branchStatus' } };
+      }
+      patch.branchStatus = branchStatus;
+    }
+    if (body.writePaths !== undefined || body.write_paths !== undefined) {
+      try {
+        patch.writePaths = normalizeWritePaths(body.writePaths ?? body.write_paths);
+      } catch (error) {
+        return { error: { code: 'invalid_parameter', message: error.message, param: 'writePaths' } };
+      }
+    }
+    if (body.baseSha !== undefined || body.base_sha !== undefined) {
+      patch.baseSha = body.baseSha ?? body.base_sha;
+    }
+    if (body.headSha !== undefined || body.head_sha !== undefined) {
+      patch.headSha = body.headSha ?? body.head_sha;
+    }
+    if (body.diffStats !== undefined || body.diff_stats !== undefined) {
+      patch.diffStats = body.diffStats ?? body.diff_stats;
+    }
+    if (body.testStatus !== undefined || body.test_status !== undefined) {
+      patch.testStatus = body.testStatus ?? body.test_status;
+    }
+    if (body.reviewStatus !== undefined || body.review_status !== undefined) {
+      patch.reviewStatus = body.reviewStatus ?? body.review_status;
+    }
+    if (body.integratedAt !== undefined || body.integrated_at !== undefined) {
+      patch.integratedAt = body.integratedAt ?? body.integrated_at;
+    }
+    return { patch };
+  }
 
   function normalizeTaskAssignmentStatus(status, fallback = 'queued') {
     const normalized = String(status || '').trim().toLowerCase();
@@ -719,6 +1201,10 @@ function createOrchestrationRouter(context) {
         status: liveTerminal.status || liveTerminal.taskState || assignment.status || 'queued',
         adapter: liveTerminal.adapter || assignment.adapter || null,
         model: liveTerminal.model || assignment.model || null,
+        requestedModel: liveTerminal.requestedModel || null,
+        effectiveModel: liveTerminal.effectiveModel || liveTerminal.model || null,
+        requestedEffort: liveTerminal.requestedEffort || null,
+        effectiveEffort: liveTerminal.effectiveEffort || liveTerminal.requestedEffort || null,
         role: liveTerminal.role || null
       };
     }
@@ -742,6 +1228,16 @@ function createOrchestrationRouter(context) {
       status: persistedTerminal.status || assignment.status || 'queued',
       adapter: persistedTerminal.adapter || assignment.adapter || null,
       model: persistedTerminal.model || assignment.model || null,
+      requestedModel: persistedTerminal.requested_model || persistedTerminal.requestedModel || null,
+      effectiveModel: persistedTerminal.effective_model
+        || persistedTerminal.effectiveModel
+        || persistedTerminal.model
+        || null,
+      requestedEffort: persistedTerminal.requested_effort || persistedTerminal.requestedEffort || null,
+      effectiveEffort: persistedTerminal.effective_effort
+        || persistedTerminal.effectiveEffort
+        || persistedTerminal.requested_effort
+        || null,
       role: persistedTerminal.role || null
     };
   }
@@ -762,21 +1258,80 @@ function createOrchestrationRouter(context) {
     const usageAttribution = typeof db?.summarizeUsageAttribution === 'function'
       ? db.summarizeUsageAttribution({ taskAssignmentId: assignment?.id || null })
       : null;
+    const isolation = assignment?.metadata?.isolation
+      && typeof assignment.metadata.isolation === 'object'
+      && !Array.isArray(assignment.metadata.isolation)
+      ? assignment.metadata.isolation
+      : null;
+    const dispatchRequests = assignment?.id && typeof db?.listDispatchRequests === 'function'
+      ? db.listDispatchRequests({ taskAssignmentId: assignment.id, limit: 5 }).map(buildCompactDispatchPayload)
+      : [];
+    const taskSessionBindings = assignment?.id && typeof db?.listTaskSessionBindings === 'function'
+      ? db.listTaskSessionBindings({ taskAssignmentId: assignment.id, limit: 5 }).map((binding) => ({
+        id: binding.id,
+        rootSessionId: binding.rootSessionId,
+        adapter: binding.adapter,
+        model: binding.model,
+        reasoningEffort: binding.reasoningEffort,
+        terminalId: binding.terminalId,
+        providerSessionId: binding.providerSessionId,
+        runtimeHost: binding.runtimeHost,
+        runtimeFidelity: binding.runtimeFidelity,
+        reusePolicy: binding.reusePolicy,
+        reuseDecision: binding.reuseDecision,
+        status: binding.status,
+        createdAt: binding.createdAt,
+        lastVerifiedAt: binding.lastVerifiedAt
+      }))
+      : [];
+    const pathLease = assignment?.pathLeaseId && typeof db?.getTaskAssignmentPathLease === 'function'
+      ? db.getTaskAssignmentPathLease(assignment.pathLeaseId)
+      : null;
+    const branch = {
+      baseBranch: assignment?.baseBranch || null,
+      branchName: assignment?.branchName || assignment?.worktreeBranch || null,
+      mergeTarget: assignment?.mergeTarget || null,
+      status: assignment?.branchStatus || null,
+      worktreePath: assignment?.worktreePath || null,
+      worktreeBranch: assignment?.worktreeBranch || null,
+      writePaths: Array.isArray(assignment?.writePaths) ? assignment.writePaths : [],
+      pathLeaseId: assignment?.pathLeaseId || null,
+      pathLease,
+      baseSha: assignment?.baseSha || null,
+      headSha: assignment?.headSha || isolation?.head || null,
+      diffStats: assignment?.diffStats || null,
+      testStatus: assignment?.testStatus || null,
+      reviewStatus: assignment?.reviewStatus || null,
+      integratedAt: assignment?.integratedAt || null
+    };
 
     return {
       ...assignment,
       status,
       storedStatus,
       terminalStatus,
+      isolation,
+      branch,
+      dispatch: dispatchRequests[0] || null,
+      dispatchRequests,
+      taskSessionBindings,
       usageSummary,
       usageAttribution,
       adapter: assignment.adapter || terminal?.adapter || null,
       model: assignment.model || terminal?.model || null,
+      requestedModel: terminal?.requestedModel || assignment.model || null,
+      effectiveModel: terminal?.effectiveModel || terminal?.model || assignment.model || null,
+      requestedEffort: terminal?.requestedEffort || assignment.reasoningEffort || null,
+      effectiveEffort: terminal?.effectiveEffort || terminal?.requestedEffort || assignment.reasoningEffort || null,
       terminal: terminal ? {
         terminalId: terminal.terminalId,
         status: terminal.status,
         adapter: terminal.adapter,
         model: terminal.model,
+        requestedModel: terminal.requestedModel || null,
+        effectiveModel: terminal.effectiveModel || terminal.model || null,
+        requestedEffort: terminal.requestedEffort || null,
+        effectiveEffort: terminal.effectiveEffort || terminal.requestedEffort || null,
         role: terminal.role,
         missing: terminal.missing === true
       } : null,
@@ -904,6 +1459,357 @@ function createOrchestrationRouter(context) {
       || null;
   }
 
+  function truncateForMetadata(value, limit = 500) {
+    const text = String(value || '');
+    return text.length > limit ? `${text.slice(0, limit - 1)}...` : text;
+  }
+
+  function buildAssignmentStartIdempotencyKey(req, task, assignment) {
+    const requestId = extractRequestId(req, req.body || {});
+    return requestId
+      ? `task-assignment-start:${task.id}:${assignment.id}:${requestId}`
+      : null;
+  }
+
+  function resolveStartedTerminalDetails(terminalId) {
+    const liveTerminal = getLiveTerminal(terminalId);
+    const persistedTerminal = !liveTerminal && typeof db?.getTerminal === 'function'
+      ? db.getTerminal(terminalId)
+      : null;
+    const terminal = liveTerminal || persistedTerminal || null;
+    const runtimeMetadata = terminal ? resolveRuntimeHostMetadata(terminal) : null;
+    const providerThreadRef = liveTerminal?.providerThreadRef
+      || liveTerminal?.provider_thread_ref
+      || persistedTerminal?.provider_thread_ref
+      || persistedTerminal?.providerThreadRef
+      || null;
+    const runId = liveTerminal?.activeRun?.runId
+      || liveTerminal?.active_run_id
+      || persistedTerminal?.active_run_id
+      || null;
+
+    return {
+      liveTerminal,
+      persistedTerminal,
+      runId,
+      providerThreadRef,
+      runtimeHost: runtimeMetadata?.runtimeHost || null,
+      runtimeFidelity: runtimeMetadata?.runtimeFidelity || null
+    };
+  }
+
+  function resolveDispatchTerminalSnapshot(dispatch) {
+    const terminalId = dispatch?.terminalId || null;
+    if (!terminalId) {
+      return null;
+    }
+    const liveTerminal = getLiveTerminal(terminalId);
+    const persistedTerminal = !liveTerminal && typeof db?.getTerminal === 'function'
+      ? db.getTerminal(terminalId)
+      : null;
+    const terminal = liveTerminal || persistedTerminal || null;
+    if (!terminal) {
+      return {
+        terminalId,
+        status: 'terminal_missing',
+        missing: true
+      };
+    }
+    return {
+      terminalId,
+      status: terminal.status || terminal.taskState || terminal.task_state || null,
+      missing: false
+    };
+  }
+
+  function deriveDispatchLiveness(dispatch) {
+    if (!dispatch) {
+      return null;
+    }
+
+    const now = Date.now();
+    const updatedAt = dispatch.updatedAt || dispatch.createdAt || now;
+    const ageMs = Math.max(0, now - updatedAt);
+    const terminal = resolveDispatchTerminalSnapshot(dispatch);
+    const status = String(dispatch.status || 'queued').trim().toLowerCase();
+
+    if (status === 'deferred') {
+      const deferUntil = dispatch.deferUntil || null;
+      if (deferUntil && deferUntil > now) {
+        return {
+          state: 'deferred',
+          stale: false,
+          nextAction: 'wait_until_defer_time',
+          ageMs,
+          deferUntil,
+          terminalStatus: terminal?.status || null
+        };
+      }
+      return {
+        state: 'ready',
+        stale: false,
+        nextAction: 'claim_deferred_dispatch',
+        ageMs,
+        deferUntil,
+        terminalStatus: terminal?.status || null
+      };
+    }
+
+    if ((status === 'queued' || status === 'claimed') && !dispatch.terminalId && ageMs >= dispatchStaleMs) {
+      return {
+        state: 'stale',
+        stale: true,
+        nextAction: status === 'claimed' ? 'recover_or_fail_claimed_dispatch' : 'claim_or_cancel_queued_dispatch',
+        ageMs,
+        deferUntil: dispatch.deferUntil || null,
+        terminalStatus: null
+      };
+    }
+
+    if (status === 'queued') {
+      return {
+        state: 'queued',
+        stale: false,
+        nextAction: 'claim_dispatch',
+        ageMs,
+        deferUntil: dispatch.deferUntil || null,
+        terminalStatus: null
+      };
+    }
+
+    if (status === 'claimed') {
+      return {
+        state: dispatch.claimExpiresAt && dispatch.claimExpiresAt <= now ? 'stale' : 'claimed',
+        stale: Boolean(dispatch.claimExpiresAt && dispatch.claimExpiresAt <= now),
+        nextAction: dispatch.claimExpiresAt && dispatch.claimExpiresAt <= now ? 'recover_or_fail_claimed_dispatch' : 'wait_for_spawn',
+        ageMs,
+        deferUntil: dispatch.deferUntil || null,
+        claimOwner: dispatch.claimOwner || null,
+        claimExpiresAt: dispatch.claimExpiresAt || null,
+        terminalStatus: null
+      };
+    }
+
+    if (status === 'spawned') {
+      return {
+        state: terminal?.missing ? 'terminal_missing' : 'spawned',
+        stale: terminal?.missing === true,
+        nextAction: terminal?.missing ? 'reconcile_missing_terminal' : 'monitor_terminal',
+        ageMs,
+        deferUntil: dispatch.deferUntil || null,
+        terminalStatus: terminal?.status || null
+      };
+    }
+
+    return {
+      state: status,
+      stale: false,
+      nextAction: 'none',
+      ageMs,
+      deferUntil: dispatch.deferUntil || null,
+      terminalStatus: terminal?.status || null
+    };
+  }
+
+  function buildCompactDispatchPayload(dispatch) {
+    if (!dispatch) {
+      return null;
+    }
+
+    return {
+      id: dispatch.id,
+      status: dispatch.status,
+      requestKind: dispatch.requestKind,
+      rootSessionId: dispatch.rootSessionId,
+      coalesceKey: dispatch.coalesceKey,
+      contextSnapshotId: dispatch.contextSnapshotId,
+      boundSessionId: dispatch.boundSessionId,
+      runId: dispatch.runId,
+      terminalId: dispatch.terminalId,
+      claimOwner: dispatch.claimOwner,
+      claimedAt: dispatch.claimedAt,
+      claimExpiresAt: dispatch.claimExpiresAt,
+      coalescedCount: dispatch.coalescedCount,
+      deferUntil: dispatch.deferUntil,
+      createdAt: dispatch.createdAt,
+      updatedAt: dispatch.updatedAt,
+      dispatchedAt: dispatch.dispatchedAt,
+      cancelledAt: dispatch.cancelledAt,
+      liveness: deriveDispatchLiveness(dispatch)
+    };
+  }
+
+  function createAssignmentStartDispatch({ req, task, assignment, executionControlPlane, reasoningEffort, deferUntil = null }) {
+    if (!db?.createDispatchRequest && !db?.createOrCoalesceDispatchRequest) {
+      return { dispatch: null, action: 'unavailable', coalesced: false };
+    }
+
+    const now = Date.now();
+    const claimOwner = req.body?.requestedBy || executionControlPlane.originClient || 'api';
+    const status = Number.isFinite(deferUntil) && deferUntil > now ? 'deferred' : 'queued';
+    const payload = {
+      idempotencyKey: buildAssignmentStartIdempotencyKey(req, task, assignment),
+      taskId: task.id,
+      taskAssignmentId: assignment.id,
+      rootSessionId: executionControlPlane.rootSessionId || task.rootSessionId || null,
+      requestedBy: claimOwner,
+      requestKind: 'assignment_start',
+      status,
+      coalesceKey: `task:${task.id}:assignment:${assignment.id}:start`,
+      deferUntil: Number.isFinite(deferUntil) ? deferUntil : null,
+      metadata: {
+        endpoint: 'POST /orchestration/tasks/:taskId/assignments/:assignmentId/start',
+        taskTitle: task.title,
+        taskRole: assignment.role,
+        requestedAdapter: assignment.adapter || null,
+        requestedModel: assignment.model || null,
+        requestedReasoningEffort: reasoningEffort || assignment.reasoningEffort || null,
+        branchName: assignment.branchName || assignment.worktreeBranch || null,
+        baseBranch: assignment.baseBranch || null,
+        mergeTarget: assignment.mergeTarget || null,
+        writePaths: assignment.writePaths || [],
+        preferReuse: req.body?.preferReuse,
+        forceFreshSession: req.body?.forceFreshSession === true,
+        systemPromptProvided: Boolean(req.body?.systemPrompt),
+        sessionLabel: req.body?.sessionLabel || null,
+        workspaceRoot: task.workspaceRoot || null
+      }
+    };
+
+    const created = typeof db.createOrCoalesceDispatchRequest === 'function'
+      ? db.createOrCoalesceDispatchRequest(payload, {
+        coalesceActive: true,
+        now
+      })
+      : {
+        dispatch: db.createDispatchRequest(payload),
+        action: status === 'deferred' ? 'deferred' : 'created',
+        coalesced: false
+      };
+
+    if (!created.dispatch?.id || created.coalesced || created.dispatch.status === 'deferred' || typeof db.claimDispatchRequest !== 'function') {
+      return created;
+    }
+
+    const claim = db.claimDispatchRequest(created.dispatch.id, {
+      claimOwner,
+      ttlMs: Number.parseInt(req.body?.claimTtlMs ?? req.body?.claim_ttl_ms ?? '', 10) || dispatchStaleMs,
+      now
+    });
+
+    if (!claim.claimed) {
+      return {
+        dispatch: claim.dispatch || created.dispatch,
+        action: `claim_${claim.reason || 'conflict'}`,
+        coalesced: true,
+        claim
+      };
+    }
+
+    return {
+      dispatch: claim.dispatch,
+      action: 'claimed',
+      coalesced: false,
+      claim
+    };
+  }
+
+  function createAssignmentStartContextSnapshot({ task, assignment, dispatchRequest, workingDirectory, reasoningEffort }) {
+    if (!dispatchRequest?.id || !db?.createRunContextSnapshot) {
+      return null;
+    }
+
+    return db.createRunContextSnapshot({
+      dispatchRequestId: dispatchRequest.id,
+      workspacePath: workingDirectory || task.workspaceRoot || null,
+      contextMode: 'task_assignment',
+      promptSummary: `${assignment.role}: ${truncateForMetadata(assignment.instructions, 300)}`,
+      promptBody: assignment.instructions,
+      linkedContext: {
+        task: {
+          id: task.id,
+          title: task.title,
+          kind: task.kind || 'general',
+          brief: task.brief || null,
+          workspaceRoot: task.workspaceRoot || null,
+          rootSessionId: task.rootSessionId || null
+        },
+        assignment: {
+          id: assignment.id,
+          role: assignment.role,
+          adapter: assignment.adapter || null,
+          model: assignment.model || null,
+          reasoningEffort: reasoningEffort || assignment.reasoningEffort || null,
+          worktreePath: assignment.worktreePath || null,
+          worktreeBranch: assignment.worktreeBranch || null,
+          baseBranch: assignment.baseBranch || null,
+          branchName: assignment.branchName || null,
+          mergeTarget: assignment.mergeTarget || null,
+          branchStatus: assignment.branchStatus || null,
+          writePaths: assignment.writePaths || [],
+          pathLeaseId: assignment.pathLeaseId || null,
+          acceptanceCriteria: assignment.acceptanceCriteria || null
+        }
+      },
+      toolPolicy: {
+        route: 'task_assignment_start',
+        worktreeIsolationRequested: Boolean(assignment.worktreePath)
+      },
+      adapter: assignment.adapter || null,
+      model: assignment.model || null,
+      reasoningEffort: reasoningEffort || assignment.reasoningEffort || null
+    });
+  }
+
+  function acquireAssignmentWriteLease({ task, assignment, branchPlan, requestedBy = 'api' }) {
+    const writePaths = branchPlan?.writePaths || assignment?.writePaths || [];
+    if (!Array.isArray(writePaths) || writePaths.length === 0 || typeof db?.acquireTaskAssignmentPathLease !== 'function') {
+      return { lease: null, patch: {} };
+    }
+
+    const result = db.acquireTaskAssignmentPathLease({
+      taskId: task.id,
+      taskAssignmentId: assignment.id,
+      workspaceRoot: task.workspaceRoot,
+      branchName: branchPlan?.branchName || assignment.branchName || assignment.worktreeBranch || null,
+      writePaths,
+      holder: requestedBy || assignment.id,
+      metadata: {
+        taskTitle: task.title,
+        assignmentRole: assignment.role
+      }
+    });
+
+    if (!result.acquired) {
+      const conflict = result.lease;
+      const error = new Error(`write path lease conflict with assignment ${conflict?.taskAssignmentId || 'unknown'}`);
+      error.code = 'path_lease_conflict';
+      error.conflict = conflict;
+      throw error;
+    }
+
+    return {
+      lease: result.lease || null,
+      patch: result.lease ? { pathLeaseId: result.lease.id } : {}
+    };
+  }
+
+  function updateAssignmentStartDispatch(dispatchRequest, patch = {}) {
+    if (!dispatchRequest?.id || !db?.updateDispatchRequest) {
+      return null;
+    }
+
+    const nextMetadata = {
+      ...(dispatchRequest.metadata || {}),
+      ...(patch.metadata || {})
+    };
+    return db.updateDispatchRequest(dispatchRequest.id, {
+      ...patch,
+      metadata: nextMetadata,
+      updatedAt: patch.updatedAt || Date.now()
+    });
+  }
+
   function buildRemoteApiSnapshot(req) {
     const rootLimit = parseQueryInteger(req.query.rootLimit ?? req.query.root_limit, 20);
     const taskLimit = parseQueryInteger(req.query.taskLimit ?? req.query.task_limit, 20);
@@ -991,12 +1897,17 @@ function createOrchestrationRouter(context) {
           'room_discussion',
           'root_launch',
           'root_adopt',
-          'root_attach'
+          'root_attach',
+          'terminal_input_queue',
+          'terminal_input_approval'
         ],
         terminalInput: {
           route: '/orchestration/terminals/:id/input',
           mode: 'runtime_capability_gated',
-          requiresRuntimeCapability: 'send_input'
+          queueRoute: '/orchestration/terminals/:id/input-queue',
+          requiresRuntimeCapability: 'send_input',
+          approvalCapability: 'approve_permission',
+          controlModes: Object.values(SESSION_CONTROL_MODES)
         }
       },
       routes: {
@@ -1009,8 +1920,10 @@ function createOrchestrationRouter(context) {
         runs: '/orchestration/runs',
         usage: '/orchestration/usage/*',
         memory: '/orchestration/memory/*',
+        inputQueue: '/orchestration/input-queue',
         sessionEvents: '/orchestration/session-events?normalized=1',
-        adapters: '/orchestration/adapters'
+        adapters: '/orchestration/adapters',
+        bpeScenario: '/orchestration/browser-perception-engine/scenario'
       },
       roots: rootPayload.roots,
       rootMetadata: {
@@ -1038,9 +1951,331 @@ function createOrchestrationRouter(context) {
     };
   }
 
+  function parseOptionalTimeoutMs(value) {
+    const parsed = Number.parseInt(String(value ?? '').trim(), 10);
+    if (!Number.isFinite(parsed) || parsed <= 0) {
+      return null;
+    }
+    return parsed;
+  }
+
+  function firstNonEmptyString(...values) {
+    for (const value of values) {
+      if (typeof value !== 'string') {
+        continue;
+      }
+      const normalized = value.trim();
+      if (normalized) {
+        return normalized;
+      }
+    }
+    return null;
+  }
+
+  function readHeaderString(req, name) {
+    const value = req.headers?.[name.toLowerCase()];
+    if (Array.isArray(value)) {
+      return firstNonEmptyString(...value);
+    }
+    return firstNonEmptyString(value);
+  }
+
+  function resolveBpeOwnershipContext(req) {
+    const trace = req.body?.trace && typeof req.body.trace === 'object'
+      ? req.body.trace
+      : {};
+    const query = req.query || {};
+
+    const companyId = firstNonEmptyString(
+      readHeaderString(req, 'x-paperclip-company-id'),
+      readHeaderString(req, 'x-company-id'),
+      req.body?.companyId,
+      req.body?.company_id,
+      trace.companyId,
+      trace.company_id,
+      process.env.PAPERCLIP_COMPANY_ID,
+      process.env.CLIAGENTS_BPE_DEFAULT_COMPANY_ID,
+      'local-company'
+    );
+    const runId = firstNonEmptyString(
+      readHeaderString(req, 'x-paperclip-run-id'),
+      readHeaderString(req, 'x-run-id'),
+      req.body?.runId,
+      req.body?.run_id,
+      query.runId,
+      query.run_id,
+      trace.runId,
+      trace.run_id,
+      trace.rootSessionId,
+      trace.root_session_id,
+      process.env.PAPERCLIP_RUN_ID,
+      process.env.CLIAGENTS_BPE_DEFAULT_RUN_ID,
+      'local-run'
+    );
+    const agentId = firstNonEmptyString(
+      readHeaderString(req, 'x-paperclip-agent-id'),
+      readHeaderString(req, 'x-agent-id'),
+      req.body?.agentId,
+      req.body?.agent_id,
+      query.agentId,
+      query.agent_id,
+      trace.agentId,
+      trace.agent_id,
+      process.env.PAPERCLIP_AGENT_ID,
+      process.env.CLIAGENTS_BPE_DEFAULT_AGENT_ID,
+      'local-agent'
+    );
+
+    return {
+      companyId,
+      runId,
+      agentId
+    };
+  }
+
+  function mapBpeFailureToStatusCode(failureClass, fallback = null) {
+    if (Number.isInteger(fallback) && fallback >= 400 && fallback <= 599) {
+      return fallback;
+    }
+    switch (failureClass) {
+      case BPE_FAILURE_CLASSES.TIMEOUT:
+        return 504;
+      case BPE_FAILURE_CLASSES.VALIDATION_ERROR:
+        return 400;
+      case BPE_FAILURE_CLASSES.AUTHZ_ERROR:
+        return 403;
+      case BPE_FAILURE_CLASSES.ACTION_REJECTION:
+        return 409;
+      case BPE_FAILURE_CLASSES.NOT_CONFIGURED:
+        return 503;
+      case BPE_FAILURE_CLASSES.INVALID_STATE_PAYLOAD:
+      case BPE_FAILURE_CLASSES.TRANSPORT_ERROR:
+      default:
+        return 502;
+    }
+  }
+
+  function emitBpeTelemetry({
+    operation,
+    sessionId = null,
+    actionId = null,
+    terminalFailureReason = null
+  }) {
+    const payload = {
+      operation,
+      provider: 'browser_perception_engine',
+      session_id: sessionId || null,
+      action_id: actionId || null,
+      terminal_failure_reason: terminalFailureReason || null
+    };
+    console.info(`[orchestration][bpe] ${JSON.stringify(payload)}`);
+  }
+
+  function sendBpeFailureResponse(res, error, extras = {}) {
+    const normalizedError = error instanceof BrowserPerceptionEngineError
+      ? error
+      : new BrowserPerceptionEngineError(error?.message || 'Unknown BPE integration error');
+    const failureClass = normalizedError.failureClass || BPE_FAILURE_CLASSES.TRANSPORT_ERROR;
+    const terminalFailureReason = normalizedError.terminalFailureReason || failureClass;
+    const sessionId = extras.sessionId || normalizedError.sessionId || null;
+    const actionId = extras.actionId || normalizedError.actionId || null;
+    emitBpeTelemetry({
+      operation: extras.operation || 'unknown',
+      sessionId,
+      actionId,
+      terminalFailureReason
+    });
+    return res.status(mapBpeFailureToStatusCode(failureClass, normalizedError.statusCode)).json({
+      ok: false,
+      provider: 'browser_perception_engine',
+      failureClass,
+      terminalFailureReason,
+      sessionId,
+      actionId,
+      message: normalizedError.message,
+      details: normalizedError.details || null
+    });
+  }
+
   // Mount shared memory routes at /orchestration/memory
   const memoryRouter = createMemoryRouter({ db });
   router.use('/memory', memoryRouter);
+
+  /**
+   * POST /orchestration/browser-perception-engine/session
+   * Create or resume a BPE session.
+   */
+  router.post('/browser-perception-engine/session', async (req, res) => {
+    try {
+      const timeoutMs = parseOptionalTimeoutMs(req.body?.timeoutMs ?? req.body?.timeout_ms);
+      const owner = resolveBpeOwnershipContext(req);
+      const session = await bpeClient.createSession({
+        target: req.body?.target || {},
+        runtime: req.body?.runtime || {},
+        trace: req.body?.trace || {},
+        owner,
+        resumeSessionId: req.body?.resumeSessionId ?? req.body?.resume_session_id,
+        timeoutMs
+      });
+      emitBpeTelemetry({
+        operation: 'create_or_resume_session',
+        sessionId: session.sessionId,
+        actionId: null,
+        terminalFailureReason: null
+      });
+      return res.json({
+        ok: true,
+        provider: 'browser_perception_engine',
+        session: {
+          sessionId: session.sessionId,
+          resumed: session.resumed,
+          createdAt: session.createdAt,
+          capabilities: session.capabilities
+        },
+        evidence: {
+          session_id: session.sessionId,
+          action_id: null,
+          terminal_failure_reason: null
+        }
+      });
+    } catch (error) {
+      return sendBpeFailureResponse(res, error, {
+        operation: 'create_or_resume_session'
+      });
+    }
+  });
+
+  /**
+   * GET /orchestration/browser-perception-engine/sessions/:sessionId/state
+   * Read current BPE state snapshot.
+   */
+  router.get('/browser-perception-engine/sessions/:sessionId/state', async (req, res) => {
+    try {
+      const timeoutMs = parseOptionalTimeoutMs(req.query?.timeoutMs ?? req.query?.timeout_ms);
+      const owner = resolveBpeOwnershipContext(req);
+      const state = await bpeClient.readState(req.params.sessionId, { timeoutMs, owner });
+      emitBpeTelemetry({
+        operation: 'read_state',
+        sessionId: req.params.sessionId,
+        actionId: null,
+        terminalFailureReason: null
+      });
+      return res.json({
+        ok: true,
+        provider: 'browser_perception_engine',
+        sessionId: req.params.sessionId,
+        state: {
+          stateVersion: state.stateVersion,
+          url: state.url,
+          title: state.title,
+          elements: state.elements
+        },
+        evidence: {
+          session_id: req.params.sessionId,
+          action_id: null,
+          terminal_failure_reason: null
+        }
+      });
+    } catch (error) {
+      return sendBpeFailureResponse(res, error, {
+        operation: 'read_state',
+        sessionId: req.params.sessionId
+      });
+    }
+  });
+
+  /**
+   * POST /orchestration/browser-perception-engine/sessions/:sessionId/action
+   * Submit one BPE action step.
+   */
+  router.post('/browser-perception-engine/sessions/:sessionId/action', async (req, res) => {
+    try {
+      const timeoutMs = parseOptionalTimeoutMs(req.body?.timeoutMs ?? req.body?.timeout_ms);
+      const owner = resolveBpeOwnershipContext(req);
+      const action = await bpeClient.issueAction(req.params.sessionId, req.body || {}, { timeoutMs, owner });
+      emitBpeTelemetry({
+        operation: 'issue_action',
+        sessionId: req.params.sessionId,
+        actionId: action.actionId,
+        terminalFailureReason: null
+      });
+      return res.json({
+        ok: true,
+        provider: 'browser_perception_engine',
+        sessionId: req.params.sessionId,
+        action: {
+          actionId: action.actionId,
+          status: action.status,
+          stateVersion: action.stateVersion,
+          events: action.events
+        },
+        evidence: {
+          session_id: req.params.sessionId,
+          action_id: action.actionId,
+          terminal_failure_reason: null
+        }
+      });
+    } catch (error) {
+      return sendBpeFailureResponse(res, error, {
+        operation: 'issue_action',
+        sessionId: req.params.sessionId
+      });
+    }
+  });
+
+  /**
+   * POST /orchestration/browser-perception-engine/scenario
+   * Run one deterministic BPE scenario: session -> state -> action.
+   */
+  router.post('/browser-perception-engine/scenario', async (req, res) => {
+    try {
+      const timeoutMs = parseOptionalTimeoutMs(req.body?.timeoutMs ?? req.body?.timeout_ms);
+      const trace = req.body?.trace && typeof req.body.trace === 'object'
+        ? { ...req.body.trace }
+        : {};
+      const owner = resolveBpeOwnershipContext(req);
+      trace.source = trace.source || 'cliagents';
+      trace.route = trace.route || '/orchestration/browser-perception-engine/scenario';
+      trace.ownership = trace.ownership && typeof trace.ownership === 'object'
+        ? { ...trace.ownership }
+        : {
+            company_id: owner.companyId,
+            run_id: owner.runId,
+            agent_id: owner.agentId
+          };
+
+      const result = await bpeClient.runDeterministicScenario({
+        targetUrl: req.body?.targetUrl ?? req.body?.target?.url,
+        target: req.body?.target && typeof req.body.target === 'object' ? req.body.target : {},
+        runtime: req.body?.runtime && typeof req.body.runtime === 'object' ? req.body.runtime : {},
+        trace,
+        owner,
+        resumeSessionId: req.body?.resumeSessionId ?? req.body?.resume_session_id,
+        interaction: req.body?.interaction && typeof req.body.interaction === 'object' ? req.body.interaction : {},
+        interactionPolicy: req.body?.interactionPolicy && typeof req.body.interactionPolicy === 'object'
+          ? req.body.interactionPolicy
+          : null,
+        timeoutMs,
+        actionTimeoutMs: req.body?.actionTimeoutMs ?? req.body?.action_timeout_ms,
+        idempotencyKey: req.body?.idempotencyKey ?? req.body?.idempotency_key,
+        expectedStateVersion: req.body?.expectedStateVersion ?? req.body?.expected_state_version
+      });
+      emitBpeTelemetry({
+        operation: 'deterministic_scenario',
+        sessionId: result?.session?.sessionId || null,
+        actionId: result?.action?.actionId || null,
+        terminalFailureReason: null
+      });
+      return res.json({
+        ok: true,
+        ...result
+      });
+    } catch (error) {
+      return sendBpeFailureResponse(res, error, {
+        operation: 'deterministic_scenario'
+      });
+    }
+  });
 
   /**
    * GET /orchestration/remote/snapshot
@@ -1170,6 +2405,7 @@ function createOrchestrationRouter(context) {
    * Create a queued assignment for a task.
    */
   router.post('/tasks/:taskId/assignments', (req, res) => {
+    let precreatedPathLease = null;
     try {
       if (!db?.getTask || !db?.createTaskAssignment) {
         return res.status(503).json({
@@ -1196,17 +2432,70 @@ function createOrchestrationRouter(context) {
           error: { code: 'missing_parameter', message: 'instructions are required', param: 'instructions' }
         });
       }
+      const reasoningEffortInput = parseReasoningEffortFromBody(req.body);
+      if (reasoningEffortInput.error) {
+        return res.status(400).json({
+          error: {
+            code: 'invalid_parameter',
+            message: 'reasoningEffort must be one of none, minimal, low, medium, high, xhigh',
+            param: 'reasoningEffort'
+          }
+        });
+      }
 
       const now = Date.now();
+      let branchPlan = null;
+      if (shouldAllocateBranch(req.body || {})) {
+        branchPlan = buildAssignmentBranchPlan(task, {
+          ...req.body,
+          role
+        }, { now });
+      }
+      const branchFields = readAssignmentBranchFields(req.body || {});
+      if (branchFields.error) {
+        return res.status(400).json({ error: branchFields.error });
+      }
+      const assignmentId = String(req.body?.assignmentId || req.body?.id || `assignment_${crypto.randomBytes(8).toString('hex')}`).trim();
+      const assignmentWritePaths = branchPlan?.writePaths || branchFields.patch.writePaths || [];
+      if (assignmentWritePaths.length > 0) {
+        const leaseResult = acquireAssignmentWriteLease({
+          task,
+          assignment: {
+            id: assignmentId,
+            role,
+            branchName: branchPlan?.branchName || branchFields.patch.branchName || null,
+            worktreeBranch: branchPlan?.worktreeBranch || req.body?.worktreeBranch || null,
+            writePaths: assignmentWritePaths
+          },
+          branchPlan: {
+            branchName: branchPlan?.branchName || branchFields.patch.branchName || req.body?.worktreeBranch || null,
+            writePaths: assignmentWritePaths
+          },
+          requestedBy: req.body?.requestedBy || req.body?.requested_by || 'api'
+        });
+        precreatedPathLease = leaseResult.lease || null;
+      }
       const assignment = db.createTaskAssignment({
-        id: req.body?.assignmentId || req.body?.id || null,
+        id: assignmentId,
         taskId: task.id,
         role,
         instructions,
         adapter: req.body?.adapter || null,
         model: req.body?.model || null,
-        worktreePath: req.body?.worktreePath || null,
-        worktreeBranch: req.body?.worktreeBranch || null,
+        reasoningEffort: reasoningEffortInput.provided ? reasoningEffortInput.value : null,
+        worktreePath: branchPlan?.worktreePath || req.body?.worktreePath || null,
+        worktreeBranch: branchPlan?.worktreeBranch || req.body?.worktreeBranch || null,
+        baseBranch: branchPlan?.baseBranch || branchFields.patch.baseBranch || null,
+        branchName: branchPlan?.branchName || branchFields.patch.branchName || null,
+        mergeTarget: branchPlan?.mergeTarget || branchFields.patch.mergeTarget || null,
+        branchStatus: branchPlan?.branchStatus || branchFields.patch.branchStatus || null,
+        writePaths: assignmentWritePaths,
+        pathLeaseId: precreatedPathLease?.id || null,
+        baseSha: branchPlan?.baseSha || branchFields.patch.baseSha || null,
+        headSha: branchFields.patch.headSha || null,
+        diffStats: branchFields.patch.diffStats || null,
+        testStatus: branchFields.patch.testStatus || null,
+        reviewStatus: branchFields.patch.reviewStatus || null,
         acceptanceCriteria: req.body?.acceptanceCriteria || null,
         metadata: req.body?.metadata || {},
         status: 'queued',
@@ -1219,9 +2508,36 @@ function createOrchestrationRouter(context) {
         assignment: buildTaskAssignmentPayload(assignment)
       });
     } catch (error) {
+      if (precreatedPathLease?.id && typeof db?.updateTaskAssignmentPathLease === 'function') {
+        try {
+          db.updateTaskAssignmentPathLease(precreatedPathLease.id, {
+            status: 'released',
+            releasedAt: Date.now(),
+            metadata: {
+              ...(precreatedPathLease.metadata || {}),
+              releasedBy: 'assignment_create_failed',
+              releaseReason: error.message || String(error)
+            }
+          });
+        } catch {}
+      }
       if (error?.code === 'SQLITE_CONSTRAINT_PRIMARYKEY' || error?.code === 'SQLITE_CONSTRAINT_UNIQUE') {
         return res.status(409).json({
           error: { code: 'task_assignment_exists', message: error.message }
+        });
+      }
+      if (error?.code === 'path_lease_conflict') {
+        return res.status(409).json({
+          error: {
+            code: 'path_lease_conflict',
+            message: error.message,
+            conflict: error.conflict || null
+          }
+        });
+      }
+      if (/writePaths|autoBranch/.test(error.message || '')) {
+        return res.status(400).json({
+          error: { code: 'invalid_parameter', message: error.message }
         });
       }
       res.status(500).json({
@@ -1309,6 +2625,19 @@ function createOrchestrationRouter(context) {
       if (req.body?.model !== undefined) {
         patch.model = req.body.model;
       }
+      const reasoningEffortInput = parseReasoningEffortFromBody(req.body);
+      if (reasoningEffortInput.error) {
+        return res.status(400).json({
+          error: {
+            code: 'invalid_parameter',
+            message: 'reasoningEffort must be one of none, minimal, low, medium, high, xhigh',
+            param: 'reasoningEffort'
+          }
+        });
+      }
+      if (reasoningEffortInput.provided) {
+        patch.reasoningEffort = reasoningEffortInput.value;
+      }
       if (req.body?.worktreePath !== undefined) {
         patch.worktreePath = req.body.worktreePath;
       }
@@ -1321,6 +2650,11 @@ function createOrchestrationRouter(context) {
       if (req.body?.metadata !== undefined) {
         patch.metadata = req.body.metadata;
       }
+      const branchFields = readAssignmentBranchFields(req.body || {});
+      if (branchFields.error) {
+        return res.status(400).json({ error: branchFields.error });
+      }
+      Object.assign(patch, branchFields.patch);
 
       if (patch.instructions !== undefined && !patch.instructions) {
         return res.status(400).json({
@@ -1332,6 +2666,31 @@ function createOrchestrationRouter(context) {
           task: buildTaskPayload(task.id),
           assignment: buildTaskAssignmentPayload(assignment)
         });
+      }
+      if (Array.isArray(patch.writePaths)) {
+        if (patch.writePaths.length > 0) {
+          const leaseResult = acquireAssignmentWriteLease({
+            task,
+            assignment: {
+              ...assignment,
+              ...patch
+            },
+            branchPlan: {
+              branchName: patch.branchName || assignment.branchName || patch.worktreeBranch || assignment.worktreeBranch || null,
+              writePaths: patch.writePaths
+            },
+            requestedBy: req.body?.requestedBy || req.body?.requested_by || 'api'
+          });
+          if (leaseResult.patch.pathLeaseId) {
+            patch.pathLeaseId = leaseResult.patch.pathLeaseId;
+          }
+        } else if (assignment.pathLeaseId && typeof db?.updateTaskAssignmentPathLease === 'function') {
+          db.updateTaskAssignmentPathLease(assignment.pathLeaseId, {
+            status: 'released',
+            releasedAt: Date.now()
+          });
+          patch.pathLeaseId = null;
+        }
       }
 
       const now = Date.now();
@@ -1346,6 +2705,15 @@ function createOrchestrationRouter(context) {
         assignment: buildTaskAssignmentPayload(updated)
       });
     } catch (error) {
+      if (error?.code === 'path_lease_conflict') {
+        return res.status(409).json({
+          error: {
+            code: 'path_lease_conflict',
+            message: error.message,
+            conflict: error.conflict || null
+          }
+        });
+      }
       res.status(500).json({
         error: { code: 'internal_error', message: error.message }
       });
@@ -1400,9 +2768,19 @@ function createOrchestrationRouter(context) {
           instructions: replacementSpec.instructions || assignment.instructions,
           adapter: replacementSpec.adapter !== undefined ? replacementSpec.adapter : assignment.adapter,
           model: replacementSpec.model !== undefined ? replacementSpec.model : assignment.model,
-          worktreePath: replacementSpec.worktreePath !== undefined ? replacementSpec.worktreePath : assignment.worktreePath,
-          worktreeBranch: replacementSpec.worktreeBranch !== undefined ? replacementSpec.worktreeBranch : assignment.worktreeBranch,
-          acceptanceCriteria: replacementSpec.acceptanceCriteria !== undefined ? replacementSpec.acceptanceCriteria : assignment.acceptanceCriteria,
+	          reasoningEffort: replacementSpec.reasoningEffort !== undefined ? replacementSpec.reasoningEffort : assignment.reasoningEffort,
+	          worktreePath: replacementSpec.worktreePath !== undefined ? replacementSpec.worktreePath : assignment.worktreePath,
+	          worktreeBranch: replacementSpec.worktreeBranch !== undefined ? replacementSpec.worktreeBranch : assignment.worktreeBranch,
+	          baseBranch: replacementSpec.baseBranch !== undefined ? replacementSpec.baseBranch : assignment.baseBranch,
+	          branchName: replacementSpec.branchName !== undefined ? replacementSpec.branchName : assignment.branchName,
+	          mergeTarget: replacementSpec.mergeTarget !== undefined ? replacementSpec.mergeTarget : assignment.mergeTarget,
+	          branchStatus: replacementSpec.branchStatus !== undefined ? replacementSpec.branchStatus : assignment.branchStatus,
+	          writePaths: replacementSpec.writePaths !== undefined ? replacementSpec.writePaths : assignment.writePaths,
+	          baseSha: replacementSpec.baseSha !== undefined ? replacementSpec.baseSha : assignment.baseSha,
+	          headSha: replacementSpec.headSha !== undefined ? replacementSpec.headSha : assignment.headSha,
+	          testStatus: replacementSpec.testStatus !== undefined ? replacementSpec.testStatus : assignment.testStatus,
+	          reviewStatus: replacementSpec.reviewStatus !== undefined ? replacementSpec.reviewStatus : assignment.reviewStatus,
+	          acceptanceCriteria: replacementSpec.acceptanceCriteria !== undefined ? replacementSpec.acceptanceCriteria : assignment.acceptanceCriteria,
           metadata: {
             ...(assignment.metadata || {}),
             ...(replacementSpec.metadata && typeof replacementSpec.metadata === 'object' && !Array.isArray(replacementSpec.metadata)
@@ -1417,9 +2795,10 @@ function createOrchestrationRouter(context) {
         });
       }
 
-      const superseded = db.updateTaskAssignment(assignment.id, {
-        status: 'superseded',
-        completedAt: now,
+	      const superseded = db.updateTaskAssignment(assignment.id, {
+	        status: 'superseded',
+	        branchStatus: assignment.branchStatus === 'integrated' ? 'integrated' : (assignment.branchName || assignment.worktreeBranch ? 'failed' : assignment.branchStatus || null),
+	        completedAt: now,
         metadata: {
           ...(assignment.metadata || {}),
           supersededAt: now,
@@ -1427,7 +2806,20 @@ function createOrchestrationRouter(context) {
           supersedeReason: reason
         },
         updatedAt: now
-      });
+	      });
+	      if (assignment.pathLeaseId && typeof db?.updateTaskAssignmentPathLease === 'function') {
+	        db.updateTaskAssignmentPathLease(assignment.pathLeaseId, {
+	          status: 'released',
+	          releasedAt: now,
+	          metadata: {
+	            ...(db.getTaskAssignmentPathLease(assignment.pathLeaseId)?.metadata || {}),
+	            releasedBy: 'assignment_supersede',
+	            supersededAt: now,
+	            supersededBy: replacement?.id || null
+	          },
+	          updatedAt: now
+	        });
+	      }
       db.updateTask(task.id, { updatedAt: now });
 
       res.json({
@@ -1447,6 +2839,10 @@ function createOrchestrationRouter(context) {
    * Launch a queued assignment via the broker task router.
    */
   router.post('/tasks/:taskId/assignments/:assignmentId/start', async (req, res) => {
+    let dispatchRequest = null;
+    let contextSnapshot = null;
+    let taskSessionBinding = null;
+    let assignmentForFailure = null;
     try {
       if (!db?.getTask || !db?.getTaskAssignment) {
         return res.status(503).json({
@@ -1461,7 +2857,8 @@ function createOrchestrationRouter(context) {
         });
       }
 
-      const assignment = db.getTaskAssignment(req.params.assignmentId);
+      let assignment = db.getTaskAssignment(req.params.assignmentId);
+      assignmentForFailure = assignment;
       if (!assignment || assignment.taskId !== task.id) {
         return res.status(404).json({
           error: { code: 'task_assignment_not_found', message: `Assignment ${req.params.assignmentId} not found for task ${task.id}` }
@@ -1497,8 +2894,93 @@ function createOrchestrationRouter(context) {
       }
       const executionControlPlane = projectExecutionControlPlane(resolvedControlPlane);
       const router = getTaskRouter();
+      const reasoningEffortInput = parseReasoningEffortFromBody(req.body);
+      if (reasoningEffortInput.error) {
+        return res.status(400).json({
+          error: {
+            code: 'invalid_parameter',
+            message: 'reasoningEffort must be one of none, minimal, low, medium, high, xhigh',
+            param: 'reasoningEffort'
+          }
+        });
+      }
+      const requestedReasoningEffort = reasoningEffortInput.provided
+        ? reasoningEffortInput.value
+        : (assignment.reasoningEffort || null);
+      if (Array.isArray(assignment.writePaths) && assignment.writePaths.length > 0 && !assignment.pathLeaseId) {
+        const leaseResult = acquireAssignmentWriteLease({
+          task,
+          assignment,
+          branchPlan: {
+            branchName: assignment.branchName || assignment.worktreeBranch || null,
+            writePaths: assignment.writePaths
+          },
+          requestedBy: req.body?.requestedBy || req.body?.requested_by || executionControlPlane.originClient || 'api'
+        });
+        if (leaseResult.patch.pathLeaseId) {
+          assignment = db.updateTaskAssignment(assignment.id, {
+            pathLeaseId: leaseResult.patch.pathLeaseId,
+            updatedAt: Date.now()
+          });
+          assignmentForFailure = assignment;
+        }
+      }
+      const deferUntilInput = parseOptionalTimestamp(req.body?.deferUntil ?? req.body?.defer_until, 'deferUntil');
+      if (deferUntilInput.error) {
+        return res.status(400).json({ error: deferUntilInput.error });
+      }
+      const dispatchClaim = createAssignmentStartDispatch({
+        req,
+        task,
+        assignment,
+        executionControlPlane,
+        reasoningEffort: requestedReasoningEffort,
+        deferUntil: deferUntilInput.value
+      });
+      dispatchRequest = dispatchClaim?.dispatch || null;
+      if (dispatchRequest && (dispatchClaim?.coalesced || dispatchRequest.status === 'deferred')) {
+        const now = Date.now();
+        const updatedAssignment = db.updateTaskAssignment(assignment.id, {
+          metadata: {
+            ...(assignment.metadata || {}),
+            dispatch: {
+              dispatchRequestId: dispatchRequest.id,
+              coalesced: dispatchClaim?.coalesced === true,
+              action: dispatchClaim?.action || null,
+              deferUntil: dispatchRequest.deferUntil || null
+            }
+          },
+          updatedAt: now
+        });
+        db.updateTask(task.id, {
+          rootSessionId: executionControlPlane.rootSessionId || task.rootSessionId || null,
+          updatedAt: now
+        });
+
+        return res.status(202).json({
+          task: buildTaskPayload(task.id),
+          assignment: buildTaskAssignmentPayload(updatedAssignment),
+          route: null,
+          dispatch: {
+            dispatchRequestId: dispatchRequest.id,
+            contextSnapshotId: dispatchRequest.contextSnapshotId || null,
+            taskSessionBindingId: dispatchRequest.boundSessionId || null,
+            status: dispatchRequest.status,
+            action: dispatchClaim?.action || null,
+            coalesced: dispatchClaim?.coalesced === true,
+            coalescedCount: dispatchRequest.coalescedCount || 0,
+            deferUntil: dispatchRequest.deferUntil || null,
+            liveness: deriveDispatchLiveness(dispatchRequest)
+          },
+          rootSessionId: resolvedControlPlane.rootSessionId || null,
+          parentSessionId: resolvedControlPlane.parentSessionId || null
+        });
+      }
       const preparedWorktree = assignment.worktreePath
         ? prepareTaskAssignmentWorktree(task, assignment)
+        : null;
+      const preparedBranchSnapshot = assignment.branchName || preparedWorktree?.worktreeBranch
+        ? readBranchSnapshot(task.workspaceRoot, assignment.branchName || preparedWorktree?.worktreeBranch)
         : null;
       const workingDirectory = preparedWorktree?.workingDirectory
         || task.workspaceRoot
@@ -1515,10 +2997,19 @@ function createOrchestrationRouter(context) {
         sessionMetadata.workspaceRoot = task.workspaceRoot;
       }
 
+      contextSnapshot = createAssignmentStartContextSnapshot({
+        task,
+        assignment,
+        dispatchRequest,
+        workingDirectory,
+        reasoningEffort: requestedReasoningEffort
+      });
+
       const result = await router.routeTask(assignment.instructions, {
         forceRole: normalizeTaskAssignmentRoutingRole(assignment.role),
         forceAdapter: assignment.adapter || undefined,
         model: assignment.model || undefined,
+        reasoningEffort: requestedReasoningEffort || undefined,
         systemPrompt: req.body?.systemPrompt || null,
         workDir: workingDirectory || undefined,
         sessionLabel: req.body?.sessionLabel || null,
@@ -1534,17 +3025,79 @@ function createOrchestrationRouter(context) {
       });
 
       const now = Date.now();
+      const terminalDetails = resolveStartedTerminalDetails(result.terminalId);
+      if (db?.createTaskSessionBinding) {
+        taskSessionBinding = db.createTaskSessionBinding({
+          rootSessionId: executionControlPlane.rootSessionId || task.rootSessionId || null,
+          taskId: task.id,
+          taskAssignmentId: assignment.id,
+          adapter: result.adapter || assignment.adapter || 'unknown',
+          model: result.model || assignment.model || null,
+          reasoningEffort: result.reasoningEffort || requestedReasoningEffort || null,
+          terminalId: result.terminalId,
+          providerSessionId: terminalDetails.providerThreadRef || null,
+          runtimeHost: terminalDetails.runtimeHost || null,
+          runtimeFidelity: terminalDetails.runtimeFidelity || null,
+          reusePolicy: req.body?.forceFreshSession === true
+            ? 'force_fresh_session'
+            : (req.body?.preferReuse === false ? 'no_reuse' : 'prefer_compatible_reuse'),
+          reuseDecision: result.reuse || {
+            reused: result.reused === true,
+            reason: result.reuseReason || null
+          },
+          metadata: {
+            dispatchRequestId: dispatchRequest?.id || null,
+            contextSnapshotId: contextSnapshot?.id || null,
+            routeProfile: result.profile || null,
+            routeTaskType: result.taskType || null,
+            routeAttempts: result.routeAttempts || 1,
+            routeRetried: result.routeRetried === true,
+            routeRetryReason: result.routeRetryReason || null
+          },
+          createdAt: now,
+          lastVerifiedAt: now
+        });
+      }
+      dispatchRequest = updateAssignmentStartDispatch(dispatchRequest, {
+        status: 'spawned',
+        terminalId: result.terminalId,
+        runId: terminalDetails.runId || null,
+        boundSessionId: taskSessionBinding?.id || null,
+        dispatchedAt: now,
+        updatedAt: now,
+        metadata: {
+          spawned: true,
+          adapter: result.adapter || assignment.adapter || null,
+          model: result.model || assignment.model || null,
+          reasoningEffort: result.reasoningEffort || requestedReasoningEffort || null,
+          reused: result.reused === true,
+          reuseReason: result.reuseReason || null,
+          routeAttempts: result.routeAttempts || 1
+        }
+      }) || dispatchRequest;
       const updatedAssignment = db.updateTaskAssignment(assignment.id, {
         terminalId: result.terminalId,
         adapter: result.adapter || assignment.adapter || null,
         model: result.model || assignment.model || null,
+        reasoningEffort: result.reasoningEffort || assignment.reasoningEffort || null,
         status: 'running',
         worktreePath: preparedWorktree?.worktreePath || assignment.worktreePath || null,
         worktreeBranch: preparedWorktree?.worktreeBranch || assignment.worktreeBranch || null,
+        branchName: assignment.branchName || preparedWorktree?.worktreeBranch || null,
+        branchStatus: assignment.branchName || assignment.worktreeBranch || preparedWorktree?.worktreeBranch
+          ? 'running'
+          : assignment.branchStatus || null,
+        headSha: preparedBranchSnapshot?.headSha || preparedWorktree?.isolation?.head || assignment.headSha || null,
         startedAt: now,
         updatedAt: now,
         metadata: {
-          ...(preparedWorktree?.metadata || assignment.metadata || {}),
+          ...(assignment.metadata || {}),
+          ...(preparedWorktree?.metadata || {}),
+          dispatch: {
+            dispatchRequestId: dispatchRequest?.id || null,
+            contextSnapshotId: contextSnapshot?.id || null,
+            taskSessionBindingId: taskSessionBinding?.id || null
+          },
           routing: {
             profile: result.profile || null,
             taskType: result.taskType || null,
@@ -1561,12 +3114,197 @@ function createOrchestrationRouter(context) {
         task: buildTaskPayload(task.id),
         assignment: buildTaskAssignmentPayload(updatedAssignment),
         route: result,
+        dispatch: {
+          dispatchRequestId: dispatchRequest?.id || null,
+          contextSnapshotId: contextSnapshot?.id || null,
+          taskSessionBindingId: taskSessionBinding?.id || null,
+          status: dispatchRequest?.status || null,
+          action: dispatchClaim?.action || null,
+          coalesced: dispatchClaim?.coalesced === true,
+          coalescedCount: dispatchRequest?.coalescedCount || 0,
+          deferUntil: dispatchRequest?.deferUntil || null,
+          liveness: deriveDispatchLiveness(dispatchRequest)
+        },
         rootSessionId: resolvedControlPlane.rootSessionId || null,
         parentSessionId: resolvedControlPlane.parentSessionId || null
       });
     } catch (error) {
+      if (assignmentForFailure?.id && db?.updateTaskAssignment) {
+        try {
+          const branchTracked = assignmentForFailure.branchName || assignmentForFailure.worktreeBranch;
+          if (branchTracked) {
+            db.updateTaskAssignment(assignmentForFailure.id, {
+              branchStatus: 'failed',
+              updatedAt: Date.now()
+            });
+          }
+        } catch {}
+      }
+      if (dispatchRequest?.id && db?.updateDispatchRequest) {
+        try {
+          updateAssignmentStartDispatch(dispatchRequest, {
+            status: 'failed',
+            metadata: {
+              failed: true,
+              error: {
+                message: error.message,
+                code: error.code || null
+              }
+            }
+          });
+        } catch {}
+      }
+      if (error?.code === 'path_lease_conflict') {
+        return res.status(409).json({
+          error: {
+            code: 'path_lease_conflict',
+            message: error.message,
+            conflict: error.conflict || null
+          }
+        });
+      }
       res.status(500).json({
         error: { code: 'task_assignment_start_failed', message: error.message }
+      });
+    }
+  });
+
+  /**
+   * PATCH /orchestration/tasks/:taskId/assignments/:assignmentId/branch
+   * Update branch lifecycle metadata for an assignment.
+   */
+  router.patch('/tasks/:taskId/assignments/:assignmentId/branch', (req, res) => {
+    try {
+      if (!db?.getTask || !db?.getTaskAssignment || !db?.updateTaskAssignment) {
+        return res.status(503).json({
+          error: { code: 'unavailable', message: 'task assignments are not configured' }
+        });
+      }
+
+      const task = db.getTask(req.params.taskId);
+      if (!task) {
+        return res.status(404).json({
+          error: { code: 'task_not_found', message: `Task ${req.params.taskId} not found` }
+        });
+      }
+      const assignment = db.getTaskAssignment(req.params.assignmentId);
+      if (!assignment || assignment.taskId !== task.id) {
+        return res.status(404).json({
+          error: { code: 'task_assignment_not_found', message: `Assignment ${req.params.assignmentId} not found for task ${task.id}` }
+        });
+      }
+
+      const branchFields = readAssignmentBranchFields(req.body || {});
+      if (branchFields.error) {
+        return res.status(400).json({ error: branchFields.error });
+      }
+      const patch = { ...branchFields.patch };
+      const branchName = patch.branchName || assignment.branchName || assignment.worktreeBranch || null;
+      const shouldRefresh = parseQueryBoolean(req.body?.refresh ?? req.query?.refresh, false);
+      if (shouldRefresh && branchName) {
+        const snapshot = readBranchSnapshot(task.workspaceRoot, branchName);
+        patch.headSha = snapshot.headSha || patch.headSha || assignment.headSha || null;
+        const baseRef = patch.baseSha || assignment.baseSha || assignment.baseBranch || assignment.mergeTarget || null;
+        if (baseRef && snapshot.headSha) {
+          patch.diffStats = readDiffStats(task.workspaceRoot, baseRef, branchName);
+        }
+      }
+
+      if (Object.keys(patch).length === 0) {
+        return res.json({
+          task: buildTaskPayload(task.id),
+          assignment: buildTaskAssignmentPayload(assignment)
+        });
+      }
+
+      const now = Date.now();
+      const updated = db.updateTaskAssignment(assignment.id, {
+        ...patch,
+        updatedAt: now
+      });
+      db.updateTask(task.id, { updatedAt: now });
+
+      res.json({
+        task: buildTaskPayload(task.id),
+        assignment: buildTaskAssignmentPayload(updated)
+      });
+    } catch (error) {
+      res.status(500).json({
+        error: { code: 'task_assignment_branch_update_failed', message: error.message }
+      });
+    }
+  });
+
+  /**
+   * POST /orchestration/tasks/:taskId/assignments/:assignmentId/integrate
+   * Merge an accepted assignment branch into its merge target.
+   */
+  router.post('/tasks/:taskId/assignments/:assignmentId/integrate', (req, res) => {
+    try {
+      if (!db?.getTask || !db?.getTaskAssignment || !db?.updateTaskAssignment) {
+        return res.status(503).json({
+          error: { code: 'unavailable', message: 'task assignments are not configured' }
+        });
+      }
+
+      const task = db.getTask(req.params.taskId);
+      if (!task) {
+        return res.status(404).json({
+          error: { code: 'task_not_found', message: `Task ${req.params.taskId} not found` }
+        });
+      }
+      const assignment = db.getTaskAssignment(req.params.assignmentId);
+      if (!assignment || assignment.taskId !== task.id) {
+        return res.status(404).json({
+          error: { code: 'task_assignment_not_found', message: `Assignment ${req.params.assignmentId} not found for task ${task.id}` }
+        });
+      }
+      if (assignment.branchStatus !== 'accepted' && req.body?.force !== true) {
+        return res.status(409).json({
+          error: {
+            code: 'assignment_branch_not_accepted',
+            message: `Assignment ${assignment.id} branch must be accepted before integration`
+          }
+        });
+      }
+
+      const integration = integrateAssignmentBranch(task, assignment, {
+        mergeTarget: req.body?.mergeTarget || req.body?.merge_target || null
+      });
+      const now = Date.now();
+      if (assignment.pathLeaseId && typeof db?.updateTaskAssignmentPathLease === 'function') {
+        db.updateTaskAssignmentPathLease(assignment.pathLeaseId, {
+          status: 'released',
+          releasedAt: now,
+          metadata: {
+            ...(db.getTaskAssignmentPathLease(assignment.pathLeaseId)?.metadata || {}),
+            releasedBy: 'assignment_integrate',
+            integratedAt: now
+          },
+          updatedAt: now
+        });
+      }
+      const completeAssignment = req.body?.completeAssignment !== false && req.body?.complete_assignment !== false;
+      const updated = db.updateTaskAssignment(assignment.id, {
+        branchStatus: 'integrated',
+        mergeTarget: integration.targetBranch,
+        headSha: integration.afterSha,
+        diffStats: integration.diffStats,
+        integratedAt: now,
+        ...(completeAssignment ? { status: 'completed', completedAt: now } : {}),
+        updatedAt: now
+      });
+      db.updateTask(task.id, { updatedAt: now });
+
+      res.json({
+        task: buildTaskPayload(task.id),
+        assignment: buildTaskAssignmentPayload(updated),
+        integration
+      });
+    } catch (error) {
+      const status = /uncommitted changes|must be accepted/.test(error.message || '') ? 409 : 500;
+      res.status(status).json({
+        error: { code: 'task_assignment_integration_failed', message: error.message }
       });
     }
   });
@@ -2642,22 +4380,40 @@ function createOrchestrationRouter(context) {
 
       res.json({
         count: terminals.length,
-        terminals: terminals.map(t => ({
-          terminalId: t.terminalId,
-          adapter: t.adapter,
-          agentProfile: t.agentProfile,
-          role: t.role,
-          status: t.status,
-          taskState: t.taskState || t.status,
-          processState: t.processState || null,
-          createdAt: t.createdAt,
-          lastActive: t.lastActive,
-          runtimeHost: t.runtimeHost || null,
-          runtimeId: t.runtimeId || null,
-          runtimeCapabilities: t.runtimeCapabilities || [],
-          runtimeFidelity: t.runtimeFidelity || null,
-          runtime: t.runtime || null
-        }))
+        terminals: terminals.map(t => {
+          const processState = t.processState || null;
+          const status = t.status || null;
+          const sessionState = deriveSessionState({
+            ...t,
+            status,
+            processState,
+            live: processState === 'alive' && status !== 'orphaned'
+          });
+          return {
+            terminalId: t.terminalId,
+            adapter: t.adapter,
+            agentProfile: t.agentProfile,
+            role: t.role,
+            status,
+            sessionState,
+            taskState: t.taskState || status,
+            processState,
+            live: processState === 'alive' && status !== 'orphaned',
+            currentCommand: t.currentCommand || null,
+            createdAt: t.createdAt,
+            lastActive: t.lastActive,
+            rootSessionId: t.rootSessionId || t.root_session_id || null,
+            parentSessionId: t.parentSessionId || t.parent_session_id || null,
+            sessionKind: t.sessionKind || t.session_kind || null,
+            sessionName: t.sessionName || t.session_name || null,
+            workDir: t.workDir || t.work_dir || null,
+            runtimeHost: t.runtimeHost || null,
+            runtimeId: t.runtimeId || null,
+            runtimeCapabilities: t.runtimeCapabilities || [],
+            runtimeFidelity: t.runtimeFidelity || null,
+            runtime: t.runtime || null
+          };
+        })
       });
 
     } catch (error) {
@@ -2683,9 +4439,39 @@ function createOrchestrationRouter(context) {
 
       res.json({
         ...terminal,
+        sessionState: deriveSessionState(terminal),
         attachCommand: sessionManager.getAttachCommand(req.params.id)
       });
 
+    } catch (error) {
+      res.status(500).json({
+        error: { code: 'internal_error', message: error.message }
+      });
+    }
+  });
+
+  /**
+   * POST /orchestration/terminals/:id/trim-history
+   * Trim tmux pane scrollback while preserving broker logs and persisted messages.
+   */
+  router.post('/terminals/:id/trim-history', (req, res) => {
+    try {
+      if (typeof sessionManager.trimTerminalTmuxHistory !== 'function') {
+        return res.status(503).json({
+          error: { code: 'unavailable', message: 'tmux history trimming is not supported by this session manager' }
+        });
+      }
+
+      const result = sessionManager.trimTerminalTmuxHistory(req.params.id, {
+        historyLimit: req.body?.historyLimit || req.body?.history_limit || null
+      });
+      if (!result) {
+        return res.status(404).json({
+          error: { code: 'terminal_not_found', message: `Terminal ${req.params.id} not found` }
+        });
+      }
+
+      res.json(result);
     } catch (error) {
       res.status(500).json({
         error: { code: 'internal_error', message: error.message }
@@ -2759,7 +4545,24 @@ function createOrchestrationRouter(context) {
         });
       }
 
-      const messages = db.getHistory(terminalId, { limit, offset, traceId, role });
+      const messages = db.getHistory(terminalId, { limit, offset, traceId, role }).map((entry) => {
+        const redaction = redactSecretsInText(entry.content || '');
+        if (!redaction.redacted) {
+          return entry;
+        }
+        return {
+          ...entry,
+          content: redaction.content,
+          metadata: {
+            ...(entry.metadata || {}),
+            security: {
+              ...((entry.metadata || {}).security || {}),
+              redactedSecretLikeContent: true,
+              redactionReasonCodes: redaction.reasons
+            }
+          }
+        };
+      });
       const totalCount = db.getMessageCount(terminalId);
 
       res.json({
@@ -2964,6 +4767,159 @@ function createOrchestrationRouter(context) {
     }
   });
 
+  function normalizeInputQueueKind(value) {
+    const normalized = String(value || 'message').trim().toLowerCase();
+    return ['message', 'approval', 'denial'].includes(normalized) ? normalized : 'message';
+  }
+
+  const UNAPPROVED_TERMINAL_INPUT_ALLOWLIST = [
+    { id: 'read_pwd', pattern: /^pwd$/i },
+    { id: 'read_ls', pattern: /^ls(?:\s+[-\w./~]+)*$/i },
+    { id: 'read_whoami', pattern: /^whoami$/i },
+    { id: 'read_id', pattern: /^id(?:\s+[-\w]+)?$/i },
+    { id: 'read_date', pattern: /^date(?:\s+[-+:%\w]+)?$/i },
+    { id: 'read_uname', pattern: /^uname(?:\s+[-\w]+)?$/i },
+    { id: 'git_read_only', pattern: /^git\s+(?:status|diff|log|show|branch)(?:\s+[-\w./:]+)*$/i },
+    { id: 'rg_search', pattern: /^rg\s+.+$/i }
+  ];
+
+  function detectSensitiveTerminalInput(message) {
+    const text = String(message || '').trim();
+    if (!text) {
+      return null;
+    }
+    for (const rule of UNAPPROVED_TERMINAL_INPUT_ALLOWLIST) {
+      if (rule.pattern.test(text)) {
+        return null;
+      }
+    }
+    return {
+      id: 'shell_command_not_allowlisted',
+      reason: 'terminal message input is not in the unapproved input allowlist'
+    };
+  }
+
+  function parseActionActorIdentity(value) {
+    if (typeof value !== 'string') {
+      return null;
+    }
+    const normalized = value.trim();
+    return normalized || null;
+  }
+
+  function parseInputQueueTimestamp(value) {
+    if (value === null || value === undefined || value === '') {
+      return null;
+    }
+    if (typeof value === 'number' && Number.isFinite(value)) {
+      return Math.round(value);
+    }
+    const parsedNumber = Number(value);
+    if (Number.isFinite(parsedNumber)) {
+      return Math.round(parsedNumber);
+    }
+    const parsedDate = Date.parse(String(value));
+    return Number.isFinite(parsedDate) ? parsedDate : null;
+  }
+
+  function buildInputQueuePayload(item) {
+    if (!item) {
+      return null;
+    }
+    const redaction = redactSecretsInText(item.message || '');
+    const safeInput = redaction.redacted
+      ? {
+        ...item,
+        message: redaction.content,
+        metadata: {
+          ...(item.metadata || {}),
+          security: {
+            ...((item.metadata || {}).security || {}),
+            redactedSecretLikeContent: true,
+            redactionReasonCodes: redaction.reasons
+          }
+        }
+      }
+      : item;
+    return {
+      input: safeInput,
+      terminal: typeof db?.getTerminal === 'function' ? db.getTerminal(item.terminalId) : null
+    };
+  }
+
+  function buildInputLeasePayload(lease, extra = {}) {
+    return {
+      lease,
+      terminal: lease?.terminalId && typeof db?.getTerminal === 'function' ? db.getTerminal(lease.terminalId) : null,
+      ...extra
+    };
+  }
+
+  function getRequestLeaseId(req) {
+    return String(req.body?.leaseId || req.body?.lease_id || req.query?.leaseId || req.query?.lease_id || '').trim() || null;
+  }
+
+  function validateTerminalInputLeaseAccess(req, terminalId) {
+    if (!db?.getActiveTerminalInputLease) {
+      return { ok: true };
+    }
+    const activeLease = db.getActiveTerminalInputLease(terminalId);
+    if (!activeLease) {
+      return { ok: true };
+    }
+
+    const requestLeaseId = getRequestLeaseId(req);
+    const requestedBy = parseActionActorIdentity(req.body?.requestedBy || req.body?.requested_by || req.body?.operator);
+    if (requestLeaseId && requestLeaseId === activeLease.id) {
+      return { ok: true, lease: activeLease };
+    }
+    if (requestedBy && requestedBy === activeLease.holder) {
+      return { ok: true, lease: activeLease };
+    }
+    return {
+      ok: false,
+      status: 423,
+      body: {
+        error: {
+          code: 'terminal_input_lease_held',
+          message: `Terminal ${terminalId} input is leased by ${activeLease.holder}.`,
+          terminalId,
+          leaseId: activeLease.id,
+          holder: activeLease.holder,
+          expiresAt: activeLease.expiresAt,
+          nextAction: 'retry after the lease expires, or provide the active leaseId'
+        }
+      }
+    };
+  }
+
+  async function deliverInputQueueItem(item) {
+    const deliveryMetadata = {
+      source: 'terminal-input-queue',
+      inputQueueId: item.id,
+      inputKind: item.inputKind,
+      controlMode: item.controlMode,
+      approvalRequired: item.approvalRequired,
+      requestedBy: item.requestedBy || null,
+      approvedBy: item.approvedBy || null
+    };
+    if (item.inputKind === 'approval' || item.inputKind === 'denial') {
+      const key = String(item.message || (item.inputKind === 'approval' ? 'y' : 'n')).trim()
+        || (item.inputKind === 'approval' ? 'y' : 'n');
+      if (typeof sessionManager?.sendSpecialKey === 'function') {
+        sessionManager.sendSpecialKey(item.terminalId, key, { metadata: deliveryMetadata });
+        if (item.metadata?.sendEnter !== false) {
+          sessionManager.sendSpecialKey(item.terminalId, 'Enter', { metadata: deliveryMetadata });
+        }
+        return;
+      }
+    }
+
+    await sessionManager.sendInput(item.terminalId, item.message || '', {
+      metadata: deliveryMetadata
+    });
+  }
+
   /**
    * POST /orchestration/terminals/:id/input
    * Send input to terminal
@@ -2978,54 +4934,36 @@ function createOrchestrationRouter(context) {
         });
       }
 
-      const rootSnapshot = resolveTerminalRootAccess(req.params.id);
-      const runtimeMetadata = getTerminalRuntimeMetadata(req.params.id);
-      if (runtimeMetadata && !runtimeMetadata.runtimeCapabilities.includes('send_input')) {
+      const ownership = requireTerminalInputOwnershipByTerminalId(
+        req,
+        res,
+        '/orchestration/terminals/:id/input',
+        req.params.id
+      );
+      if (!ownership) {
+        return;
+      }
+
+      const leaseAccess = validateTerminalInputLeaseAccess(req, req.params.id);
+      if (!leaseAccess.ok) {
+        return res.status(leaseAccess.status).json(leaseAccess.body);
+      }
+
+      const sensitiveInput = detectSensitiveTerminalInput(message);
+      if (sensitiveInput) {
         return res.status(403).json({
           error: {
-            code: 'runtime_capability_unsupported',
-            message: `Runtime host ${runtimeMetadata.runtimeHost} does not support remote input for terminal ${req.params.id}.`,
+            code: 'approval_required_for_sensitive_input',
+            message: `Terminal input matched sensitive policy '${sensitiveInput.id}'. Queue this input with approvalRequired=true before delivery.`,
             terminalId: req.params.id,
-            runtimeHost: runtimeMetadata.runtimeHost,
-            runtimeCapabilities: runtimeMetadata.runtimeCapabilities
+            ruleId: sensitiveInput.id
           }
         });
       }
 
-      if (rootSnapshot?.rootMode === 'attached') {
-        const terminalSession = (rootSnapshot.sessions || []).find(s => s.sessionId === req.params.id);
-        const liveTerminal = getLiveTerminal(req.params.id);
-        const isRoot = req.params.id === rootSnapshot.rootSessionId;
-        const liveRootSessionId = liveTerminal?.rootSessionId || liveTerminal?.root_session_id || null;
-        const liveParentSessionId = liveTerminal?.parentSessionId || liveTerminal?.parent_session_id || null;
-        const dbParentSessionId = terminalSession?.parentSessionId || terminalSession?.parent_session_id || null;
-        const dbOriginClient = String(terminalSession?.originClient || terminalSession?.origin_client || '').trim().toLowerCase();
-        const liveOriginClient = String(liveTerminal?.originClient || liveTerminal?.origin_client || '').trim().toLowerCase();
-        const dbSessionKind = String(terminalSession?.sessionKind || terminalSession?.session_kind || '').trim().toLowerCase();
-        const liveSessionKind = String(liveTerminal?.sessionKind || liveTerminal?.session_kind || '').trim().toLowerCase();
-        const originClientsMatch = Boolean(dbOriginClient) && Boolean(liveOriginClient) && dbOriginClient === liveOriginClient;
-        const hasBrokerChildRole = Boolean(terminalSession?.agentProfile || terminalSession?.agent_profile || liveTerminal?.agentProfile)
-          || ATTACHED_ROOT_BROKER_CHILD_SESSION_KINDS.has(dbSessionKind || liveSessionKind);
-        const isBrokerOwnedChild = Boolean(terminalSession && liveTerminal)
-          && liveRootSessionId === rootSnapshot.rootSessionId
-          && liveParentSessionId === rootSnapshot.rootSessionId
-          && dbParentSessionId === rootSnapshot.rootSessionId
-          && originClientsMatch
-          && dbOriginClient !== 'legacy'
-          && hasBrokerChildRole
-          && (!dbSessionKind || !liveSessionKind || dbSessionKind === liveSessionKind);
-
-        if (isRoot || !isBrokerOwnedChild) {
-          return res.status(403).json({
-            error: {
-              code: 'root_read_only',
-              message: `Root session ${rootSnapshot.rootSessionId} is attached and read-only. Remote execution requires a managed or adopted root.`,
-              rootSessionId: rootSnapshot.rootSessionId,
-              rootMode: rootSnapshot.rootMode,
-              terminalId: req.params.id
-            }
-          });
-        }
+      const access = validateTerminalRemoteControlAccess(req.params.id, { inputKind: 'message' });
+      if (!access.ok) {
+        return res.status(access.status).json(access.body);
       }
 
       await sessionManager.sendInput(req.params.id, message);
@@ -3038,8 +4976,11 @@ function createOrchestrationRouter(context) {
 
     } catch (error) {
       if (error.message.includes('not found')) {
-        return res.status(404).json({
-          error: { code: 'terminal_not_found', message: error.message }
+        return denyTerminalInputOwnership(res, {
+          terminalId: req.params.id,
+          callerRootSessionId: String(req.body?.rootSessionId || req.body?.root_session_id || '').trim() || null,
+          ownerRootSessionId: null,
+          reason: 'unknown_terminal'
         });
       }
 
@@ -3056,6 +4997,591 @@ function createOrchestrationRouter(context) {
         });
       }
 
+      res.status(500).json({
+        error: { code: 'internal_error', message: error.message }
+      });
+    }
+  });
+
+  /**
+   * GET /orchestration/terminals/:id/input-lease
+   * Return the active terminal input lease, if any.
+   */
+  router.get('/terminals/:id/input-lease', (req, res) => {
+    try {
+      if (!db?.getActiveTerminalInputLease) {
+        return res.status(503).json({
+          error: { code: 'unavailable', message: 'terminal input leases are not configured' }
+        });
+      }
+      db.expireTerminalInputLeases?.();
+      const lease = db.getActiveTerminalInputLease(req.params.id);
+      res.json(buildInputLeasePayload(lease, {
+        terminalId: req.params.id,
+        active: Boolean(lease)
+      }));
+    } catch (error) {
+      res.status(500).json({
+        error: { code: 'internal_error', message: error.message }
+      });
+    }
+  });
+
+  /**
+   * POST /orchestration/terminals/:id/input-lease
+   * Acquire or refresh a short terminal input ownership lease.
+   */
+  router.post('/terminals/:id/input-lease', (req, res) => {
+    try {
+      if (!db?.acquireTerminalInputLease) {
+        return res.status(503).json({
+          error: { code: 'unavailable', message: 'terminal input leases are not configured' }
+        });
+      }
+
+      const ownership = requireTerminalInputOwnershipByTerminalId(
+        req,
+        res,
+        '/orchestration/terminals/:id/input-lease',
+        req.params.id
+      );
+      if (!ownership) {
+        return;
+      }
+
+      const holder = parseActionActorIdentity(req.body?.holder || req.body?.requestedBy || req.body?.requested_by || req.body?.operator);
+      if (!holder) {
+        return res.status(400).json({
+          error: { code: 'missing_parameter', message: 'holder is required', param: 'holder' }
+        });
+      }
+
+      const result = db.acquireTerminalInputLease({
+        id: req.body?.leaseId || req.body?.lease_id || req.body?.id || null,
+        terminalId: req.params.id,
+        rootSessionId: ownership.ownerRootSessionId,
+        sessionId: req.body?.sessionId || req.body?.session_id || null,
+        holder,
+        purpose: req.body?.purpose || null,
+        ttlMs: Number.parseInt(req.body?.ttlMs ?? req.body?.ttl_ms ?? '', 10) || 60 * 1000,
+        metadata: req.body?.metadata || null
+      });
+
+      if (!result.acquired) {
+        return res.status(423).json(buildInputLeasePayload(result.lease, {
+          acquired: false,
+          reason: result.reason,
+          error: {
+            code: 'terminal_input_lease_held',
+            message: `Terminal ${req.params.id} input is already leased.`,
+            terminalId: req.params.id
+          }
+        }));
+      }
+
+      res.json(buildInputLeasePayload(result.lease, {
+        acquired: true,
+        reason: result.reason
+      }));
+    } catch (error) {
+      if (error.message.includes('not found')) {
+        return denyTerminalInputOwnership(res, {
+          terminalId: req.params.id,
+          callerRootSessionId: String(req.body?.rootSessionId || req.body?.root_session_id || '').trim() || null,
+          ownerRootSessionId: null,
+          reason: 'unknown_terminal'
+        });
+      }
+      res.status(500).json({
+        error: { code: 'internal_error', message: error.message }
+      });
+    }
+  });
+
+  router.post('/input-leases/:leaseId/heartbeat', (req, res) => {
+    try {
+      if (!db?.getTerminalInputLease || !db?.updateTerminalInputLease) {
+        return res.status(503).json({
+          error: { code: 'unavailable', message: 'terminal input leases are not configured' }
+        });
+      }
+      db.expireTerminalInputLeases?.();
+      const lease = db.getTerminalInputLease(req.params.leaseId);
+      if (!lease) {
+        return res.status(404).json({
+          error: { code: 'input_lease_not_found', message: `Input lease ${req.params.leaseId} not found` }
+        });
+      }
+      if (lease.status !== 'active') {
+        return res.status(409).json({
+          error: { code: 'input_lease_not_active', message: `Input lease ${lease.id} is ${lease.status}.`, status: lease.status }
+        });
+      }
+      const ttlMs = Number.parseInt(req.body?.ttlMs ?? req.body?.ttl_ms ?? '', 10) || 60 * 1000;
+      const now = Date.now();
+      const updated = db.updateTerminalInputLease(lease.id, {
+        heartbeatAt: now,
+        expiresAt: now + Math.max(1000, ttlMs),
+        updatedAt: now
+      });
+      res.json(buildInputLeasePayload(updated, { heartbeated: true }));
+    } catch (error) {
+      res.status(500).json({
+        error: { code: 'internal_error', message: error.message }
+      });
+    }
+  });
+
+  router.post('/input-leases/:leaseId/release', (req, res) => {
+    try {
+      if (!db?.getTerminalInputLease || !db?.updateTerminalInputLease) {
+        return res.status(503).json({
+          error: { code: 'unavailable', message: 'terminal input leases are not configured' }
+        });
+      }
+      const lease = db.getTerminalInputLease(req.params.leaseId);
+      if (!lease) {
+        return res.status(404).json({
+          error: { code: 'input_lease_not_found', message: `Input lease ${req.params.leaseId} not found` }
+        });
+      }
+      const now = Date.now();
+      const updated = db.updateTerminalInputLease(lease.id, {
+        status: 'released',
+        releasedAt: now,
+        updatedAt: now
+      });
+      res.json(buildInputLeasePayload(updated, { released: true }));
+    } catch (error) {
+      res.status(500).json({
+        error: { code: 'internal_error', message: error.message }
+      });
+    }
+  });
+
+  router.post('/input-leases/:leaseId/revoke', (req, res) => {
+    try {
+      if (!db?.getTerminalInputLease || !db?.updateTerminalInputLease) {
+        return res.status(503).json({
+          error: { code: 'unavailable', message: 'terminal input leases are not configured' }
+        });
+      }
+      const lease = db.getTerminalInputLease(req.params.leaseId);
+      if (!lease) {
+        return res.status(404).json({
+          error: { code: 'input_lease_not_found', message: `Input lease ${req.params.leaseId} not found` }
+        });
+      }
+      const now = Date.now();
+      const updated = db.updateTerminalInputLease(lease.id, {
+        status: 'revoked',
+        revokedAt: now,
+        updatedAt: now,
+        metadata: {
+          ...(lease.metadata || {}),
+          revokedBy: parseActionActorIdentity(req.body?.revokedBy || req.body?.revoked_by || req.body?.operator) || null,
+          revokeReason: req.body?.reason || null
+        }
+      });
+      res.json(buildInputLeasePayload(updated, { revoked: true }));
+    } catch (error) {
+      res.status(500).json({
+        error: { code: 'internal_error', message: error.message }
+      });
+    }
+  });
+
+  /**
+   * POST /orchestration/terminals/:id/input-queue
+   * Enqueue remote input or approval/denial for explicit delivery.
+   */
+  router.post('/terminals/:id/input-queue', async (req, res) => {
+    try {
+      if (!db?.enqueueTerminalInput) {
+        return res.status(503).json({
+          error: { code: 'unavailable', message: 'terminal input queue is not configured' }
+        });
+      }
+
+      const ownership = requireTerminalInputOwnershipByTerminalId(
+        req,
+        res,
+        '/orchestration/terminals/:id/input-queue',
+        req.params.id
+      );
+      if (!ownership) {
+        return;
+      }
+
+      const inputKind = normalizeInputQueueKind(req.body?.inputKind || req.body?.input_kind);
+      const message = req.body?.message
+        || (inputKind === 'approval' ? 'y' : null)
+        || (inputKind === 'denial' ? 'n' : null);
+      const approvalRequired = parseQueryBoolean(req.body?.approvalRequired ?? req.body?.approval_required, false);
+      if (!message && inputKind === 'message') {
+        return res.status(400).json({
+          error: { code: 'missing_parameter', message: 'message is required', param: 'message' }
+        });
+      }
+      if (inputKind === 'message') {
+        const sensitiveInput = detectSensitiveTerminalInput(message);
+        if (sensitiveInput && !approvalRequired) {
+          return res.status(403).json({
+            error: {
+              code: 'approval_required_for_sensitive_input',
+              message: `Input queue item matched sensitive policy '${sensitiveInput.id}'. Re-submit with approvalRequired=true.`,
+              terminalId: req.params.id,
+              ruleId: sensitiveInput.id
+            }
+          });
+        }
+      }
+
+      const item = db.enqueueTerminalInput({
+        id: req.body?.inputId || req.body?.id || null,
+        terminalId: req.params.id,
+        rootSessionId: ownership.ownerRootSessionId,
+        runId: req.body?.runId || req.body?.run_id || null,
+        taskId: req.body?.taskId || req.body?.task_id || null,
+        taskAssignmentId: req.body?.taskAssignmentId || req.body?.task_assignment_id || null,
+        inputKind,
+        message,
+        status: approvalRequired ? 'held_for_approval' : 'pending',
+        controlMode: req.body?.controlMode || req.body?.control_mode || getTerminalSessionControlMode(req.params.id),
+        requestedBy: req.body?.requestedBy || req.body?.requested_by || null,
+        approvalRequired,
+        holdReason: req.body?.holdReason || req.body?.hold_reason || null,
+        expiresAt: parseInputQueueTimestamp(req.body?.expiresAt ?? req.body?.expires_at),
+        metadata: req.body?.metadata || null
+      });
+
+      res.json(buildInputQueuePayload(item));
+    } catch (error) {
+      res.status(500).json({
+        error: { code: 'internal_error', message: error.message }
+      });
+    }
+  });
+
+  router.get('/terminals/:id/input-queue', (req, res) => {
+    try {
+      if (!db?.listTerminalInputQueue) {
+        return res.status(503).json({
+          error: { code: 'unavailable', message: 'terminal input queue is not configured' }
+        });
+      }
+
+      db.expireTerminalInputQueueItems?.();
+      const inputs = db.listTerminalInputQueue({
+        terminalId: req.params.id,
+        status: req.query.status,
+        limit: parseQueryInteger(req.query.limit, 100),
+        offset: parseQueryInteger(req.query.offset, 0)
+      });
+      res.json({ terminalId: req.params.id, inputs });
+    } catch (error) {
+      res.status(500).json({
+        error: { code: 'internal_error', message: error.message }
+      });
+    }
+  });
+
+  router.get('/input-queue', (req, res) => {
+    try {
+      if (!db?.listTerminalInputQueue) {
+        return res.status(503).json({
+          error: { code: 'unavailable', message: 'terminal input queue is not configured' }
+        });
+      }
+
+      db.expireTerminalInputQueueItems?.();
+      const status = req.query.status
+        ? String(req.query.status).split(',').map((entry) => entry.trim()).filter(Boolean)
+        : null;
+      const inputs = db.listTerminalInputQueue({
+        terminalId: req.query.terminalId || req.query.terminal_id || null,
+        rootSessionId: req.query.rootSessionId || req.query.root_session_id || null,
+        taskId: req.query.taskId || req.query.task_id || null,
+        status,
+        limit: parseQueryInteger(req.query.limit, 100),
+        offset: parseQueryInteger(req.query.offset, 0)
+      });
+      res.json({ inputs });
+    } catch (error) {
+      res.status(500).json({
+        error: { code: 'internal_error', message: error.message }
+      });
+    }
+  });
+
+  router.get('/input-queue/:inputId', (req, res) => {
+    try {
+      if (!db?.getTerminalInputQueueItem) {
+        return res.status(503).json({
+          error: { code: 'unavailable', message: 'terminal input queue is not configured' }
+        });
+      }
+
+      db.expireTerminalInputQueueItems?.();
+      const item = db.getTerminalInputQueueItem(req.params.inputId);
+      if (!item) {
+        return res.status(404).json({
+          error: { code: 'input_queue_item_not_found', message: `Input queue item not found: ${req.params.inputId}` }
+        });
+      }
+      res.json(buildInputQueuePayload(item));
+    } catch (error) {
+      res.status(500).json({
+        error: { code: 'internal_error', message: error.message }
+      });
+    }
+  });
+
+  router.post('/input-queue/:inputId/approve', (req, res) => {
+    try {
+      if (!db?.updateTerminalInputQueueItem || !db?.getTerminalInputQueueItem) {
+        return res.status(503).json({
+          error: { code: 'unavailable', message: 'terminal input queue is not configured' }
+        });
+      }
+
+      const ownership = requireTerminalInputOwnershipByQueueItem(
+        req,
+        res,
+        '/orchestration/input-queue/:inputId/approve',
+        db.getTerminalInputQueueItem(req.params.inputId)
+      );
+      if (!ownership) {
+        return;
+      }
+      const item = ownership.item;
+      if (item.status !== 'held_for_approval') {
+        return res.status(409).json({
+          error: {
+            code: 'invalid_input_queue_state',
+            message: `Input queue item ${item.id} is ${item.status}, not held_for_approval.`,
+            status: item.status
+          }
+        });
+      }
+
+      const approvedBy = parseActionActorIdentity(req.body?.approvedBy || req.body?.approved_by || req.body?.operator);
+      if (!approvedBy) {
+        return res.status(400).json({
+          error: { code: 'missing_parameter', message: 'approvedBy is required', param: 'approvedBy' }
+        });
+      }
+
+      const updated = db.updateTerminalInputQueueItem(req.params.inputId, {
+        status: 'pending',
+        approvedBy,
+        approvedAt: Date.now(),
+        decision: 'approved',
+        holdReason: null
+      });
+      res.json(buildInputQueuePayload(updated));
+    } catch (error) {
+      res.status(500).json({
+        error: { code: 'internal_error', message: error.message }
+      });
+    }
+  });
+
+  router.post('/input-queue/:inputId/deny', (req, res) => {
+    try {
+      if (!db?.updateTerminalInputQueueItem || !db?.getTerminalInputQueueItem) {
+        return res.status(503).json({
+          error: { code: 'unavailable', message: 'terminal input queue is not configured' }
+        });
+      }
+
+      const ownership = requireTerminalInputOwnershipByQueueItem(
+        req,
+        res,
+        '/orchestration/input-queue/:inputId/deny',
+        db.getTerminalInputQueueItem(req.params.inputId)
+      );
+      if (!ownership) {
+        return;
+      }
+      const item = ownership.item;
+      if (!['pending', 'held_for_approval'].includes(item.status)) {
+        return res.status(409).json({
+          error: {
+            code: 'invalid_input_queue_state',
+            message: `Input queue item ${item.id} is ${item.status} and cannot be denied.`,
+            status: item.status
+          }
+        });
+      }
+
+      const deniedBy = parseActionActorIdentity(req.body?.deniedBy || req.body?.denied_by || req.body?.operator);
+      if (!deniedBy) {
+        return res.status(400).json({
+          error: { code: 'missing_parameter', message: 'deniedBy is required', param: 'deniedBy' }
+        });
+      }
+
+      const updated = db.updateTerminalInputQueueItem(req.params.inputId, {
+        status: 'cancelled',
+        approvedBy: deniedBy,
+        approvedAt: Date.now(),
+        decision: 'denied',
+        cancelledAt: Date.now(),
+        holdReason: req.body?.reason || 'denied'
+      });
+      res.json(buildInputQueuePayload(updated));
+    } catch (error) {
+      res.status(500).json({
+        error: { code: 'internal_error', message: error.message }
+      });
+    }
+  });
+
+  router.post('/input-queue/:inputId/cancel', (req, res) => {
+    try {
+      if (!db?.updateTerminalInputQueueItem || !db?.getTerminalInputQueueItem) {
+        return res.status(503).json({
+          error: { code: 'unavailable', message: 'terminal input queue is not configured' }
+        });
+      }
+
+      const ownership = requireTerminalInputOwnershipByQueueItem(
+        req,
+        res,
+        '/orchestration/input-queue/:inputId/cancel',
+        db.getTerminalInputQueueItem(req.params.inputId)
+      );
+      if (!ownership) {
+        return;
+      }
+      const item = ownership.item;
+      if (!['pending', 'held_for_approval'].includes(item.status)) {
+        return res.status(409).json({
+          error: {
+            code: 'invalid_input_queue_state',
+            message: `Input queue item ${item.id} is ${item.status} and cannot be cancelled.`,
+            status: item.status
+          }
+        });
+      }
+
+      const updated = db.updateTerminalInputQueueItem(req.params.inputId, {
+        status: 'cancelled',
+        cancelledAt: Date.now(),
+        holdReason: req.body?.reason || 'cancelled'
+      });
+      res.json(buildInputQueuePayload(updated));
+    } catch (error) {
+      res.status(500).json({
+        error: { code: 'internal_error', message: error.message }
+      });
+    }
+  });
+
+  router.post('/input-queue/:inputId/deliver', async (req, res) => {
+    try {
+      if (!db?.updateTerminalInputQueueItem || !db?.getTerminalInputQueueItem) {
+        return res.status(503).json({
+          error: { code: 'unavailable', message: 'terminal input queue is not configured' }
+        });
+      }
+
+      db.expireTerminalInputQueueItems?.();
+      const ownership = requireTerminalInputOwnershipByQueueItem(
+        req,
+        res,
+        '/orchestration/input-queue/:inputId/deliver',
+        db.getTerminalInputQueueItem(req.params.inputId)
+      );
+      if (!ownership) {
+        return;
+      }
+      const item = ownership.item;
+      const leaseAccess = validateTerminalInputLeaseAccess(req, item.terminalId);
+      if (!leaseAccess.ok) {
+        return res.status(leaseAccess.status).json(leaseAccess.body);
+      }
+      if (item.status !== 'pending') {
+        return res.status(409).json({
+          error: {
+            code: 'invalid_input_queue_state',
+            message: `Input queue item ${item.id} is ${item.status}; only pending inputs can be delivered.`,
+            status: item.status,
+            nextAction: item.status === 'held_for_approval' ? 'approve the input before delivering it' : null
+          }
+        });
+      }
+      if (item.approvalRequired && (item.decision !== 'approved' || !item.approvedBy)) {
+        return res.status(409).json({
+          error: {
+            code: 'invalid_input_queue_state',
+            message: `Input queue item ${item.id} requires explicit approval with actor identity before delivery.`,
+            status: item.status,
+            approvalRequired: true
+          }
+        });
+      }
+      if (item.expiresAt && item.expiresAt <= Date.now()) {
+        const expired = db.updateTerminalInputQueueItem(item.id, {
+          status: 'expired'
+        });
+        return res.status(409).json({
+          error: {
+            code: 'input_queue_item_expired',
+            message: `Input queue item ${item.id} has expired.`,
+            input: expired
+          }
+        });
+      }
+      if (item.controlMode === SESSION_CONTROL_MODES.OBSERVER) {
+        return res.status(403).json({
+          error: {
+            code: 'session_control_observer',
+            message: `Input queue item ${item.id} was created in observer mode and cannot be delivered.`,
+            inputId: item.id,
+            terminalId: item.terminalId,
+            controlMode: item.controlMode
+          }
+        });
+      }
+
+      const access = validateTerminalRemoteControlAccess(item.terminalId, { inputKind: item.inputKind });
+      if (!access.ok) {
+        return res.status(access.status).json(access.body);
+      }
+
+      await deliverInputQueueItem(item);
+      const delivered = db.updateTerminalInputQueueItem(item.id, {
+        status: 'delivered',
+        deliveredAt: Date.now()
+      });
+      res.json({
+        success: true,
+        ...buildInputQueuePayload(delivered),
+        status: typeof sessionManager?.getStatus === 'function' ? sessionManager.getStatus(item.terminalId) : null
+      });
+    } catch (error) {
+      if (error.message.includes('not found')) {
+        return denyTerminalInputOwnership(res, {
+          terminalId: null,
+          callerRootSessionId: String(req.body?.rootSessionId || req.body?.root_session_id || '').trim() || null,
+          ownerRootSessionId: null,
+          reason: 'unknown_terminal'
+        });
+      }
+      if (error.code === 'terminal_busy' || error.statusCode === 409) {
+        return res.status(409).json({
+          error: {
+            code: 'terminal_busy',
+            message: error.message,
+            terminalId: error.terminalId || null,
+            status: error.terminalStatus || null,
+            retryAfterMs: error.retryAfterMs || 1000,
+            nextAction: 'wait for the terminal to finish, then deliver the queued input again'
+          }
+        });
+      }
       res.status(500).json({
         error: { code: 'internal_error', message: error.message }
       });
@@ -3673,6 +6199,7 @@ function createOrchestrationRouter(context) {
       const launchEnvironment = normalizeLaunchEnvironment(req.body?.launchEnvironment || sessionMetadata.launchEnvironment);
       const deferProviderStartUntilAttached = req.body?.deferProviderStartUntilAttached === true;
       const providerResumePicker = adapter === 'codex-cli' && req.body?.providerResumePicker === true;
+      const reasoningEffort = req.body?.reasoningEffort || req.body?.reasoning_effort || req.body?.effort || null;
       if (!sessionMetadata.launchProfile) {
         sessionMetadata.launchProfile = String(req.body?.profile || 'guarded-root').trim() || 'guarded-root';
       }
@@ -3702,6 +6229,10 @@ function createOrchestrationRouter(context) {
       sessionMetadata.launchSource = 'http-root-launch';
       sessionMetadata.managedLaunch = true;
       sessionMetadata.resumeMode = requestedResumeMode;
+      if (reasoningEffort) {
+        sessionMetadata.reasoningEffort = reasoningEffort;
+        sessionMetadata.requestedEffort = reasoningEffort;
+      }
       if (providerSessionId) {
         sessionMetadata.providerResumeSessionId = providerSessionId;
         sessionMetadata.providerResumeLatest = false;
@@ -3724,6 +6255,7 @@ function createOrchestrationRouter(context) {
         workDir,
         systemPrompt,
         model: req.body?.model || null,
+        reasoningEffort,
         allowedTools: Array.isArray(req.body?.allowedTools) ? req.body.allowedTools : null,
         permissionMode: req.body?.permissionMode || 'default',
         rootSessionId: null,
@@ -3966,6 +6498,36 @@ function createOrchestrationRouter(context) {
   });
 
   /**
+   * POST /orchestration/root-sessions/:rootSessionId/trim-history
+   * Trim tmux pane scrollback for live managed root terminals in this root.
+   */
+  router.post('/root-sessions/:rootSessionId/trim-history', (req, res) => {
+    try {
+      if (typeof sessionManager.trimRootSessionTmuxHistory !== 'function') {
+        return res.status(503).json({
+          error: { code: 'unavailable', message: 'tmux history trimming is not supported by this session manager' }
+        });
+      }
+
+      const result = sessionManager.trimRootSessionTmuxHistory(req.params.rootSessionId, {
+        historyLimit: req.body?.historyLimit || req.body?.history_limit || null,
+        managedOnly: req.body?.managedOnly !== false
+      });
+      if (!result) {
+        return res.status(404).json({
+          error: { code: 'root_session_not_found', message: `Root session ${req.params.rootSessionId} not found` }
+        });
+      }
+
+      res.json(result);
+    } catch (error) {
+      res.status(500).json({
+        error: { code: 'internal_error', message: error.message }
+      });
+    }
+  });
+
+  /**
    * POST /orchestration/root-sessions/attach
    * Explicitly attach or resume a logical root session for an external client.
    */
@@ -4082,6 +6644,7 @@ function createOrchestrationRouter(context) {
         forceRole,
         forceAdapter,
         model,
+        reasoningEffort,
         sessionLabel,
         systemPrompt,
         workingDirectory,
@@ -4138,6 +6701,7 @@ function createOrchestrationRouter(context) {
         forceRole,
         forceAdapter,
         model,
+        reasoningEffort,
         sessionLabel,
         systemPrompt,
         workDir: workingDirectory,

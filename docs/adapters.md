@@ -10,6 +10,21 @@ The canonical active broker surface is:
 
 This is the runtime truth for `GET /adapters`, orchestration, and the default test gates. New adapter work should either enter through this contract completely or stay out of the supported surface until it is ready.
 
+## Public Alpha Status
+
+`supported-alpha` requires the child adapter reliability matrix to report ready
+across three consecutive runs in the last 24 hours. Otherwise the adapter is
+`experimental`. `qwen-cli` remains `experimental/degraded` unless it passes
+three session creates, three follow-up messages, and one resume within one hour.
+
+| Adapter | Status | Last verified | Matrix run id | Notes |
+|---|---|---:|---|---|
+| `claude-code` | `experimental` | 2026-05-11 | pending-live-matrix | Deterministic tests cover command construction, auth, metadata, and MCP flows; 3-run child reliability evidence is still required for `supported-alpha`. |
+| `gemini-cli` | `experimental` | 2026-05-11 | pending-live-matrix | Deterministic and runtime tests cover fallback and resume behavior; live quota/capacity can still affect readiness. |
+| `codex-cli` | `experimental` | 2026-05-11 | pending-live-matrix | Deterministic and runtime tests cover managed roots, resume, model selection, and usage parsing; live matrix promotion is pending. |
+| `qwen-cli` | `experimental/degraded` | 2026-05-11 | pending-live-matrix | Upstream auth/provider availability has been unreliable; do not classify as supported until the stricter Qwen pass bar succeeds. |
+| `opencode-cli` | `experimental` | 2026-05-11 | pending-live-matrix | Deterministic tests cover command construction, model routing, and smoke paths; live matrix promotion is pending. |
+
 Project execution defaults:
 
 - Use Node `22.12.0` from [`.nvmrc`](./../.nvmrc).

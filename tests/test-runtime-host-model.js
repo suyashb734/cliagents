@@ -7,8 +7,10 @@ const assert = require('assert');
 const {
   RUNTIME_HOSTS,
   RUNTIME_FIDELITY,
+  SESSION_CONTROL_MODES,
   normalizeRuntimeHost,
   normalizeRuntimeFidelity,
+  normalizeSessionControlMode,
   normalizeRuntimeCapabilities,
   resolveRuntimeHostMetadata,
   serializeRuntimeCapabilities
@@ -27,10 +29,13 @@ function run() {
   assert.strictEqual(normalizeRuntimeFidelity('MANAGED'), RUNTIME_FIDELITY.MANAGED);
   assert.strictEqual(normalizeRuntimeFidelity(' adopted-partial '), RUNTIME_FIDELITY.ADOPTED_PARTIAL);
   assert.strictEqual(normalizeRuntimeFidelity('invalid-fidelity'), RUNTIME_FIDELITY.MANAGED);
+  assert.strictEqual(normalizeSessionControlMode('OBSERVER'), SESSION_CONTROL_MODES.OBSERVER);
+  assert.strictEqual(normalizeSessionControlMode(' exclusive '), SESSION_CONTROL_MODES.EXCLUSIVE);
+  assert.strictEqual(normalizeSessionControlMode('bad-mode'), SESSION_CONTROL_MODES.OPERATOR);
 
   assertSortedEqual(
     normalizeRuntimeCapabilities(null, RUNTIME_HOSTS.TMUX),
-    ['detach', 'kill', 'multi_viewer', 'read_output', 'resize', 'send_input', 'stream_events'],
+    ['approve_permission', 'detach', 'kill', 'multi_viewer', 'read_output', 'resize', 'send_input', 'stream_events'],
     'tmux default capabilities'
   );
   assertSortedEqual(
@@ -45,7 +50,7 @@ function run() {
   );
   assertSortedEqual(
     normalizeRuntimeCapabilities('not json', RUNTIME_HOSTS.DIRECT_PTY),
-    ['read_output', 'resize', 'send_input', 'stream_events'],
+    ['approve_permission', 'read_output', 'resize', 'send_input', 'stream_events'],
     'invalid capability JSON falls back by host'
   );
 
@@ -106,7 +111,7 @@ function run() {
     '["read_output","send_input"]'
   );
 
-  console.log('✅ Runtime host model normalizes hosts, fidelity, capabilities, metadata, and overrides');
+  console.log('✅ Runtime host model normalizes hosts, fidelity, session control, capabilities, metadata, and overrides');
 }
 
 try {

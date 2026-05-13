@@ -4,6 +4,8 @@
 
 const assert = require('assert');
 
+process.env.CLIAGENTS_ROUTE_RETRY_DELAY_MAX_MS = '25';
+
 const { TaskRouter } = require('../src/orchestration/task-router');
 
 function createFakeSessionManager() {
@@ -14,6 +16,56 @@ function createFakeSessionManager() {
       return { terminalId: 'term-ready', reused: false, reuseReason: null };
     },
     async sendInput() {}
+  };
+}
+
+function createRetrySessionManager() {
+  return {
+    createCalls: [],
+    sendCalls: [],
+    destroyCalls: [],
+    async createTerminal(options = {}) {
+      this.createCalls.push(options);
+      const index = this.createCalls.length;
+      return {
+        terminalId: `term-retry-${index}`,
+        reused: false,
+        reuseReason: null
+      };
+    },
+    async sendInput(terminalId, message) {
+      this.sendCalls.push({ terminalId, message });
+      if (this.sendCalls.length === 1) {
+        const error = new Error(`Terminal ${terminalId} is busy (processing).`);
+        error.code = 'terminal_busy';
+        error.statusCode = 409;
+        error.retryAfterMs = 2000;
+        throw error;
+      }
+    },
+    async destroyTerminal(terminalId) {
+      this.destroyCalls.push(terminalId);
+      return true;
+    }
+  };
+}
+
+function createNonBusyConflictSessionManager() {
+  return {
+    createCalls: [],
+    sendCalls: [],
+    async createTerminal(options = {}) {
+      this.createCalls.push(options);
+      return { terminalId: 'term-conflict-1', reused: false, reuseReason: null };
+    },
+    async sendInput(terminalId, message) {
+      this.sendCalls.push({ terminalId, message });
+      const error = new Error('Root session binding conflict.');
+      error.code = 'root_binding_conflict';
+      error.statusCode = 409;
+      error.retryAfterMs = 1;
+      throw error;
+    }
   };
 }
 
@@ -124,7 +176,8 @@ async function run() {
     partialRouter.routeTask('Continue as a collaborator.', {
       forceRole: 'review',
       forceAdapter: 'claude-code',
-      sessionKind: 'collaborator'
+      sessionKind: 'collaborator',
+      sessionLabel: 'security-review-partner'
     }),
     'not collaborator-ready'
   );
@@ -148,6 +201,58 @@ async function run() {
   assert.strictEqual(result.terminalId, 'term-ready');
   assert.strictEqual(readyManager.createCalls.length, 1);
   assert.strictEqual(result.runtimeChildSessionSupport.collaboratorReady, true);
+
+  const retryManager = createRetrySessionManager();
+  const retryRouter = new TaskRouter(retryManager, {
+    apiSessionManager,
+    adapterAuthInspector,
+    adapterReadinessService: createReadinessService({
+      ephemeralReady: true,
+      collaboratorReady: true,
+      continuityMode: 'provider_resume'
+    })
+  });
+
+  const retryStart = Date.now();
+  const retried = await retryRouter.routeTask('Review this patch with transient terminal contention.', {
+    forceRole: 'review',
+    forceAdapter: 'claude-code',
+    preferReuse: true
+  });
+  const retryElapsed = Date.now() - retryStart;
+  assert.strictEqual(retried.terminalId, 'term-retry-2');
+  assert.strictEqual(retried.routeAttempts, 2);
+  assert.strictEqual(retried.routeRetried, true);
+  assert.strictEqual(retried.routeRetryReason, 'terminal_busy');
+  assert.strictEqual(retryManager.createCalls.length, 2, 'retry path should create a second terminal');
+  assert.strictEqual(retryManager.sendCalls.length, 2, 'retry path should retry sendInput once');
+  assert.deepStrictEqual(retryManager.destroyCalls, ['term-retry-1'], 'failed first attempt terminal should be cleaned up');
+  assert.strictEqual(retryManager.createCalls[0].preferReuse, true);
+  assert.strictEqual(retryManager.createCalls[1].preferReuse, false);
+  assert.strictEqual(retryManager.createCalls[1].forceFreshSession, true);
+  assert(retryElapsed < 500, `Retry delay should be capped; observed ${retryElapsed}ms`);
+
+  const conflictManager = createNonBusyConflictSessionManager();
+  const conflictRouter = new TaskRouter(conflictManager, {
+    apiSessionManager,
+    adapterAuthInspector,
+    adapterReadinessService: createReadinessService({
+      ephemeralReady: true,
+      collaboratorReady: true,
+      continuityMode: 'provider_resume'
+    })
+  });
+
+  await assert.rejects(
+    () => conflictRouter.routeTask('Review this patch with a non-busy conflict.', {
+      forceRole: 'review',
+      forceAdapter: 'claude-code',
+      preferReuse: true
+    }),
+    /Root session binding conflict/
+  );
+  assert.strictEqual(conflictManager.createCalls.length, 1, 'non-busy conflicts should not retry routing');
+  assert.strictEqual(conflictManager.sendCalls.length, 1, 'non-busy conflicts should surface immediately');
 
   console.log('✅ TaskRouter gates routing with effective adapter readiness');
 }

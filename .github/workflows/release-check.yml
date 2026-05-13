@@ -1,0 +1,42 @@
+name: Release Check
+
+on:
+  pull_request:
+    branches:
+      - main
+      - 'release/**'
+  push:
+    branches:
+      - 'release/**'
+
+env:
+  NODE_VERSION: '22.12.0'
+  PNPM_VERSION: '10.28.2'
+
+jobs:
+  release-check:
+    name: Deterministic alpha release gate
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Setup pnpm
+        uses: pnpm/action-setup@v4
+        with:
+          version: ${{ env.PNPM_VERSION }}
+
+      - name: Setup Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: ${{ env.NODE_VERSION }}
+          cache: pnpm
+          cache-dependency-path: pnpm-lock.yaml
+
+      - name: Install tmux
+        run: sudo apt-get update && sudo apt-get install -y tmux
+
+      - name: Install dependencies
+        run: pnpm install --frozen-lockfile
+
+      - name: Run release check
+        run: pnpm run release:check

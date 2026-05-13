@@ -13,6 +13,12 @@ This branch is the implementation follow-through for task-linked observability:
 tasks, assignments, roots, rooms, runs, messages, session events, usage, findings,
 artifacts, and context should be discoverable through one read model.
 
+The broader product reason is supervisor continuity. External controllers such
+as OpenClaw, Hermes, or a future desktop/mobile app should be able to query
+`cliagents` like a broker memory system: what happened, who did it, which tools
+or terminals were involved, what changed, what remains blocked, and what context
+should be resumed.
+
 ## Scope
 
 - Add database hygiene diagnostics for weak or missing links.
@@ -21,6 +27,11 @@ artifacts, and context should be discoverable through one read model.
 - Add memory query and insight APIs.
 - Add tests that prove persisted task, room, run, usage, and message data can be
   queried together.
+- Include native interactive-root event sources once available:
+  `root_io_events`, parsed messages, terminal output offsets, and root
+  continuation summaries.
+- Add lineage support for derived summaries so root, run, room, task, and
+  project summaries can form a tree or graph over raw event records.
 - Keep existing write paths intact unless a link can be populated safely.
 
 ## Non-Goals
@@ -29,6 +40,7 @@ artifacts, and context should be discoverable through one read model.
 - Do not add a graph database.
 - Do not infer task links from weak text similarity.
 - Do not store private model chain-of-thought.
+- Do not treat derived summaries as canonical truth over raw records.
 - Do not make worktrees a primary memory object; keep them assignment metadata.
 - Do not build UI in V1 except route/API surfaces required by tests.
 
@@ -58,9 +70,28 @@ Deliverables:
 - exact `projects` schema
 - exact `memory_records_v1` shape
 - exact `memory_edges_v1` shape
+- exact `root_io_events` ownership and field contract for native root capture
+- exact summary-lineage edge contract, including edge namespace and staleness
+  rules
 - route payloads for `/orchestration/memory/query` and
   `/orchestration/memory/insights`
 - test fixtures and acceptance criteria
+- redaction contract: every new persistable text or JSON field (`prompt_body`,
+  `content_full`, `content_preview`, `parsed_message`, `metadata`, and `*_json`
+  user-content fields) is written through one redaction seam. The default
+  ruleset reuses `src/security/secret-redaction.js`. Summary writers use the
+  same seam. No new write path ships with redaction disabled.
+- hash policy: `content_sha256` is computed over the redacted payload. Raw-byte
+  audit fidelity, if needed, belongs in a separately purgeable opt-in side store.
+- retention contract: each new table declares a retention class
+  (`raw-bounded`, `summary-indefinite`, or `metadata-indefinite`). Raw-bounded
+  tables ship with the columns needed for future cleanup without another
+  migration. A purge-by-`root_session_id` path is designed and named even if V1
+  only stubs implementation.
+- performance budget: `/orchestration/memory/query` p95 <= 250 ms and
+  `/orchestration/memory/insights` p95 <= 500 ms against the V1 seed fixture
+  (at least 50k `root_io_events`, 5k `runs`, and 500 `orchestrations`) with a
+  representative filter set. Required indexes are named in the migration spec.
 
 Parallelism: no implementation workers yet.
 
@@ -102,6 +133,8 @@ Deliverables:
 
 - `memory_records_v1` read projection over current durable tables
 - `memory_edges_v1` lineage projection
+- summary lineage edges for derived root/run/room/task/project snapshots where
+  source records are known
 - optional FTS table only after projection shape is stable
 
 Acceptance:
@@ -110,6 +143,55 @@ Acceptance:
   searchable text
 - edges expose lineage without inventing weak links
 - query results can drill back to source records
+- derived summaries link back to their source scopes or source records
+
+### Phase 2a: Native Root Events And Summary Lineage
+
+Preferred executor: strong coding model after Phase 0.
+
+Status: foundation implemented in `0019_root_io_events_memory_lineage.sql` with
+DB helpers, read-model projections, redaction-on-write, idempotency, direct
+cycle checks, automatic broker parsed-message events from `addMessage`,
+broker-sent input events from `PersistentSessionManager.sendInput`, and
+deduplicated screen snapshots from `PersistentSessionManager.getStatus`,
+root-timeline usage events from `addUsageRecord`, tool events from
+`RunLedgerService.appendToolEvent`, and status-transition liveness events from
+`PersistentSessionManager`.
+Focused regression coverage lives in `tests/test-root-io-events.js`,
+`tests/test-session-reuse.js`, `tests/test-session-control-plane-runtime.js`,
+`tests/test-usage-ledger.js`, and `tests/test-run-ledger-service.js`. Generated
+run, root, room, task, and project snapshots now write idempotent
+`memory_summary_edges` back to the records they summarize. Repair backfills
+missing run/root/task/project snapshot lineage without regenerating unrelated
+summary text, and `getStatus` persists bounded terminal-log `output` chunks
+with exact byte offsets so raw logs remain the audit fallback. Task memory
+bundles now surface assignments, linked rooms, task usage totals, role-aware
+usage attribution, and recent session events for linked roots; project bundles
+roll up recent tasks, runs, rooms, usage, and source pointers.
+
+Write scope:
+
+- ordered migration for `root_io_events` and summary-lineage storage
+- redaction and retention helpers in the persistence path
+- native-root event tests
+
+Deliverables:
+
+- `root_io_events` for broker-sent input, terminal output chunks, parsed visible
+  messages, tool events, usage, and liveness signals
+- log offsets and redacted payload hashes so raw terminal logs remain the audit
+  fallback without making query tables unbounded raw-byte stores
+- summary lineage edges for root, run, room, task, and project summaries
+- parser confidence rules so low-confidence TUI extraction does not seed
+  authoritative-looking summary edges
+
+Acceptance:
+
+- `run_context_snapshots` and root IO payloads are redacted on creation
+- immutable snapshots are never partially scrubbed later; the only post-hoc
+  privacy operation is full purge by scope
+- parsed-message ingestion is idempotent across parser reruns
+- summary edges preserve source provenance and cannot loop indefinitely
 
 ### Phase 3: HTTP Query And Insights APIs
 
@@ -150,6 +232,8 @@ Insights:
 - top findings
 - pending items
 - missing-link diagnostics
+- continuation context: latest summary, decisions, blockers, and next actions
+  by root, task, room, run, and project
 
 ### Phase 4: MCP And Docs
 
@@ -180,6 +264,13 @@ Supervisor gates:
 - focused DB/memory/query tests
 - `npm test`
 - manual route smoke for query and insights
+- redaction conformance: injected JWT, Google API key, and bearer token patterns
+  in a TUI output stream and `run_context_snapshots.prompt_body` do not appear
+  unredacted in persisted rows, derived summaries, or metadata fields
+- retention dry-run: cleanup identifies expired `raw-bounded` rows under the
+  documented policy without touching summary or lineage rows
+- benchmark gate: the `BENCH=1` fixture test executes within documented SLOs and
+  exercises the same indexes named in the migration plan
 - no new broad-suite regressions except documented provider auth/quota skips
 
 ## Worktree Strategy
@@ -248,6 +339,10 @@ chooses an explicit `--continue-on-*` override.
 - FTS could hide source provenance if results are not traceable
 - MCP output could become too verbose for agent consumption
 - room/root snapshot overloading may require a compatibility migration
+- native TUI parsing can be lossy; raw terminal logs and broker-mediated events
+  must remain the audit fallback
+- summary graphs can become misleading if summary edges do not preserve source
+  provenance
 
 ## First Concrete Next Step
 

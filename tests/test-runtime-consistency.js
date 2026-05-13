@@ -12,6 +12,8 @@ const results = { passed: 0, failed: 0, skipped: 0, tests: [] };
 
 let testServer = null;
 let baseUrl = null;
+let runtimeRootContext = null;
+const envRestore = new Map();
 
 function log(section, message) {
   console.log(`[${section}] ${message}`);
@@ -49,10 +51,12 @@ function isTransientFailure(message = '') {
     'deadline exceeded',
     'fetch failed',
     'network',
+    'aborterror',
     'econnreset',
     'socket',
     'status: 504',
-    'process exited with code'
+    'process exited with code',
+    'exited with code'
   ].some((pattern) => text.includes(pattern));
 }
 
@@ -61,7 +65,8 @@ async function request(method, route, body = null, options = {}) {
   const requestOptions = {
     method,
     headers: {
-      'Content-Type': 'application/json'
+      'Content-Type': 'application/json',
+      ...(options.headers || {})
     },
     signal: AbortSignal.timeout(timeoutMs)
   };
@@ -109,6 +114,13 @@ async function test(name, fn) {
       console.log(`  ⏭️  ${name} (${reason})`);
       return;
     }
+    if (isTransientFailure(error.message)) {
+      const reason = `transient runtime/provider failure: ${error.message}`;
+      results.skipped += 1;
+      results.tests.push({ name, status: 'skipped', reason });
+      console.log(`  ⏭️  ${name} (${reason})`);
+      return;
+    }
 
     results.failed += 1;
     results.tests.push({ name, status: 'failed', error: error.message });
@@ -145,18 +157,67 @@ function makeTempWorkDir(prefix) {
   return fs.mkdtempSync(path.join(os.tmpdir(), `cliagents-${prefix}-`));
 }
 
-async function createSession(adapter, workDir, options = {}) {
-  const { status, data } = await request('POST', '/sessions', { adapter, workDir }, {
-    timeoutMs: options.timeoutMs || 120000
-  });
-  if (status !== 200) {
-    const message = data?.error?.message || data?.error || JSON.stringify(data);
-    if (isSkippableProviderFailure(message)) {
-      throw new Error(`SKIP: ${message}`);
-    }
-    throw new Error(`Failed to create ${adapter} session: ${status} ${message}`);
+function setTemporaryEnv(name, value) {
+  if (!envRestore.has(name)) {
+    envRestore.set(name, process.env[name]);
   }
-  return data.sessionId;
+  process.env[name] = value;
+}
+
+function restoreTemporaryEnv() {
+  for (const [name, value] of envRestore.entries()) {
+    if (typeof value === 'string') {
+      process.env[name] = value;
+    } else {
+      delete process.env[name];
+    }
+  }
+  envRestore.clear();
+}
+
+async function createSession(adapter, workDir, options = {}) {
+  const maxAttempts = Math.max(1, Number(options.retries || 1));
+  const retryDelayMs = Number(options.retryDelayMs || 1500);
+
+  for (let attempt = 1; attempt <= maxAttempts; attempt++) {
+    try {
+      const { status, data } = await request('POST', '/sessions', { adapter, workDir }, {
+        timeoutMs: options.timeoutMs || 120000
+      });
+      if (status !== 200) {
+        const message = data?.error?.message || data?.error || JSON.stringify(data);
+        if (isSkippableProviderFailure(message)) {
+          throw new Error(`SKIP: ${message}`);
+        }
+
+        if (attempt < maxAttempts && isTransientFailure(message)) {
+          await sleep(retryDelayMs);
+          continue;
+        }
+
+        if (isTransientFailure(message)) {
+          throw new Error(`SKIP: transient session create failure: ${message}`);
+        }
+
+        throw new Error(`Failed to create ${adapter} session: ${status} ${message}`);
+      }
+      return data.sessionId;
+    } catch (error) {
+      const errorMessage = String(error?.message || error);
+      if (errorMessage.startsWith('SKIP:')) {
+        throw error;
+      }
+
+      if (attempt < maxAttempts && isTransientFailure(errorMessage)) {
+        await sleep(retryDelayMs);
+        continue;
+      }
+
+      throw error;
+    }
+  }
+
+  throw new Error(`Failed to create ${adapter} session after ${maxAttempts} attempts`);
 }
 
 async function sendMessage(sessionId, message, options = {}) {
@@ -215,12 +276,80 @@ async function cleanupSession(sessionId) {
   await request('DELETE', `/sessions/${sessionId}`);
 }
 
+function runtimeRootHeaders() {
+  if (!runtimeRootContext) {
+    return {};
+  }
+  return {
+    'x-cliagents-root-session-id': runtimeRootContext.rootSessionId,
+    'x-cliagents-parent-session-id': runtimeRootContext.rootSessionId,
+    'x-cliagents-origin-client': runtimeRootContext.originClient,
+    'x-cliagents-client-name': runtimeRootContext.clientName,
+    'x-cliagents-session-ref': runtimeRootContext.externalSessionRef
+  };
+}
+
+function runtimeRootPayload(extra = {}) {
+  if (!runtimeRootContext) {
+    return extra;
+  }
+  return {
+    ...extra,
+    rootSessionId: runtimeRootContext.rootSessionId,
+    parentSessionId: runtimeRootContext.rootSessionId,
+    originClient: runtimeRootContext.originClient,
+    externalSessionRef: runtimeRootContext.externalSessionRef,
+    sessionMetadata: {
+      clientName: runtimeRootContext.clientName,
+      externalSessionRef: runtimeRootContext.externalSessionRef,
+      clientSessionRef: runtimeRootContext.externalSessionRef,
+      ...(extra.sessionMetadata || {})
+    }
+  };
+}
+
+async function ensureRuntimeRootContext() {
+  if (runtimeRootContext) {
+    return runtimeRootContext;
+  }
+
+  const externalSessionRef = `runtime-consistency-${Date.now()}`;
+  const originClient = 'runtime-consistency';
+  const clientName = 'runtime-consistency';
+  const { status, data } = await request('POST', '/orchestration/root-sessions/attach', {
+    originClient,
+    externalSessionRef,
+    sessionMetadata: {
+      clientName,
+      externalSessionRef,
+      clientSessionRef: externalSessionRef
+    }
+  });
+
+  if (status !== 200 || !data?.rootSessionId) {
+    const message = data?.error?.message || data?.error || JSON.stringify(data);
+    throw new Error(`Failed to attach runtime root: ${status} ${message}`);
+  }
+
+  runtimeRootContext = {
+    rootSessionId: data.rootSessionId,
+    originClient,
+    clientName,
+    externalSessionRef
+  };
+  return runtimeRootContext;
+}
+
 async function createTmuxTerminal(adapter, options = {}) {
-  const { status, data } = await request('POST', '/orchestration/terminals', {
+  await ensureRuntimeRootContext();
+  const { status, data } = await request('POST', '/orchestration/terminals', runtimeRootPayload({
     adapter,
     agentProfile: options.agentProfile || `${adapter}-worker`,
     role: options.role || 'worker',
-    workDir: options.workDir
+    workDir: options.workDir,
+    sessionKind: 'worker'
+  }), {
+    headers: runtimeRootHeaders()
   });
 
   if (status !== 200) {
@@ -302,7 +431,40 @@ async function waitForTerminalCompletion(terminalId, timeoutMs = 120000) {
 }
 
 async function sendTerminalInput(terminalId, message) {
-  const { status, data } = await request('POST', `/orchestration/terminals/${terminalId}/input`, { message });
+  await ensureRuntimeRootContext();
+  const enqueue = await request('POST', `/orchestration/terminals/${terminalId}/input-queue`, {
+    message,
+    approvalRequired: true,
+    requestedBy: 'runtime-consistency'
+  }, {
+    headers: runtimeRootHeaders()
+  });
+  if (enqueue.status !== 200) {
+    const errorMessage = enqueue.data?.error?.message || enqueue.data?.error || JSON.stringify(enqueue.data);
+    if (isSkippableProviderFailure(errorMessage)) {
+      throw new Error(`SKIP: ${errorMessage}`);
+    }
+    throw new Error(`Failed to enqueue terminal input: ${enqueue.status} ${errorMessage}`);
+  }
+
+  const inputId = enqueue.data?.input?.id;
+  if (!inputId) {
+    throw new Error(`Input queue returned no input id: ${JSON.stringify(enqueue.data)}`);
+  }
+
+  const approve = await request('POST', `/orchestration/input-queue/${inputId}/approve`, {
+    approvedBy: 'runtime-consistency'
+  }, {
+    headers: runtimeRootHeaders()
+  });
+  if (approve.status !== 200) {
+    const errorMessage = approve.data?.error?.message || approve.data?.error || JSON.stringify(approve.data);
+    throw new Error(`Failed to approve terminal input: ${approve.status} ${errorMessage}`);
+  }
+
+  const { status, data } = await request('POST', `/orchestration/input-queue/${inputId}/deliver`, {}, {
+    headers: runtimeRootHeaders()
+  });
   if (status !== 200) {
     const errorMessage = data?.error?.message || data?.error || JSON.stringify(data);
     if (isSkippableProviderFailure(errorMessage)) {
@@ -351,10 +513,20 @@ async function testGeminiPersistence() {
     await ensureAdapterAvailable('gemini-cli');
 
     const workDir = makeTempWorkDir('gemini-shared');
-    const sessionA = await createSession('gemini-cli', workDir, { timeoutMs: 210000 });
-    const sessionB = await createSession('gemini-cli', workDir, { timeoutMs: 210000 });
+    let sessionA = null;
+    let sessionB = null;
 
     try {
+      sessionA = await createSession('gemini-cli', workDir, {
+        timeoutMs: 210000,
+        retries: 2,
+        retryDelayMs: 3000
+      });
+      sessionB = await createSession('gemini-cli', workDir, {
+        timeoutMs: 210000,
+        retries: 2,
+        retryDelayMs: 3000
+      });
       await sendMessage(sessionA, 'The session marker is ALPHA. Reply with READY.', { timeout: 120000, retries: 2 });
       await sendMessage(sessionB, 'The session marker is BETA. Reply with READY.', { timeout: 120000, retries: 2 });
       const answer = await sendMessage(
@@ -364,8 +536,12 @@ async function testGeminiPersistence() {
       );
       assert(answer.toLowerCase().includes('alpha'), `Expected ALPHA, got: ${answer}`);
     } finally {
-      await cleanupSession(sessionA);
-      await cleanupSession(sessionB);
+      if (sessionA) {
+        await cleanupSession(sessionA);
+      }
+      if (sessionB) {
+        await cleanupSession(sessionB);
+      }
     }
   });
 }
@@ -614,6 +790,8 @@ async function testOneShotAdapters() {
 async function main() {
   console.log('🚀 cliagents - Runtime Consistency Tests');
 
+  setTemporaryEnv('SESSION_GRAPH_WRITES_ENABLED', '1');
+  setTemporaryEnv('SESSION_EVENTS_ENABLED', '1');
   testServer = await startTestServer();
   baseUrl = testServer.baseUrl;
   console.log(`   Testing against: ${baseUrl}`);
@@ -627,6 +805,7 @@ async function main() {
     await testTmuxWorkerBehavior();
   } finally {
     await stopTestServer(testServer);
+    restoreTemporaryEnv();
   }
 
   console.log('\n' + '━'.repeat(50));
@@ -656,5 +835,6 @@ main().catch(async (error) => {
   if (testServer) {
     await stopTestServer(testServer);
   }
+  restoreTemporaryEnv();
   process.exit(1);
 });

@@ -165,7 +165,8 @@ class GeminiCliAdapter extends BaseLLMAdapter {
     }
 
     // Prefer the gemini binary installed alongside the current Node runtime.
-    // This keeps the adapter aligned with the version selected by nvm/wrappers.
+    // _buildGeminiEnv() also prepends this Node bin dir so the script shebang
+    // resolves to the same runtime instead of an older PATH entry.
     const siblingGeminiPath = path.join(path.dirname(process.execPath), 'gemini');
     if (fs.existsSync(siblingGeminiPath)) {
       this._geminiPathCache = siblingGeminiPath;
@@ -200,6 +201,31 @@ class GeminiCliAdapter extends BaseLLMAdapter {
 
     // Fall back to bare command (relies on PATH)
     return 'gemini';
+  }
+
+  _buildGeminiEnv(extraEnv = {}) {
+    const nodeBinDir = path.dirname(process.execPath);
+    const inheritedPath = String(extraEnv.PATH || process.env.PATH || '');
+    const pathParts = inheritedPath
+      .split(path.delimiter)
+      .map((part) => part.trim())
+      .filter(Boolean)
+      .filter((part) => part !== nodeBinDir);
+
+    return {
+      ...process.env,
+      ...extraEnv,
+      PATH: [nodeBinDir, ...pathParts].join(path.delimiter),
+      NO_COLOR: '1'
+    };
+  }
+
+  _ensureWorkDir(workDir) {
+    const resolvedWorkDir = workDir || process.cwd();
+    if (!fs.existsSync(resolvedWorkDir)) {
+      fs.mkdirSync(resolvedWorkDir, { recursive: true });
+    }
+    return resolvedWorkDir;
   }
 
   /**
@@ -316,7 +342,9 @@ class GeminiCliAdapter extends BaseLLMAdapter {
     }
 
     return new Promise((resolve) => {
-      const check = cp.spawn('which', ['gemini']);
+      const check = cp.spawn('which', ['gemini'], {
+        env: this._buildGeminiEnv()
+      });
       check.on('close', (code) => resolve(code === 0));
       check.on('error', () => resolve(false));
     });
@@ -332,6 +360,13 @@ class GeminiCliAdapter extends BaseLLMAdapter {
       timeoutMs = 30000
     } = options;
     const geminiPath = this._getGeminiPath();
+    let resolvedWorkDir;
+    try {
+      resolvedWorkDir = this._ensureWorkDir(workDir);
+    } catch (error) {
+      console.warn(`[GeminiAdapter] Could not prepare session list workDir ${workDir}: ${error.message}`);
+      return [];
+    }
     let lastError = null;
     const attemptLimit = Number.isFinite(Number(maxAttempts)) && Number(maxAttempts) > 0
       ? Math.floor(Number(maxAttempts))
@@ -353,11 +388,8 @@ class GeminiCliAdapter extends BaseLLMAdapter {
       try {
         const { stdout } = await new Promise((resolve, reject) => {
           cp.execFile(geminiPath, ['--list-sessions'], {
-            cwd: workDir,
-            env: {
-              ...process.env,
-              NO_COLOR: '1'
-            },
+            cwd: resolvedWorkDir,
+            env: this._buildGeminiEnv(),
             encoding: 'utf-8',
             timeout: commandTimeoutMs
           }, (err, stdout, stderr) => {
@@ -493,6 +525,9 @@ class GeminiCliAdapter extends BaseLLMAdapter {
 
     const workDir = options.workDir || path.join(this.config.workDir, sessionId);
     const model = options.model || this.config.model; // null = default
+    const timeout = Number.isFinite(Number(options.timeout)) && Number(options.timeout) > 0
+      ? Math.floor(Number(options.timeout))
+      : this.config.timeout;
 
     // Apply generation parameters if provided (writes to ~/.gemini/config.yaml)
     const generationParams = {
@@ -529,10 +564,10 @@ class GeminiCliAdapter extends BaseLLMAdapter {
     }
 
     // Non-JSON mode: normal init with session creation
-    const spawnDeadline = Date.now() + this.config.timeout;
+    const spawnDeadline = Date.now() + timeout;
     const sessionsBeforeInit = await this._listGeminiSessions(workDir, {
       deadline: spawnDeadline,
-      timeoutMs: Math.min(this.config.timeout, 15000)
+      timeoutMs: Math.min(timeout, 15000)
     });
 
     const initPrompt = options.systemPrompt
@@ -561,11 +596,12 @@ class GeminiCliAdapter extends BaseLLMAdapter {
     for (let attemptIndex = 0; attemptIndex < modelAttempts.length; attemptIndex++) {
       const attemptModel = modelAttempts[attemptIndex];
       const args = this._buildArgsWithModel(baseArgs, attemptModel);
+      const remainingTimeout = Math.max(1, spawnDeadline - Date.now());
 
       try {
         initResult = await this._runGeminiCommand(args, {
           workDir,
-          timeout: this.config.timeout
+          timeout: remainingTimeout
         });
         resolvedModel = attemptModel;
         break;
@@ -633,10 +669,7 @@ class GeminiCliAdapter extends BaseLLMAdapter {
     const geminiPath = this._getGeminiPath();
 
     // Ensure work directory exists
-    const workDir = options.workDir || process.cwd();
-    if (!fs.existsSync(workDir)) {
-      fs.mkdirSync(workDir, { recursive: true });
-    }
+    const workDir = this._ensureWorkDir(options.workDir || process.cwd());
 
     console.log('[GeminiAdapter] Running (async):', geminiPath, args.join(' '));
     console.log('[GeminiAdapter] Working directory:', workDir);
@@ -645,10 +678,7 @@ class GeminiCliAdapter extends BaseLLMAdapter {
     return new Promise((resolve, reject) => {
       const proc = cp.spawn(geminiPath, args, {
         cwd: workDir,
-        env: {
-          ...process.env,
-          NO_COLOR: '1'
-        }
+        env: this._buildGeminiEnv()
       });
 
       let stdout = '';
@@ -805,19 +835,13 @@ class GeminiCliAdapter extends BaseLLMAdapter {
     const timeout = options.timeout || this.config.timeout;
     const geminiPath = this._getGeminiPath();
 
-    const workDir = options.workDir || process.cwd();
-    if (!fs.existsSync(workDir)) {
-      fs.mkdirSync(workDir, { recursive: true });
-    }
+    const workDir = this._ensureWorkDir(options.workDir || process.cwd());
 
     console.log('[GeminiAdapter] Streaming:', geminiPath, args.join(' '));
 
     const proc = cp.spawn(geminiPath, args, {
       cwd: workDir,
-      env: {
-        ...process.env,
-        NO_COLOR: '1'
-      }
+      env: this._buildGeminiEnv()
     });
 
     // Track this process for cleanup
@@ -832,6 +856,7 @@ class GeminiCliAdapter extends BaseLLMAdapter {
     let processError = null;
     let settleTimer = null;
     let settleForceKillTimer = null;
+    let timeoutForceKillTimer = null;
     let earlyExitRequested = false;
     let finalResult = null;
 
@@ -861,8 +886,8 @@ class GeminiCliAdapter extends BaseLLMAdapter {
       timedOut = true;
       proc.kill('SIGTERM');
       // Force kill after 2 seconds if SIGTERM doesn't work
-      setTimeout(() => {
-        if (!proc.killed) {
+      timeoutForceKillTimer = setTimeout(() => {
+        if (exitCode === null && !processError) {
           proc.kill('SIGKILL');
         }
       }, 2000);
@@ -878,6 +903,9 @@ class GeminiCliAdapter extends BaseLLMAdapter {
         if (settleForceKillTimer) {
           clearTimeout(settleForceKillTimer);
         }
+        if (timeoutForceKillTimer) {
+          clearTimeout(timeoutForceKillTimer);
+        }
         exitCode = code;
         // Remove from active processes
         if (sessionId) {
@@ -892,6 +920,9 @@ class GeminiCliAdapter extends BaseLLMAdapter {
         }
         if (settleForceKillTimer) {
           clearTimeout(settleForceKillTimer);
+        }
+        if (timeoutForceKillTimer) {
+          clearTimeout(timeoutForceKillTimer);
         }
         processError = err;
         // Remove from active processes
@@ -1061,6 +1092,9 @@ class GeminiCliAdapter extends BaseLLMAdapter {
 
     } catch (error) {
       clearTimeout(timeoutId);
+      if (timeoutForceKillTimer) {
+        clearTimeout(timeoutForceKillTimer);
+      }
       yield {
         type: 'error',
         content: error.message,
