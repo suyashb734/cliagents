@@ -15,6 +15,12 @@ function makeTempDir(prefix) {
   return fs.mkdtempSync(path.join(os.tmpdir(), prefix));
 }
 
+function makeWorkspaceTempDir(prefix) {
+  const baseDir = path.join(process.cwd(), '.tmp-test-workdirs');
+  fs.mkdirSync(baseDir, { recursive: true });
+  return fs.mkdtempSync(path.join(baseDir, prefix));
+}
+
 function withLocalhostAuthOverride() {
   const previousValue = process.env[UNAUTH_LOCALHOST_ENV];
   const hasApiKey = Boolean(
@@ -77,7 +83,7 @@ function tmuxSessionExists(sessionName, tmuxSocketPath = null) {
   }
 }
 
-async function startServer({ dataDir, logDir, tmuxSocketPath, destroyTerminalsOnStop }) {
+async function startServer({ dataDir, logDir, tmuxSocketPath, workDir, destroyTerminalsOnStop }) {
   const server = new AgentServer({
     host: '127.0.0.1',
     port: 0,
@@ -86,7 +92,7 @@ async function startServer({ dataDir, logDir, tmuxSocketPath, destroyTerminalsOn
       dataDir,
       logDir,
       tmuxSocketPath,
-      workDir: '/Users/mojave/Documents/AI-projects/cliagents',
+      workDir,
       destroyTerminalsOnStop
     }
   });
@@ -106,6 +112,7 @@ async function run() {
   const dataDir = makeTempDir('cliagents-managed-root-data-');
   const logDir = makeTempDir('cliagents-managed-root-logs-');
   const tmuxDir = makeTempDir('cliagents-managed-root-tmux-');
+  const workDir = makeWorkspaceTempDir('cliagents-managed-root-work-');
   const tmuxSocketPath = path.join(tmuxDir, 'broker.sock');
   let serverOne = null;
   let serverTwo = null;
@@ -117,13 +124,14 @@ async function run() {
       dataDir,
       logDir,
       tmuxSocketPath,
+      workDir,
       destroyTerminalsOnStop: false
     });
 
     const launch = await request(serverOne.baseUrl, 'POST', '/orchestration/root-sessions/launch', {
       adapter: 'claude',
       externalSessionRef: 'claude:test-managed-root-recovery',
-      workDir: '/Users/mojave/Documents/AI-projects/cliagents'
+      workDir
     });
 
     assert.strictEqual(launch.status, 200);
@@ -148,6 +156,7 @@ async function run() {
       dataDir,
       logDir,
       tmuxSocketPath,
+      workDir,
       destroyTerminalsOnStop: true
     });
 
@@ -183,7 +192,7 @@ async function run() {
       execSync(`tmux -S ${JSON.stringify(tmuxSocketPath)} kill-session -t ${JSON.stringify(sessionName)}`, { stdio: 'ignore' });
     }
 
-    for (const dirPath of [dataDir, logDir, tmuxDir]) {
+    for (const dirPath of [dataDir, logDir, tmuxDir, workDir]) {
       if (dirPath && fs.existsSync(dirPath)) {
         fs.rmSync(dirPath, { recursive: true, force: true });
       }

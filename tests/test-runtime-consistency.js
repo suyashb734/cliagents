@@ -37,6 +37,9 @@ function isSkippableProviderFailure(message = '') {
     'billing',
     'participant timed out',
     'request timed out',
+    'cli not available',
+    'adapter cli is not available',
+    'adapter not installed',
     'qwen oauth was discontinued',
     'status: 504'
   ].some((pattern) => text.includes(pattern));
@@ -569,6 +572,9 @@ async function testConsensusRoute() {
   console.log('\n📋 Direct Consensus Route');
 
   await test('Consensus route produces a judged answer without tmux workers', async () => {
+    await ensureAdapterAvailable('qwen-cli');
+    await ensureAdapterAvailable('codex-cli');
+
     const { status, data } = await request(
       'POST',
       '/orchestration/consensus',

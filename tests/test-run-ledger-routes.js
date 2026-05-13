@@ -7,6 +7,7 @@ const path = require('path');
 
 const { startTestServer, stopTestServer } = require('./helpers/server-harness');
 const { RunLedgerService } = require('../src/orchestration/run-ledger');
+const { isAdapterAuthenticated } = require('../src/utils/adapter-auth');
 
 function makeTempDir(prefix) {
   return fs.mkdtempSync(path.join(os.tmpdir(), prefix));
@@ -29,6 +30,9 @@ function isSkippableProviderFailure(message = '') {
     'no active subscription',
     'billing',
     'request timed out',
+    'cli not available',
+    'adapter cli is not available',
+    'adapter not installed',
     'oauth was discontinued upstream',
     'switch to api key or coding plan',
     'status: 504'
@@ -52,6 +56,29 @@ async function request(baseUrl, method, route, body) {
   return { status: response.status, data };
 }
 
+async function ensureRouteAdaptersAvailable(baseUrl, adapterNames) {
+  const adaptersResponse = await request(baseUrl, 'GET', '/adapters');
+  if (adaptersResponse.status !== 200) {
+    throw new Error(`Adapter catalog failed: ${adaptersResponse.status}`);
+  }
+
+  const adapters = new Map((adaptersResponse.data.adapters || []).map((adapter) => [adapter.name, adapter]));
+  for (const adapterName of adapterNames) {
+    const adapter = adapters.get(adapterName);
+    if (!adapter) {
+      throw new Error(`SKIP: ${adapterName} adapter not registered`);
+    }
+    if (!adapter.available) {
+      throw new Error(`SKIP: ${adapterName} adapter not installed`);
+    }
+
+    const auth = isAdapterAuthenticated(adapterName);
+    if (!auth.authenticated) {
+      throw new Error(`SKIP: ${auth.reason}`);
+    }
+  }
+}
+
 async function run() {
   const previousWriteFlag = process.env.RUN_LEDGER_ENABLED;
   const previousReadFlag = process.env.RUN_LEDGER_READS_ENABLED;
@@ -72,6 +99,7 @@ async function run() {
     });
 
     const ledger = new RunLedgerService(testServer.server.orchestration.db);
+    await ensureRouteAdaptersAvailable(testServer.baseUrl, ['codex-cli', 'qwen-cli']);
 
     const consensusResponse = await request(testServer.baseUrl, 'POST', '/orchestration/consensus', {
       message: 'What is 3 + 3? Reply with just the number.',
